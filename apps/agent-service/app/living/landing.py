@@ -58,6 +58,10 @@ from typing import Annotated
 
 from sqlalchemy import text
 
+from app.data.queries.messages import (
+    find_messages_by_outbound_ids,
+    find_recall_state_by_outbound_ids,
+)
 from app.data.session import get_session
 from app.infra.cst_time import CST
 from app.living.clock import living_lane
@@ -108,37 +112,6 @@ _UNCONFIRMED_RECALLS = (
     f"ORDER BY took_back_at ASC"
 )
 
-# 公共层里认领了这些 id 的行。
-#
-# 参数形态：**列侧裸用、参数侧给 ``uuid.UUID`` 对象**（PG 从 ``= ANY($n)`` 推出
-# uuid[]，asyncpg 直接编码 UUID）。
-# 列侧 CAST 成 text 会绕开 ``ix_common_message_agent_outbound_id`` 走全表扫。
-_LANDED_IN = (
-    "SELECT agent_outbound_id, common_message_id, event_time "
-    "FROM common_message WHERE agent_outbound_id = ANY(:oids) "
-    "ORDER BY event_time ASC, common_message_id ASC"
-)
-
-# 这些 id 各自在公共层落了几行、其中几行渠道那边真撤掉了、最后一行是什么时候没的。
-#
-# ``recalled_at IS NOT NULL`` 是"**这一行**撤成功了"的全部判据 —— 投递侧撤失败不填
-# 这一列，所以空着就是还没撤掉（**不是撤失败**）。
-#
-# 但"**这次开口**撤完了"要的是每一行都撤掉：一次开口被切成几段发出去时每段各一行，
-# 撤掉一段、另一段还挂在真人眼前，跟整条撤完不是同一件事。所以这里不按行取，按 id
-# 聚合出「几段 / 撤掉几段 / 最后一段什么时候没的」，判据留给调用方。
-#
-# ``count(recalled_at)`` 只数非空的那些，跟 ``count(*)`` 相等就是全撤掉了。
-_RECALL_STATE_IN = (
-    "SELECT agent_outbound_id, "
-    "count(*) AS parts, "
-    "count(recalled_at) AS parts_recalled, "
-    "max(recalled_at) AS last_recalled_at "
-    "FROM common_message WHERE agent_outbound_id = ANY(:oids) "
-    "GROUP BY agent_outbound_id"
-)
-
-
 class LandingTick(Data):
     """对账那一拍。
 
@@ -186,8 +159,7 @@ def _by_outbound_uuid(
 
 async def _landed_in(oids: list[uuid.UUID]) -> dict[uuid.UUID, tuple[uuid.UUID, int]]:
     """``outbound_id -> (公共层那一行的 id, 它的 event_time 毫秒)``。"""
-    async with get_session() as s:
-        rows = (await s.execute(text(_LANDED_IN), {"oids": oids})).mappings().all()
+    rows = await find_messages_by_outbound_ids(oids)
     found: dict[uuid.UUID, tuple[uuid.UUID, int]] = {}
     for r in rows:
         oid = r["agent_outbound_id"]
@@ -220,10 +192,7 @@ async def _recalled_in(oids: list[uuid.UUID]) -> dict[uuid.UUID, datetime]:
     一段都没撤掉是**常态**（她按下撤回到渠道真撤掉之间隔着一趟队列），不说话；
     撤了一部分才是要给人看的事实，每一拍都说一次 —— 它不会自己好起来。
     """
-    async with get_session() as s:
-        rows = (
-            (await s.execute(text(_RECALL_STATE_IN), {"oids": oids})).mappings().all()
-        )
+    rows = await find_recall_state_by_outbound_ids(oids)
     found: dict[uuid.UUID, datetime] = {}
     for r in rows:
         parts, recalled = r["parts"], r["parts_recalled"]

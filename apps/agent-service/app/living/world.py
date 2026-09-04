@@ -47,8 +47,8 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
-from app.domain.thinking_cost import record_round_cost
 from app.data.session import get_session
+from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import to_cst_full
 from app.living.anchor import anchor_on_grid
 from app.living.records import _require_aware

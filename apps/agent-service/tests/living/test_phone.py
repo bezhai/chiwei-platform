@@ -1613,8 +1613,8 @@ async def test_finding_someone_is_one_of_the_hands_she_actually_has(living_db):
 # 实测（coe-living，2026-09-02 22:27）：她看到「某某：[file]」，只知道有个东西、
 # 不知道是什么，于是回了一句「发来看看」—— 而那个文件早就发过来了。
 #
-# 渲染口径跟聊天那条路（``app.chat.content_parser`` 的 ``ParsedContent.render``）
-# 对齐，但两边各写各的：living 是独立一层。
+# 这份渲染口径现在是全项目唯一一份：聊天那条路曾经有过自己的
+# ``ParsedContent.render``，随那条路一起删了。
 
 # 飞书文件消息的真实形状（lark-service ``inbound-message.ts`` 的 toContentItem）。
 _FILE_ITEM = {

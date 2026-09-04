@@ -796,7 +796,7 @@ class Agent:
         agent short-circuits *before* touching Dynamic Config — the flag read is
         the only blocking bit, wrapped in ``asyncio.to_thread`` because the SDK's
         cache-miss refresh is sync httpx that would otherwise stall the shared
-        event loop (mirrors ``app.life.feed_whitelist``).
+        event loop.
 
         Computed once per run (the model is fixed across retry attempts) so the
         loops stay free of this business judgment.

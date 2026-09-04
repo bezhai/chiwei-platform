@@ -43,7 +43,8 @@ uuidv7（按生成时刻单调），同毫秒里谁先谁后有确定答案。
   * **未读集合 U**：游标之后的、别人发的、没撤掉的那些。判据跟改之前逐字相同，
     信封和"谁在叫她"用的也是它。
   * **展示窗口 W**：这条会话上最近 :data:`PHONE_GLANCE_LIMIT` 条，**不看游标、不分谁
-    发的**，含她自己撤掉的那条（留痕迹，见 :data:`_VISIBLE_WHEN_SHE_OPENS_IT`），不含
+    发的**，含她自己撤掉的那条（留痕迹，见
+    :data:`app.data.queries.messages._VISIBLE_WHEN_SHE_OPENS_IT`），不含
     别人撤掉的。
   * 「其中 N 条是新的」＝ ``|U ∩ W|``；「前面还有 K 条你没往回翻」＝ ``|U − W|``，也
     就是被挤出窗口的未读。
@@ -62,16 +63,24 @@ uuidv7（按生成时刻单调），同毫秒里谁先谁后有确定答案。
 出来，读不出来也是她的判断，不是需要被逻辑层消除的不确定性。真人翻聊天记录时看到的也
 是全部历史，靠的同样是时间和上下文。
 
+**公共层怎么读，不在这个模块里。** 这一层只回答"她此刻看到什么、她做了什么"；
+``common_message`` / ``common_conversation`` / ``common_bot_presence`` /
+``bot_config`` 的每一条查询都住在 :mod:`app.data.queries.messages` 和
+:mod:`app.data.queries.persona`，这里只调函数。留在本模块的库操作只有她自己那两张
+表（``PhoneRead`` 的游标、``Happening`` 的"上次在这儿开口"）。
+
 **哪些会话在她手机上**：她自己的 bot 还在的那些（``common_bot_presence`` +
 ``bot_config.persona_id``），私聊和群同一条规则。用 presence 而不是"聊过天就算"，
-是因为 bot 被移出群之后历史还在、但她既收不到也发不出去。
+是因为 bot 被移出群之后历史还在、但她既收不到也发不出去。判据见
+:func:`app.data.queries.persona.find_conversations_with_persona_bot`。
 
 **"这话是不是她说的"认 bot，不认 role。** 三姐妹本来就挂在同一个群里（prod
 ``common_bot_presence`` 实测：一个群里同时有 ayana / chinagi / chiwei），她们的出站
 落进 ``common_message`` 全是 ``role='assistant'`` —— 长得一模一样。所以拿 ``role``
 单独判会同时错两次：姐姐的话被整段排除出未读（她永远看不见同一个群里姐姐说了什么），
 同时又被无条件塞进"她已经知道的"、还署上"你"。分得开这两者的是 ``bot_name``
-（``bot_config`` 里 bot → persona 的映射），见 :data:`_SAID_BY_HER`。
+（``bot_config`` 里 bot → persona 的映射），判据写在
+:data:`app.data.queries.messages._SAID_BY_HER` 上。
 
 **姐姐的群聊发言进未读，但一个字的召唤力都不多。** 群里不点名就是背景音，条数上限
 照样管得着它（:meth:`Envelope.is_calling_you` 一个字没动）。同一个屋檐下的姐妹在群里
@@ -79,12 +88,13 @@ uuidv7（按生成时刻单调），同毫秒里谁先谁后有确定答案。
 互相把对方叫醒，永远停不下来。
 
 **撤掉的那条不在会话里了。** 撤回不删 ``common_message`` 那一行（公共层是消息记录，
-删行会打断历史），撤成功只在 ``recalled_at`` 上留个时刻。这里每一处读那张表的地方都
-带着 :data:`_STILL_IN_THE_CONVERSATION` —— 少带一处，她就在那个视角下还能看见一条自己
-明明撤掉了的话，然后接着它往下说，而对面早就看不到了。
+删行会打断历史），撤成功只在 ``recalled_at`` 上留个时刻。查询层每一处读那张表的地方
+都带着 :data:`app.data.queries.messages._STILL_IN_THE_CONVERSATION` —— 少带一处，她就
+在那个视角下还能看见一条自己明明撤掉了的话，然后接着它往下说，而对面早就看不到了。
 
 **只有"打开会话"那一处例外，而且只对她自己撤掉的那条**：那儿留一条写明已经撤回的
-痕迹并带上原话（:data:`_VISIBLE_WHEN_SHE_OPENS_IT`）。理由写在那个常量上。
+痕迹并带上原话（:data:`app.data.queries.messages._VISIBLE_WHEN_SHE_OPENS_IT`）。理由
+写在那个常量上。
 """
 
 from __future__ import annotations
@@ -102,6 +112,19 @@ from sqlalchemy import text
 from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
+from app.data.queries.messages import (
+    find_conversation_window,
+    find_messages_known_through,
+    find_newest_unread_summons,
+    find_unread_senders,
+    find_unread_summary,
+    search_persona_conversations_by_name,
+)
+from app.data.queries.persona import (
+    find_bot_names_for_persona,
+    find_bot_user_ids_for_persona,
+    find_conversations_with_persona_bot,
+)
 from app.data.session import get_session
 from app.infra.cst_time import CST, to_cst_dated
 from app.living.records import (
@@ -237,31 +260,13 @@ class Summons:
 # 她手机上有哪些会话
 # ---------------------------------------------------------------------------
 
-_REACHABLE_SQL = """
-SELECT cc.common_conversation_id AS channel_id,
-       cc.scope                  AS scope,
-       COALESCE(cc.display_name, '') AS title,
-       cc.channel                AS channel,
-       MIN(bc.bot_name)          AS bot_name
-  FROM common_bot_presence bp
-  JOIN bot_config bc
-    ON bc.bot_name = bp.bot_name
-   AND bc.persona_id = :persona_id
-   AND bc.is_active = true
-  JOIN common_conversation cc
-    ON cc.common_conversation_id = bp.common_conversation_id
-   AND cc.is_active = true
- WHERE bp.is_active = true
- GROUP BY cc.common_conversation_id, cc.scope, cc.display_name, cc.channel
-"""
-
-
 async def reachable_conversations(*, persona_id: str) -> list[Reachable]:
-    """她手机上的全部会话。查不到就是查不到，不猜、不兜底。"""
-    async with get_session() as s:
-        rows = (
-            await s.execute(text(_REACHABLE_SQL), {"persona_id": persona_id})
-        ).mappings().all()
+    """她手机上的全部会话。查不到就是查不到，不猜、不兜底。
+
+    口径（presence + 她自己的 bot + 会话没归档）在
+    :func:`app.data.queries.persona.find_conversations_with_persona_bot`。
+    """
+    rows = await find_conversations_with_persona_bot(persona_id)
     return [
         Reachable(
             channel_id=str(r["channel_id"]),
@@ -364,160 +369,35 @@ async def commit_glances(*, glances: list[dict], session: Any) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 这话是谁说的
-# ---------------------------------------------------------------------------
-
-# **``role`` 说不出"是谁说的"。** ``role='assistant'`` 只意味着"某个 bot 发的"，而三
-# 姐妹挂在同一个群里，她们的出站在这张表里长得一模一样。唯一分得开的是 ``bot_name``
-# —— ``bot_config`` 里 bot → persona 那条映射（出站的写入方两边都填了这一列：
-# ``apps/lark-service/src/lark/outbound/deliver.ts`` 和 channel-server 的 QQ 投影）。
-#
-# ``bot_name`` 为空的历史行按"她自己说的"算。认不出是谁的 bot 时宁可少一条未读，也
-# 不能把她自己的话摆成别人在说 —— 那正是前几次栽过的病（她把自己的回声当成别人在
-# 说话）。反过来漏一条只是少看见一句，下一条来了照样看得见。
-_SAID_BY_HER = (
-    "(cm.role = 'assistant'"
-    " AND (cm.bot_name IS NULL"
-    "      OR cm.bot_name = ANY(CAST(:own_bots AS text[]))))"
-)
-
-
-# 「这一行还在会话里吗」。**除了"打开会话"那一处，每一处读 ``common_message`` 的地方
-# 都带着它**（那一处的判据是 :data:`_VISIBLE_WHEN_SHE_OPENS_IT`）。
-#
-# 撤回不删那一行（公共层是消息记录，删行会打断历史），撤成功只在 ``recalled_at`` 上
-# 留个时刻，由投递侧写（撤失败不填）。所以读的一侧不管的话，她自己刚撤掉的话还会原样
-# 出现在她眼前 —— 然后她接着那句往下说，而对面早就看不到了。
-#
-# **判据写在这一列的含义上**（这一行在渠道上已经不在了），不写在谁撤的它上面：这几处
-# 回答的是"这条还算不算数"——算未读、叫不叫她、按名字搜得到搜不到，她自己撤的和同群
-# 姐姐撤的是同一件事，没有理由分开对待。
-#
-# 这几处**都不显示、也不摆占位**。唯一显示痕迹的是她打开会话那一眼，理由写在
-# :data:`_VISIBLE_WHEN_SHE_OPENS_IT` 上：那是她**读一段对话**的地方，跟这几处的问题
-# 不是同一个。
-#
-# NULL = 没撤过（或者还没撤掉），这是绝大多数行的样子，所以这个条件不能写成
-# ``= false`` 之类会被 NULL 吃掉的形状。
-_STILL_IN_THE_CONVERSATION = "cm.recalled_at IS NULL"
-
-# 「这一行她还没看过吗」——未读集合 U 的判据，**全模块只有这一处定义**。
-#
-# 四个地方用它，其中三个拿它当 ``WHERE``：信封的未读计数
-# （:data:`_UNREAD_SUMMARY_SQL`）、信封上点谁的名（:data:`_UNREAD_SENDERS_SQL`）、
-# 谁在叫她（:data:`_SUMMONS_SQL`，那边再 ``AND`` 上一条额外条件）。第四处是打开会话
-# 那条查询，它拿这个集合去标窗口里哪几行是新的。
-#
-# **必须是同一份。** 改之前这四处各写一遍同样的三个条件，抄漏一个就是"信封说三条、
-# 翻开却数出两条"——她只会以为自己漏看了，而库里没有任何东西对不上。
-#
-# 收 ``:after_ms`` / ``:after_id`` 两个绑定参数，所以每个用它的查询都得带上游标。
-_STILL_UNREAD = f"""(
-       NOT {_SAID_BY_HER}
-   AND {_STILL_IN_THE_CONVERSATION}
-   AND (cm.event_time, CAST(cm.common_message_id AS text))
-       > (:after_ms, :after_id)
-)"""
-
-
-async def _own_bot_names(*, persona_id: str) -> list[str]:
-    """她那些 bot 的名字 —— "这句话是不是她说的"的全部依据。
-
-    是列表不是单值：一个 persona 线上就挂着好几个 bot（正式那个和 dev 那个指向同一
-    个人）。查不到就是空列表，那意味着她根本没有 bot ——
-    :func:`reachable_conversations` 同样返回空，她手机上一条会话都没有，不会有
-    "把所有人的话都当成别人说的"这种半截状态。
-    """
-    async with get_session() as s:
-        rows = (
-            await s.execute(
-                text(
-                    "SELECT bot_name FROM bot_config "
-                    "WHERE persona_id = :pid AND is_active = true"
-                ),
-                {"pid": persona_id},
-            )
-        ).scalars().all()
-    return [str(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
 # 信封
 # ---------------------------------------------------------------------------
-
-# 「这条消息点了她的名」的唯一判据。
-#
-# 读的是 ``common_message.mentioned_common_user_ids`` —— 投影层在落账时算好写下的
-# 那一列，不是 ``content``。公共层的内容契约里没有 mention 这种片段（只有
-# text/image/audio/file/sticker/unsupported 六种），@ 在投影时就被内联回了正文，
-# 所以从 ``content`` 里根本认不出被点的是谁。
-#
-# **列是 NULL 时这个表达式是 NULL，不是 false**，而 NULL 在 WHERE 和 BOOL_OR 里都
-# 不算真。这正是要的：NULL = 没人算过这条消息（加列前的存量行、QQ 的行、飞书新写入
-# 方上线前的行），既然没算过，就不能当成"确认点了她"，也不能当成"确认没点她"。往
-# 这上面套 COALESCE 会把这个区分抹平。
-#
-# 两边都转成 text[] 再比：绑定进来的是一串 uuid 字符串（``_bot_user_ids`` 那边
-# ``str()`` 出来的），跟本仓库其他 ``CAST(:x AS text[])`` 用同一种绑定形状。
-_NAMED_HER = (
-    "cm.mentioned_common_user_ids::text[] && CAST(:bot_user_ids AS text[])"
-)
-
-# 未读 = 不是她自己说的、event_time 在她这条会话的水位之后。她自己发出去的那些不算
-# 未读——那是她说的话，落在 Happening 里。**姐姐说的算**：同一个群里的动静她本该
-# 感知到。
-_UNREAD_SUMMARY_SQL = f"""
-SELECT COUNT(*)                          AS unread,
-       MIN(cm.event_time)                AS earliest,
-       MAX(cm.event_time)                AS latest,
-       BOOL_OR({_NAMED_HER})             AS named_you
-  FROM common_message cm
- WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND {_STILL_UNREAD}
-"""
-
-_UNREAD_SENDERS_SQL = f"""
-SELECT COALESCE(cm.sender_display_name, '某人') AS who,
-       MAX(cm.event_time)                       AS latest
-  FROM common_message cm
- WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND {_STILL_UNREAD}
- GROUP BY 1
- ORDER BY 2 DESC
- LIMIT :limit
-"""
 
 # 她上次在这条会话上开口是什么时候。读的是她自己的 Happening（嘴落下的那条），
 # 不是 common_message —— 出站消息要等 chat-response-worker 异步落库，按它算会
 # 把刚说完的话算成"从没说过"。
+#
+# 这是本模块里唯一一条还自己拿 session 的查询，因为它读的是 living 自己那张表。
 _LAST_SPOKE_SQL = f"""
 SELECT MAX(occurred_at) FROM {_HAPPENING_TABLE}
  WHERE lane = :lane AND actor = :persona_id AND channel_id = :channel_id
 """
 
 
-async def _bot_user_ids(*, persona_id: str) -> list[str]:
-    """她自己那些 bot 的 ``common_user_id`` —— 群里"点的是不是她"的全部依据。
-
-    拿它跟 ``common_message.mentioned_common_user_ids`` 比（见 :data:`_NAMED_HER`）。
-    那一列由飞书投影在落账时写下，装的是被 @ 的人在公共层的 id。所以"被点名"是
-    **库里的客观事实**，不需要模型判断，也不需要从 MQ 拿 ``persona_ids``。
-
-    查不到就是空列表，那意味着她的 bot 一个都没回填 common_user_id —— 此时
-    :data:`_NAMED_HER` 恒为假，群里谁都叫不动她，但私聊不受影响。
-    """
+async def _last_spoke_at(
+    *, lane: str, persona_id: str, channel_id: str
+) -> datetime | None:
+    """她上次在这条会话上开口的时刻；从没说过返回 ``None``。"""
     async with get_session() as s:
-        rows = (
+        return (
             await s.execute(
-                text(
-                    "SELECT common_user_id FROM bot_config "
-                    "WHERE persona_id = :pid AND is_active = true "
-                    "AND common_user_id IS NOT NULL"
-                ),
-                {"pid": persona_id},
+                text(_LAST_SPOKE_SQL),
+                {
+                    "lane": lane,
+                    "persona_id": persona_id,
+                    "channel_id": channel_id,
+                },
             )
-        ).scalars().all()
-    return [str(r) for r in rows]
+        ).scalar()
 
 
 def _instant(ms: int) -> datetime:
@@ -532,42 +412,32 @@ async def envelopes_for(*, lane: str, persona_id: str) -> list[Envelope]:
     被挤出去的那条会话，她连它存在都不知道，也就永远不会想起去看。一屋子群在刷屏
     的时候，正在等她回话的那条私聊必须还在眼前，**谁值得先回是她判，不是这里判**。
     """
-    bot_uids = await _bot_user_ids(persona_id=persona_id)
-    own_bots = await _own_bot_names(persona_id=persona_id)
+    bot_uids = await find_bot_user_ids_for_persona(persona_id)
+    own_bots = await find_bot_names_for_persona(persona_id)
     out: list[Envelope] = []
     for conv in await reachable_conversations(persona_id=persona_id):
         after_ms, after_id = await effective_cursor(
             lane=lane, persona_id=persona_id, channel_id=conv.channel_id
         )
-        params = {
-            "channel_id": conv.channel_id,
-            "after_ms": after_ms,
-            "after_id": after_id,
-            "bot_user_ids": bot_uids,
-            "own_bots": own_bots,
-        }
-        async with get_session() as s:
-            row = (
-                await s.execute(text(_UNREAD_SUMMARY_SQL), params)
-            ).mappings().first()
-            if row is None or not row["unread"]:
-                continue
-            senders = (
-                await s.execute(
-                    text(_UNREAD_SENDERS_SQL),
-                    {**params, "limit": ENVELOPE_SENDER_LIMIT},
-                )
-            ).mappings().all()
-            spoke = (
-                await s.execute(
-                    text(_LAST_SPOKE_SQL),
-                    {
-                        "lane": lane,
-                        "persona_id": persona_id,
-                        "channel_id": conv.channel_id,
-                    },
-                )
-            ).scalar()
+        row = await find_unread_summary(
+            channel_id=conv.channel_id,
+            after_ms=after_ms,
+            after_id=after_id,
+            bot_user_ids=bot_uids,
+            own_bots=own_bots,
+        )
+        if row is None or not row["unread"]:
+            continue
+        senders = await find_unread_senders(
+            channel_id=conv.channel_id,
+            after_ms=after_ms,
+            after_id=after_id,
+            own_bots=own_bots,
+            limit=ENVELOPE_SENDER_LIMIT,
+        )
+        spoke = await _last_spoke_at(
+            lane=lane, persona_id=persona_id, channel_id=conv.channel_id
+        )
         out.append(
             Envelope(
                 channel_id=conv.channel_id,
@@ -653,48 +523,30 @@ async def phone_envelope(*, lane: str, persona_id: str, now: datetime) -> str:
 # 谁在叫她（提前一缝的输入；判断在 app.living.nudge）
 # ---------------------------------------------------------------------------
 
-# 在叫她 = 私聊来的任意一条，或者群里点了她名字的那条。除此之外没有分级。
-#
-# **姐姐在群里说话不在这里面。** 她的话进未读、进信封（同一个群里的动静她本该感知
-# 到），但群里不点名就是背景音 —— 不点名却算召唤的话，两个 agent 在一个群里会互相
-# 把对方叫醒，永远停不下来。点名了就跟真人点名一样算，同一条判据，不多不少。
-_SUMMONS_SQL = f"""
-SELECT cm.common_message_id AS message_id,
-       cm.event_time        AS at_ms
-  FROM common_message cm
- WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND {_STILL_UNREAD}
-   AND (:is_direct OR {_NAMED_HER})
- ORDER BY cm.event_time DESC, cm.common_message_id DESC
- LIMIT 1
-"""
-
 
 async def newest_unread_summons(
     *, lane: str, persona_id: str
 ) -> Summons | None:
-    """还没被她看过、而且是在叫她的那条消息里最新的一条；没有返回 ``None``。"""
-    bot_uids = await _bot_user_ids(persona_id=persona_id)
-    own_bots = await _own_bot_names(persona_id=persona_id)
+    """还没被她看过、而且是在叫她的那条消息里最新的一条；没有返回 ``None``。
+
+    "在叫她"= 私聊来的任意一条，或者群里点了她名字的那条，除此之外没有分级 ——
+    判据在 :func:`app.data.queries.messages.find_newest_unread_summons`。
+    """
+    bot_uids = await find_bot_user_ids_for_persona(persona_id)
+    own_bots = await find_bot_names_for_persona(persona_id)
     newest: Summons | None = None
     for conv in await reachable_conversations(persona_id=persona_id):
         after_ms, after_id = await read_through(
             lane=lane, persona_id=persona_id, channel_id=conv.channel_id
         )
-        async with get_session() as s:
-            row = (
-                await s.execute(
-                    text(_SUMMONS_SQL),
-                    {
-                        "channel_id": conv.channel_id,
-                        "after_ms": after_ms,
-                        "after_id": after_id,
-                        "is_direct": conv.scope == "direct",
-                        "bot_user_ids": bot_uids,
-                        "own_bots": own_bots,
-                    },
-                )
-            ).mappings().first()
+        row = await find_newest_unread_summons(
+            channel_id=conv.channel_id,
+            after_ms=after_ms,
+            after_id=after_id,
+            is_direct=conv.scope == "direct",
+            bot_user_ids=bot_uids,
+            own_bots=own_bots,
+        )
         if row is None:
             continue
         found = Summons(
@@ -711,93 +563,8 @@ async def newest_unread_summons(
 # 看手机
 # ---------------------------------------------------------------------------
 
-# 「她打开这条会话时这一行还看得见吗」。**只有这一处的判据跟
-# :data:`_STILL_IN_THE_CONVERSATION` 不同**，差的就是她自己撤掉的那条。
-#
-# 她撤完之后不知道自己撤了什么（coe-living 2026-09-04 实测：撤完 8 分钟还在问主人
-# 撤了啥）。三种做法只有一种成立：
-#
-#   * 原样显示 → 她会接着一句对面看不到的话往下说，这正是当初加过滤的原因；
-#   * 留个白洞 → 等于没修，她仍然不知道那里曾经有什么；
-#   * **留痕迹并带原话** → 符合真实的信息状态：她自己知道撤了什么（真人能点开重新
-#     编辑），对面不知道内容但知道有这么回事。
-#
-# **别人撤掉的仍然不显示**（判据里那个 :data:`_SAID_BY_HER`）：真人那侧看到的是
-# "XX 撤回了一条消息"，内容确实没了；给她留一条带原话的痕迹，就是让她看到的会话跟
-# 对面看到的不是同一个。
-_VISIBLE_WHEN_SHE_OPENS_IT = f"(cm.recalled_at IS NULL OR {_SAID_BY_HER})"
-
-# 打开会话那一眼。展示窗口 W、未读总数 ``|U|``、``max(U)`` 由**同一条语句**一次给出。
-#
-# **为什么必须是一条。** ``app/data/session.py`` 没配更强的隔离级别，PostgreSQL 默认
-# ``READ COMMITTED`` 下同一个事务里连续两条 ``SELECT`` 各取各的快照。分成两条时，一条
-# 在两次查询之间提交的新消息不在窗口里、却可能成为未读里最新那条 —— 游标推到它身上，
-# 这条她从没见过的消息就被永久跳过了，一句报错都没有。并发撤回同样会让「其中 N 条是
-# 新的」跟未读总数互相对不上。单条语句只取一个快照，三个答案必然出自同一份事实。
-#
-# ``unread`` 是未读集合 U，判据是 :data:`_STILL_UNREAD`（全模块唯一那份）。窗口那侧
-# 不重写一遍判据，而是 ``LEFT JOIN`` 回这个集合：``is_unread`` 于是**字面上就是**
-# "这一行在 U 里"，「其中 N 条是新的」＝ ``|U ∩ W|`` 由此成为结构上的事实，不再靠两处
-# 判据长得一样来维持。``common_message_id`` 是主键，join 不会把窗口里的行放大。
-#
-# 窗口 W 收游标参数但**不按游标过滤**：一行都不会因为"读过了"而被挡在窗口外。这正是
-# 这次改动的分界 —— 窗口回答"这条会话最近说了些什么"，未读回答"其中哪些是新的"。
-#
-# 多带的几列各有各的用处，缺一个她就少知道一件事：``said_by_you`` 决定这一行署"你"
-# 还是署那个人的名字（认 ``bot_name``，不认 ``role`` —— 同群的姐姐也是
-# ``role='assistant'``）；``recalled_at`` 决定要不要写明这条已经撤回；
-# ``agent_outbound_id`` 是她能拿去撤回的那个编号，只有她主动发起的行才有。
-#
-# ``unread_total`` / ``newest_unread_*`` 三列在每一行上都一样（标量子查询）。窗口一行
-# 都没有时整条语句返回零行，这三个答案也就无从读起 —— **而那恰好是对的**：U 里每一行
-# 都满足 ``recalled_at IS NULL``，也就必然满足 ``recalled_at IS NULL OR 是她说的``，
-# 所以 U 是窗口候选集的子集；候选集非空时 ``LIMIT``（≥1）取出的窗口也非空。反过来推：
-# 窗口为空 ⟹ 候选集为空 ⟹ U 为空。**"窗口为空但未读非空"在同一个快照里不可能发生。**
-# 万一这个推理哪天被破坏（比如 limit 变成 0），零行的后果是"什么都没看到、游标不动"
-# —— 宁可重看、不可漏看那一侧，不会静默跳过任何一条。
-_OPEN_CONVERSATION_SQL = f"""
-WITH unread AS (
-  SELECT cm.common_message_id AS message_id,
-         cm.event_time        AS at_ms
-    FROM common_message cm
-   WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-     AND {_STILL_UNREAD}
-),
-newest_unread AS (
-  SELECT message_id, at_ms
-    FROM unread
-   ORDER BY at_ms DESC, message_id DESC
-   LIMIT 1
-),
-recent AS (
-  SELECT cm.common_message_id AS message_id,
-         COALESCE(cm.sender_display_name, '某人') AS who,
-         {_SAID_BY_HER}       AS said_by_you,
-         cm.content           AS content,
-         cm.content_text      AS content_text,
-         cm.event_time        AS at_ms,
-         cm.recalled_at       AS recalled_at,
-         cm.agent_outbound_id AS outbound_id,
-         (u.message_id IS NOT NULL) AS is_unread
-    FROM common_message cm
-    LEFT JOIN unread u ON u.message_id = cm.common_message_id
-   WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-     AND {_VISIBLE_WHEN_SHE_OPENS_IT}
-   ORDER BY cm.event_time DESC, cm.common_message_id DESC
-   LIMIT :limit
-)
-SELECT r.*,
-       (SELECT COUNT(*) FROM unread)          AS unread_total,
-       (SELECT message_id FROM newest_unread) AS newest_unread_id,
-       (SELECT at_ms FROM newest_unread)      AS newest_unread_ms
-  FROM recent r
- ORDER BY r.at_ms DESC, r.message_id DESC
-"""
-
-
-# 附件在她眼里叫什么。口径跟聊天那条路（``app.chat.content_parser`` 的
-# ``ParsedContent.render``）一致，**但两边各写各的**：living 是独立一层，共用一份
-# 代码换来的是改一处炸两处。
+# 附件在她眼里叫什么。这里是全项目唯一一份 —— 聊天那条路曾经有过自己的一份
+# （``app.chat.content_parser``），它随那条路一起删了。
 #
 # 名字能带就带：她要判断"这东西我看没看过、值不值得打开"，靠的是文件名，不是
 # ``file_v3_...`` 那串 key。图片、表情包、语音本来就没有文件名，自然落回没名字那档。
@@ -829,7 +596,8 @@ def _body_of(row) -> str:
     if isinstance(items, str):
         items = json.loads(items)
     if not isinstance(items, list):
-        # jsonb 里存的不保证是数组（同一条防线在 :data:`_UNREAD_SUMMARY_SQL` 的
+        # jsonb 里存的不保证是数组（同一条防线在
+        # :data:`app.data.queries.messages._SENT_FILES_SQL` 的
         # ``jsonb_typeof`` 那儿）。认不出形状就整条交给 ``content_text``。
         items = []
     parts: list[str] = []
@@ -920,64 +688,6 @@ def _glance_text(
 # 按名字找回一条会话的地址
 # ---------------------------------------------------------------------------
 
-# 匹配两边：群按会话标题（群基本都有名），私聊按**在里面说过话的人**
-# （``sender_display_name``，也正是信封上给她看的那个"谁"——她搜的名字和她见过的
-# 名字是同一个）。私聊会话本身多半没有标题：prod 实测 205 条私聊里 158 条
-# ``display_name`` 是空的，所以只查标题等于查不到人。
-#
-# 只在她手机上的会话里找（``common_bot_presence`` ＋ 她自己的 bot），跟
-# :data:`_REACHABLE_SQL` 同一条口径 —— 查出来的地址必须是她真能用的，否则这只手
-# 只是把 fail-loud 从"找不到"推迟到"发不出去"。
-#
-# **匹配的是 ``sender_display_name``，不是 ``common_user.display_name``。** 后者有索引、
-# 表也小（prod 12973 行），但她从来没见过那个名字：信封和会话正文给她看的"谁"全都是
-# ``sender_display_name``。两者在 prod 上 4652 组里有 2157 组不一致（46%），按 common_user
-# 搜等于让她搜一个自己没见过的名字。
-#
-# 代价是没有索引可用，只能扫。**过滤必须下推进扫描**（``WHERE ... ILIKE`` 在 matched
-# 里，不是先聚合再 FILTER）：prod 实测 akao 名下 323 条会话共 254 万条消息，下推之后
-# 是一次并行 seq scan，EXPLAIN ANALYZE 386ms。这只手她一天调不了几次、不在每一缝的
-# 路径上，386ms 换"她能主动找回一个人"是划算的——所以这里不加时间窗，加了她就再也
-# 找不回久没联系的人。
-_LOOK_UP_SQL = f"""
-WITH mine AS (
-  SELECT cc.common_conversation_id AS channel_id,
-         cc.scope                  AS scope,
-         COALESCE(cc.display_name, '') AS title
-    FROM common_bot_presence bp
-    JOIN bot_config bc
-      ON bc.bot_name = bp.bot_name
-     AND bc.persona_id = :persona_id
-     AND bc.is_active = true
-    JOIN common_conversation cc
-      ON cc.common_conversation_id = bp.common_conversation_id
-     AND cc.is_active = true
-   WHERE bp.is_active = true
-   GROUP BY cc.common_conversation_id, cc.scope, cc.display_name
-),
-matched AS (
-  SELECT cm.common_conversation_id AS channel_id,
-         COALESCE(cm.sender_display_name, '某人') AS who,
-         MAX(cm.event_time) AS latest
-    FROM common_message cm
-    JOIN mine m ON m.channel_id = cm.common_conversation_id
-   WHERE cm.sender_display_name ILIKE :like
-     AND NOT {_SAID_BY_HER}
-     AND {_STILL_IN_THE_CONVERSATION}
-   GROUP BY 1, 2
-)
-SELECT m.channel_id AS channel_id,
-       m.scope      AS scope,
-       m.title      AS title,
-       ARRAY_AGG(DISTINCT x.who) FILTER (WHERE x.who IS NOT NULL) AS matched,
-       MAX(x.latest) AS latest
-  FROM mine m
-  LEFT JOIN matched x ON x.channel_id = m.channel_id
- GROUP BY m.channel_id, m.scope, m.title
-HAVING m.title ILIKE :like OR COUNT(x.who) > 0
- ORDER BY m.channel_id
-"""
-
 
 @tool
 @tool_error("找会话失败")
@@ -1005,17 +715,11 @@ async def look_up_contact(
     if not wanted:
         raise ValueError("name 不能是空的：写一个你要找的名字。")
 
-    async with get_session() as s:
-        rows = (
-            await s.execute(
-                text(_LOOK_UP_SQL),
-                {
-                    "persona_id": persona_id,
-                    "like": f"%{wanted}%",
-                    "own_bots": await _own_bot_names(persona_id=persona_id),
-                },
-            )
-        ).mappings().all()
+    rows = await search_persona_conversations_by_name(
+        persona_id=persona_id,
+        name_like=f"%{wanted}%",
+        own_bots=await find_bot_names_for_persona(persona_id),
+    )
 
     if not rows:
         return f"手机上没有叫「{wanted}」的人或群。"
@@ -1076,26 +780,20 @@ async def look_at_phone(
     after_ms, after_id = await effective_cursor(
         lane=lane, persona_id=persona_id, channel_id=conv.channel_id
     )
-    params = {
-        "channel_id": conv.channel_id,
-        "own_bots": await _own_bot_names(persona_id=persona_id),
-        "after_ms": after_ms,
-        "after_id": after_id,
-    }
-
     # 一条语句同时给出窗口、未读总数和 ``max(U)``，理由写在
-    # :data:`_OPEN_CONVERSATION_SQL` 上：两条语句就是两个快照，中间提交的那条消息
-    # 会被永久跳过。三列在每一行上都一样，取第一行即可。
-    async with get_session() as s:
-        rows = (
-            await s.execute(
-                text(_OPEN_CONVERSATION_SQL),
-                {**params, "limit": PHONE_GLANCE_LIMIT},
-            )
-        ).mappings().all()
+    # :data:`app.data.queries.messages._OPEN_CONVERSATION_SQL` 上：两条语句就是两个
+    # 快照，中间提交的那条消息会被永久跳过。三列在每一行上都一样，取第一行即可。
+    rows = await find_conversation_window(
+        channel_id=conv.channel_id,
+        after_ms=after_ms,
+        after_id=after_id,
+        own_bots=await find_bot_names_for_persona(persona_id),
+        limit=PHONE_GLANCE_LIMIT,
+    )
 
     if not rows:
-        # 窗口为空 ⟹ 未读也为空（推理见 :data:`_OPEN_CONVERSATION_SQL`），所以这里
+        # 窗口为空 ⟹ 未读也为空（推理见
+        # :data:`app.data.queries.messages._OPEN_CONVERSATION_SQL`），所以这里
         # 直接返回、游标不动是完备的，不是漏了一种情况。
         return f"「{conv.title}」上一条消息都没有。"
 
@@ -1141,31 +839,6 @@ PHONE_TOOLS = [look_at_phone, look_up_contact]
 # 她**已经知道**的那部分会话（嘴渲染措辞时能看的全部）
 # ---------------------------------------------------------------------------
 
-# 边界就是游标：她看过的（event_time <= 水位）+ **她自己**发出去的。**没看过的一个
-# 字都不给**——嘴是用来把她的意思说成人话的，不是用来替她读消息的。给它未读内容，
-# "内容要她去看"这条线当场就漏了：她会在措辞里回应一句自己根本没读过的话。
-#
-# 绕过游标那道门是给"她当然知道自己说过什么"留的，**只有她自己的话走得进来**。姐姐
-# 的话从这道门溜进来会同时破两条线：白送未读内容，而且下面渲染时被署成"你"——她开口
-# 前读到的上下文里，姐姐说的话写着是她自己说的。
-_KNOWN_SQL = f"""
-SELECT COALESCE(cm.sender_display_name, '某人') AS who,
-       {_SAID_BY_HER}       AS said_by_you,
-       cm.content           AS content,
-       cm.content_text      AS content_text,
-       cm.event_time        AS at_ms
-  FROM common_message cm
- WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND {_STILL_IN_THE_CONVERSATION}
-   AND (
-        {_SAID_BY_HER}
-        OR (cm.event_time, CAST(cm.common_message_id AS text))
-           <= (:cursor_ms, :cursor_id)
-   )
- ORDER BY cm.event_time DESC, cm.common_message_id DESC
- LIMIT :limit
-"""
-
 # 渲染措辞时回看多少条。够她接住上下文，又不至于把一整天的会话灌进去。
 KNOWN_TAIL_LIMIT = 20
 
@@ -1180,7 +853,11 @@ async def conversation_as_she_knows_it(
 ) -> str:
     """这条会话上她已经知道的那一段，按时间升序，一条一行。
 
-    没看过的消息不在里面。她从没看过、也没说过话的会话，返回一句如实的空。
+    没看过的消息不在里面 —— 边界就是游标：她看过的（``event_time <=`` 水位）+
+    **她自己**发出去的，判据在
+    :func:`app.data.queries.messages.find_messages_known_through`。嘴是用来把她的
+    意思说成人话的，不是用来替她读消息的；给它未读内容，"内容要她去看"这条线当场
+    就漏了。她从没看过、也没说过话的会话，返回一句如实的空。
 
     署名认 ``bot_name``：只有**她自己**那些 bot 发的才写"你"。同一个群里姐姐也是
     ``role='assistant'``，按 role 署名就是把姐姐的话标成她自己说的。
@@ -1195,19 +872,13 @@ async def conversation_as_she_knows_it(
     cursor_ms, cursor_id = await effective_cursor(
         lane=lane, persona_id=persona_id, channel_id=channel_id
     )
-    async with get_session() as s:
-        rows = (
-            await s.execute(
-                text(_KNOWN_SQL),
-                {
-                    "channel_id": channel_id,
-                    "cursor_ms": cursor_ms,
-                    "cursor_id": cursor_id,
-                    "own_bots": await _own_bot_names(persona_id=persona_id),
-                    "limit": limit,
-                },
-            )
-        ).mappings().all()
+    rows = await find_messages_known_through(
+        channel_id=channel_id,
+        cursor_ms=cursor_ms,
+        cursor_id=cursor_id,
+        own_bots=await find_bot_names_for_persona(persona_id),
+        limit=limit,
+    )
     if not rows:
         return "（这条会话上你还什么都没看过、也没说过）"
     lines = []

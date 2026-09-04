@@ -63,6 +63,7 @@ from sqlalchemy import text
 from app.agent.reading import run_reading_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
+from app.data.queries.messages import find_file_items_in_persona_conversations
 from app.data.session import get_session
 from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
@@ -187,77 +188,6 @@ class SentFile:
     still_gettable: bool
 
 
-# 会话集合跟 :data:`app.living.phone._REACHABLE_SQL` 同一条口径（她自己的 bot 还在
-# 的那些）：她读得到的严格等于她收得到的。
-#
-# 文件项的字段名是 ``kind`` / ``key``（``meta.file_name`` 放原始文件名），跟渠道投影
-# 写进 ``common_message.content`` 的形状一致 —— 见
-# ``tests/living/test_reading.py`` 里那份照抄真实记录的常量。**曾经写成
-# ``type`` / ``value``**：SQL 和测试数据用了同一份臆造形状、彼此自洽所以全绿，而线上
-# 一个文件都查不出来，她永远只会说"没有谁给你发过什么可以读的东西"。改这几个字段名
-# 之前先去库里看一条真实记录。
-#
-# **不加时间窗。** 加了她就再也读不到上个月别人发来的那本书 —— 那正是"阈值替她
-# 遗忘"。代价是全表扫，用 ``content @> '[{"kind":"file"}]'`` 先把绝大多数消息挡在
-# 展开之前（jsonb 包含判断，比逐条展开数组便宜得多）。展开时仍要挡一次
-# ``jsonb_typeof = 'array'``：content 不是数组的历史行会让 jsonb_array_elements 直接
-# 报错，同 phone 里那几条查询的写法。
-#
-# ``DISTINCT`` 是必需的：一个 persona 名下可能挂着好几个 bot（正式那个和 dev 那个），
-# 同一条会话会被 presence 匹配出好几行，不去重同一个文件就会列出来好几遍。
-#
-# ``recalled_at`` 在这里**不做过滤，只当一列事实读出来**（``still_gettable``）。撤回
-# 不删公共层那一行（那是消息记录，删行会打断历史），只在这一列上留个时刻，而这一列说的
-# 是"渠道上还有没有它"——也就是还取不取得到字节。
-#
-# 一度是 ``WHERE cm.recalled_at IS NULL``，那样查询就同时替调用方做了两个决定：拿不到
-# 的不给读（对），以及她读过它这件事也一并消失（错，违反决策 6）。她读过的那份印象是
-# 真发生过的事，撤回改变不了它。所以判定留给调用方：
-# :func:`read_a_bit` 只认拿得到的，:func:`look_for_something_to_read` 把她读过的照常
-# 摆出来、只是不给可执行的句柄。
-#
-# **不从 :mod:`app.living.phone` import 那个同名判据。** 那边「打开会话」那处的判据已经
-# 分化成"没撤掉的、或者是她自己说的"（她自己撤掉的那条要留在会话里当痕迹），跟这里要
-# 的不是同一件事。共享一个常量会让下一个改判据的人以为改一处两边都对。文件这边只有
-# 一种情况：撤掉了就拿不到了，谁撤的都一样。
-_SENT_FILES_SQL = """
-WITH hers AS (
-  SELECT DISTINCT
-         cc.common_conversation_id AS channel_id,
-         cc.scope                  AS scope,
-         COALESCE(cc.display_name, '') AS title
-    FROM common_bot_presence bp
-    JOIN bot_config bc
-      ON bc.bot_name = bp.bot_name
-     AND bc.persona_id = :persona_id
-     AND bc.is_active = true
-    JOIN common_conversation cc
-      ON cc.common_conversation_id = bp.common_conversation_id
-     AND cc.is_active = true
-   WHERE bp.is_active = true
-)
-SELECT DISTINCT
-       CAST(cm.common_message_id AS text)       AS message_id,
-       it->>'key'                               AS file_key,
-       COALESCE(it->'meta'->>'file_name', '')   AS file_name,
-       COALESCE(cm.sender_display_name, '某人') AS who,
-       cm.event_time                            AS at_ms,
-       h.scope                                  AS scope,
-       h.title                                  AS where_title,
-       (cm.recalled_at IS NULL)                 AS still_gettable
-  FROM common_message cm
-  JOIN hers h ON h.channel_id = cm.common_conversation_id
- CROSS JOIN LATERAL jsonb_array_elements(
-       CASE WHEN jsonb_typeof(cm.content) = 'array'
-            THEN cm.content ELSE '[]'::jsonb END
- ) AS it
- WHERE cm.content @> '[{"kind": "file"}]'::jsonb
-   AND it->>'kind' = 'file'
-   AND COALESCE(it->>'key', '') <> ''
- ORDER BY at_ms DESC, message_id DESC
-"""
-
-
 def _where_of(scope: str, title: str, who: str) -> str:
     """这个文件发在哪儿 —— 私聊多半没有会话名，那就用发的人当它的名字。
 
@@ -271,13 +201,16 @@ def _where_of(scope: str, title: str, who: str) -> str:
 async def files_sent_to(*, persona_id: str) -> list[SentFile]:
     """有人发到她手机上的全部文件，最近的在前。查不到就是查不到，不猜、不兜底。
 
+    会话集合跟 :func:`app.living.phone.reachable_conversations` 同一条口径（她自己
+    的 bot 还在的那些）：**她读得到的严格等于她收得到的**。
+
     **撤回掉的也在里面**，带着 ``still_gettable=False``。谁看得到它、谁读得起它由
-    调用方定（理由写在 :data:`_SENT_FILES_SQL` 上）。
+    调用方定（理由写在
+    :data:`app.data.queries.messages._SENT_FILES_SQL` 上）：:func:`read_a_bit` 只认
+    拿得到的，:func:`look_for_something_to_read` 把她读过的照常摆出来、只是不给可
+    执行的句柄。
     """
-    async with get_session() as s:
-        rows = (
-            await s.execute(text(_SENT_FILES_SQL), {"persona_id": persona_id})
-        ).mappings().all()
+    rows = await find_file_items_in_persona_conversations(persona_id)
     return [
         SentFile(
             attachment_id=derive_attachment_id(

@@ -1,934 +1,661 @@
-"""Chat message queries backed by common_* tables.
+"""``common_message`` queries — 一个 bot 身份在会话里看得到什么。
 
-agent-service consumes ``common_message`` / ``common_conversation`` /
-``common_agent_response`` only. The returned read model keeps the existing
-agent-service payload names, where ``message_id`` is the common message id.
+调用方给的是 ``persona`` 名下那些 bot（``own_bots`` / ``bot_user_ids``，由
+:mod:`app.data.queries.persona` 取），这一层据此回答四个问题：哪些行还没被看过、
+谁点了谁的名、打开一条会话看到哪一段、她那次开口在公共层落成了什么。
+
+**这里的判据认 ``bot_name``，不认 ``role``。** 几个 bot 挂在同一个群里时它们的出站
+在这张表里全是 ``role='assistant'``，长得一模一样；分得开的只有 ``bot_name``
+（``bot_config`` 里 bot → persona 那条映射）。按 ``role`` 判会同时错两次：别的 bot
+说的话被整段排除，同时又被无条件当成"她自己说的"。
+
+判据只在这个模块里定义一次（:data:`_SAID_BY_HER` / :data:`_STILL_IN_THE_CONVERSATION`
+/ :data:`_STILL_UNREAD`），每个查询拼同一份 —— 各写一遍的话，抄漏一个条件就是
+"信封说三条、翻开却数出两条"，而库里没有任何东西对不上。
 """
 from __future__ import annotations
 
-import json
-from datetime import datetime
-from uuid import UUID
+import uuid
 
-from sqlalchemy import func, or_, text, update
+from sqlalchemy import func
 from sqlalchemy.future import select
+from sqlalchemy.sql import text
 
-from app.data.message_record import (
-    CommonMessageRecord,
-    LifeChatConversation,
-    LifeChatCounterpart,
-    LifeChatMessage,
-    ReadableFile,
-)
-from app.data.models import (
-    CommonAgentResponse,
-    CommonConversation,
-    CommonMessage,
-    CommonUser,
-)
-from app.infra import cst_time
-from app.life.feed_whitelist import should_feed_chat_to_life
+from app.data.models import CommonMessage
 from app.runtime.db import auto_tx, current_session
 
 __all__ = [
-    "find_cross_chat_messages",
-    "find_message_content",
-    "find_username",
-    "find_group_download_permission",
-    "find_message_by_id",
-    "find_last_bot_reply_time",
-    "find_gray_config",
-    "find_user_messages_after",
-    "find_recent_chat_messages",
-    "find_messages_with_user_chat_persona_by_root",
-    "find_messages_with_user_chat_persona_in_chat",
-    "find_persona_spoken_chats_in_window",
-    "find_persona_related_chats_recent",
-    "update_messages_tos_files",
+    "find_unread_summary",
+    "find_unread_senders",
+    "find_newest_unread_summons",
+    "find_conversation_window",
+    "find_messages_known_through",
+    "search_persona_conversations_by_name",
+    "find_file_items_in_persona_conversations",
+    "find_messages_by_outbound_ids",
+    "find_recall_state_by_outbound_ids",
 ]
 
-_UNKNOWN_SPEAKER = "（不知名）"
+
+# ---------------------------------------------------------------------------
+# 判据：这话是谁说的 / 这行还在不在 / 她看过没有
+# ---------------------------------------------------------------------------
+
+# **``role`` 说不出"是谁说的"。** ``role='assistant'`` 只意味着"某个 bot 发的"，而
+# 几个 bot 挂在同一个群里时它们的出站在这张表里长得一模一样。唯一分得开的是
+# ``bot_name`` —— ``bot_config`` 里 bot → persona 那条映射（出站的写入方两边都填了
+# 这一列：``apps/lark-service/src/lark/outbound/deliver.ts`` 和 channel-server 的 QQ
+# 投影）。
+#
+# ``bot_name`` 为空的历史行按"她自己说的"算。认不出是谁的 bot 时宁可少一条未读，也
+# 不能把她自己的话摆成别人在说 —— 那正是前几次栽过的病（她把自己的回声当成别人在
+# 说话）。反过来漏一条只是少看见一句，下一条来了照样看得见。
+_SAID_BY_HER = (
+    "(cm.role = 'assistant'"
+    " AND (cm.bot_name IS NULL"
+    "      OR cm.bot_name = ANY(CAST(:own_bots AS text[]))))"
+)
 
 
-def _bot_config_persona():
-    """assistant 行经 ``bot_config(bot_name → persona_id)`` 兜底取发言 persona。
+# 「这一行还在会话里吗」。**除了"打开会话"那一处，每一处读 ``common_message`` 的地方
+# 都带着它**（那一处的判据是 :data:`_VISIBLE_WHEN_SHE_OPENS_IT`）。
+#
+# 撤回不删那一行（公共层是消息记录，删行会打断历史），撤成功只在 ``recalled_at`` 上
+# 留个时刻，由投递侧写（撤失败不填）。所以读的一侧不管的话，她自己刚撤掉的话还会原样
+# 出现在她眼前 —— 然后她接着那句往下说，而对面早就看不到了。
+#
+# **判据写在这一列的含义上**（这一行在渠道上已经不在了），不写在谁撤的它上面：这几处
+# 回答的是"这条还算不算数"——算未读、叫不叫她、按名字搜得到搜不到，她自己撤的和同群
+# 别人撤的是同一件事，没有理由分开对待。
+#
+# NULL = 没撤过（或者还没撤掉），这是绝大多数行的样子，所以这个条件不能写成
+# ``= false`` 之类会被 NULL 吃掉的形状。
+_STILL_IN_THE_CONVERSATION = "cm.recalled_at IS NULL"
 
-    proactive 出站行真实落库形态是 ``response_id=NULL`` 且**没有**
-    ``common_agent_response`` 行（worker 口径：proactive session_id=null → responseId
-    不挂、不写 agent_response），所以单靠 ``response_id → common_agent_response.session_id``
-    join 必拿 None —— 那会让 proactive 行被判成 persona=None，下游误判为真人输入（串味）。
-    bot_name → persona 是它在真实链路里唯一能拿到的归属来源。
+# 「这条消息点了她的名」的唯一判据。
+#
+# 读的是 ``common_message.mentioned_common_user_ids`` —— 投影层在落账时算好写下的
+# 那一列，不是 ``content``。公共层的内容契约里没有 mention 这种片段（只有
+# text/image/audio/file/sticker/unsupported 六种），@ 在投影时就被内联回了正文，
+# 所以从 ``content`` 里根本认不出被点的是谁。
+#
+# **列是 NULL 时这个表达式是 NULL，不是 false**，而 NULL 在 WHERE 和 BOOL_OR 里都
+# 不算真。这正是要的：NULL = 没人算过这条消息（加列前的存量行、QQ 的行、飞书新写入
+# 方上线前的行），既然没算过，就不能当成"确认点了她"，也不能当成"确认没点她"。往
+# 这上面套 COALESCE 会把这个区分抹平。
+#
+# 两边都转成 text[] 再比：绑定进来的是一串 uuid 字符串（``find_bot_user_ids_for_persona``
+# 那边 ``str()`` 出来的），跟本仓库其他 ``CAST(:x AS text[])`` 用同一种绑定形状。
+_NAMED_HER = (
+    "cm.mentioned_common_user_ids::text[] && CAST(:bot_user_ids AS text[])"
+)
 
-    ``bot_config`` 由 channel-server 管理、不在 agent-service 的 SQLAlchemy 模型里
-    （见 ``models.py`` 顶注、``resolve_persona_id`` 同样裸表读它），用相关标量子查询读
-    裸表：``bot_name = common_message.bot_name`` 与外层 ``common_message`` 关联，只取
-    ``is_active`` 的映射。
+# 「这一行她还没看过吗」——未读集合 U 的判据，**全模块只有这一处定义**。
+#
+# 四个地方用它，其中三个拿它当 ``WHERE``：信封的未读计数
+# （:func:`find_unread_summary`）、信封上点谁的名（:func:`find_unread_senders`）、
+# 谁在叫她（:func:`find_newest_unread_summons`，那边再 ``AND`` 上一条额外条件）。
+# 第四处是打开会话那条查询，它拿这个集合去标窗口里哪几行是新的。
+#
+# **必须是同一份。** 四处各写一遍同样的三个条件，抄漏一个就是"信封说三条、翻开却数
+# 出两条"——她只会以为自己漏看了，而库里没有任何东西对不上。
+#
+# 收 ``:after_ms`` / ``:after_id`` 两个绑定参数，所以每个用它的查询都得带上游标。
+#
+# **游标是复合的。** 只按 ``event_time > 水位`` 开窗的话，**整个那一毫秒**都被排除
+# —— 一条跟她刚读那条同毫秒、但晚一步落库的消息就此永久消失。所以水位是
+# ``(event_time, common_message_id)``，按字典序推进。
+_STILL_UNREAD = f"""(
+       NOT {_SAID_BY_HER}
+   AND {_STILL_IN_THE_CONVERSATION}
+   AND (cm.event_time, CAST(cm.common_message_id AS text))
+       > (:after_ms, :after_id)
+)"""
 
-    **承重红线（codex 必改 1）**：子查询额外 correlate 外层 ``role = 'assistant'``。
-    channel-server 给真人 ``role='user'`` 行**也写 bot_name``（storeLarkInboundMessage
-    给 inbound user 行落 bot_name=botName、claim 时再写），裸 ``bot_name`` 子查询会对
-    user 行也命中、把真人话错归成某 persona——查询合同被串脏。human-chat 路径下游
-    ``is_self`` 第一个条件就是 ``role == 'assistant'`` 遮住不炸，但睡前回顾路径
-    （``find_persona_spoken_chats_in_window`` → ``review``）**直接用 persona 分"她说的
-    vs 用户说的"、没有 role gate**，会把真人话当成她自己说的。加 role 限定让外层非
-    assistant 行（user / 其它）→ 子查询无命中 → 返回 NULL。assistant proactive 出站行
-    （``response_id=NULL``、无 agent_response）仍经 bot_name → persona 兜底拿到归属。
+# 「她打开这条会话时这一行还看得见吗」。**只有这一处的判据跟
+# :data:`_STILL_IN_THE_CONVERSATION` 不同**，差的就是她自己撤掉的那条。
+#
+# 她撤完之后不知道自己撤了什么（coe-living 2026-09-04 实测：撤完 8 分钟还在问主人
+# 撤了啥）。三种做法只有一种成立：
+#
+#   * 原样显示 → 她会接着一句对面看不到的话往下说，这正是当初加过滤的原因；
+#   * 留个白洞 → 等于没修，她仍然不知道那里曾经有什么；
+#   * **留痕迹并带原话** → 符合真实的信息状态：她自己知道撤了什么（真人能点开重新
+#     编辑），对面不知道内容但知道有这么回事。
+#
+# **别人撤掉的仍然不显示**（判据里那个 :data:`_SAID_BY_HER`）：真人那侧看到的是
+# "XX 撤回了一条消息"，内容确实没了；给她留一条带原话的痕迹，就是让她看到的会话跟
+# 对面看到的不是同一个。
+_VISIBLE_WHEN_SHE_OPENS_IT = f"(cm.recalled_at IS NULL OR {_SAID_BY_HER})"
+
+
+# 她自己那些 bot 还在的那些会话。跟
+# :func:`app.data.queries.persona.find_conversations_with_persona_bot` 同一条口径，
+# 但**内联在语句里**：这两条查询各要一次单条语句（下面两处的理由各不相同），把会话
+# 集合拆出去查会变成两个快照。
+_HER_CONVERSATIONS_CTE = """
+  SELECT cc.common_conversation_id AS channel_id,
+         cc.scope                  AS scope,
+         COALESCE(cc.display_name, '') AS title
+    FROM common_bot_presence bp
+    JOIN bot_config bc
+      ON bc.bot_name = bp.bot_name
+     AND bc.persona_id = :persona_id
+     AND bc.is_active = true
+    JOIN common_conversation cc
+      ON cc.common_conversation_id = bp.common_conversation_id
+     AND cc.is_active = true
+   WHERE bp.is_active = true
+"""
+
+
+# ---------------------------------------------------------------------------
+# 未读：信封那一侧
+# ---------------------------------------------------------------------------
+
+# 未读 = 不是她自己说的、event_time 在她这条会话的水位之后。她自己发出去的那些不算
+# 未读——那是她说的话。**别的 bot 说的算**：同一个群里的动静她本该感知到。
+_UNREAD_SUMMARY_SQL = f"""
+SELECT COUNT(*)                          AS unread,
+       MIN(cm.event_time)                AS earliest,
+       MAX(cm.event_time)                AS latest,
+       BOOL_OR({_NAMED_HER})             AS named_you
+  FROM common_message cm
+ WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+   AND {_STILL_UNREAD}
+"""
+
+_UNREAD_SENDERS_SQL = f"""
+SELECT COALESCE(cm.sender_display_name, '某人') AS who,
+       MAX(cm.event_time)                       AS latest
+  FROM common_message cm
+ WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+   AND {_STILL_UNREAD}
+ GROUP BY 1
+ ORDER BY 2 DESC
+ LIMIT :limit
+"""
+
+
+async def find_unread_summary(
+    *,
+    channel_id: str,
+    after_ms: int,
+    after_id: str,
+    bot_user_ids: list[str],
+    own_bots: list[str],
+) -> dict | None:
+    """这条会话上她还没看过的那些：几条、最早最晚是什么时候、有没有人点她的名。
+
+    ``named_you`` 三态：``True``（确认点了她）/ ``False``（确认没点）/ ``None``
+    （没人算过这批消息的 mention 列，见 :data:`_NAMED_HER`）—— 调用方不能把
+    ``None`` 折成 ``False``。
+
+    聚合无 ``GROUP BY``，所以一条未读都没有时也回一行（``unread=0``）。
     """
-    return (
-        select(text("persona_id"))
-        .select_from(text("bot_config"))
-        .where(
-            text(
-                "bot_name = common_message.bot_name AND is_active = true "
-                "AND common_message.role = 'assistant'"
+    async with auto_tx():
+        row = (
+            await current_session().execute(
+                text(_UNREAD_SUMMARY_SQL),
+                {
+                    "channel_id": channel_id,
+                    "after_ms": after_ms,
+                    "after_id": after_id,
+                    "bot_user_ids": bot_user_ids,
+                    "own_bots": own_bots,
+                },
             )
-        )
-        .limit(1)
-        .scalar_subquery()
-    )
+        ).mappings().first()
+    return dict(row) if row is not None else None
 
 
-def _uuid(value: str | UUID | None) -> UUID | None:
-    if value is None:
-        return None
-    if isinstance(value, UUID):
-        return value
-    try:
-        return UUID(str(value))
-    except ValueError:
-        return None
-
-
-def _uuid_list(values: list[str] | set[str]) -> list[UUID]:
-    out: list[UUID] = []
-    for value in values:
-        parsed = _uuid(value)
-        if parsed is not None:
-            out.append(parsed)
-    return out
-
-
-def _content_item_to_v2(item: dict) -> dict:
-    if "type" in item:
-        return item
-
-    kind = item.get("kind")
-    if kind == "text":
-        return {"type": "text", "value": item.get("text", "")}
-    if kind in {"image", "audio", "file", "sticker"}:
-        out = {"type": kind, "value": item.get("key", "")}
-        if item.get("meta"):
-            out["meta"] = item["meta"]
-        return out
-    if kind == "unsupported":
-        return {
-            "type": "unsupported",
-            "value": item.get("text", ""),
-            "meta": item.get("meta", {}),
-        }
-    return {"type": "unsupported", "value": str(item)}
-
-
-def _content_text(content: list[dict], content_text: str | None) -> str:
-    if content_text is not None:
-        return content_text
-    parts: list[str] = []
-    for item in content:
-        if item.get("kind") == "text":
-            parts.append(str(item.get("text", "")))
-        elif item.get("type") == "text":
-            parts.append(str(item.get("value", "")))
-    return "".join(parts)
-
-
-def _content_json(row: CommonMessage) -> str:
-    content = row.content or []
-    text = _content_text(content, row.content_text)
-    return json.dumps(
-        {
-            "v": 2,
-            "text": text,
-            "items": [_content_item_to_v2(item) for item in content],
-        },
-        ensure_ascii=False,
-    )
-
-
-def _chat_type(scope: str) -> str:
-    return "p2p" if scope == "direct" else scope
-
-
-def _record(row: CommonMessage) -> CommonMessageRecord:
-    return CommonMessageRecord(
-        message_id=str(row.common_message_id),
-        user_id=str(row.common_user_id) if row.common_user_id else None,
-        username=row.sender_display_name,
-        content=_content_json(row),
-        role=row.role,
-        root_message_id=str(row.common_root_message_id or row.common_message_id),
-        reply_message_id=(
-            str(row.common_reply_message_id) if row.common_reply_message_id else None
-        ),
-        chat_id=str(row.common_conversation_id),
-        chat_type=_chat_type(row.scope),
-        create_time=int(row.event_time),
-        message_type=row.message_type,
-        bot_name=row.bot_name,
-        response_id=row.response_id,
-    )
-
-
-async def find_cross_chat_messages(
-    user_id: str,
-    bot_names: list[str],
-    exclude_chat_id: str,
-    since_ms: int,
-    excluded_chat_ids: list[str] | None = None,
-) -> list[CommonMessageRecord]:
-    user_uuid = _uuid(user_id)
-    exclude_chat_uuid = _uuid(exclude_chat_id)
-    if user_uuid is None or exclude_chat_uuid is None:
-        return []
-
-    stmt = (
-        select(CommonMessage)
-        .where(CommonMessage.common_conversation_id != exclude_chat_uuid)
-        .where(CommonMessage.event_time >= since_ms)
-        .where(CommonMessage.bot_name.in_(bot_names))
-        .where(
-            or_(
-                (CommonMessage.role == "user")
-                & (CommonMessage.common_user_id == user_uuid),
-                CommonMessage.role == "assistant",
-            )
-        )
-        .order_by(CommonMessage.event_time.asc())
-    )
-    if excluded_chat_ids:
-        excluded = _uuid_list(excluded_chat_ids)
-        if excluded:
-            stmt = stmt.where(~CommonMessage.common_conversation_id.in_(excluded))
-    async with auto_tx():
-        result = await current_session().execute(stmt)
-        return [_record(row) for row in result.scalars().all()]
-
-
-async def find_message_content(message_id: str) -> str | None:
-    msg_uuid = _uuid(message_id)
-    if msg_uuid is None:
-        return None
-    async with auto_tx():
-        row = await current_session().scalar(
-            select(CommonMessage).where(CommonMessage.common_message_id == msg_uuid)
-        )
-        return _content_json(row) if row else None
-
-
-async def find_username(user_id: str) -> str | None:
-    user_uuid = _uuid(user_id)
-    if user_uuid is None:
-        return None
-    async with auto_tx():
-        result = await current_session().execute(
-            select(CommonUser.display_name).where(CommonUser.common_user_id == user_uuid)
-        )
-        return result.scalar_one_or_none()
-
-
-async def find_group_download_permission(chat_id: str) -> str | None:
-    chat_uuid = _uuid(chat_id)
-    if chat_uuid is None:
-        return None
-    async with auto_tx():
-        result = await current_session().execute(
-            select(CommonConversation.attachment_policy).where(
-                CommonConversation.common_conversation_id == chat_uuid
-            )
-        )
-        policy = result.scalar_one_or_none() or {}
-        if policy.get("download_allowed") is True:
-            return "all_messages"
-        if policy.get("download_allowed") is False:
-            return "not_allow"
-        return None
-
-
-async def find_message_by_id(message_id: str) -> CommonMessageRecord | None:
-    msg_uuid = _uuid(message_id)
-    if msg_uuid is None:
-        return None
-    async with auto_tx():
-        result = await current_session().execute(
-            select(CommonMessage).where(CommonMessage.common_message_id == msg_uuid)
-        )
-        row = result.scalar_one_or_none()
-        return _record(row) if row else None
-
-
-async def find_last_bot_reply_time(chat_id: str) -> int:
-    chat_uuid = _uuid(chat_id)
-    if chat_uuid is None:
-        return 0
-    async with auto_tx():
-        result = await current_session().execute(
-            select(func.max(CommonMessage.event_time)).where(
-                CommonMessage.common_conversation_id == chat_uuid,
-                CommonMessage.role == "assistant",
-            )
-        )
-        return result.scalar_one_or_none() or 0
-
-
-async def find_gray_config(message_id: str) -> dict | None:
-    msg_uuid = _uuid(message_id)
-    if msg_uuid is None:
-        return None
-    async with auto_tx():
-        row = await current_session().scalar(
-            select(CommonMessage).where(CommonMessage.common_message_id == msg_uuid)
-        )
-        if not row:
-            return None
-        conversation = await current_session().scalar(
-            select(CommonConversation).where(
-                CommonConversation.common_conversation_id
-                == row.common_conversation_id
-            )
-        )
-        policy = conversation.attachment_policy if conversation else None
-        gray = (policy or {}).get("gray_config")
-        return gray if isinstance(gray, dict) else None
-
-
-async def find_user_messages_after(
-    chat_id: str,
+async def find_unread_senders(
     *,
-    after: int,
+    channel_id: str,
+    after_ms: int,
+    after_id: str,
+    own_bots: list[str],
     limit: int,
-    exclude_user_id: str,
-) -> list[CommonMessageRecord]:
-    chat_uuid = _uuid(chat_id)
-    exclude_user_uuid = _uuid(exclude_user_id)
-    if chat_uuid is None:
-        return []
+) -> list[dict]:
+    """这条会话上还没被她看过的消息是谁发的，按最近说话的先后取前 ``limit`` 个。
 
-    stmt = (
-        select(CommonMessage)
-        .where(
-            CommonMessage.common_conversation_id == chat_uuid,
-            CommonMessage.role == "user",
-            CommonMessage.message_type != "proactive_trigger",
-            CommonMessage.event_time > after,
-        )
-        .order_by(CommonMessage.event_time.desc())
-        .limit(limit)
-    )
-    if exclude_user_uuid is not None:
-        stmt = stmt.where(CommonMessage.common_user_id != exclude_user_uuid)
-
-    async with auto_tx():
-        result = await current_session().execute(stmt)
-        return [_record(row) for row in result.scalars().all()]
-
-
-async def find_recent_chat_messages(
-    *,
-    chat_id: str,
-    limit: int,
-    since: str | None = None,
-) -> list[tuple[CommonMessageRecord, str | None]]:
-    """按 chat_id 捞这个会话的消息（proactive 渲染的历史上下文）。
-
-    proactive（赤尾主动给真人发消息）**没有源消息**，渲染历史不能走
-    ``quick_search``（它从 message_id 反查），只能靠 chat_id 取。这里给一个
-    ``chat_id``，捞这个会话的消息：
-
-      * **``since`` 增量水位（治她对着旧话反复主动开口）**：``since`` 非空时只取
-        ``event_time`` **严格大于** ``since`` 的消息——即「上一次 life 轮之后真人新发
-        的」增量，她这次主动发不再把早就说过的旧话拉进来。``since`` 是 ISO8601 串
-        （life 写的 ``LifeState.observed_at`` 形态）、DB ``event_time`` 是毫秒整数，
-        过滤前经 ``cst_time.parse`` 把 ISO 折成毫秒时刻再比。``since=None``（默认、也是
-        冷启兜底）时**行为完全不变**：退回全量最近 ``limit`` 条。``since`` 解析不出真实
-        时刻（脏串）时同样退回全量（不静默把这次主动发的历史吞成空，由水位语义兜底）。
-      * **user + assistant 都取**（区别于 ``find_user_messages_after`` 只取 user）——
-        proactive context 要把赤尾自己发过的（含上一条 proactive）认作她自己说的，
-        所以 assistant 行也得在历史里。
-      * assistant 行的发言 persona 经
-        ``COALESCE(common_agent_response.persona_id, bot_config.persona_id)`` 取：
-          - 普通回复行带 ``response_id`` → join ``common_agent_response.session_id``
-            拿到 persona（**优先**，同 ``find_persona_spoken_chats_in_window`` 的 join）。
-          - **proactive 出站行 ``response_id=NULL`` 且没有 agent_response 行**（worker
-            真实落库口径：proactive session_id=null → responseId 不挂、不写
-            agent_response），此 join 必拿 None；改经 ``bot_config(bot_name →
-            persona_id)`` 兜底（channel-server 落 proactive 时写了 bot_name）。
-            **承重红线（codex 必改 1）**：只靠 response_id 会把 proactive 行判成
-            persona=None → proactive context 误判为真人输入（串味）；bot_name → persona
-            是它在真实链路里唯一能拿到的归属来源。
-        user 行两路都拿 None（无 persona）。``bot_config`` 由 channel-server 管理、不在
-        agent-service 的 SQLAlchemy 模型里，用相关标量子查询读裸表（同
-        ``resolve_persona_id`` 用裸表名读它），只取 ``is_active`` 的映射。
-      * 超 ``limit`` 只保**最近 N 条**、仍按发生先后升序（条目数量控制、不字符截断）：
-        SQL 先按 event_time 降序取最近 N 条，再在 Python 反转回升序。``since`` 过滤后
-        仍保这个上限（水位后消息很多时取最近 limit 条防爆）。
-      * ``proactive_trigger`` 伪消息剔除（NULL-safe，同 ``_by_root``）。
-
-    返回 ``[(record, 发言 persona), ...]``。``chat_id`` 解析不出 uuid → 返回 ``[]``。
+    不是"最重要的几个"，就是按最近说话排。发件人没名字的行落 ``某人``（不暴露
+    raw user_id，跟渲染层其它地方同一口径）。
     """
-    chat_uuid = _uuid(chat_id)
-    if chat_uuid is None:
-        return []
-
-    stmt = (
-        select(
-            CommonMessage,
-            func.coalesce(
-                CommonAgentResponse.persona_id, _bot_config_persona()
-            ).label("persona_id"),
-        )
-        .outerjoin(
-            CommonAgentResponse,
-            CommonMessage.response_id == CommonAgentResponse.session_id,
-        )
-        .where(
-            CommonMessage.common_conversation_id == chat_uuid,
-            or_(
-                CommonMessage.message_type.is_(None),
-                CommonMessage.message_type != "proactive_trigger",
-            ),
-        )
-        .order_by(CommonMessage.event_time.desc())
-        .limit(limit)
-    )
-
-    # ``since`` 增量水位：把 ISO8601 串折成毫秒时刻（DB event_time 口径），只取严格大于
-    # 它的消息。脏串（cst_time.parse 解析不出真实时刻）退回全量——不加这个过滤即可，
-    # 不静默把历史吞成空（向后兼容 + 冷启兜底语义一致）。
-    if since is not None:
-        since_dt = cst_time.parse(since)
-        if since_dt is not None:
-            since_ms = int(since_dt.timestamp() * 1000)
-            stmt = stmt.where(CommonMessage.event_time > since_ms)
-
     async with auto_tx():
-        result = await current_session().execute(stmt)
-        rows = [(_record(msg), msg_persona) for msg, msg_persona in result.all()]
-    rows.reverse()
-    return rows
-
-
-async def find_messages_with_user_chat_persona_by_root(
-    *,
-    root_message_id: str,
-    until_create_time: int,
-) -> list[tuple[CommonMessageRecord, str | None, str | None, str | None]]:
-    root_uuid = _uuid(root_message_id)
-    if root_uuid is None:
-        return []
-
-    stmt = (
-        select(
-            CommonMessage,
-            CommonConversation.display_name.label("chat_name"),
-            func.coalesce(
-                CommonAgentResponse.persona_id, _bot_config_persona()
-            ).label("persona_id"),
-        )
-        .outerjoin(
-            CommonConversation,
-            CommonMessage.common_conversation_id
-            == CommonConversation.common_conversation_id,
-        )
-        .outerjoin(
-            CommonAgentResponse,
-            CommonMessage.response_id == CommonAgentResponse.session_id,
-        )
-        .where(CommonMessage.common_root_message_id == root_uuid)
-        .where(CommonMessage.event_time <= until_create_time)
-        # 历史 proactive_trigger 伪消息（旧外部判断器旁路遗留，已删）剔除：它是
-        # 触发器记录、不是真实对话，绝不能混进可见聊天上下文。NULL-safe（正常
-        # 消息 message_type 多为 NULL，裸 != 会把 NULL 行一并丢掉）。
-        .where(
-            or_(
-                CommonMessage.message_type.is_(None),
-                CommonMessage.message_type != "proactive_trigger",
+        rows = (
+            await current_session().execute(
+                text(_UNREAD_SENDERS_SQL),
+                {
+                    "channel_id": channel_id,
+                    "after_ms": after_ms,
+                    "after_id": after_id,
+                    "own_bots": own_bots,
+                    "limit": limit,
+                },
             )
-        )
-        .order_by(CommonMessage.event_time.asc())
-    )
-    async with auto_tx():
-        result = await current_session().execute(stmt)
-        rows = []
-        for msg, chat_name, persona_id in result.all():
-            record = _record(msg)
-            rows.append((record, record.username, chat_name, persona_id))
-        return rows
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 
-async def find_messages_with_user_chat_persona_in_chat(
+# ---------------------------------------------------------------------------
+# 谁在叫她
+# ---------------------------------------------------------------------------
+
+# 在叫她 = 私聊来的任意一条，或者群里点了她名字的那条。除此之外没有分级。
+#
+# **别的 bot 在群里说话不在这里面。** 它的话进未读、进信封（同一个群里的动静她本该
+# 感知到），但群里不点名就是背景音 —— 不点名却算召唤的话，两个 agent 在一个群里会
+# 互相把对方叫醒，永远停不下来。点名了就跟真人点名一样算，同一条判据，不多不少。
+_SUMMONS_SQL = f"""
+SELECT cm.common_message_id AS message_id,
+       cm.event_time        AS at_ms
+  FROM common_message cm
+ WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+   AND {_STILL_UNREAD}
+   AND (:is_direct OR {_NAMED_HER})
+ ORDER BY cm.event_time DESC, cm.common_message_id DESC
+ LIMIT 1
+"""
+
+
+async def find_newest_unread_summons(
     *,
-    chat_id: str,
-    exclude_root_message_id: str,
-    after_create_time: int,
-    before_create_time: int,
-    exclude_user_id: str,
-    limit: int,
-) -> list[tuple[CommonMessageRecord, str | None, str | None, str | None]]:
-    chat_uuid = _uuid(chat_id)
-    root_uuid = _uuid(exclude_root_message_id)
-    exclude_user_uuid = _uuid(exclude_user_id)
-    if chat_uuid is None or root_uuid is None:
-        return []
-
-    stmt = (
-        select(
-            CommonMessage,
-            CommonConversation.display_name.label("chat_name"),
-            func.coalesce(
-                CommonAgentResponse.persona_id, _bot_config_persona()
-            ).label("persona_id"),
-        )
-        .outerjoin(
-            CommonConversation,
-            CommonMessage.common_conversation_id
-            == CommonConversation.common_conversation_id,
-        )
-        .outerjoin(
-            CommonAgentResponse,
-            CommonMessage.response_id == CommonAgentResponse.session_id,
-        )
-        .where(
-            CommonMessage.common_conversation_id == chat_uuid,
-            CommonMessage.common_root_message_id != root_uuid,
-            CommonMessage.event_time >= after_create_time,
-            CommonMessage.event_time < before_create_time,
-            # 历史 proactive_trigger 伪消息剔除（NULL-safe，同 _by_root）。
-            or_(
-                CommonMessage.message_type.is_(None),
-                CommonMessage.message_type != "proactive_trigger",
-            ),
-        )
-        .order_by(CommonMessage.event_time.desc())
-        .limit(limit)
-    )
-    if exclude_user_uuid is not None:
-        stmt = stmt.where(CommonMessage.common_user_id != exclude_user_uuid)
-
+    channel_id: str,
+    after_ms: int,
+    after_id: str,
+    is_direct: bool,
+    bot_user_ids: list[str],
+    own_bots: list[str],
+) -> dict | None:
+    """这条会话上还没被她看过、而且**在叫她**的那批里最新的一条；没有返回 ``None``。"""
     async with auto_tx():
-        result = await current_session().execute(stmt)
-        rows = []
-        for msg, chat_name, persona_id in result.all():
-            record = _record(msg)
-            rows.append((record, record.username, chat_name, persona_id))
-        return rows
+        row = (
+            await current_session().execute(
+                text(_SUMMONS_SQL),
+                {
+                    "channel_id": channel_id,
+                    "after_ms": after_ms,
+                    "after_id": after_id,
+                    "is_direct": is_direct,
+                    "bot_user_ids": bot_user_ids,
+                    "own_bots": own_bots,
+                },
+            )
+        ).mappings().first()
+    return dict(row) if row is not None else None
 
 
-async def find_persona_spoken_chats_in_window(
+# ---------------------------------------------------------------------------
+# 打开一条会话
+# ---------------------------------------------------------------------------
+
+# 打开会话那一眼。展示窗口 W、未读总数 ``|U|``、``max(U)`` 由**同一条语句**一次给出。
+#
+# **为什么必须是一条。** ``app/data/session.py`` 没配更强的隔离级别，PostgreSQL 默认
+# ``READ COMMITTED`` 下同一个事务里连续两条 ``SELECT`` 各取各的快照。分成两条时，一条
+# 在两次查询之间提交的新消息不在窗口里、却可能成为未读里最新那条 —— 游标推到它身上，
+# 这条她从没见过的消息就被永久跳过了，一句报错都没有。并发撤回同样会让「其中 N 条是
+# 新的」跟未读总数互相对不上。单条语句只取一个快照，三个答案必然出自同一份事实。
+#
+# ``unread`` 是未读集合 U，判据是 :data:`_STILL_UNREAD`（全模块唯一那份）。窗口那侧
+# 不重写一遍判据，而是 ``LEFT JOIN`` 回这个集合：``is_unread`` 于是**字面上就是**
+# "这一行在 U 里"，「其中 N 条是新的」＝ ``|U ∩ W|`` 由此成为结构上的事实，不再靠两处
+# 判据长得一样来维持。``common_message_id`` 是主键，join 不会把窗口里的行放大。
+#
+# 窗口 W 收游标参数但**不按游标过滤**：一行都不会因为"读过了"而被挡在窗口外。窗口
+# 回答"这条会话最近说了些什么"，未读回答"其中哪些是新的"。
+#
+# 多带的几列各有各的用处，缺一个她就少知道一件事：``said_by_you`` 决定这一行署"你"
+# 还是署那个人的名字（认 ``bot_name``，不认 ``role``）；``recalled_at`` 决定要不要写
+# 明这条已经撤回；``agent_outbound_id`` 是她能拿去撤回的那个编号，只有她主动发起的
+# 行才有。
+#
+# ``unread_total`` / ``newest_unread_*`` 三列在每一行上都一样（标量子查询）。窗口一行
+# 都没有时整条语句返回零行，这三个答案也就无从读起 —— **而那恰好是对的**：U 里每一行
+# 都满足 ``recalled_at IS NULL``，也就必然满足 ``recalled_at IS NULL OR 是她说的``，
+# 所以 U 是窗口候选集的子集；候选集非空时 ``LIMIT``（≥1）取出的窗口也非空。反过来推：
+# 窗口为空 ⟹ 候选集为空 ⟹ U 为空。**"窗口为空但未读非空"在同一个快照里不可能发生。**
+# 万一这个推理哪天被破坏（比如 limit 变成 0），零行的后果是"什么都没看到、游标不动"
+# —— 宁可重看、不可漏看那一侧，不会静默跳过任何一条。
+_OPEN_CONVERSATION_SQL = f"""
+WITH unread AS (
+  SELECT cm.common_message_id AS message_id,
+         cm.event_time        AS at_ms
+    FROM common_message cm
+   WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+     AND {_STILL_UNREAD}
+),
+newest_unread AS (
+  SELECT message_id, at_ms
+    FROM unread
+   ORDER BY at_ms DESC, message_id DESC
+   LIMIT 1
+),
+recent AS (
+  SELECT cm.common_message_id AS message_id,
+         COALESCE(cm.sender_display_name, '某人') AS who,
+         {_SAID_BY_HER}       AS said_by_you,
+         cm.content           AS content,
+         cm.content_text      AS content_text,
+         cm.event_time        AS at_ms,
+         cm.recalled_at       AS recalled_at,
+         cm.agent_outbound_id AS outbound_id,
+         (u.message_id IS NOT NULL) AS is_unread
+    FROM common_message cm
+    LEFT JOIN unread u ON u.message_id = cm.common_message_id
+   WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+     AND {_VISIBLE_WHEN_SHE_OPENS_IT}
+   ORDER BY cm.event_time DESC, cm.common_message_id DESC
+   LIMIT :limit
+)
+SELECT r.*,
+       (SELECT COUNT(*) FROM unread)          AS unread_total,
+       (SELECT message_id FROM newest_unread) AS newest_unread_id,
+       (SELECT at_ms FROM newest_unread)      AS newest_unread_ms
+  FROM recent r
+ ORDER BY r.at_ms DESC, r.message_id DESC
+"""
+
+
+async def find_conversation_window(
+    *,
+    channel_id: str,
+    after_ms: int,
+    after_id: str,
+    own_bots: list[str],
+    limit: int,
+) -> list[dict]:
+    """打开一条会话那一眼：最近 ``limit`` 条往来 + 未读总数 + 未读里最新那条。
+
+    一条语句给出三个答案，理由写在 :data:`_OPEN_CONVERSATION_SQL` 上：两条语句就是
+    两个快照，中间提交的那条消息会被永久跳过。``unread_total`` /
+    ``newest_unread_id`` / ``newest_unread_ms`` 在每一行上都一样，取第一行即可。
+
+    窗口按 ``at_ms`` 降序（最近的在前），**含她自己撤掉的那条**（带 ``recalled_at``
+    留痕迹）、不含别人撤掉的。``content`` 是 jsonb 原样，没有解析。
+    """
+    async with auto_tx():
+        rows = (
+            await current_session().execute(
+                text(_OPEN_CONVERSATION_SQL),
+                {
+                    "channel_id": channel_id,
+                    "after_ms": after_ms,
+                    "after_id": after_id,
+                    "own_bots": own_bots,
+                    "limit": limit,
+                },
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 她**已经知道**的那一段
+# ---------------------------------------------------------------------------
+
+# 边界就是游标：她看过的（event_time <= 水位）+ **她自己**发出去的。**没看过的一个
+# 字都不给** —— 给它未读内容，"内容要她去看"这条线当场就漏了：她会回应一句自己根本
+# 没读过的话。
+#
+# 绕过游标那道门是给"她当然知道自己说过什么"留的，**只有她自己的话走得进来**。别的
+# bot 的话从这道门溜进来会同时破两条线：白送未读内容，而且渲染时被署成"你"。
+_KNOWN_SQL = f"""
+SELECT COALESCE(cm.sender_display_name, '某人') AS who,
+       {_SAID_BY_HER}       AS said_by_you,
+       cm.content           AS content,
+       cm.content_text      AS content_text,
+       cm.event_time        AS at_ms
+  FROM common_message cm
+ WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+   AND {_STILL_IN_THE_CONVERSATION}
+   AND (
+        {_SAID_BY_HER}
+        OR (cm.event_time, CAST(cm.common_message_id AS text))
+           <= (:cursor_ms, :cursor_id)
+   )
+ ORDER BY cm.event_time DESC, cm.common_message_id DESC
+ LIMIT :limit
+"""
+
+
+async def find_messages_known_through(
+    *,
+    channel_id: str,
+    cursor_ms: int,
+    cursor_id: str,
+    own_bots: list[str],
+    limit: int,
+) -> list[dict]:
+    """这条会话上她已经知道的那一段：游标之前的 + 她自己说过的，最近 ``limit`` 条。
+
+    按 ``at_ms`` **降序**返回（最近的在前），撤掉的行一条都不在里面。
+    """
+    async with auto_tx():
+        rows = (
+            await current_session().execute(
+                text(_KNOWN_SQL),
+                {
+                    "channel_id": channel_id,
+                    "cursor_ms": cursor_ms,
+                    "cursor_id": cursor_id,
+                    "own_bots": own_bots,
+                    "limit": limit,
+                },
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 按名字找回一条会话
+# ---------------------------------------------------------------------------
+
+# 匹配两边：群按会话标题（群基本都有名），私聊按**在里面说过话的人**
+# （``sender_display_name``，也正是信封上给她看的那个"谁"——她搜的名字和她见过的
+# 名字是同一个）。私聊会话本身多半没有标题：prod 实测 205 条私聊里 158 条
+# ``display_name`` 是空的，所以只查标题等于查不到人。
+#
+# 只在她手机上的会话里找（:data:`_HER_CONVERSATIONS_CTE`）—— 查出来的地址必须是她
+# 真能用的，否则这只手只是把 fail-loud 从"找不到"推迟到"发不出去"。
+#
+# **匹配的是 ``sender_display_name``，不是 ``common_user.display_name``。** 后者有索引、
+# 表也小（prod 12973 行），但她从来没见过那个名字：信封和会话正文给她看的"谁"全都是
+# ``sender_display_name``。两者在 prod 上 4652 组里有 2157 组不一致（46%），按 common_user
+# 搜等于让她搜一个自己没见过的名字。
+#
+# 代价是没有索引可用，只能扫。**过滤必须下推进扫描**（``WHERE ... ILIKE`` 在 matched
+# 里，不是先聚合再 FILTER）：prod 实测 akao 名下 323 条会话共 254 万条消息，下推之后
+# 是一次并行 seq scan，EXPLAIN ANALYZE 386ms。这只手她一天调不了几次、不在每一缝的
+# 路径上，386ms 换"她能主动找回一个人"是划算的——所以这里不加时间窗，加了她就再也
+# 找不回久没联系的人。
+_LOOK_UP_SQL = f"""
+WITH mine AS (
+{_HER_CONVERSATIONS_CTE}
+   GROUP BY cc.common_conversation_id, cc.scope, cc.display_name
+),
+matched AS (
+  SELECT cm.common_conversation_id AS channel_id,
+         COALESCE(cm.sender_display_name, '某人') AS who,
+         MAX(cm.event_time) AS latest
+    FROM common_message cm
+    JOIN mine m ON m.channel_id = cm.common_conversation_id
+   WHERE cm.sender_display_name ILIKE :name_like
+     AND NOT {_SAID_BY_HER}
+     AND {_STILL_IN_THE_CONVERSATION}
+   GROUP BY 1, 2
+)
+SELECT m.channel_id AS channel_id,
+       m.scope      AS scope,
+       m.title      AS title,
+       ARRAY_AGG(DISTINCT x.who) FILTER (WHERE x.who IS NOT NULL) AS matched,
+       MAX(x.latest) AS latest
+  FROM mine m
+  LEFT JOIN matched x ON x.channel_id = m.channel_id
+ GROUP BY m.channel_id, m.scope, m.title
+HAVING m.title ILIKE :name_like OR COUNT(x.who) > 0
+ ORDER BY m.channel_id
+"""
+
+
+async def search_persona_conversations_by_name(
     *,
     persona_id: str,
-    since_ms: int,
-    until_ms: int,
-    per_chat_limit: int,
-) -> list[tuple[str, str | None, list[tuple[CommonMessageRecord, str | None]]]]:
-    """她在窗口内**发过言**的 chat → 这些 chat 在窗口内的消息（睡前回顾的聊天证据）。
+    name_like: str,
+    own_bots: list[str],
+) -> list[dict]:
+    """这个 persona 手机上、名字对得上 ``name_like`` 的那些会话。
 
-    参与边界合同（spec 决策 2b）：她在 ``[since_ms, until_ms]`` 闭区间内发过言的
-    chat 才算她的经历——被动在场没吭声的群不算（chat 是被动唤起模型，她没被唤起
-    就没看见）。「她发过言」按 common 口径判：assistant 消息的发言 persona ==
-    ``persona_id``，发言 persona 经 ``COALESCE(common_agent_response.persona_id,
-    bot_config(bot_name→persona_id))`` 取——**普通回复**经 ``response_id →
-    agent_response`` join 拿，**proactive 出站行**（``response_id=NULL``、无
-    agent_response）经 ``bot_config`` 兜底拿（承重 2：只认 response join 会把她只发过
-    proactive 的 chat 整个漏出回顾）。
-
-    每个够格的 chat 取窗口内消息（user + assistant，剔除 ``proactive_trigger``
-    伪消息），**条目数量控制不截断**：超 ``per_chat_limit`` 只保最近 N 条、仍按
-    发生先后升序。每条消息带发言 persona（None = 用户消息 / 无归属），发言 persona
-    同样经 ``COALESCE(agent_response.persona_id, bot_config 兜底)`` 取（proactive 出站
-    行 persona 归属不丢；``_bot_config_persona`` 已加 role 限定，真人 user 行仍是
-    None、归属正确），让回顾分得清"她说的"和"别的 bot 说的"；身份字段（user_id /
-    username / chat_type）在 ``CommonMessageRecord`` 里。返回按 chat 维度分组：
-    ``[(chat_id, chat 显示名, [(record, 发言 persona), ...]), ...]``。
+    ``name_like`` 是完整的 ``ILIKE`` 模式（调用方自己加 ``%``）。群按标题匹配，
+    私聊按在里面说过话的人匹配 —— 私聊多半没有标题，只查标题等于查不到人。
+    ``matched`` 是对得上的那些人名（一条都没有时是 ``None``）。
     """
-    spoke_stmt = (
-        select(CommonMessage.common_conversation_id)
-        .outerjoin(
-            CommonAgentResponse,
-            CommonMessage.response_id == CommonAgentResponse.session_id,
-        )
-        .where(
-            func.coalesce(CommonAgentResponse.persona_id, _bot_config_persona())
-            == persona_id,
-            CommonMessage.role == "assistant",
-            CommonMessage.event_time >= since_ms,
-            CommonMessage.event_time <= until_ms,
-        )
-        .distinct()
-    )
-
-    out: list[tuple[str, str | None, list[tuple[CommonMessageRecord, str | None]]]] = []
     async with auto_tx():
-        chat_ids = [row[0] for row in (await current_session().execute(spoke_stmt)).all()]
-        for chat_uuid in chat_ids:
-            name_row = await current_session().execute(
-                select(CommonConversation.display_name).where(
-                    CommonConversation.common_conversation_id == chat_uuid
-                )
+        rows = (
+            await current_session().execute(
+                text(_LOOK_UP_SQL),
+                {
+                    "persona_id": persona_id,
+                    "name_like": name_like,
+                    "own_bots": own_bots,
+                },
             )
-            chat_name = name_row.scalar_one_or_none()
-
-            # 窗口内消息按时间**降序取最近 N 条**（条目上限是"保最近"的语义），
-            # 再反转回升序——回顾按发生先后读一段对话。
-            msg_stmt = (
-                select(
-                    CommonMessage,
-                    func.coalesce(
-                        CommonAgentResponse.persona_id, _bot_config_persona()
-                    ).label("persona_id"),
-                )
-                .outerjoin(
-                    CommonAgentResponse,
-                    CommonMessage.response_id == CommonAgentResponse.session_id,
-                )
-                .where(
-                    CommonMessage.common_conversation_id == chat_uuid,
-                    CommonMessage.event_time >= since_ms,
-                    CommonMessage.event_time <= until_ms,
-                    or_(
-                        CommonMessage.message_type.is_(None),
-                        CommonMessage.message_type != "proactive_trigger",
-                    ),
-                )
-                .order_by(CommonMessage.event_time.desc())
-                .limit(per_chat_limit)
-            )
-            rows = (await current_session().execute(msg_stmt)).all()
-            entries = [(_record(msg), msg_persona) for msg, msg_persona in rows]
-            entries.reverse()
-            out.append((str(chat_uuid), chat_name, entries))
-    return out
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 
-def _life_chat_message(
-    record: CommonMessageRecord,
-    msg_persona: str | None,
+# ---------------------------------------------------------------------------
+# 有人发到她手机上的文件
+# ---------------------------------------------------------------------------
+
+# 文件项的字段名是 ``kind`` / ``key``（``meta.file_name`` 放原始文件名），跟渠道投影
+# 写进 ``common_message.content`` 的形状一致 —— 见 ``tests/living/test_reading.py`` 里
+# 那份照抄真实记录的常量。**曾经写成 ``type`` / ``value``**：SQL 和测试数据用了同一份
+# 臆造形状、彼此自洽所以全绿，而线上一个文件都查不出来。改这几个字段名之前先去库里看
+# 一条真实记录。
+#
+# **不加时间窗。** 加了她就再也读不到上个月别人发来的那本书 —— 那正是"阈值替她
+# 遗忘"。代价是全表扫，用 ``content @> '[{"kind":"file"}]'`` 先把绝大多数消息挡在
+# 展开之前（jsonb 包含判断，比逐条展开数组便宜得多）。展开时仍要挡一次
+# ``jsonb_typeof = 'array'``：content 不是数组的历史行会让 jsonb_array_elements 直接
+# 报错。
+#
+# ``DISTINCT`` 是必需的：一个 persona 名下可能挂着好几个 bot（正式那个和 dev 那个），
+# 同一条会话会被 presence 匹配出好几行，不去重同一个文件就会列出来好几遍。
+#
+# ``recalled_at`` 在这里**不做过滤，只当一列事实读出来**（``still_gettable``）。撤回
+# 不删公共层那一行（那是消息记录，删行会打断历史），只在这一列上留个时刻，而这一列说的
+# 是"渠道上还有没有它"——也就是还取不取得到字节。
+#
+# 一度是 ``WHERE cm.recalled_at IS NULL``，那样查询就同时替调用方做了两个决定：拿不到
+# 的不给读（对），以及她读过它这件事也一并消失（错）。她读过的那份印象是真发生过的
+# 事，撤回改变不了它。所以判定留给调用方。
+#
+# **不复用 :data:`_STILL_IN_THE_CONVERSATION` / :data:`_VISIBLE_WHEN_SHE_OPENS_IT`。**
+# 那两个判据回答的是"这行还算不算数"，跟这里的"还取不取得到字节"不是同一件事；共享
+# 一个常量会让下一个改判据的人以为改一处两边都对。文件这边只有一种情况：撤掉了就拿不
+# 到了，谁撤的都一样。
+_SENT_FILES_SQL = f"""
+WITH hers AS (
+{_HER_CONVERSATIONS_CTE}
+   GROUP BY cc.common_conversation_id, cc.scope, cc.display_name
+)
+SELECT DISTINCT
+       CAST(cm.common_message_id AS text)       AS message_id,
+       it->>'key'                               AS file_key,
+       COALESCE(it->'meta'->>'file_name', '')   AS file_name,
+       COALESCE(cm.sender_display_name, '某人') AS who,
+       cm.event_time                            AS at_ms,
+       h.scope                                  AS scope,
+       h.title                                  AS where_title,
+       (cm.recalled_at IS NULL)                 AS still_gettable
+  FROM common_message cm
+  JOIN hers h ON h.channel_id = cm.common_conversation_id
+ CROSS JOIN LATERAL jsonb_array_elements(
+       CASE WHEN jsonb_typeof(cm.content) = 'array'
+            THEN cm.content ELSE '[]'::jsonb END
+ ) AS it
+ WHERE cm.content @> '[{{"kind": "file"}}]'::jsonb
+   AND it->>'kind' = 'file'
+   AND COALESCE(it->>'key', '') <> ''
+ ORDER BY at_ms DESC, message_id DESC
+"""
+
+
+async def find_file_items_in_persona_conversations(
     persona_id: str,
-    now: datetime,
-) -> LifeChatMessage:
-    """把一条 common 消息 + 它的发言 persona 折成 life 读对话用的可读形态。
+) -> list[dict]:
+    """这个 persona 手机上的会话里，别人发过的每一个文件项，最近的在前。
 
-    ``is_self`` = role=assistant 且发言 persona == 当前 persona（同
-    ``review._chats_evidence`` 的"她说的"判定，发言 persona 已经过
-    ``COALESCE(agent_response, bot_config 兜底)`` 取、含 proactive 出站行归属）。
-    展示名：她自己用 persona_id；别的 persona 用它的 persona_id；真人用
-    ``sender_display_name`` 兜底（不暴露 raw user_id）。CST 时间走项目 cst_time 归一
-    （``event_time`` 毫秒整数 → ``str`` 喂 ``to_cst_dated``，与历史毫秒口径一致）：
-    当天的只给时分，**跨天的补上 MM-DD**——回看窗口冷启时回退 6 小时、经常跨夜，
-    只给 ``23:41 CST`` 她分不清那是昨晚还是刚才（线上事故 2026-08-03）。
+    **撤回掉的也在里面**，带着 ``still_gettable=False`` —— 撤回改变的是"现在还能不能
+    拿到"，不是"有没有发生过"。谁看得到它、谁读得起它由调用方定。
     """
-    is_self = record.role == "assistant" and msg_persona == persona_id
-    if is_self:
-        speaker = persona_id
-    elif msg_persona:
-        speaker = msg_persona
-    else:
-        speaker = record.username or _UNKNOWN_SPEAKER
-    return LifeChatMessage(
-        message_id=record.message_id,
-        speaker_display_name=speaker,
-        is_self=is_self,
-        text=json.loads(record.content).get("text", "") if record.content else "",
-        cst_time=cst_time.to_cst_dated(
-            str(record.create_time), now=now, seconds=False
-        ),
-    )
+    async with auto_tx():
+        rows = (
+            await current_session().execute(
+                text(_SENT_FILES_SQL), {"persona_id": persona_id}
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 
-async def _direct_counterparts_by_chat(
-    chat_ids: list[str],
-) -> dict[str, list[LifeChatCounterpart]]:
-    """私聊会话 → 对面真人列表（id + 展示名），对一批会话**一次查**（不逐会话 N+1）。
+# ---------------------------------------------------------------------------
+# 她那次开口在公共层落成了什么
+# ---------------------------------------------------------------------------
 
-    锚定 ``role='user'`` 行取对方——已查实的两个陷阱决定了不能取会话内任意 distinct
-    common_user_id：真人 user 行**也写 bot_name**（不能拿 bot_name 排除真人）、proactive
-    出站 assistant 行的 ``common_user_id`` 非空但是 **bot 自己的**（拿它当对方就把她自己
-    认成聊天对象）。role='user' 是「这行是真人说的」唯一干净锚。
 
-    **全历史、不带 since 窗口**（spec 决策 3）：会话对面是谁是稳定事实，不随内容增量
-    窗口变化——对方最后发言早于窗口、窗口内只剩她自己独白时（她刚主动发过话、对方还
-    没回，正是最需要具名的场景）也必须具名。仅全历史都无真人行才返回空（渲染层匿名
-    兜底）。``proactive_trigger`` 伪消息剔除（触发器记录不是真人发言，同各消息查询口径）。
+async def find_messages_by_outbound_ids(
+    outbound_ids: list[uuid.UUID],
+) -> list[dict]:
+    """认领了这些 ``agent_outbound_id`` 的公共层行，按 ``event_time`` 升序。
 
-    每个真人一行：``DISTINCT ON (会话, 真人)`` 取**有名字的最近一行**（sender_display_name
-    为空的行排后——最新一行恰好没写展示名时不把名字弄丢），展示名兜底
-    ``_UNKNOWN_SPEAKER``（同 ``_life_chat_message`` 口径：不暴露 raw user_id）。正常 p2p
-    恰好 1 个；>1 个是约定外脏数据，如实全列、按最近发言在前排序（忠实呈现，不替她挑
-    「主对象」）。
+    一次开口只该落一行；真出现多行（投递方重复写了）时靠这个排序让调用方取最早
+    那条。**列侧不做任何 CAST** —— CAST 成 text 会绕开
+    ``ix_common_message_agent_outbound_id`` 走全表扫。
     """
-    chat_uuids = _uuid_list(chat_ids)
-    if not chat_uuids:
-        return {}
-    unnamed = or_(
-        CommonMessage.sender_display_name.is_(None),
-        CommonMessage.sender_display_name == "",
-    )
     stmt = (
         select(
-            CommonMessage.common_conversation_id,
-            CommonMessage.common_user_id,
-            CommonMessage.sender_display_name,
+            CommonMessage.agent_outbound_id,
+            CommonMessage.common_message_id,
             CommonMessage.event_time,
         )
-        .where(
-            CommonMessage.common_conversation_id.in_(chat_uuids),
-            CommonMessage.role == "user",
-            CommonMessage.common_user_id.is_not(None),
-            or_(
-                CommonMessage.message_type.is_(None),
-                CommonMessage.message_type != "proactive_trigger",
-            ),
-        )
-        .distinct(
-            CommonMessage.common_conversation_id,
-            CommonMessage.common_user_id,
-        )
+        .where(CommonMessage.agent_outbound_id.in_(outbound_ids))
         .order_by(
-            CommonMessage.common_conversation_id,
-            CommonMessage.common_user_id,
-            unnamed,
-            CommonMessage.event_time.desc(),
+            CommonMessage.event_time.asc(),
+            CommonMessage.common_message_id.asc(),
         )
     )
     async with auto_tx():
-        rows = (await current_session().execute(stmt)).all()
-
-    grouped: dict[str, list[tuple[int, LifeChatCounterpart]]] = {}
-    for chat_uuid, user_uuid, display_name, event_time in rows:
-        grouped.setdefault(str(chat_uuid), []).append(
-            (
-                event_time,
-                LifeChatCounterpart(
-                    user_id=str(user_uuid),
-                    display_name=display_name or _UNKNOWN_SPEAKER,
-                ),
-            )
-        )
-    return {
-        chat_id: [cp for _, cp in sorted(pairs, key=lambda p: p[0], reverse=True)]
-        for chat_id, pairs in grouped.items()
-    }
+        rows = (await current_session().execute(stmt)).mappings().all()
+    return [dict(r) for r in rows]
 
 
-async def find_persona_related_chats_recent(
-    *,
-    persona_id: str,
-    since_ms: int,
-    max_conversations: int,
-    per_chat_limit: int,
-    now: datetime,
-) -> list[LifeChatConversation]:
-    """她相关会话（真人私聊 + 白名单内的群）的最近一段消息 —— life 醒来实时拉对话。
+async def find_recall_state_by_outbound_ids(
+    outbound_ids: list[uuid.UUID],
+) -> list[dict]:
+    """这些 ``agent_outbound_id`` 各自落了几行、其中几行渠道那边真撤掉了、最后一行
+    是什么时候没的。
 
-    「她相关会话」= 她在 ``since_ms`` 之后**发过言**的会话（同 chat 被动唤起模型口径：
-    她没发言就没被唤起、就没看见），按最近活跃降序取前 ``max_conversations`` 个。她发
-    过言按 common 口径判：assistant 行的发言 persona ==``persona_id``，发言 persona 经
-    ``COALESCE(common_agent_response.persona_id, bot_config(bot_name→persona_id))`` 取
-    （普通回复经 ``response_id`` join 拿、proactive 出站行经 ``bot_config`` 兜底拿，
-    ``_bot_config_persona`` 已加 role 限定，真人 user 行仍是 None）。
+    ``recalled_at IS NOT NULL`` 是"**这一行**撤成功了"的全部判据 —— 投递侧撤失败不填
+    这一列，所以空着就是还没撤掉（**不是撤失败**）。
 
-    白名单挪到拉取侧（spec 决策）：私聊（scope=direct）放行；群（scope=group）必须过
-    ``should_feed_chat_to_life``（Dynamic Config ``life_feed_chat_whitelist``，配置缺失
-    fail-closed 不拉）。这一层在查询里做掉、不依赖调用方先过滤。
+    但"**这次开口**撤完了"要的是每一行都撤掉：一次开口被切成几段发出去时每段各一行，
+    撤掉一段、另一段还挂在真人眼前，跟整条撤完不是同一件事。所以这里不按行取，按 id
+    聚合出「几段 / 撤掉几段 / 最后一段什么时候没的」，**判据留给调用方**。
 
-    每个会话取最近消息（user + assistant，剔除 ``proactive_trigger`` 伪消息），**条目数
-    量控制不字符截断**：超 ``per_chat_limit`` 只保最近 N 条、仍按发生先后升序。每条折成
-    ``LifeChatMessage``（发言者展示名 / 是否她自己 / 文本 / CST 时间），返回
-    ``LifeChatConversation`` 列表（chat_id + scope + 群名 + 消息列表 + 私聊对面真人）。
-
-    ``now`` 由调用方给、不在这里现取：消息时间戳「同一天省日期、跨天补 MM-DD」要拿
-    调用方那一轮的同一个「今天」去比。自己现取会和调用方的 now 差开——跨午夜那一瞬
-    两边落在不同日历日，同一屏 stimulus 里的日期口径就自相矛盾。
-
-    私聊会话额外聚合「对面是谁」（主动私聊具名化 Task 1）：对选中的私聊**批量一次**
-    经 :func:`_direct_counterparts_by_chat` 解析对方真人（口径见该函数——按全历史
-    role='user' 行锚定、与 since 窗口解耦），让渲染层能把私聊段具名；群会话恒为空。
+    ``count(recalled_at)`` 只数非空的那些，跟 ``count(*)`` 相等就是全撤掉了。
     """
-    # 她在 since_ms 之后发过言的会话，按各会话她发言的最近时刻降序，连会话元数据
-    # 一把取出（scope / 群名）。白名单读 Dynamic Config 是同步 httpx（网络 IO），
-    # 不放进 tx——db.tx 明确警告 tx 内外部 IO；先在一个 tx 里把候选会话 + 元数据捞齐
-    # 退出 tx，再过白名单（网络），最后逐个会话进新 tx 拉消息。
-    spoke_stmt = (
+    stmt = (
         select(
-            CommonMessage.common_conversation_id,
-            CommonConversation.scope,
-            CommonConversation.display_name,
+            CommonMessage.agent_outbound_id,
+            func.count().label("parts"),
+            func.count(CommonMessage.recalled_at).label("parts_recalled"),
+            func.max(CommonMessage.recalled_at).label("last_recalled_at"),
         )
-        .outerjoin(
-            CommonAgentResponse,
-            CommonMessage.response_id == CommonAgentResponse.session_id,
-        )
-        .outerjoin(
-            CommonConversation,
-            CommonMessage.common_conversation_id
-            == CommonConversation.common_conversation_id,
-        )
-        .where(
-            func.coalesce(CommonAgentResponse.persona_id, _bot_config_persona())
-            == persona_id,
-            CommonMessage.role == "assistant",
-            CommonMessage.event_time >= since_ms,
-        )
-        .group_by(
-            CommonMessage.common_conversation_id,
-            CommonConversation.scope,
-            CommonConversation.display_name,
-        )
-        .order_by(func.max(CommonMessage.event_time).desc())
+        .where(CommonMessage.agent_outbound_id.in_(outbound_ids))
+        .group_by(CommonMessage.agent_outbound_id)
     )
-
     async with auto_tx():
-        candidates = (await current_session().execute(spoke_stmt)).all()
-
-    # 白名单（网络 IO，tx 外）：私聊放行，群必须过 life_feed_chat_whitelist。取够
-    # max_conversations 个就停（避免对名单外的群也白白读配置 / 拉消息）。
-    selected: list[tuple[str, str, str | None]] = []
-    for chat_uuid, raw_scope, display_name in candidates:
-        scope = raw_scope or "group"
-        if await should_feed_chat_to_life(
-            chat_id=str(chat_uuid), is_p2p=(scope == "direct")
-        ):
-            selected.append((str(chat_uuid), scope, display_name))
-        if len(selected) >= max_conversations:
-            break
-
-    # 私聊对面真人：对选中的私聊批量一次查（不逐会话 N+1），身份按全历史解析、
-    # 与 since 窗口解耦（spec 决策 3——窗口内只剩她自己独白时也要能具名）。
-    counterparts_by_chat = await _direct_counterparts_by_chat(
-        [chat_id for chat_id, scope, _ in selected if scope == "direct"]
-    )
-
-    out: list[LifeChatConversation] = []
-    for chat_id, scope, display_name in selected:
-        chat_uuid = _uuid(chat_id)
-        # 会话内最近消息：降序取最近 N 条再反转回升序（条目数量控制、不字符截断）。
-        msg_stmt = (
-            select(
-                CommonMessage,
-                func.coalesce(
-                    CommonAgentResponse.persona_id, _bot_config_persona()
-                ).label("persona_id"),
-            )
-            .outerjoin(
-                CommonAgentResponse,
-                CommonMessage.response_id == CommonAgentResponse.session_id,
-            )
-            .where(
-                CommonMessage.common_conversation_id == chat_uuid,
-                CommonMessage.event_time >= since_ms,
-                or_(
-                    CommonMessage.message_type.is_(None),
-                    CommonMessage.message_type != "proactive_trigger",
-                ),
-            )
-            .order_by(CommonMessage.event_time.desc())
-            .limit(per_chat_limit)
-        )
-        async with auto_tx():
-            rows = (await current_session().execute(msg_stmt)).all()
-        # 一批 (record, 发言 persona)：消息渲染与文件候选都从这同一批派生（同一边界）。
-        record_pairs = [(_record(msg), msg_persona) for msg, msg_persona in rows]
-        messages = [
-            _life_chat_message(record, msg_persona, persona_id, now)
-            for record, msg_persona in record_pairs
-        ]
-        messages.reverse()
-        # 文件候选（读小说 Task 2）：从**同一批已取出的消息 rows** 解析可读文件项 —— 零额外
-        # 查询、真同一边界（read_book 在她这一轮看得见的同一批消息里认文件，不重跑 recent
-        # 查询避免边界漂移）。每条消息每个 file 项一个 ReadableFile（attachment_id =
-        # 收到该文件那次派生、file_name 原始文件名、tos_file 对象存储引用可能为空=还没回填）。
-        file_candidates = _extract_file_candidates(
-            [record for record, _ in record_pairs]
-        )
-        out.append(
-            LifeChatConversation(
-                chat_id=chat_id,
-                scope=scope,
-                display_name=display_name,
-                messages=messages,
-                file_candidates=file_candidates,
-                counterparts=counterparts_by_chat.get(chat_id, []),
-            )
-        )
-    return out
-
-
-def _extract_file_candidates(records: list[CommonMessageRecord]) -> list[ReadableFile]:
-    """从一批消息里解析出可读文件项 → ``ReadableFile`` 列表（读小说 Task 2）。
-
-    每条消息 content 过 ``parse_content`` 拿 ``.file_keys``（**只含 type=="file" 的真文件**，
-    media / 视频天然排除——codex T3 ④）/ ``.items``：每个文件项派一个 ``ReadableFile``——
-    ``attachment_id`` 由「收到该文件那次」派生（消息 id + file_key，决策 3 身份命门），
-    ``file_name`` 取该项 meta 的原始文件名（解码分流靠它），``tos_file`` 由 file_key
-    **确定性派生** ``files/<file_key>``（codex T3 ①：与 tool-service 存储命名契约，不依赖那条
-    image-only、对文件根本不跑的回填——否则文件 tos_file 恒空、read_book 永远开不了读）。
-    """
-    from app.chat.content_parser import parse_content
-    from app.domain.reading_source import derive_attachment_id, derive_tos_file
-
-    out: list[ReadableFile] = []
-    for record in records:
-        parsed = parse_content(record.content)
-        if not parsed.file_keys:
-            continue
-        # file_key → 该项 meta.file_name（同条消息里多个文件按各自项取名，按位置对齐）。
-        names: dict[str, str] = {}
-        for item in parsed.items:
-            if item.get("type") == "file":
-                key = item.get("value", "")
-                if key:
-                    names[key] = (item.get("meta") or {}).get("file_name") or ""
-        for file_key in parsed.file_keys:
-            out.append(
-                ReadableFile(
-                    attachment_id=derive_attachment_id(
-                        common_message_id=record.message_id, file_key=file_key
-                    ),
-                    file_name=names.get(file_key, ""),
-                    tos_file=derive_tos_file(file_key),
-                )
-            )
-    return out
-
-
-async def update_messages_tos_files(
-    updates: dict[str, dict[str, str]],
-) -> int:
-    if not updates:
-        return 0
-
-    from app.chat.content_parser import update_tos_files
-
-    updated_count = 0
-    async with auto_tx():
-        s = current_session()
-        for mid, mapping in updates.items():
-            msg_uuid = _uuid(mid)
-            if msg_uuid is None:
-                continue
-            row = await s.scalar(
-                select(CommonMessage).where(CommonMessage.common_message_id == msg_uuid)
-            )
-            if row is None:
-                continue
-            new_content = update_tos_files(_content_json(row), mapping)
-            if not new_content:
-                continue
-            data = json.loads(new_content)
-            row.content = data.get("items", [])
-            row.content_text = data.get("text")
-            await s.execute(
-                update(CommonMessage)
-                .where(CommonMessage.common_message_id == msg_uuid)
-                .values(content=row.content, content_text=row.content_text)
-            )
-            updated_count += 1
-    return updated_count
+        rows = (await current_session().execute(stmt)).mappings().all()
+    return [dict(r) for r in rows]
