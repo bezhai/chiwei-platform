@@ -33,6 +33,7 @@ __all__ = [
     "search_conversations_by_name",
     "find_file_items_in_conversations",
     "count_summons_since",
+    "find_conversations_others_spoke_in",
     "find_messages_by_outbound_ids",
     "find_recall_state_by_outbound_ids",
 ]
@@ -645,8 +646,12 @@ async def find_file_items_in_conversations(
 #     她"这件事跟着没了。
 #
 # **时刻由调用方给，一次给几个就一次答几个。** 这里不知道 1h / 6h / 24h / 7d 这些
-# 档位，也不知道多少条才算够 —— 那是业务口径。传一个 ``0`` 进来就是"从头到现在"，
-# 也就是总数，不需要另开一条查询。
+# 档位，也不知道多少条才算够 —— 那是业务口径。
+#
+# **每个时刻都得是真的下界。** 传 ``0`` 进来语法上是"从头到现在"，但 ``0`` 不是边界
+# ——planner 拿不到有效范围，只能整表扫（见下面 ``hits`` 那一段）。"从头到现在有多少
+# 条"这个问题在这条查询上没有便宜的答法；真要问的是"够不够 N 条"的话，那是
+# :func:`find_conversations_others_spoke_in`，它数到第 N 条就停。
 #
 # ``LEFT JOIN`` 而不是 ``JOIN``：一条消息都没有的会话也要给出 0。少一行的话调用方
 # 就得自己兜一次底，而"缺行"和"零条"在白名单那边是同一个意思、却是两种代码路径。
@@ -659,8 +664,8 @@ async def find_file_items_in_conversations(
 # 行、**1752ms**。先用最宽那个下界（``:earliest``，标量）把候选取出来，再在候选上分
 # 窗口，就走上了 ``idx_common_message_conversation_time``：同一批数据 **61ms**。
 #
-# 所以 ``:earliest`` 必须是 ``since_ms`` 里最早那个。调用方传一个 ``0`` 进来（要总
-# 数）时它就是 0，那一次就是全历史扫描 —— 代价在调用方那边，要清楚自己在要什么。
+# 所以 ``:earliest`` 必须是 ``since_ms`` 里最早那个，而且它得是个真下界：传 ``0``
+# 进来时它就是 0，那一次又退回全表扫。
 _SUMMONS_COUNT_SQL = f"""
 WITH given AS (
 {_GIVEN_CONVERSATIONS_CTE}
@@ -705,9 +710,10 @@ async def count_summons_since(
     每条会话 × 每个时刻一行：``channel_id`` / ``window``（``since_ms`` 里的下标）/
     ``n``。一条消息都没有的会话给 0，不是不出现。集合为空就返回空。
 
-    时刻传 ``0`` 就是"从头到现在"，**但那一次是全历史扫描**（理由见
-    :data:`_SUMMONS_COUNT_SQL`）：只在真要总数时传，别顺手跟四个窗口混在一次调用
-    里——混进去会把那四个窗口也拖成全表扫。
+    **每个时刻都得是真的下界。** 传 ``0`` 进来语法上成立、语义上是"从头到现在"，但
+    它不是边界：planner 只能整表扫，而且跟四个窗口混在一次调用里会把那四个窗口一起
+    拖下水（理由见 :data:`_SUMMONS_COUNT_SQL`）。"够不够 N 条"这类问题问
+    :func:`find_conversations_others_spoke_in`。
     """
     async with auto_tx():
         rows = (
@@ -719,6 +725,96 @@ async def count_summons_since(
                     "own_bots": own_bots,
                     "since_ms": since_ms,
                     "earliest": min(since_ms) if since_ms else 0,
+                },
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 别人在这条会话里说过的够不够多
+# ---------------------------------------------------------------------------
+
+# **这是一道是非题，不是计数题。** 问的是"别人说过的话有没有 ``:at_least`` 条"，不是
+# "有多少条" —— 而这个区别就是全部的性能。
+#
+# 计数题没有便宜的答法。它没有时间范围可言，下界只能凑一个 ``event_time > 0``，而
+# ``0`` 不是边界：planner 拿不到有效范围，只能整表扫一遍再 hash join 回那几十条会话
+# （prod 实测 2026-09-05，这条规则在 :mod:`app.living.whitelist` 上原本就是这么问的：
+# akao 名下 69 条私聊，Parallel Seq Scan 扫满 308 万行、101197 个 buffer 里 98788 个
+# 是磁盘读、**960ms**）。是非题数到第 ``:at_least`` 条就能停，每条会话各走一次
+# ``idx_common_message_conversation_time``：同一批数据 1175 个 buffer 全部命中缓存、
+# 一条磁盘读都没有，每条会话 0.1ms 量级，取数据总共 4ms。
+#
+# **剩下的时间是 JIT，不是取数据。** 那 190ms 的 ``Execution Time`` 里有 186ms 是
+# PostgreSQL 在编译这条语句：planner 按"每条会话平均一万条消息"估行（真实是 107），
+# 估出来的 cost 越过了 ``jit_above_cost`` 和 ``jit_optimize_above_cost``。这是统计口径
+# 的问题，SQL 这一侧改不掉；换成 ``EXISTS ... OFFSET n-1`` 写法实测 cost 和 JIT 一模
+# 一样。仍然比原来快 5 倍、少 86 倍 buffer，但别拿 ``Execution Time`` 当取数据的成本读。
+#
+# ``LIMIT`` **必须在最里层的子查询上**，不能挂在聚合外面：``COUNT(*)`` 会先把这条会话
+# 的所有行数完，``LIMIT`` 只截结果那一行，等于没截。
+#
+# 门槛是闭区间（``>= :at_least``）。白名单那条规则是"多于 30 条"，翻译成"至少 31 条"
+# 在调用方那一侧做一次 —— 这一层不知道 30 是什么。
+#
+# 判据是两条，跟 :data:`_SUMMONS_COUNT_SQL` 同源：不算她自己说的（:data:`_SAID_BY_HER`）、
+# 不算撤回掉的（:data:`_STILL_IN_THE_CONVERSATION`）。**没有第三条。**
+#
+#   * 没有 ``mention``：这里问的不是"谁在叫她"，私聊里没人 @ 她，别人说的每一条都算数。
+#     所以群传进来时数的是群里所有人说的话，不是点名的那些 —— "这条规则只给私聊"是业务
+#     口径，住在调用方那边（:mod:`app.living.whitelist`）。
+#   * 没有时间下界：问的是"这个人跟她聊过多少"，不是"最近多少"。凑一个 ``event_time > 0``
+#     进来既挡不住任何行（毫秒时间戳没有非正数，prod 实测 0 行），也换不来更好的计划
+#     （实测带不带它同样走 ``idx_common_message_conversation_time``、同样 1175 个
+#     buffer）—— 它只是计数写法被迫编出来的那个假下界的化石。
+#
+# **空集合就是空结果**，同 :data:`_GIVEN_CONVERSATIONS_CTE` 那条 fail-closed。
+_OTHERS_SPOKE_AT_LEAST_SQL = f"""
+WITH given AS (
+{_GIVEN_CONVERSATIONS_CTE}
+)
+SELECT g.channel_id AS channel_id
+  FROM given g
+ CROSS JOIN LATERAL (
+   SELECT COUNT(*) AS n
+     FROM (
+       SELECT 1
+         FROM common_message cm
+        WHERE cm.common_conversation_id = g.channel_id
+          AND NOT {_SAID_BY_HER}
+          AND {_STILL_IN_THE_CONVERSATION}
+        LIMIT :at_least
+     ) capped
+ ) enough
+ WHERE enough.n >= :at_least
+ ORDER BY g.channel_id
+"""
+
+
+async def find_conversations_others_spoke_in(
+    *,
+    conversations: list[dict],
+    own_bots: list[str],
+    at_least: int,
+) -> list[dict]:
+    """``conversations`` 里，别人说过至少 ``at_least`` 条的那些（只有 ``channel_id``）。
+
+    "别人说的"= 不是她自己发的、而且没被撤回掉。够不到门槛的会话不出现在结果里
+    （这条查询回答是非题，不回答"差几条"）。集合为空就返回空。
+
+    **不要拿它当计数用。** 它数到第 ``at_least`` 条就停，所以问的门槛越高越慢、而且
+    永远答不出"到底有多少条"。想要总数的话没有便宜的答法，理由见
+    :data:`_OTHERS_SPOKE_AT_LEAST_SQL`。
+    """
+    async with auto_tx():
+        rows = (
+            await current_session().execute(
+                text(_OTHERS_SPOKE_AT_LEAST_SQL),
+                {
+                    **_unzip_conversations(conversations),
+                    "own_bots": own_bots,
+                    "at_least": at_least,
                 },
             )
         ).mappings().all()

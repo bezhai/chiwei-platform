@@ -17,12 +17,13 @@ EXPECTED_FUNCTIONS = {
     # 随旧 chat 管线失去最后一个调用方，一并删除)
     "find_persona", "find_bot_names_for_persona",
     "find_bot_user_ids_for_persona", "find_conversations_with_persona_bot",
-    # messages (9 — 旧 chat 管线那 14 个导出零调用方、整批删除；这 9 个是
+    # messages (11 — 旧 chat 管线那 14 个导出零调用方、整批删除；这 11 个是
     # app.living 读公共层的那批查询收口进来的)
     "find_unread_summary", "find_unread_senders",
     "find_newest_unread_summons", "find_conversation_window",
     "find_messages_known_through", "search_conversations_by_name",
     "find_file_items_in_conversations", "count_summons_since",
+    "find_conversations_others_spoke_in",
     "find_messages_by_outbound_ids", "find_recall_state_by_outbound_ids",
 }
 

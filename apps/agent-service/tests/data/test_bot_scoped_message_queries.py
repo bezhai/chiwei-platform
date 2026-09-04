@@ -23,6 +23,7 @@ from app.data.models import Base, CommonConversation, CommonMessage
 from app.data.queries.messages import (
     count_summons_since,
     find_conversation_window,
+    find_conversations_others_spoke_in,
     find_file_items_in_conversations,
     find_messages_by_outbound_ids,
     find_messages_known_through,
@@ -1000,3 +1001,120 @@ async def test_a_conversation_outside_the_set_is_not_counted(bot_db):
         since_ms=[_ms(_at(8))],
     )
     assert [str(r["channel_id"]) for r in rows] == [str(_DM)]
+
+
+# ---------------------------------------------------------------------------
+# 别人在这条会话里说过的够不够多 —— 私聊那条永久加白的原料
+# ---------------------------------------------------------------------------
+#
+# 这条查询回答的是一个**是非题**："这条会话里别人说过的话有没有 ``at_least`` 条"。
+# 它不回答"有多少条" —— 数总数要从头数到现在，没有有效下界，planner 只能整表扫一遍
+# （prod 实测 986ms）。是非题数到第 ``at_least`` 条就能停，每条会话各走一次索引。
+#
+# 它也**不知道私聊和群的区别**：门槛多少、只对私聊生效，都是业务口径，住在 living
+# 那边。这里只按调用方给的集合逐条回答。
+
+
+async def _they_said(
+    conv: uuid.UUID, *, how_many: int, scope: str = "direct"
+) -> None:
+    """真人在这条会话里连着说了几句（一分钟一句）。"""
+    for i in range(how_many):
+        await _message(conv, at=_at(9, i), body=f"第{i}句", scope=scope)
+
+
+async def _spoke_in(*, at_least: int) -> list[str]:
+    """她手机上别人说过至少 ``at_least`` 条的那些会话。"""
+    rows = await find_conversations_others_spoke_in(
+        conversations=await _her_conversations(),
+        own_bots=["chiwei", "chiwei-dev"],
+        at_least=at_least,
+    )
+    return [str(r["channel_id"]) for r in rows]
+
+
+async def test_a_conversation_at_the_bar_is_reported(bot_db):
+    """恰好 ``at_least`` 条就算够 —— 门槛是闭区间。
+
+    白名单那边的规则是"多于 30 条"，所以它传进来的是 31：闭区间的"至少 31"和开区间
+    的"多于 30"是同一件事，翻译在调用方那一侧做一次。
+    """
+    await _seed_her_phone()
+    await _they_said(_DM, how_many=31)
+
+    assert await _spoke_in(at_least=31) == [str(_DM)]
+
+
+async def test_one_short_of_the_bar_is_not_reported(bot_db):
+    await _seed_her_phone()
+    await _they_said(_DM, how_many=30)
+
+    assert await _spoke_in(at_least=31) == []
+
+
+async def test_what_she_said_herself_does_not_count_toward_the_bar(bot_db):
+    """她自己说了多少不说明别人在跟她聊。
+
+    30 条真人 + 20 条她自己 = 50 条，按"这条会话有多少行"数早就过线了；只数别人说
+    的就是 30，还差一条。
+    """
+    await _seed_her_phone()
+    await _they_said(_DM, how_many=30)
+    for i in range(20):
+        await _message(
+            _DM,
+            at=_at(10, i),
+            role="assistant",
+            bot_name="chiwei",
+            who="赤尾",
+            body=f"我第{i}句",
+        )
+
+    assert await _spoke_in(at_least=31) == []
+
+
+async def test_a_recalled_line_does_not_count_toward_the_bar(bot_db):
+    """撤回掉的那条在渠道上已经没了，它也就不再算作"这个人跟她聊过一句"。"""
+    await _seed_her_phone()
+    await _they_said(_DM, how_many=30)
+    await _message(_DM, at=_at(11), body="撤掉的", recalled_at=_at(11, 5))
+
+    assert await _spoke_in(at_least=31) == []
+
+
+async def test_each_conversation_is_answered_on_its_own(bot_db):
+    """一次问一批，每条会话各按自己的行数答 —— 不是把整批加起来比一次。"""
+    other = uuid.uuid5(uuid.NAMESPACE_OID, "q-conv-dm-other")
+    await _seed_her_phone()
+    await _conversation(other, scope="direct", title=None)
+    await _present(other, "chiwei")
+    await _they_said(_DM, how_many=31)
+    await _they_said(other, how_many=20)
+
+    assert await _spoke_in(at_least=31) == [str(_DM)]
+
+
+async def test_a_conversation_outside_the_set_is_not_reported(bot_db):
+    await _seed_her_phone()
+    await _they_said(_GROUP, how_many=31, scope="group")
+    only_dm = [c for c in await _her_conversations() if str(c["channel_id"]) == str(_DM)]
+    rows = await find_conversations_others_spoke_in(
+        conversations=only_dm,
+        own_bots=["chiwei", "chiwei-dev"],
+        at_least=31,
+    )
+    assert rows == []
+
+
+async def test_an_empty_set_reports_nothing_rather_than_everything(bot_db):
+    """空集合是"一条都不许"，不是"不过滤" —— 同 :func:`search_conversations_by_name`
+    那条 fail-closed。"""
+    await _seed_her_phone()
+    await _they_said(_DM, how_many=31)
+
+    assert (
+        await find_conversations_others_spoke_in(
+            conversations=[], own_bots=["chiwei", "chiwei-dev"], at_least=31
+        )
+        == []
+    )
