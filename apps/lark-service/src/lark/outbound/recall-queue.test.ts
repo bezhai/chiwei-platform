@@ -5,7 +5,7 @@
 //
 // 撤回逻辑本身（撤哪几条、算不算成功、台账写什么）在 recall.test.ts。
 
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ConsumeMessage } from 'amqplib';
@@ -136,7 +136,10 @@ function message(
 function payload(overrides: Partial<LarkRecallPayload> = {}): LarkRecallPayload {
     return {
         channel: 'lark',
+        // 两种定位方式恰好用一种，这里默认走会话那条；主动开口那条由用例自己给
+        // outbound_id（并把 session_id 置空）。
         session_id: 'sess-1',
+        outbound_id: null,
         reason: 'unsafe',
         detail: '违规内容',
         ...overrides,
@@ -214,6 +217,11 @@ function tracedRecall(): {
                 note(`db:omIdOf:${id}`);
                 return 'om_a';
             },
+            messagesOfAgentOutbound: async (agentOutboundId) => {
+                note(`db:messagesOfAgentOutbound:${agentOutboundId}`);
+                return [{ common_message_id: 'cm_p', bot_name: 'chiwei', recalled_at: null }];
+            },
+            markRecalled: async (id) => note(`db:markRecalled:${id}`),
         },
         api: { recall: async () => note('api:recall') },
         speakAs: async (_who, say) => say(),
@@ -246,6 +254,39 @@ describe('fail-closed — 不是飞书的撤回一律拒绝', () => {
             expect(c.requests).toEqual([]);
         });
     }
+
+    it('拒绝时说得出这条撤回指的是什么 —— 她自己开口那条只有 outbound_id', async () => {
+        // 这行日志是越界投递唯一的线索（消息进了 DLQ，body 还在，但捞日志的人要先
+        // 知道自己在找哪一条）。只记 session_id 的话，主动开口那条链上的每一条越界
+        // 消息都长成 null。
+        const lines: string[] = [];
+        const spy = spyOn(console, 'error').mockImplementation((line: unknown) => {
+            lines.push(String(line));
+        });
+        try {
+            const c = startConsumer();
+            await c.push(
+                message(
+                    'm4',
+                    payload({
+                        channel: 'qq',
+                        session_id: null,
+                        outbound_id: '55f3469bd46c5384a9ce22cb4944b77a',
+                    }),
+                ),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+
+        const logged = lines
+            .map((line) => JSON.parse(line) as Record<string, unknown>)
+            .find((entry) => entry.event === 'recall_foreign_channel');
+        expect(logged).toMatchObject({
+            session_id: null,
+            outbound_id: '55f3469bd46c5384a9ce22cb4944b77a',
+        });
+    });
 
     it('自己的 payload 照常走完整条链', async () => {
         const traced = tracedRecall();

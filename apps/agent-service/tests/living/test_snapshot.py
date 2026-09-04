@@ -19,12 +19,18 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 
 import pytest
 
 from app.living.happening import record_happening
 from app.living.loose_ends import LooseEnd, rewrite_loose_ends
-from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
+from app.living.records import (
+    KIND_ACT,
+    KIND_SPEECH,
+    MEDIUM_PHONE,
+    OUTBOUND_HAPPENING_PREFIX,
+)
 from app.living.snapshot import OWN_RECENT_LIMIT, all_whereabouts, read_snapshot
 from app.living.whereabouts import note_whereabouts
 
@@ -237,6 +243,62 @@ async def test_her_own_acts_show_up_too(snap_db):
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 6))
 
     assert [h.content for h in snap.own_recent] == ["把胶片摊在茶几上"]
+
+
+@pytest.mark.integration
+async def test_a_message_she_sent_carries_the_handle_that_takes_it_back(snap_db):
+    """她发出去的每条消息后面带着它的编号 —— 撤回时她唯一指得动的东西。
+
+    编号就是 ``outbound_id``（``happening_id`` 去掉
+    :data:`~app.living.records.OUTBOUND_HAPPENING_PREFIX` 之后那一串），
+    :func:`app.living.takeback.take_back_message` 收的是同一个东西。不印出来的话她
+    只能拿原话去指，同一句话说过两遍就分不出是哪一次。
+
+    **整串照印，不截断。** 截断要配一套前缀唯一性校验，而那个分支在真实数据量下永
+    远不会触发。她照抄一串字符没有负担。
+    """
+    oid = uuid.uuid5(uuid.NAMESPACE_OID, "she-sent-this-one").hex
+    await record_happening(
+        lane=LANE,
+        happening_id=f"{OUTBOUND_HAPPENING_PREFIX}{oid}",
+        actor="akao",
+        place="家/我房间",
+        kind=KIND_SPEECH,
+        content="你去过那家抹茶店吗？",
+        occurred_at=_at(14, 32),
+        audience=["bezhai"],
+        medium=MEDIUM_PHONE,
+        channel_id=str(uuid.uuid5(uuid.NAMESPACE_OID, "conv-dm")),
+    )
+
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 40)
+    )
+    text = snap.render()
+
+    assert (
+        f"- 14:32 CST 你对 bezhai 说：「你去过那家抹茶店吗？」［{oid}］" in text
+    ), f"她发出去那条没带编号 —— 撤回时她指不动任何一条。拿到：\n{text}"
+
+
+@pytest.mark.integration
+async def test_what_she_said_face_to_face_carries_no_handle(snap_db):
+    """当面说的话撤不了 —— 给它一个编号就是给她一个指了会失败的东西。
+
+    判据是 ``happening_id`` 的前缀，不是 ``kind``：当面说和发消息的 ``kind`` 都是
+    ``speech``，只有走过嘴那条路的才有 ``outbound_id``。
+    """
+    await _say("akao", "布丁我吃了。", _at(14, 5), place="家/客厅", to=["ayana"])
+
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
+    )
+    text = snap.render()
+
+    assert "- 14:05 CST 你对 ayana 说：「布丁我吃了。」" in text
+    assert "［" not in text, (
+        f"当面说的话也带上了编号 —— 她照它去撤只会撤了个空。拿到：\n{text}"
+    )
 
 
 @pytest.mark.integration

@@ -118,6 +118,7 @@ from app.living.scope import (
 )
 from app.living.serial import hold
 from app.living.snapshot import all_whereabouts, read_snapshot
+from app.living.takeback import TAKEBACK_TOOLS
 from app.living.web import WEB_TOOLS
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 
@@ -602,6 +603,7 @@ MOMENT_TOOLS = [
     look_around,
     *PHONE_TOOLS,
     *MOUTH_TOOLS,
+    *TAKEBACK_TOOLS,
     *WEB_TOOLS,
     *READING_TOOLS,
 ]

@@ -127,6 +127,22 @@ class CommonMessage(Base):
     agent_outbound_id: Mapped[PyUUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True, index=True
     )
+    # 这一行在渠道上被撤掉的时刻。**撤成功才填，撤失败不填。**
+    #
+    # 撤回不删这一行：公共层是消息记录，删行会把历史打断。所以"这条还在不在会话
+    # 里"是这一列说了算 —— 非空 = 渠道上它已经不在了，读的一侧（
+    # ``app.living.phone``）据此把它从她眼前拿掉。
+    #
+    # 引擎这边没有入站边，撤成功了没人来通知，所以撤回的结果也是**事后按
+    # ``agent_outbound_id`` 反查这一列**对回台账的（``app.living.landing``）。
+    #
+    # 可空、无默认值，跟上面那一列同一个理由：NULL = 没撤过或者还没撤掉，跟"撤掉
+    # 了"是两件事，给了默认值就再也分不开。写入方在投递侧（lark-service），TS 侧那
+    # 一列（packages/ts-shared/src/entities/common-message.ts）是同一条契约的另一半，
+    # **两边列名必须都是 recalled_at**。
+    recalled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     scope: Mapped[str] = mapped_column(String(16), nullable=False)
     message_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     bot_name: Mapped[str | None] = mapped_column(String(50), nullable=True)

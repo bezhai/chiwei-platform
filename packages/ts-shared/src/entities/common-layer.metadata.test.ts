@@ -101,6 +101,20 @@ describe('common layer entity metadata', () => {
         expect(options?.default).toBeUndefined();
     });
 
+    it('common_message keeps "this message got recalled" as a nullable timestamptz', () => {
+        const options = columnOptions(CommonMessage, 'recalled_at');
+        expect(options).toBeDefined();
+
+        // 记的是撤回发生的时刻，不是一个布尔 —— "什么时候撤的"事后没有别的地方能查。
+        expect(options?.type).toBe('timestamptz');
+
+        // NULL = 没被撤回：加列之前的存量行、QQ 渠道的行、别人发的消息，以及所有
+        // 撤回失败的行。给 NOT NULL 或者默认值就得替这些行编一个时刻出来，而这一列
+        // 的读法正是"有值即被撤回"。
+        expect(options?.nullable).toBe(true);
+        expect(options?.default).toBeUndefined();
+    });
+
     it('common_message indexes agent_outbound_id — 它会被按等值反查', () => {
         const indices = getMetadataArgsStorage()
             .indices.filter((i) => i.target === CommonMessage)

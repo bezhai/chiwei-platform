@@ -28,4 +28,12 @@ export type {
     MessageInfo,
 } from './types';
 
-export { createDefaultLarkConfig, ERROR_CODE_MAP } from './types';
+export {
+    createDefaultLarkConfig,
+    ERROR_CODE_MAP,
+    // 飞书的数字错误码：谁抛的、怎么问。业务层按码分支要用（见 client.ts 的
+    // handleResponse）。
+    LARK_MESSAGE_ALREADY_RECALLED,
+    larkErrorCode,
+    withLarkErrorCode,
+} from './types';

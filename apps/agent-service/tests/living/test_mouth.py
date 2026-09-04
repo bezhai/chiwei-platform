@@ -22,6 +22,7 @@ from sqlalchemy import text
 from app.data import session as session_mod
 from app.domain.chat_dataflow import PROACTIVE_MESSAGE_ID_PREFIX
 from app.living.mouth import (
+    _SEND_CHECK_TIMEOUT_S,
     LIVING_CHAT_VOICE_PROMPT_ID,
     send_message,
 )
@@ -107,8 +108,34 @@ def spoken(monkeypatch):
 
 
 @pytest.fixture
-def voice(monkeypatch):
-    """把渲染那一步换成替身：拿到什么、吐出什么，都由用例说了算。"""
+def guard(monkeypatch):
+    """交出去之前那一关的替身。默认放行，而且是**判过之后**放行的。"""
+    from app.capabilities.output_safety import OutputVerdict
+    from app.living import mouth as mouth_mod
+
+    class FakeGuard:
+        def __init__(self) -> None:
+            self.verdict = OutputVerdict(ok=True)
+            self.judged: list[str] = []
+            self.deadlines: list[float | None] = []
+
+        async def __call__(self, text: str, *, timeout_s: float | None = None):
+            self.judged.append(text)
+            self.deadlines.append(timeout_s)
+            return self.verdict
+
+    fake = FakeGuard()
+    monkeypatch.setattr(mouth_mod, "audit_output", fake)
+    return fake
+
+
+@pytest.fixture
+def voice(monkeypatch, guard):
+    """把渲染那一步换成替身：拿到什么、吐出什么，都由用例说了算。
+
+    ``guard`` 挂在这儿而不是各条用例上：她开口就要过那一关，没有例外。哪条用例想
+    换个判法，把 ``guard`` 也接进签名里改 ``verdict`` 就行。
+    """
     from app.agent.neutral import Message, Role
     from app.living import mouth as mouth_mod
 
@@ -743,3 +770,279 @@ async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
     assert [v.ver for v in versions] == [1, 2], (
         f"抢输那一次也往认领链上写了。拿到：{[v.ver for v in versions]}"
     )
+
+
+# --------------------------------------------------------------------------
+# 十 · 交出去之前先过这一关
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_words_that_do_not_pass_never_reach_anyone(
+    mouth_db, in_a_moment, spoken, voice, guard
+):
+    """判不合格就是不发 —— 不是发了再撤。
+
+    她主动开口没有实时性压力（不像真人在等一条流式回复），所以这一关放得进"交出去
+    之前"。放在之后就只剩"先发后撤"，而那意味着真人已经看见了。
+    """
+    from app.capabilities.output_safety import OutputVerdict
+    from app.living.mouth import latest_outbound
+
+    guard.verdict = OutputVerdict(
+        ok=False, reason="output_unsafe", detail="confidence=0.9"
+    )
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        outcome = await send_message.invoke(
+            {"what": "问问他", "channel_id": str(_DM)}
+        )
+
+    assert spoken == [], "判不合格还交出去了 —— 这一关等于没有"
+    assert await recent_own_happenings(lane=LANE, persona_id="akao") == [], (
+        "没说出去的话落成了记忆 —— 她下一缝会以为自己说过"
+    )
+    assert await latest_outbound(lane=LANE, moment_id=_MOMENT) is None, (
+        "没发出去却占住了认领 —— 那个 id 就此作废，她这一缝再也说不成这件事"
+    )
+    assert isinstance(outcome, str), (
+        f"拦下不是工具坏了。报成错她就会重试，而重试会换一套措辞再判一次 —— "
+        f"那是一条绕过去的路。拿到：{outcome!r}"
+    )
+    assert "没发出去" in outcome, f"没告诉她这句没发出去。拿到：{outcome!r}"
+
+
+@pytest.mark.integration
+async def test_what_gets_judged_is_the_sentence_that_would_be_seen(
+    mouth_db, in_a_moment, spoken, voice, guard
+):
+    """判的是渲染出来那句人话，不是她脑子里那个意思。
+
+    真人看见的是前者。拿后者去判就是判了一个没人会读到的东西。
+    """
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        await send_message.invoke(
+            {"what": "问问他抹茶店去过没", "channel_id": str(_DM)}
+        )
+
+    assert guard.judged == [voice.said], (
+        f"判的不是真要发出去那句。拿到：{guard.judged!r}"
+    )
+    assert guard.deadlines == [_SEND_CHECK_TIMEOUT_S], (
+        "没给期限 —— 判词那一步挂住就是把她整缝卡在网络上"
+    )
+
+
+@pytest.mark.integration
+async def test_being_stopped_does_not_burn_the_id_for_that_sentence(
+    mouth_db, in_a_moment, spoken, voice, guard
+):
+    """被拦下的那次不占认领 —— 否则她这一缝里连改都改不成。
+
+    认领是从 ``(这一缝, 她那句意思)`` 派生的：被拦时如果占住了，同一缝里再说同一件
+    事就会撞上"你已经说过了"，而那是假话 —— 她一个字都没说出去。
+    """
+    from app.capabilities.output_safety import OutputVerdict
+
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        guard.verdict = OutputVerdict(ok=False, reason="output_unsafe")
+        await send_message.invoke({"what": "问问他", "channel_id": str(_DM)})
+        guard.verdict = OutputVerdict(ok=True)
+        outcome = await send_message.invoke(
+            {"what": "问问他", "channel_id": str(_DM)}
+        )
+
+    assert len(spoken) == 1, (
+        f"第二次没真的发出去 —— 第一次被拦时占住了那个 id。交了 {len(spoken)} 次"
+    )
+    assert "发出去了" in outcome, f"拿到：{outcome!r}"
+
+
+@pytest.mark.integration
+async def test_a_replay_does_not_pay_for_the_check_twice(
+    mouth_db, in_a_moment, spoken, voice, guard
+):
+    """这一缝重放时，那道去重的闸仍然在这一关**前面**。
+
+    顺序反过来的话，工具重试和整轮重放都会各花一次模型调用去判一句根本不会再发的话。
+    """
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        await send_message.invoke({"what": "问问他", "channel_id": str(_DM)})
+        await send_message.invoke({"what": "问问他", "channel_id": str(_DM)})
+
+    assert len(spoken) == 1
+    assert len(guard.judged) == 1, (
+        f"同一句话判了 {len(guard.judged)} 次 —— 去重那道闸跑到这一关后面去了"
+    )
+
+
+@pytest.mark.integration
+async def test_a_guard_that_could_not_judge_does_not_make_her_go_quiet(
+    mouth_db, in_a_moment, spoken, voice, guard, caplog
+):
+    """这一关自己坏了的时候照发 —— 但欠的这一笔要留得下来。
+
+    坏掉时挡下来，挡的不是一条消息、是整条线：她和三个姐妹一起哑掉，挂多久哑多久。
+    而这道检查的实测拦截率本来就很低。代价是它**静默**，所以必须数得出来。
+    """
+    import logging
+
+    from app.capabilities.output_safety import OutputVerdict
+
+    guard.verdict = OutputVerdict(ok=True, checked=False)
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        async with in_a_moment("akao", moment_id=_MOMENT):
+            outcome = await send_message.invoke(
+                {"what": "问问他", "channel_id": str(_DM)}
+            )
+
+    assert len(spoken) == 1, "这一关坏掉就把她的嘴堵上了"
+    assert "发出去了" in outcome, f"拿到：{outcome!r}"
+    assert "living_mouth_unchecked" in caplog.text, (
+        "没检查就发出去了，却没留下任何痕迹 —— 那段时间漏了多少条永远查不出来"
+    )
+
+
+# --------------------------------------------------------------------------
+# 十一 · 撤回是第三根轴
+# --------------------------------------------------------------------------
+
+
+def test_taking_it_back_is_its_own_axis_not_a_third_state():
+    """本地认领、渠道落地、撤回 —— 三件事都真、也都可能单独发生。
+
+    压进 ``state`` 就会用一个"撤回了"盖掉 ``claimed``，:func:`unsettled_outbound`
+    从此捞不出它，"她可能不记得自己说过"这件事再没人看得见。
+    """
+    from app.living.mouth import SpokenOutbound
+
+    fields = SpokenOutbound.model_fields
+    assert "took_back_at" in fields, "她按下撤回那一刻"
+    assert "recalled_at" in fields, "渠道那边真撤掉那一刻"
+    for name in ("took_back_at", "recalled_at"):
+        assert fields[name].default is None, (
+            f"{name} 必须可空、且不能有默认值：migrator 加列生成的是可空无默认的 "
+            f"ADD COLUMN，声明成别的样子的话这张表上每一条旧记录一读就炸"
+        )
+
+
+def test_the_take_back_axis_refuses_a_clockless_instant():
+    """跟另外三个时刻同一个待遇：naive datetime 溜进 TIMESTAMPTZ 列就是错时区。"""
+    import datetime as _dt
+
+    import pydantic
+
+    from app.living.mouth import STATE_HANDED_OFF, SpokenOutbound
+
+    base = {
+        "lane": LANE, "outbound_id": "x" * 32, "ver": 1, "persona_id": "akao",
+        "channel_id": str(_DM), "moment_id": _MOMENT, "said": "话",
+        "state": STATE_HANDED_OFF, "claimed_at": _at(21),
+    }
+    for name in ("took_back_at", "recalled_at"):
+        with pytest.raises(pydantic.ValidationError):
+            SpokenOutbound(**base, **{name: _dt.datetime(2026, 7, 25, 21, 0)})
+
+
+@pytest.mark.integration
+async def test_a_line_that_lost_the_claim_race_is_not_counted_as_unchecked(
+    mouth_db, in_a_moment, spoken, voice, guard, monkeypatch, caplog
+):
+    """认领抢输的那次一个字都没发出去，不该记进"漏检了多少"那本账。
+
+    ``living_mouth_unchecked`` 是数"那段时间有多少话没检查就到了真人手上"的唯一
+    锚。把它记在认领**之前**，抢输的那次也会被算进去 —— 那条根本没出站，账就虚了。
+    """
+    import logging
+
+    from app.agent.neutral import Message, Role
+    from app.capabilities.output_safety import OutputVerdict
+    from app.living import mouth as mouth_mod
+
+    guard.verdict = OutputVerdict(ok=True, checked=False)
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    someone_else_went_first: list[bool] = []
+
+    class RacingVoice:
+        async def run(self, messages, **kwargs):
+            if not someone_else_went_first:
+                someone_else_went_first.append(True)
+                await send_message.invoke(
+                    {"what": "问问他", "channel_id": str(_DM)}
+                )
+            return Message(role=Role.ASSISTANT, content=voice.said)
+
+    monkeypatch.setattr(mouth_mod, "build_voice_runner", lambda: RacingVoice())
+
+    with caplog.at_level(logging.WARNING):
+        async with in_a_moment("akao", moment_id=_MOMENT):
+            await send_message.invoke(
+                {"what": "问问他", "channel_id": str(_DM)}
+            )
+
+    assert someone_else_went_first, "并发那一次没跑起来，这条用例什么都没验"
+    assert len(spoken) == 1
+    assert caplog.text.count("living_mouth_unchecked") == 1, (
+        f"真交出去的只有一条，这本账却记了 "
+        f"{caplog.text.count('living_mouth_unchecked')} 笔"
+    )
+
+
+@pytest.mark.integration
+async def test_being_stopped_over_and_over_never_leaks_a_line(
+    mouth_db, in_a_moment, spoken, voice, guard
+):
+    """一直判不合格就是一条都不出去 —— 换多少种说法都一样。
+
+    拦下时返回的是一句正常的话而不是错误，所以她可以在同一缝里换个说法再来。这条
+    守的是那条路的另一端：只要每次都判不合格，就一次都不会漏出去。**这里没有重试
+    预算**，因为"还要不要再说一次"是她的判断；能保证的是每个候选都被判过。
+    """
+    from app.capabilities.output_safety import OutputVerdict
+
+    guard.verdict = OutputVerdict(ok=False, reason="output_unsafe")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        for what in ("这么说", "换个说法", "再换一个"):
+            outcome = await send_message.invoke(
+                {"what": what, "channel_id": str(_DM)}
+            )
+            assert "没发出去" in outcome, f"拿到：{outcome!r}"
+
+    assert spoken == [], f"判了三次不合格，还是漏出去 {len(spoken)} 条"
+    assert len(guard.judged) == 3, (
+        f"每个候选都该被判一次，实际判了 {len(guard.judged)} 次"
+    )
+    assert await recent_own_happenings(lane=LANE, persona_id="akao") == []

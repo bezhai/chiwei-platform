@@ -263,6 +263,23 @@ async def _bot_said(
     return str(mid)
 
 
+async def _recalled_on_the_channel(message_id: str, *, at: dt.datetime) -> None:
+    """渠道那边把这一行撤掉了。
+
+    **撤回不删这一行**：公共层是消息记录，删行会打断历史。所以"这条还在不在会话
+    里"由 ``recalled_at`` 说了算 —— 非空 = 渠道上它已经不在了。填这一列的是投递侧
+    （lark-service），撤成功才填、撤失败不填。
+    """
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "UPDATE common_message SET recalled_at = :at "
+                "WHERE common_message_id = CAST(:m AS uuid)"
+            ),
+            {"at": at, "m": message_id},
+        )
+
+
 async def _her_own(conv: uuid.UUID, *, text_body: str, at: dt.datetime) -> str:
     """她自己在这条会话里说过的一句（她的 bot 是 ``chiwei``）。"""
     return await _bot_said(
@@ -1375,3 +1392,203 @@ async def test_the_tail_she_speaks_from_carries_the_file_name_too(
     )
 
     assert "[文件: 三体.epub]" in known, f"拿到：\n{known}"
+
+
+# --------------------------------------------------------------------------
+# 十一 · 撤掉的那条不在会话里了
+# --------------------------------------------------------------------------
+#
+# 撤回不删 ``common_message`` 那一行（公共层是消息记录，删行会打断历史），撤成功
+# 只在 ``recalled_at`` 上留个时刻。所以**读的一侧不管，她就会原样看见一条自己明明
+# 撤掉了的话** —— 然后接着它往下说，而对面早就看不到那句了。
+#
+# 判据写在**这一列的含义**上（这一行在渠道上已经不在了），不写在谁撤的它上面：她自己
+# 撤的、同群姐姐撤的都是同一件事。今天填这一列的只有投递侧（撤的是 bot 自己发的），
+# 但这条规则不依赖那个事实。
+#
+# **不显示，不摆一条"已撤回"的占位。** 她的记忆里已经有一条"我去撤了"（撤回那只手
+# 落的 Happening），会话里再摆一次是同一件事的第二份记录；而占位能告诉她的东西
+# （"这儿本来有句话"）她本来就知道得更清楚。真人撤完一条消息，微信里那条内容也是没
+# 有的。
+
+
+@pytest.mark.integration
+async def test_a_message_she_took_back_is_gone_from_the_tail_she_speaks_from(
+    living_db,
+):
+    """她自己撤掉的那句，不在她开口前读的那段会话里。
+
+    这是最要命的一处：``conversation_as_she_knows_it`` 是嘴渲染措辞前读的最后一样
+    东西（``app.living.mouth.send_message``）。撤掉的那句留在里面，她就会接着一句
+    对面根本看不到的话往下说。
+    """
+    await _seed_world()
+    took_back = await _her_own(_DM, text_body="那家店周一不开", at=_at(21, 30))
+    await _her_own(_DM, text_body="明天见", at=_at(21, 32))
+    await _recalled_on_the_channel(took_back, at=_at(21, 31))
+
+    known = await conversation_as_she_knows_it(
+        lane=LANE, persona_id="akao", channel_id=str(_DM), now=_at(21, 35)
+    )
+
+    assert "那家店周一不开" not in known, (
+        f"她撤掉的那句还在她开口前的上下文里 —— 她会接着一句对面看不到的话说下去。"
+        f"拿到：\n{known}"
+    )
+    assert "你：明天见" in known, (
+        f"撤一句把她别的话也一起拿掉了。拿到：\n{known}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_sister_word_taken_back_is_gone_from_what_she_knows_too(
+    living_db, in_a_moment
+):
+    """姐姐撤掉的那句同样不在 —— 哪怕她之前已经读过。
+
+    判据是"这一行在渠道上还在不在"，不是"谁撤的"。她读过之后那句本来会绕过游标
+    进入她已知的那段（前一节那批用例），撤掉之后不该再进。
+    """
+    await _seed_world()
+    took_back = await _sister_said(_GROUP, text_body="今晚吃火锅", at=_at(21, 30))
+    await _sister_said(_GROUP, text_body="七点楼下集合", at=_at(21, 31))
+
+    async with in_a_moment("akao"):
+        await look_at_phone.invoke({"channel_id": str(_GROUP)})  # 两条都读过了
+    await _recalled_on_the_channel(took_back, at=_at(21, 32))
+
+    known = await conversation_as_she_knows_it(
+        lane=LANE, persona_id="akao", channel_id=str(_GROUP), now=_at(21, 35)
+    )
+
+    assert "今晚吃火锅" not in known, (
+        f"姐姐撤掉的那句还在她已知的那段里。拿到：\n{known}"
+    )
+    assert "绫奈：七点楼下集合" in known, f"没撤的那句也一起没了。拿到：\n{known}"
+
+
+@pytest.mark.integration
+async def test_a_message_taken_back_before_she_looked_is_not_there_to_open(
+    living_db, in_a_moment
+):
+    """撤在她看之前 —— 信封上不算动静，拿起手机也没有它。
+
+    信封那一处和看手机那一眼必须同一条判据：信封说有一条、翻开却什么都没有，
+    她只会以为自己漏看了。
+    """
+    await _seed_world()
+    took_back = await _sister_said(_GROUP, text_body="今晚吃火锅", at=_at(21, 30))
+
+    before = await envelopes_for(lane=LANE, persona_id="akao")
+    assert [(e.channel_id, e.unread) for e in before] == [(str(_GROUP), 1)], (
+        f"用例前提就没成立：撤回之前这条本该是一条未读。拿到：{before}"
+    )
+
+    await _recalled_on_the_channel(took_back, at=_at(21, 31))
+
+    assert await envelopes_for(lane=LANE, persona_id="akao") == [], (
+        "撤掉的那条还在信封上算一条动静 —— 她会为一条不存在的消息拿起手机"
+    )
+    async with in_a_moment("akao"):
+        seen = await look_at_phone.invoke({"channel_id": str(_GROUP)})
+    assert "今晚吃火锅" not in seen, f"翻开会话还能看见撤掉的那条。拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_the_envelope_does_not_name_someone_whose_only_word_was_taken_back(
+    living_db,
+):
+    """信封上点的名字里，没有"只说过一句、而且撤掉了"的那个人。
+
+    信封上那几个名字是她判断"这条会话值不值得翻开"的依据。摆一个撤掉了的人在那儿，
+    她翻开会话根本找不到那个人说了什么。
+    """
+    await _seed_world()
+    took_back = await _sister_said(_GROUP, text_body="今晚吃火锅", at=_at(21, 30))
+    await _incoming(
+        _GROUP,
+        text_body="我也去",
+        at=_at(21, 31),
+        sender=_SOMEONE,
+        sender_name="路人",
+    )
+    await _recalled_on_the_channel(took_back, at=_at(21, 32))
+
+    envelopes = await envelopes_for(lane=LANE, persona_id="akao")
+
+    assert [(e.unread, e.senders) for e in envelopes] == [(1, ("路人",))], (
+        f"信封上还点着一个只说过一句、而且已经撤掉了的人。拿到：{envelopes}"
+    )
+
+
+@pytest.mark.integration
+async def test_the_skipped_count_does_not_count_a_message_taken_back(
+    living_db, in_a_moment
+):
+    """"前面还有 N 条你没往回翻"里不算撤掉的那些。
+
+    未读的口径只有一处才对：信封、看手机那一眼、跳过多少条，三处一分家，她看到的
+    数就跟她读到的东西对不上。
+    """
+    await _seed_world()
+    for i in range(PHONE_GLANCE_LIMIT + 3):
+        mid = await _sister_said(_GROUP, text_body=f"姐姐第{i}句", at=_at(20, i))
+        if i == 0:
+            await _recalled_on_the_channel(mid, at=_at(21, 0))
+
+    async with in_a_moment("akao"):
+        seen = await look_at_phone.invoke({"channel_id": str(_GROUP)})
+
+    assert "还有 2 条" in seen, (
+        f"跳过多少条把撤掉的那条也算进去了 —— 这个数跟她真能翻到的东西对不上。"
+        f"拿到：\n{seen}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_message_taken_back_stops_calling_her(living_db):
+    """撤掉的那条不再叫她。
+
+    真人在私聊里发一句又撤回，对面就不该再被这句话叫过去 —— 那句话已经不在会话里
+    了。判据同样只看这一列：``recalled_at`` 非空 = 渠道上它不在了。
+    """
+    await _seed_world()
+    mid = await _incoming(_DM, text_body="在吗", at=_at(21, 30))
+
+    before = await newest_unread_summons(lane=LANE, persona_id="akao")
+    assert before is not None and before.message_id == mid, (
+        f"用例前提就没成立：撤回之前这条私聊本该在叫她。拿到：{before}"
+    )
+
+    await _recalled_on_the_channel(mid, at=_at(21, 31))
+
+    assert await newest_unread_summons(lane=LANE, persona_id="akao") is None, (
+        "撤掉的那条还在叫她 —— 她会被提前带到一刻，为一句已经不在的话"
+    )
+
+
+@pytest.mark.integration
+async def test_a_name_only_seen_in_a_taken_back_message_is_not_found(
+    living_db, in_a_moment
+):
+    """按名字找回会话时，撤掉的那条不算"这个人在里面说过话"。
+
+    这只手是拿 ``sender_display_name`` 在她见过的消息里搜的。撤掉的那条在渠道上已经
+    不在了，拿它把一条会话搜出来，等于让她按一句不存在的话去找人。
+    """
+    await _seed_world()
+    took_back = await _sister_said(_GROUP, text_body="今晚吃火锅", at=_at(21, 30))
+
+    async with in_a_moment("akao"):
+        before = await look_up_contact.invoke({"name": "绫奈"})
+    assert str(_GROUP) in before, (
+        f"用例前提就没成立：撤回之前该按姐姐的名字搜得到这个群。拿到：\n{before}"
+    )
+
+    await _recalled_on_the_channel(took_back, at=_at(21, 31))
+
+    async with in_a_moment("akao"):
+        after = await look_up_contact.invoke({"name": "绫奈"})
+    assert str(_GROUP) not in after, (
+        f"撤掉的那条还把这个群摆进了搜索结果。拿到：\n{after}"
+    )

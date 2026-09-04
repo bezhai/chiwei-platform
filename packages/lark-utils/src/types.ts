@@ -152,11 +152,61 @@ export interface MessageInfo {
 }
 
 /**
+ * 「消息已被撤回或删除」。
+ *
+ * 单独起个名字是因为撤回那一侧要按它分支：飞书只允许发送者撤回自己的消息，所以对着
+ * 自己发出去的消息收到这个码，只可能是「已经撤掉了」，跟「超出撤回时限」这种真的撤
+ * 不掉不是一回事。
+ */
+export const LARK_MESSAGE_ALREADY_RECALLED = 99991663;
+
+/**
  * 错误码映射
  */
 export const ERROR_CODE_MAP: Record<number, string> = {
     41050: '无用户权限，请将当前操作的用户添加到应用或用户的权限范围内',
-    99991663: '消息已被撤回或删除',
+    [LARK_MESSAGE_ALREADY_RECALLED]: '消息已被撤回或删除',
     99991668: '机器人不在群聊中',
     99991672: '机器人没有发送消息的权限',
 };
+
+/**
+ * 飞书的数字错误码挂在 Error 上时用的属性名。
+ *
+ * 读和写都只经过下面两个函数，名字不外泄 —— 换个名字不会让某个调用方悄悄读到
+ * undefined。
+ */
+const LARK_ERROR_CODE_KEY = 'larkCode';
+
+/**
+ * 把飞书返回的数字错误码挂到这个 Error 上，原样返回它。
+ *
+ * **不新建类型、不改文案、不改可枚举字段。** 属性是 non-enumerable，所以
+ * `JSON.stringify(err)`、`Object.keys(err)`、`{ ...err }` 拿到的东西跟以前逐字一样，
+ * 只有明确按名字问的调用方读得到这个码。现有调用方只读 `message`、只把整个对象丢给
+ * console，全都不受影响。
+ *
+ * code 不是数字时什么都不做：飞书没给码和「给了码但值是 undefined」应该长得一样。
+ */
+export function withLarkErrorCode<E extends Error>(error: E, code: unknown): E {
+    if (typeof code !== 'number') return error;
+    Object.defineProperty(error, LARK_ERROR_CODE_KEY, {
+        value: code,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+    });
+    return error;
+}
+
+/**
+ * 这个错误上带着的飞书错误码。没有就返回 undefined。
+ *
+ * 收 `unknown`：catch 到的东西什么都可能是，让每个调用点先做一遍类型收窄，等于把
+ * 同一段判断抄很多遍。
+ */
+export function larkErrorCode(error: unknown): number | undefined {
+    if (typeof error !== 'object' || error === null) return undefined;
+    const code = (error as Record<string, unknown>)[LARK_ERROR_CODE_KEY];
+    return typeof code === 'number' ? code : undefined;
+}

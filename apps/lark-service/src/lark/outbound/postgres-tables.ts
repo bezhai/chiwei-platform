@@ -14,6 +14,8 @@ import type {
     LarkOutboundMapping,
     LarkOutboundStore,
     LarkOutboundTables,
+    LarkProactiveMessageRow,
+    LarkRecallTables,
 } from './tables';
 
 function tablesOn(manager: EntityManager): LarkOutboundTables {
@@ -87,9 +89,58 @@ function tablesOn(manager: EntityManager): LarkOutboundTables {
     };
 }
 
-export function postgresLarkOutboundTables(dataSource: DataSource): LarkOutboundStore {
+/**
+ * 撤回主动消息那两条语句。
+ *
+ * 不放进 tablesOn：那一组是**发消息**要的语句，整组会被 atomically 换到事务连接上
+ * 跑；撤回这两条既不在那个事务里，也不该跟着它一起被换。
+ */
+function recallTablesOn(manager: EntityManager): Omit<LarkRecallTables, 'omIdOf'> {
+    return {
+        async messagesOfAgentOutbound(agentOutboundId): Promise<LarkProactiveMessageRow[]> {
+            const rows = await manager.getRepository(CommonMessage).find({
+                // 撤回只要"哪几行、谁发的、撤过没有"。整行取回来会把 content 那个
+                // jsonb 一起拖出来，而它对撤回一点用都没有。
+                select: {
+                    common_message_id: true,
+                    bot_name: true,
+                    recalled_at: true,
+                },
+                // 参数就是标准 uuid 文本，列侧不套任何函数 —— 套了（比如 CAST 成
+                // text）就绕开 agent_outbound_id 上那个索引走全表扫。
+                where: { agent_outbound_id: agentOutboundId },
+                // 一次开口的多段按发送先后撤。同一毫秒落下的两段靠主键兜底，
+                // 否则顺序由 PG 决定，看上去随机。
+                order: { event_time: 'ASC', common_message_id: 'ASC' },
+            });
+            return rows.map((row) => ({
+                common_message_id: row.common_message_id,
+                bot_name: row.bot_name ?? null,
+                // 这一列可空，撤回那一侧要按"非空 = 已经撤过"判短路，所以 undefined
+                // 归一成 null —— 两种写法在那里是同一件事，但只有一种能被断言。
+                recalled_at: row.recalled_at ?? null,
+            }));
+        },
+
+        async markRecalled(commonMessageId, recalledAt): Promise<void> {
+            // 只碰 recalled_at 这一列：这张表三个服务共写，多写一列就是覆盖别人写的
+            // 结论。
+            await manager
+                .createQueryBuilder()
+                .update(CommonMessage)
+                .set({ recalled_at: recalledAt })
+                .where('common_message_id = :commonMessageId', { commonMessageId })
+                .execute();
+        },
+    };
+}
+
+export function postgresLarkOutboundTables(
+    dataSource: DataSource,
+): LarkOutboundStore & LarkRecallTables {
     return {
         ...tablesOn(dataSource.manager),
+        ...recallTablesOn(dataSource.manager),
         atomically: (run) => dataSource.transaction((manager) => run(tablesOn(manager))),
     };
 }

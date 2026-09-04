@@ -89,6 +89,23 @@ export class CommonMessage {
     @Column({ type: 'uuid', nullable: true })
     agent_outbound_id?: string;
 
+    /**
+     * 这条消息什么时候被撤回的。
+     *
+     * 撤回链路把飞书那条消息删掉之后写这一列，**只在真的删掉之后写**：写了就等于
+     * 对上游说"这句话已经不在群里了"，而上游（agent-service 的安全判定、以及她自己
+     * 想收回一句话时）就是按这一列判的。删不掉却写上，她会以为自己收回了。
+     *
+     * **NULL = 没被撤回。** 存量行、QQ 渠道的行、别人发的消息、以及撤回请求发出去
+     * 但一直没成功的那些，全落在 NULL 上 —— 最后一种正是要让上游看见的"请求过撤回
+     * 但没确认撤掉"。所以这一列既不能 NOT NULL 也不能给默认值：给了就得替这些行编
+     * 一个撤回时刻出来。
+     *
+     * 记时刻而不是布尔：事后"什么时候撤的"没有第二个地方能查。
+     */
+    @Column({ type: 'timestamptz', nullable: true })
+    recalled_at?: Date;
+
     @Column({ type: 'bigint' })
     event_time!: string;
 

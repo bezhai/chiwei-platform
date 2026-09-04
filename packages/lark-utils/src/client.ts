@@ -15,6 +15,7 @@ import {
     UserInfo,
     MessageInfo,
     ERROR_CODE_MAP,
+    withLarkErrorCode,
 } from './types';
 
 /**
@@ -41,18 +42,27 @@ export class LarkClient {
 
     /**
      * 处理 API 响应
+     *
+     * 两条抛错路径都把飞书那个数字 code 挂在抛出的 Error 上（见 types.ts 的
+     * withLarkErrorCode）。**只是多挂一个 non-enumerable 属性**：类型、文案、可枚举
+     * 字段一个都没动，只读 message 的调用方看不出区别。挂它是因为飞书用数字码区分
+     * 失败的种类，而"这一种该怎么办"只有业务层知道 —— 撤回那一侧要把「消息已被撤回
+     * 或删除」跟「超出撤回时限」分开处置，光有一句 msg 就只能拿文案去匹配。
      */
     private async handleResponse<T>(promise: Promise<LarkResponse<T>>): Promise<T> {
         try {
             const res = await promise;
             if (res.code !== 0) {
-                throw new Error(res.msg);
+                throw withLarkErrorCode(new Error(res.msg), res.code);
             }
             return res.data!;
         } catch (e: any) {
             console.error(JSON.stringify(e.response?.data || e, null, 4));
             if (e.response?.data?.code) {
-                throw new Error(ERROR_CODE_MAP[e.response?.data?.code] || e.response?.data?.msg);
+                throw withLarkErrorCode(
+                    new Error(ERROR_CODE_MAP[e.response?.data?.code] || e.response?.data?.msg),
+                    e.response?.data?.code,
+                );
             }
             throw e;
         }

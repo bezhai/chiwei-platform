@@ -99,6 +99,65 @@ export interface LarkOutboundTables {
     insertLarkMessage(row: LarkOutboundMapping): Promise<void>;
 }
 
+/** 她某一次主动开口在公共层落下的一行。撤回按 agent_outbound_id 反查到的就是它。 */
+export interface LarkProactiveMessageRow {
+    common_message_id: string;
+    /**
+     * 发这条消息的 bot。
+     *
+     * 撤回必须用**同一个身份**调删除接口——飞书只让发送者撤自己的消息，换个 bot 就是
+     * 一次注定失败的调用。主动发没有台账行，所以这个身份只能从消息行上拿：出站落库时
+     * 写进去的正是当时说话的那个 bot（见 deliver.ts 的 record）。
+     *
+     * 行上没有就是 null，撤回那一侧照样往下走（客户端池会拒绝猜，逐条记 failed）。
+     */
+    bot_name: string | null;
+    /**
+     * 这一段已经撤掉的时刻；没撤掉是 null。
+     *
+     * **撤回那一侧要先看这一列再决定要不要调删除接口。** 飞书对一条已经删掉的消息
+     * 返回非 0 code（见 lark-api.ts 的 recall），所以同一条撤回被投递两次时，第二次
+     * 的删除全部失败，结论会从"撤掉了"退成"撤不掉"。这一列是主动消息**唯一**的终态
+     * 记录（它在台账上一行都没有），所以它同时承担会话那条链上 safety_status 的角色
+     * ——重复投递时的短路依据。
+     */
+    recalled_at: Date | null;
+}
+
+/**
+ * 撤回她主动发的那条消息要读写的语句。
+ *
+ * **跟出站那个端口分开，因为定位方式不同**：出站是"公共层 id → 飞书坐标"，撤回主动
+ * 消息是"她哪一次开口 → 公共层那几行 → 飞书坐标"。中间那一跳只有撤回需要，而 om_id
+ * 那一跳两边都要，所以这里直接复用它的声明，不重写一份。
+ *
+ * 撤回真人问答那条链不走这里：那条按 session_id 查台账（common_agent_response），
+ * 主动消息在那张表上一行都没有。
+ */
+export interface LarkRecallTables extends Pick<LarkOutboundTables, 'omIdOf'> {
+    /**
+     * agent_outbound_id → 她那次开口落下的公共层行，按发送先后。
+     *
+     * 返回数组而不是单行：一次开口被切成几段发出去时，每一段都是一行（都带同一个
+     * agent_outbound_id）。只撤第一行的话，后面几段留在群里，而且没人会知道。
+     *
+     * 一行都没有 → 空数组。它**不等于**"没有东西要撤"，更常见的是投递方还没落库
+     * ——判断在 recall.ts。
+     */
+    messagesOfAgentOutbound(agentOutboundId: string): Promise<LarkProactiveMessageRow[]>;
+
+    /**
+     * 在这一行上记下撤回时刻。
+     *
+     * **只在飞书那条消息真的删掉之后调**：这一列是上游判"她这句话收回去了没有"的
+     * 依据，删不掉却写上就是告诉她一件没发生的事。
+     *
+     * 反过来，删掉了却没写上也是假的（她会看见一条实际上已经不存在的消息）。所以
+     * 这一条**失败不许吞**：调用方据此让整条撤回延时重投，见 recall.ts。
+     */
+    markRecalled(commonMessageId: string, recalledAt: Date): Promise<void>;
+}
+
 export interface LarkOutboundStore extends LarkOutboundTables {
     /**
      * 一组写入要么都成、要么都不成。传给 run 的 tables 走同一条连接。

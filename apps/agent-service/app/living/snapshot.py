@@ -47,7 +47,12 @@ from app.infra.cst_time import to_cst_dated, to_cst_full
 from app.living.calendar import WORLD_ACTOR
 from app.living.happening import Perceived, PerceivedWindow, read_perceived_by
 from app.living.loose_ends import LooseEnd, format_entry, list_open_loose_ends
-from app.living.records import KIND_SPEECH, Happening, Whereabouts
+from app.living.records import (
+    KIND_SPEECH,
+    OUTBOUND_HAPPENING_PREFIX,
+    Happening,
+    Whereabouts,
+)
 from app.living.whereabouts import current_whereabouts
 from app.runtime.migrator import _table_name
 
@@ -179,12 +184,39 @@ def _clock(moment: datetime, *, now: datetime) -> str:
     return to_cst_dated(moment.isoformat(), now=now, seconds=False)
 
 
+def _message_handle(happening_id: str) -> str | None:
+    """这一条要是她发出去的消息，给出她能拿去撤回的那个编号；否则 ``None``。
+
+    编号就是 ``outbound_id``——:func:`app.living.takeback.take_back_message` 按等值查
+    的那个键。前缀走 :data:`~app.living.records.OUTBOUND_HAPPENING_PREFIX`，跟
+    :mod:`app.living.mouth` 拼 ``happening_id`` 时用的是同一个常量，所以"这里印出去
+    的"和"她照抄回来的"必然是同一个东西。
+
+    **判据是前缀，不是** ``kind``：当面说的话和发消息的 ``kind`` 都是 ``speech``，
+    但当面说的话撤不了。给它一个编号就是给她一个指了会失败的东西。
+    """
+    if not happening_id.startswith(OUTBOUND_HAPPENING_PREFIX):
+        return None
+    return happening_id[len(OUTBOUND_HAPPENING_PREFIX):]
+
+
 def _own_line(h: Happening) -> str:
+    """她自己那条记录的样子；发出去的消息末尾带上它的编号。
+
+    带编号是**给她一个消息级句柄**。没有它的时候她只能拿原话去指要撤哪一条，于是
+    后端得在逻辑层按内容猜——同一句话说过两遍就分不出是哪一次。真人撤消息是看着那条
+    点的，句柄一直都在他手上；她的句柄就印在这里。
+
+    整串照印，不截断：截断要配一套前缀唯一性校验，而那个分支在真实数据量下永远不会
+    触发。她是模型，照抄一串字符没有负担。
+    """
+    handle = _message_handle(h.happening_id)
+    tail = f"［{handle}］" if handle is not None else ""
     if h.kind != KIND_SPEECH:
-        return f"你 {h.content}"
+        return f"你 {h.content}{tail}"
     if h.audience:
-        return f"你对 {'、'.join(h.audience)} 说：「{h.content}」"
-    return f"你说：「{h.content}」"
+        return f"你对 {'、'.join(h.audience)} 说：「{h.content}」{tail}"
+    return f"你说：「{h.content}」{tail}"
 
 
 def _perceived_line(p: Perceived, *, me: str) -> str:

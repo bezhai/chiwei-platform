@@ -9,6 +9,7 @@ import { describe, expect, it } from 'bun:test';
 import { Readable } from 'node:stream';
 
 import { LarkClient } from './client';
+import { larkErrorCode } from './types';
 
 function clientWith(native: unknown): LarkClient {
     const client = new LarkClient({ appId: 'cli_test', appSecret: 'secret' });
@@ -65,6 +66,83 @@ describe('LarkClient 的响应处理', () => {
         });
 
         expect(client.deleteMessage('om_1')).rejects.toThrow('消息已被撤回或删除');
+    });
+});
+
+// 飞书用数字码区分失败的种类，而业务层要按种类分开处置：撤回那一侧要把「消息已被撤回
+// 或删除」跟「超出撤回时限」分开，前者意味着真人已经看不到这条消息、后者意味着它还在。
+// 只给一句 msg 的话，业务层唯一能做的就是拿文案去匹配 —— 飞书改一个字就全错。
+describe('抛出来的错误带着飞书的数字码', () => {
+    /** 拿到抛出来的那个东西本身，而不是只看它的 message。 */
+    async function thrownBy(run: () => Promise<unknown>): Promise<unknown> {
+        try {
+            await run();
+        } catch (error) {
+            return error;
+        }
+        throw new Error('expected the call to throw, but it returned');
+    }
+
+    it('HTTP 200 + 非 0 code：那个 code 挂在抛出的错误上', async () => {
+        const client = clientWith({
+            im: { message: { delete: async () => ({ code: 99991663, msg: 'raw msg' }) } },
+        });
+
+        expect(larkErrorCode(await thrownBy(() => client.deleteMessage('om_1')))).toBe(99991663);
+    });
+
+    it('SDK 抛 HTTP 错误那条路同样带码', async () => {
+        const client = clientWith({
+            im: {
+                message: {
+                    delete: async () => {
+                        throw Object.assign(new Error('Request failed'), {
+                            response: { data: { code: 99991663, msg: 'message not found' } },
+                        });
+                    },
+                },
+            },
+        });
+
+        expect(larkErrorCode(await thrownBy(() => client.deleteMessage('om_1')))).toBe(99991663);
+    });
+
+    it('不是飞书判的失败（网络断了）没有码 —— 不编一个出来', async () => {
+        const client = clientWith({
+            im: {
+                message: {
+                    delete: async () => {
+                        throw new Error('socket hang up');
+                    },
+                },
+            },
+        });
+
+        expect(larkErrorCode(await thrownBy(() => client.deleteMessage('om_1')))).toBeUndefined();
+    });
+
+    it('不是错误对象的东西问过来也答 undefined，不抛', () => {
+        expect(larkErrorCode(undefined)).toBeUndefined();
+        expect(larkErrorCode(null)).toBeUndefined();
+        expect(larkErrorCode('99991663')).toBeUndefined();
+        expect(larkErrorCode(new Error('plain'))).toBeUndefined();
+    });
+
+    // 带上这个码不许动现有调用方看得见的任何东西：它们只读 message、只 log 这个对象。
+    it('类型、文案和可枚举字段都跟以前逐字一样', async () => {
+        const client = clientWith({
+            im: { message: { delete: async () => ({ code: 99991663, msg: 'raw msg' }) } },
+        });
+
+        const error = (await thrownBy(() => client.deleteMessage('om_1'))) as Error;
+
+        expect(error).toBeInstanceOf(Error);
+        expect(error.constructor).toBe(Error);
+        expect(error.name).toBe('Error');
+        expect(error.message).toBe('raw msg');
+        // console.error(JSON.stringify(err)) 和 { ...err } 是现有调用方真的在做的事。
+        expect(Object.keys(error)).toEqual([]);
+        expect(JSON.stringify(error)).toBe('{}');
     });
 });
 

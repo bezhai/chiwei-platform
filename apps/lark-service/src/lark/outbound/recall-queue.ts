@@ -108,7 +108,11 @@ export function larkRecallBinding(deps: LarkRecallConsumerDeps): OutboundQueueBi
                         event: 'recall_foreign_channel',
                         queue,
                         channel: payload.channel ?? null,
+                        // 两种定位方式都记：一条撤回只带其中一个，只记 session_id
+                        // 的话，她自己开口那条链上的越界消息全长成 null，捞出来也不
+                        // 知道是哪一句。
                         session_id: payload.session_id ?? null,
+                        outbound_id: payload.outbound_id ?? null,
                         consumer_tag: msg.fields?.consumerTag ?? null,
                     }),
                 );

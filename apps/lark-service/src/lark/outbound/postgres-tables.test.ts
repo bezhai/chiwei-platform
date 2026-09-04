@@ -9,10 +9,11 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import { LARK_SERVICE_ENTITIES } from '../../ormconfig';
 import { recordingDataSource, type RecordedStatement } from '../recording-data-source';
 import { postgresLarkOutboundTables } from './postgres-tables';
-import type { LarkOutboundStore } from './tables';
+import type { LarkOutboundStore, LarkRecallTables } from './tables';
 
 interface Harness {
-    store: LarkOutboundStore;
+    /** 真身一个对象两个端口：发消息那一组，加上撤回主动消息那两条。 */
+    store: LarkOutboundStore & LarkRecallTables;
     recorded: RecordedStatement[];
     reply(rows: Array<Record<string, unknown>>): void;
     sqlOf(fragment: string): RecordedStatement;
@@ -136,6 +137,89 @@ describe('写：assistant 行', () => {
         const insert = h.sqlOf('INSERT INTO "common_message"');
         // TypeORM 把 jsonb 列的值序列化成一个字符串参数交给 pg 驱动，形状原样保留。
         expect(insert.params).toContain(JSON.stringify([{ kind: 'text', text: '在的' }]));
+    });
+});
+
+describe('反查：她哪一次开口 → 公共层那几行', () => {
+    it('按 agent_outbound_id 等值查 common_message，只取撤回用得上的三列', async () => {
+        const recalledAt = new Date('2026-09-03T12:00:00.000Z');
+        h.reply([
+            {
+                CommonMessage_common_message_id: 'cm_1',
+                CommonMessage_bot_name: 'chiwei',
+                CommonMessage_recalled_at: recalledAt,
+            },
+        ]);
+
+        expect(
+            await h.store.messagesOfAgentOutbound('55f3469b-d46c-5384-a9ce-22cb4944b77a'),
+        ).toEqual([
+            { common_message_id: 'cm_1', bot_name: 'chiwei', recalled_at: recalledAt },
+        ]);
+
+        const select = h.sqlOf('FROM "common_message"');
+        // 等值，列侧不套函数 —— 套了就绕开 agent_outbound_id 上那个索引走全表扫。
+        expect(select.sql).toContain('"agent_outbound_id" = $1');
+        expect(select.params).toEqual(['55f3469b-d46c-5384-a9ce-22cb4944b77a']);
+        // 撤回只要"哪几行、谁发的、撤过没有"。整行取回来会把 content 这个 jsonb
+        // 一起拖出来。
+        expect(select.sql).toContain('"common_message_id"');
+        expect(select.sql).toContain('"bot_name"');
+        // 没取这一列的话撤回那一侧永远看到 null，于是每次重投都去重删一遍已经
+        // 删掉的消息 —— 而那必定失败，结论从 recalled 退成 recall_failed。
+        expect(select.sql).toContain('"recalled_at"');
+        expect(select.sql).not.toContain('"content"');
+    });
+
+    it('多段的那次开口按发送先后返回 —— 撤的顺序跟她说的顺序一致', async () => {
+        h.reply([
+            { CommonMessage_common_message_id: 'cm_1', CommonMessage_bot_name: 'chiwei' },
+            { CommonMessage_common_message_id: 'cm_2', CommonMessage_bot_name: 'chiwei' },
+        ]);
+
+        const rows = await h.store.messagesOfAgentOutbound(
+            '55f3469b-d46c-5384-a9ce-22cb4944b77a',
+        );
+
+        expect(rows.map((row) => row.common_message_id)).toEqual(['cm_1', 'cm_2']);
+        const select = h.sqlOf('FROM "common_message"');
+        // 同一毫秒落下的两段靠主键兜底，否则顺序是随机的。
+        // 主键那一段 TypeORM 排的是查询的输出列名（它在 select 里），PG 认这个写法。
+        expect(select.sql).toContain(
+            'ORDER BY "CommonMessage"."event_time" ASC, "CommonMessage_common_message_id" ASC',
+        );
+    });
+
+    it('查不到就是空数组，不编一行出来', async () => {
+        h.reply([]);
+        expect(
+            await h.store.messagesOfAgentOutbound('55f3469b-d46c-5384-a9ce-22cb4944b77a'),
+        ).toEqual([]);
+    });
+
+    it('行上没有 bot_name / recalled_at 时给 null，不留 undefined', async () => {
+        // 撤回那一侧要按这两个值决定"用谁的身份调删除接口"和"还要不要删"，null 和
+        // "这一列不存在"在那里是同一件事，但只有一种写法能被断言。
+        h.reply([{ CommonMessage_common_message_id: 'cm_1', CommonMessage_bot_name: null }]);
+
+        expect(
+            await h.store.messagesOfAgentOutbound('55f3469b-d46c-5384-a9ce-22cb4944b77a'),
+        ).toEqual([{ common_message_id: 'cm_1', bot_name: null, recalled_at: null }]);
+    });
+});
+
+describe('写：撤回时刻', () => {
+    it('按 common_message_id 更新 recalled_at，一行一条语句', async () => {
+        const recalledAt = new Date('2026-09-03T12:00:00.000Z');
+
+        await h.store.markRecalled('cm_1', recalledAt);
+
+        const update = h.sqlOf('UPDATE "common_message"');
+        expect(update.sql).toContain('"recalled_at"');
+        expect(update.params).toEqual([recalledAt, 'cm_1']);
+        // 撤回只碰这一列：这张表三个服务共写，多写一列就是覆盖别人的结论。
+        expect(update.sql).not.toContain('"content"');
+        expect(update.sql).not.toContain('"agent_outbound_id"');
     });
 });
 

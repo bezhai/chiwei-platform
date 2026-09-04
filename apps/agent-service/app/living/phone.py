@@ -50,6 +50,12 @@ uuidv7（按生成时刻单调），同毫秒里谁先谁后有确定答案。
 照样管得着它（:meth:`Envelope.is_calling_you` 一个字没动）。同一个屋檐下的姐妹在群里
 聊天，不该比陌生人更有召唤力 —— 真按"姐姐一说话就召唤"来，两个 agent 会在一个群里
 互相把对方叫醒，永远停不下来。
+
+**撤掉的那条不在会话里了。** 撤回不删 ``common_message`` 那一行（公共层是消息记录，
+删行会打断历史），撤成功只在 ``recalled_at`` 上留个时刻。这里每一处读那张表的地方都
+带着 :data:`_STILL_IN_THE_CONVERSATION` —— 少带一处，她就在那个视角下还能看见一条自己
+明明撤掉了的话，然后接着它往下说，而对面早就看不到了。**不显示，不摆"已撤回"的占位**，
+理由写在那个常量上。
 """
 
 from __future__ import annotations
@@ -345,6 +351,25 @@ _SAID_BY_HER = (
 )
 
 
+# 「这一行还在会话里吗」。**每一处读 ``common_message`` 的地方都带着它。**
+#
+# 撤回不删那一行（公共层是消息记录，删行会打断历史），撤成功只在 ``recalled_at`` 上
+# 留个时刻，由投递侧写（撤失败不填）。所以读的一侧不管的话，她自己刚撤掉的话还会原样
+# 出现在她眼前 —— 然后她接着那句往下说，而对面早就看不到了。
+#
+# **判据写在这一列的含义上**（这一行在渠道上已经不在了），不写在谁撤的它上面：她自己
+# 撤的、同群姐姐撤的是同一件事，读的一侧没有理由分开对待。
+#
+# **不显示，不摆占位。** 她的记忆里已经有一条"我去撤了"（撤回那只手落的 Happening），
+# 会话里再摆一条"已撤回"是同一件事的第二份记录；而占位能告诉她的（"这儿本来有句话"）
+# 她本来就知道得更清楚 —— 她知道那句话是什么。真人撤完一条消息，聊天记录里那条内容
+# 也是没有的。
+#
+# NULL = 没撤过（或者还没撤掉），这是绝大多数行的样子，所以这个条件不能写成
+# ``= false`` 之类会被 NULL 吃掉的形状。
+_STILL_IN_THE_CONVERSATION = "cm.recalled_at IS NULL"
+
+
 async def _own_bot_names(*, persona_id: str) -> list[str]:
     """她那些 bot 的名字 —— "这句话是不是她说的"的全部依据。
 
@@ -399,6 +424,7 @@ SELECT COUNT(*)                          AS unread,
   FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
    AND NOT {_SAID_BY_HER}
+   AND {_STILL_IN_THE_CONVERSATION}
    AND (cm.event_time, CAST(cm.common_message_id AS text))
        > (:after_ms, :after_id)
 """
@@ -409,6 +435,7 @@ SELECT COALESCE(cm.sender_display_name, '某人') AS who,
   FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
    AND NOT {_SAID_BY_HER}
+   AND {_STILL_IN_THE_CONVERSATION}
    AND (cm.event_time, CAST(cm.common_message_id AS text))
        > (:after_ms, :after_id)
  GROUP BY 1
@@ -593,6 +620,7 @@ SELECT cm.common_message_id AS message_id,
   FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
    AND NOT {_SAID_BY_HER}
+   AND {_STILL_IN_THE_CONVERSATION}
    AND (cm.event_time, CAST(cm.common_message_id AS text))
        > (:after_ms, :after_id)
    AND (:is_direct OR {_NAMED_HER})
@@ -651,6 +679,7 @@ SELECT cm.common_message_id AS message_id,
   FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
    AND NOT {_SAID_BY_HER}
+   AND {_STILL_IN_THE_CONVERSATION}
    AND (cm.event_time, CAST(cm.common_message_id AS text))
        > (:after_ms, :after_id)
  ORDER BY cm.event_time DESC, cm.common_message_id DESC
@@ -663,6 +692,7 @@ _UNREAD_COUNT_SQL = f"""
 SELECT COUNT(*) FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
    AND NOT {_SAID_BY_HER}
+   AND {_STILL_IN_THE_CONVERSATION}
    AND (cm.event_time, CAST(cm.common_message_id AS text))
        > (:after_ms, :after_id)
 """
@@ -796,6 +826,7 @@ matched AS (
     JOIN mine m ON m.channel_id = cm.common_conversation_id
    WHERE cm.sender_display_name ILIKE :like
      AND NOT {_SAID_BY_HER}
+     AND {_STILL_IN_THE_CONVERSATION}
    GROUP BY 1, 2
 )
 SELECT m.channel_id AS channel_id,
@@ -974,6 +1005,7 @@ SELECT COALESCE(cm.sender_display_name, '某人') AS who,
        cm.event_time        AS at_ms
   FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+   AND {_STILL_IN_THE_CONVERSATION}
    AND (
         {_SAID_BY_HER}
         OR (cm.event_time, CAST(cm.common_message_id AS text))

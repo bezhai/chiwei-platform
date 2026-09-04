@@ -37,6 +37,19 @@ KIND_SPEECH = "speech"
 KIND_ACT = "act"
 _KINDS = frozenset({KIND_SPEECH, KIND_ACT})
 
+# 她通过嘴发出去的一条消息，在 :class:`Happening` 上的 id 前缀：
+# ``mouth:<outbound_id>``。前缀之后那一串就是撤回要用的键
+# （``SpokenOutbound.outbound_id``）。
+#
+# **只许有这一处定义。** 拼它的是 :mod:`app.living.mouth`，把它剥掉、好让她在快照里
+# 看见那个编号的是 :mod:`app.living.snapshot`，而她照抄那个编号调
+# :mod:`app.living.takeback` 时按等值查的就是同一个键。两边各写一份字面量的话，改了
+# 一处就漂移，而漂移的表现是她照抄了却撤不掉 —— 一句报错都没有。
+#
+# 放在这里而不是 ``mouth`` 里：``mouth`` 和 ``snapshot`` 本来就都 import 这个模块，
+# 而反过来会绕成一个环。
+OUTBOUND_HAPPENING_PREFIX = "mouth:"
+
 # 通过什么渠道。这是**客观事实**——她是当面说的，还是拿手机发的，还是发在群里的。
 # 不是给她的行为分优先级，也不是强度分级：三个值之间没有高低，只有"声音能不能传到
 # 旁边的人耳朵里"这一条物理差别。

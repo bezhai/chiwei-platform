@@ -58,6 +58,19 @@ life 产出「我想跟谁说个什么意思」，这里把它渲染成人话，
 **渲染没出内容就不发。** 不回退发意图原文（那是她脑子里的措辞，不是人话），也不发空
 消息——把"没发出去"作为工具结果喂回她，她自己决定重说还是算了。
 
+**交出去之前先过一道检查，不合格就不发。** 真人问她、她答的那条链是"先发后撤"（流式
+回复没有同步检查的窗口）；她主动开口没有这个压力，所以检查放得进发送之前 —— 拦下的话
+真人一个字都没看见，不用撤。判据在 :mod:`app.capabilities.output_safety`，两条链共用
+同一份。
+
+  * 位置在**渲染之后、认领之前**：判的是真人会看见的那句人话；拦下时不占那个 id，
+    否则同一缝里她再说同一件事会撞上"你已经说过了"——而那是假话。
+  * **这一关自己坏了的时候照发**（超时、模型挂了、词表读不到）。挡下来挡的不是一条
+    消息、是整条线：她和三个姐妹一起哑掉，挂多久哑多久，而这道检查的实测拦截率本来
+    就很低。用一个大且显眼的故障换一个小且罕见的风险不划算。代价是它**静默**，所以
+    每漏一条都打一行 ``living_mouth_unchecked`` —— 那是数"那段时间漏了多少"的唯一
+    锚，改措辞前先想清楚谁在数它。
+
 **第一版是单次渲染。** 她一缝里可以调好几次说好几条，但不能自己接着聊下去（没有对话
 窗口自主权）——那是下一版的事。
 """
@@ -78,6 +91,7 @@ from app.agent.neutral import Message, Role
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities.agent import AgentRunner
+from app.capabilities.output_safety import audit_output
 from app.data.queries.persona import find_persona
 from app.data.session import get_session
 from app.domain.chat_dataflow import (
@@ -90,7 +104,11 @@ from app.living.phone import (
     medium_for,
     reachable_conversation,
 )
-from app.living.records import KIND_SPEECH, _require_aware
+from app.living.records import (
+    KIND_SPEECH,
+    OUTBOUND_HAPPENING_PREFIX,
+    _require_aware,
+)
 from app.living.scope import moment_scope, note_recorded
 from app.living.whereabouts import current_whereabouts
 from app.runtime.data import Data, Key, Version
@@ -114,6 +132,13 @@ _VOICE_CFG = AgentConfig(
 
 # 派生出站 id 的命名空间，随手换会让历史消息全部对不上。
 _ID_NS = uuid.UUID("d4a91f62-7c05-4b3e-9a18-2f6e8c07b5d1")
+
+# 交出去之前那一关最多占多久。判词是一次模型调用，挂住了就是把她整缝卡在网络上 ——
+# 一缝里她还有别的事要做。20s 沿用真人说话那侧检查的期限，不另立一个数。
+#
+# **这是护栏，不是替她做决定**：它管的是"这一步最多占用多久"，跟上面那段"没有重试
+# 计数器、没有退避、没有超时阈值"不冲突 —— 那句说的是不替她决定要不要再说一次。
+_SEND_CHECK_TIMEOUT_S = 20.0
 
 # 认领记录的两种状态。**没有"确定没发出去"这一档**——投递这一步只可能"确定发过"
 # 或者"不知道"，没有第三种（见模块 docstring）。
@@ -178,11 +203,25 @@ class SpokenOutbound(Data):
     # 渠道那一行自己的 ``event_time``（即她那句话真正落地的时刻），不是对账这一拍
     # 跑的时刻——后者只是钟的节拍，不是关于她那句话的事实。
     landed_at: datetime | None = None
+    # **撤回是第三根轴。** 她按下撤回（``took_back_at``）和渠道那边真的撤掉
+    # （``recalled_at``）是两件事，中间隔着一趟队列和一次渠道接口调用，都可能失败。
+    #
+    # 只有 ``took_back_at`` 非空 = 她去撤了，还没确认撤掉。这**不是**"撤失败了"：
+    # 撤回是异步的，没有一个确定的失败信号（投递侧退避重投三次才进死信）。她下一缝
+    # 拿起手机，撤掉了的那条就不在了，没撤掉的还在 —— 她自己看得出来。
+    #
+    # 跟上面两根轴同一个理由：不能压进 ``state``，也不能省成一个布尔。
+    took_back_at: datetime | None = None
+    recalled_at: datetime | None = None
 
-    @field_validator("claimed_at", "settled_at", "landed_at")
+    @field_validator(
+        "claimed_at", "settled_at", "landed_at", "took_back_at", "recalled_at"
+    )
     @classmethod
     def _aware_instant(cls, v: datetime | None) -> datetime | None:
-        return _require_aware("claimed_at / settled_at / landed_at", v)
+        return _require_aware(
+            "claimed_at / settled_at / landed_at / took_back_at / recalled_at", v
+        )
 
 
 _OUTBOUND_TABLE = _table_name(SpokenOutbound)
@@ -358,7 +397,8 @@ async def send_message(
 
     Returns:
         这条的下场，附上真的说出口那句话。有时候只能告诉你"交出去了但不知道到没到"
-        —— 那就是真的不知道，别当成发出去了，也别当成没发。
+        —— 那就是真的不知道，别当成发出去了，也别当成没发。也可能这句话过不了、
+        压根没发出去，那就换个说法或者换件事说。
     """
     lane, now, persona_id, moment_id = moment_scope()
     intent = what.strip()
@@ -424,6 +464,32 @@ async def send_message(
         # 接下来重试、换个说法、还是转头去干别的，是她的判断，工具不替她安排。
         raise RuntimeError("渲染没出内容")
 
+    # 交出去之前先过这一关。位置钉死在**渲染之后、认领之前**：
+    #
+    #   * 渲染之后 —— 判的必须是真人会看见的那句人话，不是她脑子里那个意思。
+    #   * 认领之前 —— 拦下时不占那个 id。占了的话，同一缝里她再说同一件事就会撞上
+    #     "你已经说过了"，而那是假话：她一个字都没说出去。
+    #
+    # 而去重那道闸在这一关**更前面**（上面那段预检查），所以工具重试和整轮重放不会
+    # 各花一次模型调用去判一句根本不会再发的话。
+    verdict = await audit_output(said, timeout_s=_SEND_CHECK_TIMEOUT_S)
+    if not verdict.ok:
+        logger.warning(
+            "living_mouth_blocked lane=%s persona=%s outbound=%s reason=%s"
+            " 这句话没交出去",
+            lane,
+            persona_id,
+            outbound_id,
+            verdict.reason,
+        )
+        # **不抛。** 抛出去会被 :func:`tool_error` 转成一个错误喂回她，而错误她会重
+        # 试 —— 重试会换一套措辞再判一次，那是一条绕过去的路。拦下是一个确定的结果，
+        # 照实说就行。不给她具体是哪个词、哪一条判据：那等于把判据交出去让她绕。
+        return (
+            f"「{said}」—— 这句话没发出去，内容过不了这一关。"
+            f"换个说法，或者换件事说。"
+        )
+
     # 顺序钉死：认领 → 交出去 → 记忆 → 收口。每一步崩掉留下什么写在模块 docstring 里。
     # 认领永远是这条链的第一版：认领过就走不到这儿（上面直接返回），所以从零起。
     # 之后这条链上还会有对账钟写的版本，收口不能假定自己写的就是 v2（见 :func:`_settle`）。
@@ -460,6 +526,23 @@ async def send_message(
             outbound_id,
         )
         return _already_claimed(taken)
+
+    if not verdict.checked:
+        # fail-open：这一关自己坏了的时候照发。挡下来挡的不是一条消息、是整条线 ——
+        # 她和三个姐妹一起哑掉，挂多久哑多久，而这道检查的实测拦截率本来就很低。
+        # 代价是它**静默**，所以欠的这一笔必须留得下来：``living_mouth_unchecked``
+        # 是数"那段时间漏了多少条"的唯一锚，改措辞前先想清楚谁在数它。
+        #
+        # **记在认领之后、``emit`` 之前**：认领抢输的那次一个字都没发出去，记进去
+        # 这本账就虚了；而 ``emit`` 抛错的那次算数 —— 抛错只说明我们没等到确认，
+        # broker 可能已经收件，那句没判过的话可能已经到了真人手上。
+        logger.warning(
+            "living_mouth_unchecked lane=%s persona=%s outbound=%s"
+            " 这一关没判成，这句话按原样交出去了",
+            lane,
+            persona_id,
+            outbound_id,
+        )
 
     try:
         await emit(
@@ -510,7 +593,7 @@ async def send_message(
     # 位置缺失不拦：手机隔着设备，旁边的人本来就一个字都感知不到，所以位置算不算得
     # 出来都不影响谁听得见（跟当面说话不一样，那条必须有位置）。
     where = await current_whereabouts(lane=lane, persona_id=persona_id)
-    happening_id = f"mouth:{outbound_id}"
+    happening_id = f"{OUTBOUND_HAPPENING_PREFIX}{outbound_id}"
     await record_happening(
         lane=lane,
         happening_id=happening_id,
