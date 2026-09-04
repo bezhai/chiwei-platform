@@ -1,6 +1,6 @@
 # 赤尾平台 · 服务拓扑现状
 
-> 最后更新:2026-08-30(入站泳道交接从 RabbitMQ 换成内部 HTTP + lane-sidecar)。
+> 最后更新:2026-09-04。
 > 范围:`apps/` 下 15 个应用目录 → 15 个 K8s Deployment(口径:lark-service 一镜像产出 2 个,channel-server 一镜像产出 2 个,lane-sidecar 与 tagger-service 不产出 Deployment,其余 11 个目录各 1 个)+ 1 个注入式 sidecar(lane-sidecar)+ 1 个裸机 GPU 服务(tagger-service,不进 K8s)+ `packages/` 4 个共享包。
 > 这是**现状**梳理,不含目标架构和改造方案。术语在文中随用随解释。
 
@@ -73,8 +73,9 @@ flowchart TB
     GW --> QGW --> CS
     GW --> DW
     GW --> DB --> PE
-    LKS -. chat_request .-> AS
-    CS -. chat_request .-> AS
+    LKS -->|投影落库| CM[("PostgreSQL<br/>common_message")]
+    CS -->|投影落库| CM
+    AS -->|每一缝查未读| CM
     AS -. chat_response_lark / recall_lark .-> LKO --> Feishu
     AS -. chat_response_qq .-> CRW --> QGW -->|发消息| QQ
     AS --> SB
@@ -85,7 +86,7 @@ flowchart TB
     REG -. 下发路由表 .-> LS
 ```
 
-虚线箭头是 RabbitMQ 消息队列(异步,飞书那条长连除外),实线是直接 HTTP 调用。注意 agent-service 不直接发平台消息——它把回复丢进队列,由持有平台凭证的那个服务代发:飞书归 lark-outbound,QQ 归 chat-response-worker(再经 qq-gateway)。lane-sidecar / lite-registry 不在某条线性调用链上,它们横切所有服务间调用(见第五节)。tagger-service 是图里唯一不跑在 K8s 上的服务:裸机 GPU 主机 + systemd 托管,media-sync-worker 通过 HTTP 提交打标任务、用回调收结果。
+虚线箭头是 RabbitMQ 消息队列(异步,飞书那条长连除外),实线是直接 HTTP 调用或读写数据库。**入站方向没有队列**:两个渠道服务把收到的消息投影成公共层口径写进 `common_message` 就结束,agent-service 每一缝(默认十分钟一次,Dynamic Config 可调;私聊和群里点名会把她提前叫来)自己去查未读、自己决定要不要开口。出站仍走队列,而且 agent-service 不直接发平台消息——它把回复丢进队列,由持有平台凭证的那个服务代发:飞书归 lark-outbound,QQ 归 chat-response-worker(再经 qq-gateway)。lane-sidecar / lite-registry 不在某条线性调用链上,它们横切所有服务间调用(见第五节)。tagger-service 是图里唯一不跑在 K8s 上的服务:裸机 GPU 主机 + systemd 托管,media-sync-worker 通过 HTTP 提交打标任务、用回调收结果。
 
 ---
 
@@ -97,49 +98,49 @@ flowchart TB
 sequenceDiagram
     participant U as 飞书用户
     participant LKS as lark-service
-    participant MQ as RabbitMQ
+    participant PG as PostgreSQL
     participant AS as agent-service
+    participant MQ as RabbitMQ
     participant LKO as lark-outbound
 
     U->>LKS: 事件经 websocket 长连推过来
     LKS->>LKS: 解析,收敛 common 口径并决定 lane
-    Note over LKS: 渠道契约链:解析→判定是否响应→换全局身份→规则引擎→存储
-    LKS->>MQ: publish chat_request(带 channel + 全局 ID)
-    MQ->>AS: 消费 chat_request
-    AS->>AS: 组装意识(人格/状态/记忆) + LLM 推理 + 工具调用
-    AS->>MQ: publish chat_response_lark(逐段流式)
+    Note over LKS: 渠道契约链:解析→换全局身份→判泳道→存储→规则引擎
+    LKS->>PG: 写 common_message 等公共层表(入站到此为止)
+    AS->>PG: 每一缝查自己未读的 common_message
+    AS->>AS: 组装当下事实(人格/状态/手机信封) + LLM 推理 + 工具调用
+    AS->>MQ: publish chat_response_lark(逐段)
     MQ->>LKO: 消费 chat_response_lark
     LKO->>U: 反查回飞书裸 ID,发送 / 追加回复
 ```
+
+**入站和出站不对称,这是设计要的**:入站是她自己去看(所以"她没看见"这个状态存在得起来),出站才是队列。她这一缝默认最多等十分钟(间隔是 Dynamic Config,不是写死的);私聊、或者群里有人点她的名,会有一条单独的钟把她提前叫到那一刻。
 
 QQ 那条链形状相同,只是入站是 qq-gateway 把 QQ 协议归一化成 `CustomInboundMessage` 后 POST 给 channel-server,出站由 chat-response-worker 消费 `chat_response_qq` 再回投 qq-gateway。
 
 三个服务各自的角色,用人话说:
 
-- **lark-service** 是飞书渠道的全部:入站(长连 + webhook)、common 投影、规则与指令、以及三个定时任务(daily-photo / daily-new-photo / emoji-sync)。入站走一条钉死顺序的契约链——解析 → 收敛成 common 口径 → 平台无关的规则引擎分发 → 存消息 → 发 `chat_request`。出站在同镜像的另一个 Deployment **lark-outbound** 里:它消费 `chat_response_lark` / `recall_lark` 两条队列,把话送到飞书、把判违规的撤掉。拆成两个进程是因为部署策略冲突——持长连的只能单副本 + Recreate,出站是竞争消费、可多副本可滚动更新。
-- **channel-server** 是 QQ 渠道的同类角色(入站 HTTP 入口 + 渠道核心 + 规则引擎),出站在 chat-response-worker。
-- **agent-service** 是「大脑」。它消费 `chat_request`,把赤尾的人格、当前状态、相关记忆「组装」成上下文喂给大模型,用自研的 agent 工具循环驱动推理(不依赖 langchain 之类的框架),推理过程中可以调工具(搜索、画图、找图、执行代码、技能脚本),最后把回复分段流式地丢回 `chat_response` 队列。
+- **lark-service** 是飞书渠道的全部:入站(长连 + webhook + 泳道交接接收端)、common 投影、规则与指令、以及三个定时任务(daily-photo / daily-new-photo / emoji-sync)。入站走一条钉死顺序的契约链——解析 → 收敛成 common 口径 + 换全局身份 → 判泳道(要交接就在这儿停) → 存消息 → 平台无关的规则引擎分发,**到规则引擎的终态为止,不发任何队列**。出站在同镜像的另一个 Deployment **lark-outbound** 里:它消费 `chat_response_lark` / `recall_lark` 两条队列,把话送到飞书、把判违规的撤掉。拆成两个进程是因为部署策略冲突——持长连的只能单副本 + Recreate,出站是竞争消费、可多副本可滚动更新。
+- **channel-server** 是 QQ 渠道的同类角色(入站 HTTP 入口 + 渠道核心 + 规则引擎),同样到落库为止不发队列,出站在 chat-response-worker。跟飞书那条唯一的顺序差别:QQ 先跑规则引擎再落库,飞书先落库再跑规则引擎。
+- **规则引擎对赤尾基本是空转。** 它按 bot 的角色过滤指令:飞书那 10 条里有 9 条声明了 `category: 'utility'`,人设 bot 撞上直接跳过,她唯一会命中的是没声明 category 的「撤回」;QQ 侧的指令表干脆是空的。所以一条普通的 @ 消息走完整个序列没有任何规则接住它,收敛成 `no_match` —— 这是正确终态,不是漏了一条兜底:她要不要开口是她自己在下一缝里决定的,不由入站这一段决定。
+- **agent-service** 是「大脑」。她每一缝直接查 `common_message` 看有没有人找她(`app/living/phone.py`),把赤尾的人格、当下状态、手机信封「组装」成上下文喂给大模型,用自研的 agent 工具循环驱动推理(不依赖 langchain 之类的框架),推理过程中可以调工具(搜索、画图、找图、执行代码、技能脚本、看手机、读文件),决定开口就把话分段丢进 `chat_response` 队列。
 
-除了「回复」这条主线,赤尾还有自己的后台生活(细节见 `docs/chiwei-system-design.md`,这里不展开):**world/life 引擎**(world 按自己定的节奏推演世界,每个角色的 life agent 自主安排并执行生活)和**记忆沉淀**(会话转写沉淀 + 睡前回顾把一天压成记忆页)。这些都跑在 agent-service 主进程里,由 dataflow runtime 驱动。
+「回复」不是独立的一条线,它就是她生活的一部分:同一缝里她既决定要不要换手上的事、去哪儿、记住什么,也决定要不要开口。跟这一缝并排的还有 world(按自己的节奏推演客观世界)和日历(把到点的东西交付给她)。这些全跑在 agent-service 主进程里,由 dataflow runtime 的五条时间源驱动,代码在 `apps/agent-service/app/living/`。
 
 ---
 
 ## 四、RabbitMQ 队列地图
 
-跨服务的异步通信全靠 RabbitMQ。入站方是各渠道服务,出站方是 agent-service,消费方是各渠道自己的出站进程。**「把入站消息交给它该去的泳道」不在这张表里**:那一跳走内部 HTTP + lane-sidecar,不是队列(见第五节)。
+**跨服务的队列只剩出站方向。** 生产者只有 agent-service 一个,消费方是各渠道自己的出站进程。入站不在这张表里,因为入站根本没有队列:渠道服务投影落库,agent-service 自己查(见第三节)。**「把入站消息交给它该去的泳道」也不在这张表里**:那一跳走内部 HTTP + lane-sidecar(见第五节)。
 
-**出站队列按 channel 分区**:队列名和 routing key 都揉进 channel(`chat_response` → `chat_response_lark`,`chat.response` → `chat.response.lark`)。分区维度必须跟消费者的所有权维度一致——飞书的回复只能由持飞书凭证的 lark-outbound 发,一条都不能被别的服务领走。入站的 `chat_request` 不分区:消费者只有 agent-service 一个。
+**出站队列按 channel 分区**:队列名和 routing key 都揉进 channel(`chat_response` → `chat_response_lark`,`chat.response` → `chat.response.lark`)。分区维度必须跟消费者的所有权维度一致——飞书的回复只能由持飞书凭证的 lark-outbound 发,一条都不能被别的服务领走。
 
 ```mermaid
 flowchart LR
-    LKS["lark-service"]
-    CS["channel-server"]
     AS["agent-service"]
     LKO["lark-outbound"]
     CRW["chat-response-worker"]
 
-    LKS ==>|chat_request| AS
-    CS ==>|chat_request| AS
     AS ==>|chat_response_lark| LKO
     AS ==>|recall_lark| LKO
     AS ==>|chat_response_qq| CRW
@@ -147,14 +148,15 @@ flowchart LR
 
 | 队列 | 生产者 | 消费者 | 干什么 |
 |---|---|---|---|
-| `chat_request` | lark-service / channel-server | agent-service | 「请赤尾回这条消息」 |
-| `chat_response_lark` | agent-service | lark-outbound | 「这是赤尾的回复,帮我发飞书」 |
-| `recall_lark` | agent-service(安全审核后) | lark-outbound | 「刚那条要撤回」 |
-| `chat_response_qq` | agent-service | chat-response-worker | 「这是赤尾的回复,帮我发 QQ」 |
+| `chat_response_lark` | agent-service | lark-outbound | 「这是赤尾说的话,帮我发飞书」 |
+| `recall_lark` | agent-service | lark-outbound | 「刚那条要撤回」 |
+| `chat_response_qq` | agent-service | chat-response-worker | 「这是赤尾说的话,帮我发 QQ」 |
 
-agent-service 内部还有一批异步事件(比如 `CommonMessageContentSynced`——消息里的图片落 TOS 后回写消息记录)走 dataflow runtime 的 durable 节点,底下的 RabbitMQ 队列由 runtime 框架按 Data 类型声明和管理,不在上表逐一列出。另有 `proactive_eval` 队列声明了但**没有任何生产者和消费者**,是死队列。
+`chat_response` / `recall` 两条不带 channel 后缀的 base 队列也声明着,但**没有生产者也没有消费者**:它们在代码里只当逻辑 sink 的名字用(`Sink.mq("chat_response")`),真实 routing key 由出站时按 payload 的 channel 现算。同理 `recall_qq` 声明了但 QQ 侧没起 recall 消费者,`proactive_eval` 两头都没有,都是空队列。
 
-所有队列都带泳道后缀(`xxx_<lane>`),泳道队列有 10s TTL,过期后消息降级回 prod 队列——这保证了未部署泳道的服务能 fallback 到线上。
+agent-service 进程内还有两类队列不在上表:一是 durable 边(当前只有一条——她拿起一个文件 → 读一程)底下的队列,由 runtime 框架按 Data 类型和消费者名自动声明(`durable_<data>_<consumer>`);二是 `runtime_delayed_trigger_agent-service`,框架自己的延迟自触发回投。两者的生产者和消费者都在同一个进程里。
+
+所有队列都带泳道后缀(`xxx_<lane>`),泳道队列有 10s TTL,过期后消息降级回 prod 队列——这保证了未部署泳道的服务能 fallback 到线上。例外是 `runtime_delayed_trigger_*`:它按 `lane_fallback=False` 声明,泳道的延迟消息留在自己泳道等到期,不会溢到 prod。
 
 ---
 
@@ -190,7 +192,7 @@ flowchart TB
 
 三条边界决定了它的失败形状:
 
-- **泳道的 Service 不存在时,sidecar 把请求原样打回 prod**。消息由 prod 的代码处理,但**保持泳道的 lane 上下文**,于是 `chat_request_{lane}` 照常投出去、下游泳道服务照常消费。这是设计要的行为:绑定指向一条没部署的泳道不会让 bot 静默变砖。代价是投递方从 HTTP 结果上看不出泳道在不在,所以接收端在响应里回报「接住它的是谁」,投递方据此打 `lane_handoff_total{channel,target_lane,outcome}` 指标(outcome ∈ `lane` / `fallback` / `error`)和 `[lark-handoff]` / `[lane-handoff]` 日志——否则「泳道里的改动怎么没生效」查不出来。
+- **泳道的 Service 不存在时,sidecar 把请求原样打回 prod**。消息由 prod 的代码处理、写进公共层表,泳道的 agent-service 照样能从库里查到它(ppe 泳道跟 prod 共用同一个库;coe 泳道是独立库,prod 写下的那条泳道进程就看不见了)。这是设计要的行为:绑定指向一条没部署 lark-service 的泳道不会让 bot 静默变砖。代价是投递方从 HTTP 结果上看不出泳道在不在,所以接收端在响应里回报「接住它的是谁」,投递方据此打 `lane_handoff_total{channel,target_lane,outcome}` 指标(outcome ∈ `lane` / `fallback` / `error`)和 `[lark-handoff]` / `[lane-handoff]` 日志——否则「泳道里的改动怎么没生效」查不出来。
 - **落回 prod 只在 Service 不存在时发生,不是泳道不健康时**。lite-registry 只 watch Service、不看 ready endpoints,所以泳道 Service 在、Pod 没起来(部署中 / 崩溃 / OOM)时 sidecar 照转不误,拿到 502。而这一跳**不重试**(平台侧早已应答,重试等于同一条消息处理两遍),那条消息就此丢失。
 - 路由表有最长 30s 的轮询延迟,刚部署或刚下掉的泳道在这个窗口里 sidecar 的判断是旧的。
 
@@ -234,7 +236,7 @@ flowchart LR
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark`,发飞书回复与撤回 |
 | channel-server | **channel-server** | HTTP,QQ 入站(`POST /api/internal/qq/inbound`) |
 | channel-server | **chat-response-worker** | 消费 `chat_response_qq`,经 qq-gateway 发 QQ 回复 |
-| agent-service | **agent-service** | 单 Deployment:HTTP(健康检查 + admin)+ chat 消费 + dataflow durable 节点 + world/life 引擎 |
+| agent-service | **agent-service** | 单 Deployment:HTTP(健康检查 + admin/DLQ)+ dataflow runtime(五条时间源 + 一条 durable 边)+ world/life 引擎 |
 | 其余 11 个 | 各自 1 个同名 Deployment | — |
 
 15 = lark-service 2 + channel-server 2 + 其余 11 个目录各 1。两个不在此表的例外:`lane-sidecar` 不是独立 Deployment,而是注入到上面每个业务 pod 里的容器;`tagger-service` 完全不在 K8s 里,跑在裸机 GPU 主机上由 systemd 托管。这两个目录不产出 Deployment,所以 15 个应用目录对应 15 个 Deployment。
@@ -262,12 +264,12 @@ flowchart LR
 
 | 服务 | 栈 | 面 | 一句话职责 |
 |---|---|---|---|
-| lark-service | Bun/TS | 数据面 | 飞书入站(长连 + webhook)+ 渠道契约链 + 规则指令 + 定时任务,决定是否触发 AI |
+| lark-service | Bun/TS | 数据面 | 飞书入站(长连 + webhook + 泳道交接接收端)+ 渠道契约链 + 规则指令 + 定时任务,投影落库即止 |
 | lark-outbound | Bun/TS | 数据面 | 消费 `chat_response_lark` / `recall_lark`,发飞书回复与撤回 + 存储 |
-| channel-server | Bun/TS | 数据面 | QQ 入站 + 渠道契约链 + 规则引擎 + 存储,决定是否触发 AI |
+| channel-server | Bun/TS | 数据面 | QQ 入站 + 渠道契约链 + 规则引擎 + 存储,投影落库即止 |
 | chat-response-worker | Bun/TS | 数据面 | 消费 `chat_response_qq`,经 qq-gateway 发 QQ 回复 + 存储 |
 | qq-gateway | Bun/TS | 数据面 | QQ 官方 bot 协议 ↔ channel-server 通用协议的双向适配 |
-| agent-service | Python | 数据面 | AI 对话引擎(自研 agent 工具循环 + dataflow runtime)+ world/life 引擎 + 记忆沉淀 |
+| agent-service | Python | 数据面 | 赤尾的生活引擎(自研 agent 工具循环 + dataflow runtime 的五条时间源)+ world 推演;她开口也在这一缝里发生 |
 | sandbox-worker | Python | AI 工具 | 隔离环境跑 bash / 技能脚本 |
 | tool-service | Python | AI 工具 | 图像管道(下载→压缩→TOS)+ jieba 关键词 |
 | paas-engine | Go | 控制面 | 构建+部署+网关规则+动态配置+CI+日志+业务库 ops |
@@ -290,7 +292,7 @@ flowchart LR
 
 ### 1. agent-service 主进程承担过多
 
-它同时是 chat 的 MQ 消费者、admin/DLQ 管理 HTTP、一批 dataflow durable 节点,还是 world/life 自主生活引擎的宿主。面向用户的对话延迟,和后台自主行为,挤在同一个 Deployment 里抢资源。
+一个 Deployment 里同时跑着 admin/DLQ 管理 HTTP、五条时间源、world 的推演轮次、三个角色各自的一缝,以及「读一程」那条 durable 边。后面几件都是模型重活,共享同一份 CPU 和同一个进程生命周期——部署一次就把所有正在跑的缝和轮次一起杀掉。
 
 ### 2. paas-engine 是个「全能控制面」
 
@@ -298,4 +300,4 @@ build/release 是本职,但它还累积了网关规则、动态配置、ConfigBu
 
 ### 3. 杂项
 
-跨语言队列契约各写一遍(TS 的 `rabbitmq.ts` 和 Python 的 wiring 各一份,有漂移风险);`proactive_eval` 是死队列;`CLAUDE.md` 的项目结构只列常用的几个 app(全量 15 个目录的清单在根 README 和本文档)。
+跨语言队列契约各写一遍(TS 的 `packages/ts-shared/src/mq/client.ts` 和 Python 的 `apps/agent-service/app/infra/rabbitmq.py` 各一份,有漂移风险);`proactive_eval` 两头都没有,`recall_qq` 只有生产侧声明、QQ 没起消费者,都是空队列;`CLAUDE.md` 的项目结构只列常用的几个 app(全量 15 个目录的清单在根 README 和本文档)。

@@ -1,6 +1,6 @@
 # Dataflow Framework — 人看版
 
-agent-service 的消息流转框架，跨节点用 Data 不可变对象传，wire 声明谁连谁。AI 上手版见 `dataflow-framework.md`（992 行字典）。本文给人看，10 分钟知道这套框架有什么。
+agent-service 的消息流转框架，跨节点用 Data 不可变对象传，wire 声明谁连谁。AI 上手版见 `dataflow-framework.md`（字典式，按需查）。本文给人看，10 分钟知道这套框架有什么。
 
 ## 元素全景
 
@@ -20,22 +20,29 @@ flowchart LR
 - **wire** — 声明 Data 怎么连到哪个 node，写在 `app/wiring/*.py`
 - **Source** — 图的入口（MQ / cron / interval / HTTP）
 - **Sink** — 图的出口（把 Data 写到 MQ 让图外消费者读）
-- **Capability** — 外部能力封装（LLM / Embedder / VectorStore / HTTP / Agent）
+- **Capability** — 外部能力封装（LLM / Agent / HTTP / Redis / 沙箱 / 图像 / 搜索 / 输出安全）
 
-## 一条消息怎么流（chat 主链路）
+## 图里现在跑什么（living 引擎）
 
 ```mermaid
 flowchart LR
-    MQin([MQ chat_request]) --> R[route_chat_node]
-    R --> C[chat_node]
-    C --> MQout([MQ chat_response])
-    C --> P[run_pre_safety]
-    P --> Recall([MQ recall])
-    C -.-> LLM[(LLM)]
-    P -.-> LLM
+    T60([interval 60s]) --> CAL[calendar_tick]
+    T60 --> MOM[life_moment_tick]
+    T60 --> NUD[phone_nudge_tick]
+    T300([interval 300s]) --> WLD[world_round_tick]
+    T300 --> LND[landing_tick]
+    MOM --> Seg([MQ chat_response])
+    MOM --> Rec([MQ recall])
+    MOM -. durable .-> RR[read_a_round]
+    MOM -.-> LLM[(LLM)]
+    RR -.-> LLM
 ```
 
-飞书消息 → channel-server publish 到 `chat_request` → 进图 → `chat_response` 出图 → chat-response-worker 调飞书 send_message。
+**图里没有入站队列**，五条边界全是 `Source.interval`（`app/wiring/living.py`）。她每一缝直接查 `common_message` 看有没有人找她（`app/living/phone.py`），自己决定要不要开口 —— 没有谁把消息推给她。
+
+开口那侧出图：`ChatResponseSegment` → `Sink.mq("chat_response")` → 按 channel 落 `chat_response_lark` / `chat_response_qq`，飞书那条由 lark-outbound 消费、QQ 那条由 chat-response-worker 消费。撤回同理，`Recall` → `Sink.mq("recall")` → `recall_{channel}`。
+
+`read_a_round` 那条是**图内的 durable 边**（`FilePickedUp`）：她在某一缝拿起一个文件，读那一程（取字节、解码、几轮模型调用）在边的另一头异步跑，不把她卡在一缝里。durable 只是边的传输方式，不是入口 —— 边上跑的只有她自己刚 emit 的那个信号。
 
 ## 边的两种：默认 vs durable
 

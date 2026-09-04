@@ -17,7 +17,7 @@ apps/
   lark-service/   # 飞书渠道服务 (Bun/TS) - 入站 + 出站，同一镜像产出 2 个独立 Deployment（见下方映射表）
   channel-server/ # QQ 渠道服务 (Bun/TS) - 同一镜像产出 2 个独立 Deployment（见下方映射表）
   qq-gateway/     # QQ 官方 bot 适配 (Bun/TS) - QQ 协议 ↔ channel-server 通用协议
-  agent-service/  # AI 对话引擎 (Python)
+  agent-service/  # 生活引擎 (Python) - 她自己醒、自己看、自己决定说不说
   api-gateway/    # 反向代理入口 (Go)
 ```
 
@@ -31,7 +31,7 @@ apps/
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark` 两条出站队列，发飞书消息与撤回 |
 | channel-server | **channel-server** | HTTP 服务，QQ 入站（`POST /api/internal/qq/inbound`，由 qq-gateway 投递） |
 | channel-server | **chat-response-worker** | 消费 RabbitMQ 回复队列，经 qq-gateway 发 QQ 消息 |
-| agent-service | **agent-service** | HTTP 服务，AI 对话 + world/life 引擎 |
+| agent-service | **agent-service** | 生活引擎：五条钟自己跑，每一缝查库决定要不要开口。**不消费任何入站队列**。另有运维 HTTP（health、admin DLQ） |
 
 **常见错误：查 chat-response-worker 的日志时用 `make logs APP=channel-server`，这是错的。** chat-response-worker 是独立 Deployment，必须用 `make logs APP=chat-response-worker`。同理 lark-outbound 也是独立服务，飞书发不出消息要查 `make logs APP=lark-outbound`，不是 `APP=lark-service`。
 
@@ -44,9 +44,10 @@ apps/
 `/webhook/{bot}/{event,card}` 路由仍然注册着，走 api-gateway 进来，是长连之外的被动入口。
 
 ```
-飞书 --websocket 长连--> lark-service:3000 (投影 common 口径 + 规则引擎 + 决定 lane)
-     → RabbitMQ: chat_request 队列
-     → agent-service:8000 (AI 对话, 工具调用)
+飞书 --websocket 长连--> lark-service:3000 (投影成 common 口径写进 common_message + 规则引擎跑飞书指令 + 决定 lane)
+     ↓ 入站到此为止，没有队列
+
+agent-service:8000 (五条钟自己醒，每一缝直接查 common_message，自己决定要不要开口)
      → RabbitMQ: chat_response_lark / recall_lark 队列
      → lark-outbound → 飞书
 ```
@@ -55,14 +56,17 @@ apps/
 
 ```
 QQ bot gateway --websocket 长连--> qq-gateway (QQ 协议 → CustomInboundMessage)
-   → channel-server:3000 (POST /api/internal/qq/inbound)
-   → RabbitMQ: chat_request 队列
-   → agent-service:8000
+   → channel-server:3000 (POST /api/internal/qq/inbound) → 投影成 common 口径写进 common_message
+     ↓ 同样到此为止
+
+agent-service:8000 (同上，每一缝查库)
    → RabbitMQ: chat_response_qq 队列
    → chat-response-worker → qq-gateway (POST /qq/outbound) → QQ
 ```
 
-未部署泳道的服务自动 fallback 到 prod（基于 K8s Service DNS，不依赖 Istio）。
+**入站和出站是断开的。** agent-service 不消费任何入站队列（`Source.mq` 在 `app/` 下零命中），「收到消息就回」这件事在代码里不存在——她看完未读自己决定说不说，说了才走出站那两条队列。
+
+未部署泳道的服务自动 fallback 到 prod（基于 K8s Service DNS，不依赖 Istio）。**但这条只覆盖入站的 HTTP 交接和出站队列**：agent-service 那一段不在任何泳道路由上，她读的 `common_message` 也没有 lane 列，所以共用同一个库的两条泳道会看到同一批消息。详见 `.claude/rules/e2e-testing.md`。
 
 ### 部署链路
 

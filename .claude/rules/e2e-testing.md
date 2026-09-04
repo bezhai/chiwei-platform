@@ -6,9 +6,11 @@
 
 ## 泳道选择
 
-飞书 dev bot 测试可走 `ppe-<name>` 或 `coe-<name>`，由你的改动会写什么决定：
+**先看一条硬约束：验 agent-service 的改动只能走 `coe-<name>`。** 入站已经没有按泳道分的队列，而她读的 `common_message` 没有 lane 列——谁看到一条消息只取决于谁在查那个库。放 ppe 上只有两种结果：泳道的 agent-service 时间源默认关着（`time_sources_enabled_by_default` 对非 prod 返回 False），她根本不醒，你验的是 prod 的代码；或者你用 `DATAFLOW_ENABLE_TIME_SOURCES=1` 打开它，于是 prod 和泳道两个 agent-service 盯着同一批未读各回各的，**线上真人会收到两条**。coe 有独立的库，消息落在 chiwei-test，天然隔开。
 
-- **`ppe-<name>`（共用 prod 组件）**：表 / 历史 / 种子配置都用线上的，开箱即用。代价：dev bot 触发的所有写入（消息记录、recall、新表新字段）直接落 prod，schema 变更或脏数据会污染线上历史。**适合**：纯读路径、prompt 调优、不动 DB 的逻辑。
+验 lark-service / channel-server / lark-outbound 自己的改动（入站投影、规则引擎、出站投递）两种都行，那几段仍然按泳道走：
+
+- **`ppe-<name>`（共用 prod 组件）**：表 / 历史 / 种子配置都用线上的，开箱即用。代价：dev bot 触发的所有写入（消息记录、recall、新表新字段）直接落 prod，schema 变更或脏数据会污染线上历史；而且消息落的是 prod 库，所以**回话的是 prod 的 agent-service**。**适合**：入站投影、规则引擎、出站投递这些不动 DB 也不碰 agent-service 的改动。
 - **`coe-<name>`（独立 chiwei-test 容器）**：写入只影响 chiwei-test，破坏不外溢。代价是要**提前准备 chiwei-test 数据**：
   - **schema**：`ensure_business_schema()` 在 coe-* 启动时自动建，但只覆盖 framework 注册过的 Data；新加的表 / 字段没注册就建不出来，要先在 framework 里注册
   - **种子数据**：dev bot 跑通必须读到的 user / persona / bot 配置等，要从 prod dump 一份到 chiwei-test 对应库
@@ -37,8 +39,11 @@
   → lane-sidecar 透明选路：读 header 查 lite-registry，把 lark-service:3000 改写成 lark-service-X:3000
   → lark-service(X) 接住信封，以信封里的 lane 建上下文继续处理
       （原始报文在 prod 那次已经记过，这里不重复审计落库）
-  → chat_request_X 队列 → agent-service(X)
-  → chat_response_lark_X 队列 → lark-outbound(X) → 飞书回复
+  → 投影成 common 口径写进 common_message —— 入站到此为止，没有队列
+
+agent-service(X) 靠自己的钟醒来，每一缝查 common_message 才看到它
+      （前提是 X 是 coe：ppe 共用 prod 库，看到它的是 prod 那个进程，见上方硬约束）
+  → 她决定开口 → chat_response_lark_X 队列 → lark-outbound(X) → 飞书回复
 ```
 
 交接打的目标服务名就是 `lark-service` 自己，泳道后缀由 sidecar 按 `x-ctx-lane` 改写，业务代码里没有任何路由逻辑。这一跳**不重试**——飞书早已应答，重试就是同一条消息处理两遍。
@@ -51,7 +56,7 @@
 
 入站和出站各有一条兜底，这就是「只部你改的那个服务」能成立的原因：
 
-- **入站**：泳道的 K8s Service 不存在时，sidecar 把交接请求原样打回 prod。消息由 prod 的代码处理，但**保持泳道的 lane 上下文**——`chat_request_{lane}` 照常投出去，下游泳道服务照常消费。所以绑定指向一条没部署 lark-service 的泳道不会让 bot 静默变砖。
+- **入站**：泳道的 K8s Service 不存在时，sidecar 把交接请求原样打回 prod，消息由 prod 的代码投影落库。所以绑定指向一条没部署 lark-service 的泳道不会让 bot 静默变砖。但**泳道上下文到落库为止就断了**——入站不再有按泳道分的队列，往下谁看到这条消息只取决于谁在查那个库。
 - **出站**：泳道队列的 10s TTL 到期后消息降级回 prod 队列，泳道没有 lark-outbound 时，回复 10 秒后由 prod 的 lark-outbound 发出。
 
 **兜底不管你想验什么，这是最容易吃的假绿。** 改动在 lark-outbound 里却没部它，回复由 prod 的 lark-outbound 发出——你在飞书看到赤尾正常回话，而你的改动一行都没跑。改 lark-service 入站逻辑不部 lark-service 同理，落回 prod 跑的是线上代码。所以：**改哪个服务就必须部哪个服务**。
@@ -72,7 +77,7 @@
 
 ## 泳道测不到的部分
 
-泳道部署只覆盖**交接之后**的处理路径（事件处理、agent 调用、出站）。以下几件只在 prod 跑，泳道测不到：
+泳道部署只覆盖**交接之后**的处理路径（投影落库、出站投递；她那一段见上方硬约束，只有 coe 覆盖得到）。以下几件只在 prod 跑，泳道测不到：
 
 - websocket 接收与飞书开放平台的连接管理
 - 原始报文审计落库
