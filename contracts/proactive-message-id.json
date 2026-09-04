@@ -12,13 +12,28 @@
     "那次开口在库里永久失联，全程零报错。两侧测试读同一份文件之后，要骗过测试就得改共享的",
     "这一份，而改了这一份，两侧一起转红。",
     "",
+    "`outbound_id_vector` 钉的是同一次开口的 id 那两种写法**是同一个值**。",
+    "app/living/mouth.py 一次派生、两处取值：`outbound_id = derived.hex`（32 位无短横）记进她自己",
+    "的台账，`message_id = proactive:<derived>`（带短横的标准 uuid）走线格式发出去、由投递方落进",
+    "uuid 列 agent_outbound_id。她眼前只出现 hex 那一种（快照的「你刚做过、说过」、打开会话时她自己",
+    "那几行），而查库要用带短横那一种。",
+    "",
+    "两种写法之间换算错了同样零报错：她照抄的编号查不到任何行，撤回只会说「没有这条」，看不出是",
+    "写法错了而不是那条消息不存在。此前两侧的契约只钉了前缀，证明不了这两种写法指的是同一次开口。",
+    "",
     "读它的是测试，不是生产代码：两个镜像的 Dockerfile 都不 COPY contracts/，且 lark-service 是",
     "`bun build --compile` 出来的独立二进制（运行时 import.meta.dir = /$bunfs/root），运行时读不到",
     "这份文件。跟 contracts/mq-channel-routes.json 是同一套做法。",
     "",
     "读取方：",
     "  apps/lark-service/src/lark/outbound/proactive-message-id.test.ts",
-    "  apps/agent-service/tests/domain/test_proactive_message_id_contract.py"
+    "  apps/agent-service/tests/domain/test_proactive_message_id_contract.py",
+    "  apps/agent-service/tests/living/test_phone.py（她打开会话时看到的那个编号）"
   ],
-  "message_id_prefix": "proactive:"
+  "message_id_prefix": "proactive:",
+  "outbound_id_vector": {
+    "hex": "0f5a3b1c8e7d4a2b9c6f1e0d3a8b7c65",
+    "uuid": "0f5a3b1c-8e7d-4a2b-9c6f-1e0d3a8b7c65",
+    "message_id": "proactive:0f5a3b1c-8e7d-4a2b-9c6f-1e0d3a8b7c65"
+  }
 }

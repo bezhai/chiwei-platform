@@ -1,11 +1,15 @@
 """手机 —— 信封可感，内容要她去看。
 
-四条硬边界，各有对应的用例：
+五条硬边界，各有对应的用例：
 
   * **每一缝拿到的只有信封。** 有没有动静、谁、多密多快、跟她刚才干的事有没有牵连。
     正文一个字都不在信封里 —— 不然"看手机"就成了摆设，她躺着就把消息读完了。
+  * **打开一条会话看到的是最近若干条往来**，双向、含她自己说过的、含读过的上文。
+    窗口、未读、游标是三件事：窗口不看游标，未读是"游标之后别人发的没撤的"，游标只
+    推到未读里最新那条。
   * **看手机是她的动作，成功返回之后才推游标。** 中途炸掉 = 一条都不算已读。
-  * **跳过的永久丢失。** 她只看最后几条，中间的不会补看：真人"未读 47 条"就是这样。
+  * **挤出窗口的那些永久丢失。** 她只看最后十来条，前面的不会补看：真人"未读 47 条"
+    就是这样。
   * **睡觉时消息照堆、不算已读。** 她没做这个动作，游标就不动。
 """
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -47,6 +52,19 @@ _UUID7_B = uuid.UUID("01920000-0000-7000-8000-00000000000b")
 _DM = uuid.uuid5(uuid.NAMESPACE_OID, "conv-dm-bezhai-akao")
 _GROUP = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-lab")
 _OTHERS_DM = uuid.uuid5(uuid.NAMESPACE_OID, "conv-dm-bezhai-ayana")
+
+# 她能拿去撤回的那个编号，两种写法是同一个值：她眼前只见得到 32 位无短横的 hex
+# （快照的「你刚做过、说过」印的就是它），而 ``common_message.agent_outbound_id``
+# 是 uuid 列、存带短横那一种。**这份向量两侧共读**，TS 那边是
+# ``apps/lark-service/src/lark/outbound/proactive-message-id.test.ts``；换算错了全程
+# 零报错 —— 她照抄的编号查不到任何行，撤回只说"没有这条"。
+_OUTBOUND_VECTOR = json.loads(
+    (
+        Path(__file__).resolve().parents[4]
+        / "contracts"
+        / "proactive-message-id.json"
+    ).read_text(encoding="utf-8")
+)["outbound_id_vector"]
 
 async def _seed_noisy_groups(how_many: int, *, at_from: dt.datetime) -> list[str]:
     """一堆在刷屏、但**没点她名字**的群。信封上限该截的正是这些。"""
@@ -224,6 +242,7 @@ async def _bot_said(
     bot_name: str,
     bot_uid: uuid.UUID,
     display_name: str,
+    outbound_id: str | None = None,
 ) -> str:
     """某个 bot 在这条会话里说过的一句（``role='assistant'``）。
 
@@ -233,6 +252,11 @@ async def _bot_said(
 
     **``role`` 只说明"这是某个 bot 发的"，说不出是哪个。** 三姐妹在同一个群里，
     她们的出站落在这张表里长得一模一样 —— 分得开的只有 ``bot_name``。
+
+    ``outbound_id`` 给了才写 ``agent_outbound_id``（带短横的标准 uuid，投递方剥掉
+    ``proactive:`` 前缀之后落的就是它）。**只有主动发起的那些行有这一列**：她回复
+    别人的消息走另一条链，那条链不写这一列，所以那些消息她撤不了。留空正是在摆那种
+    行的真实形状。
     """
     mid = uuid.uuid4()
     resolved_scope = "direct" if conv in (_DM, _OTHERS_DM) else "group"
@@ -242,9 +266,10 @@ async def _bot_said(
                 "INSERT INTO common_message "
                 "(common_message_id, channel, common_conversation_id, common_user_id,"
                 " sender_display_name, role, content, content_text, scope, bot_name,"
-                " event_time) "
+                " event_time, agent_outbound_id) "
                 "VALUES (CAST(:m AS uuid), 'lark', CAST(:c AS uuid), CAST(:u AS uuid),"
-                " :sn, 'assistant', CAST(:body AS jsonb), :txt, :sc, :bn, :et)"
+                " :sn, 'assistant', CAST(:body AS jsonb), :txt, :sc, :bn, :et,"
+                " CAST(:oid AS uuid))"
             ),
             {
                 "m": str(mid),
@@ -258,6 +283,7 @@ async def _bot_said(
                 "sc": resolved_scope,
                 "bn": bot_name,
                 "et": _ms(at),
+                "oid": outbound_id,
             },
         )
     return str(mid)
@@ -281,7 +307,11 @@ async def _recalled_on_the_channel(message_id: str, *, at: dt.datetime) -> None:
 
 
 async def _her_own(conv: uuid.UUID, *, text_body: str, at: dt.datetime) -> str:
-    """她自己在这条会话里说过的一句（她的 bot 是 ``chiwei``）。"""
+    """她自己在这条会话里说过的一句（她的 bot 是 ``chiwei``）。
+
+    **不带 ``agent_outbound_id``** —— 这是她**回复**别人时那条链落下的形状，撤不了。
+    她主动发起的那些用 :func:`_her_own_proactive`。
+    """
     return await _bot_said(
         conv,
         text_body=text_body,
@@ -290,6 +320,34 @@ async def _her_own(conv: uuid.UUID, *, text_body: str, at: dt.datetime) -> str:
         bot_uid=_AKAO_BOT_UID,
         display_name="赤尾",
     )
+
+
+async def _her_own_proactive(
+    conv: uuid.UUID,
+    *,
+    text_body: str,
+    at: dt.datetime,
+    outbound_uuid: str | None = None,
+) -> tuple[str, str]:
+    """她**主动发起**的一句，带着那次开口的编号。
+
+    返回 ``(这一行的 common_message_id, 她眼前该看到的那种写法)`` —— 后者是 32 位无
+    短横的 hex，跟库里那一列（带短横的标准 uuid）是同一个值。
+
+    真链路是：嘴那边派生一个 uuid，把 ``proactive:<uuid>`` 挂在出站信封上，投递方剥掉
+    前缀把 uuid 落进 ``agent_outbound_id``。她能撤的严格就是这些行。
+    """
+    dashed = outbound_uuid or str(uuid.uuid4())
+    mid = await _bot_said(
+        conv,
+        text_body=text_body,
+        at=at,
+        bot_name="chiwei",
+        bot_uid=_AKAO_BOT_UID,
+        display_name="赤尾",
+        outbound_id=dashed,
+    )
+    return mid, uuid.UUID(dashed).hex
 
 
 async def _sister_said(conv: uuid.UUID, *, text_body: str, at: dt.datetime) -> str:
@@ -382,8 +440,317 @@ async def test_an_empty_phone_says_so_instead_of_leaving_a_hole(living_db):
 
 
 # --------------------------------------------------------------------------
-# 三 · 游标只在看手机成功之后推进
+# 三 · 打开一条会话 —— 窗口、未读、游标是三件事
 # --------------------------------------------------------------------------
+#
+# 改之前这三件事是同一个查询条件的三个身份：那条查询同时带着"不是她自己发的"、
+# "没撤掉的"、"游标之后的"，于是"看手机"不是翻聊天记录，是**看未读**。
+#
+# 实证（coe-living，2026-09-04）：她自己撤回了一句话，8 分钟后还在问主人"你刚才到底
+# 发了啥、这么想让我看到又撤回"。那一缝她眼前只有孤零零一句「还真的能撤回啊」——
+# 前面的来回全在游标之前，而读过的消息不进任何持久记忆。**决定说什么的那个模型，
+# 从来没见过一段双向对话。**
+#
+# 三件事分开之后：
+#
+#   * **未读集合 U** = 游标之后的、别人发的、没撤掉的。判据跟改之前逐字相同。
+#   * **展示窗口 W** = 这条会话上最近若干条，不看游标、不分谁发的，含她自己撤掉的
+#     那条（留痕迹），不含别人撤掉的。
+#   * 「其中 N 条是新的」= |U ∩ W|；「前面还有 K 条你没往回翻」= |U − W|。
+#   * **游标推到 max(U)，不是 max(W)**：W 里最新那条可能是她自己发的、晚于任何未读，
+#     推到它身上会让之后乱序到达、时刻更早的消息被永久跳过，也会让措辞模型那侧把她
+#     根本没见过的消息当成"她已经知道的"。
+
+
+@pytest.mark.integration
+async def test_opening_a_conversation_shows_both_sides_of_it(living_db, in_a_moment):
+    """她点开一条会话，看到的是一段**双向**的往来，按时间顺序。
+
+    这是根因那一条：只给她看未读，她眼前就永远只有对方那一半，无从知道这段对话进行
+    到哪了。真人点开一个会话看到的也正是双向的最近若干条。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="你现在能撤回飞书消息没", at=_at(14, 50))
+    await _her_own(_DM, text_body="可以哦～", at=_at(14, 50, 30))
+    await _incoming(_DM, text_body="还真的能撤回啊", at=_at(14, 58))
+
+    async with in_a_moment("akao", now=_at(14, 59)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "你：可以哦～" in seen, (
+        f"她自己说过的那句不在眼前 —— 她看到的仍然只有对话的一半。拿到：\n{seen}"
+    )
+    assert (
+        seen.index("你现在能撤回飞书消息没")
+        < seen.index("你：可以哦～")
+        < seen.index("还真的能撤回啊")
+    ), f"往来的先后乱了。拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_a_conversation_with_nothing_unread_still_shows_the_recent_exchange(
+    living_db, in_a_moment
+):
+    """一条未读都没有时打开会话，仍然看得到最近的往来。
+
+    改之前这种情况她看到的是空的（"没有新消息"）—— 于是"再看一眼刚才说到哪了"这个
+    真人每天都在做的动作，在这个引擎里根本不存在。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="周末那家抹茶店你去过没", at=_at(21, 30))
+    async with in_a_moment("akao", now=_at(21, 31)):
+        await look_at_phone.invoke({"channel_id": str(_DM)})  # 读完，未读归零
+    await _her_own(_DM, text_body="去过呀", at=_at(21, 32))
+
+    assert await envelopes_for(lane=LANE, persona_id="akao") == [], (
+        "用例前提没成立：这条会话该已经没有未读了"
+    )
+
+    async with in_a_moment("akao", now=_at(21, 40)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "周末那家抹茶店你去过没" in seen and "你：去过呀" in seen, (
+        f"一条未读都没有的时候她眼前是空的 —— 她再也回不去看刚才说到哪了。拿到：\n{seen}"
+    )
+    assert "其中 0 条是新的" in seen, f"没有新消息这件事得说出来。拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_a_conversation_with_nothing_unread_does_not_move_the_cursor(
+    living_db, in_a_moment
+):
+    """没有未读时打开会话，游标一动不动 —— 窗口里那些行不是"读到了这儿"的依据。
+
+    游标只由未读集合决定。让窗口推游标的话，她开口说了句话、下一缝随手点开会话，
+    游标就跳到她自己那句上，之后乱序到达、时刻更早的消息永久被跳过。
+    """
+    await _seed_world()
+    first = await _incoming(_DM, text_body="在吗", at=_at(21, 30))
+    async with in_a_moment("akao", now=_at(21, 31)):
+        await look_at_phone.invoke({"channel_id": str(_DM)})
+    landed = await read_through(lane=LANE, persona_id="akao", channel_id=str(_DM))
+    assert landed == (_ms(_at(21, 30)), first)
+
+    await _her_own(_DM, text_body="在的", at=_at(21, 32))
+    async with in_a_moment("akao", now=_at(21, 40)):
+        await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert (
+        await read_through(lane=LANE, persona_id="akao", channel_id=str(_DM))
+    ) == landed, "一条未读都没有，游标却动了"
+
+
+@pytest.mark.integration
+async def test_her_own_latest_word_does_not_take_the_cursor(living_db, in_a_moment):
+    """窗口里最新那条是她自己发的时，游标停在**未读**里最新那条上。
+
+    推到她自己那句上有两处后果：之后乱序到达、时刻更早的消息被永久跳过；而且措辞
+    模型那侧（``conversation_as_she_knows_it`` 按游标开窗）会把她根本没见过的消息
+    当成"她已经知道的"。
+    """
+    await _seed_world()
+    unread = await _incoming(_DM, text_body="在吗", at=_at(21, 30))
+    await _her_own(_DM, text_body="在呢", at=_at(21, 31))
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "你：在呢" in seen, "她自己那句本该在窗口里"
+    assert (
+        await read_through(lane=LANE, persona_id="akao", channel_id=str(_DM))
+    ) == (_ms(_at(21, 30)), unread), (
+        "游标被推到了她自己发的那条上 —— 比它早、之后才到的消息从此看不见了"
+    )
+
+
+@pytest.mark.integration
+async def test_it_says_how_many_of_them_are_new(living_db, in_a_moment):
+    """「其中 N 条是新的」= 未读集合与展示窗口的交集。
+
+    窗口里会有她上一缝已经看过的消息（决策 2b：不配任何"防重复回应"的规则），所以
+    哪些是新到的必须直接说出来 —— 她读得出来，读不出来也是她的判断。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="早上好", at=_at(9, 0))
+    async with in_a_moment("akao", now=_at(9, 1)):
+        await look_at_phone.invoke({"channel_id": str(_DM)})
+    await _her_own(_DM, text_body="你也早", at=_at(9, 2))
+    await _incoming(_DM, text_body="中午吃什么", at=_at(12, 0))
+    await _incoming(_DM, text_body="想吃拉面", at=_at(12, 1))
+
+    async with in_a_moment("akao", now=_at(12, 5)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "其中 2 条是新的" in seen, f"新到几条算错了。拿到：\n{seen}"
+    assert "早上好" in seen and "你也早" in seen, (
+        f"读过的上文被挡在外面了 —— 那正是她看不懂对话进行到哪的原因。拿到：\n{seen}"
+    )
+
+
+@pytest.mark.integration
+async def test_her_own_words_take_up_room_in_the_window(living_db, in_a_moment):
+    """窗口是"最近若干条"，她自己发的照样占位置，被挤出去的未读因此更多。
+
+    这条把三件事同时钉住：窗口不分谁发的（10 条里有她 4 条）、「其中 N 条是新的」只
+    数未读（6 条）、「前面还有 K 条」是被挤出窗口的未读（2 条）。三者用同一条判据算
+    的话，这里必然对不上。
+    """
+    await _seed_world()
+    for i in range(8):
+        await _incoming(
+            _GROUP,
+            text_body=f"路人第{i}句",
+            at=_at(20, i),
+            sender=_SOMEONE,
+            sender_name="路人",
+        )
+    for i in range(4):
+        await _her_own(_GROUP, text_body=f"我第{i}句", at=_at(20, 10 + i))
+
+    async with in_a_moment("akao", now=_at(20, 20)):
+        seen = await look_at_phone.invoke({"channel_id": str(_GROUP)})
+
+    assert "其中 6 条是新的" in seen and "还有 2 条" in seen, (
+        f"窗口 10 条 = 她自己 4 条 + 最近 6 条未读，未读一共 8 条。拿到：\n{seen}"
+    )
+    assert "路人第0句" not in seen and "路人第1句" not in seen, (
+        f"被挤出窗口的那两条还在眼前。拿到：\n{seen}"
+    )
+    assert "路人第2句" in seen and "我第3句" in seen, f"拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_the_window_and_the_unread_set_come_from_one_query(
+    living_db, in_a_moment
+):
+    """展示窗口和未读集合由**同一条 SQL** 一次问出来。
+
+    分成两条查询时它们来自两个快照：``app/data/session.py`` 没配更强的隔离级别，
+    PostgreSQL 默认 ``READ COMMITTED`` 下同一个事务里连续两条 ``SELECT`` 看到的
+    快照可以不同。一条新消息刚好在两条查询之间提交，它不在窗口里、却成了未读里最新
+    那条 —— 游标推到它身上，这条她从没见过的消息就被永久跳过了，一句报错都没有。
+    并发撤回则让「其中 N 条是新的」和未读总数互相对不上。
+
+    库层面的并发在集成测试里造不出来（要卡在两条查询之间提交一条消息），所以这里钉
+    的是**可判定的那件事：这一眼只对库发了一条读 ``common_message`` 的语句**。拆回
+    两条的话这个数立刻变 2。同时把两条查询各自的产出都验一遍，确认那一条语句真的
+    同时回答了三个问题：窗口是哪几行、未读一共几条、未读里最新那条是哪条。
+    """
+    from sqlalchemy import event
+
+    read_common_message: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if "common_message" in statement and statement.lstrip()[:6].upper() != "INSERT":
+            read_common_message.append(statement)
+
+    await _seed_world()
+    # 12 条未读 + 她自己最后说的一句：窗口（10 条）装不下全部未读，而窗口里最新那条
+    # 是她自己发的 —— 未读总数和 max(U) 都不是窗口自己算得出来的。
+    latest_unread = ""
+    for i in range(12):
+        latest_unread = await _incoming(_DM, text_body=f"第{i}条", at=_at(20, i))
+    await _her_own(_DM, text_body="马上回你", at=_at(20, 12))
+
+    event.listen(living_db.sync_engine, "before_cursor_execute", record)
+    try:
+        async with in_a_moment("akao", now=_at(20, 20)):
+            seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+    finally:
+        event.remove(living_db.sync_engine, "before_cursor_execute", record)
+
+    assert len(read_common_message) == 1, (
+        f"这一眼对库发了 {len(read_common_message)} 条读 common_message 的语句 —— "
+        f"窗口和未读来自两个快照，中间提交的那条消息会被永久跳过。"
+        f"拿到：\n" + "\n---\n".join(read_common_message)
+    )
+    assert "其中 9 条是新的" in seen, f"窗口里的未读数算错了。拿到：\n{seen}"
+    assert "还有 3 条" in seen, f"未读总数算错了。拿到：\n{seen}"
+    assert (
+        await read_through(lane=LANE, persona_id="akao", channel_id=str(_DM))
+    ) == (_ms(_at(20, 11)), latest_unread), "游标没落在未读里最新那条上"
+
+
+@pytest.mark.integration
+async def test_only_the_words_she_can_take_back_carry_a_handle(
+    living_db, in_a_moment
+):
+    """编号只印在她自己发的、**真能撤**的那些行上。
+
+    真人是看着消息上有没有"撤回"这个选项知道边界的 —— 那是眼前的事实，不是规则文本。
+    她回复别人的消息走另一条链，库里没有这个编号、撤不了；印上去就是给她一个指了会
+    失败的东西。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(21, 29))
+    _, handle = await _her_own_proactive(_DM, text_body="在呢在呢", at=_at(21, 30))
+    await _her_own(_DM, text_body="刚看到消息", at=_at(21, 31))
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert f"你：在呢在呢［{handle}］" in seen, (
+        f"她主动发的那句没带编号 —— 撤回时她指不动任何一条。拿到：\n{seen}"
+    )
+    assert seen.count("［") == 1, (
+        f"撤不了的行也带上了编号（她回复别人的那条、别人发的那条）。拿到：\n{seen}"
+    )
+    assert "［］" not in seen, f"印了个空编号出去。拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_the_handle_here_is_the_one_the_snapshot_already_printed(
+    living_db, in_a_moment
+):
+    """会话里印的编号，跟「你刚做过、说过」那段里印的**逐字一致**。
+
+    她见到的写法只有 32 位无短横的 hex，而库里 ``agent_outbound_id`` 是标准 uuid。
+    两处形状不一致的话她会以为那是两种编号；换算错了则是照抄之后撤了个空 —— 两种
+    都不报错。写法之间的相等关系由两侧共读的成对向量钉住（``_OUTBOUND_VECTOR``）。
+    """
+    from app.living.records import (
+        KIND_SPEECH,
+        MEDIUM_PHONE,
+        OUTBOUND_HAPPENING_PREFIX,
+        Happening,
+    )
+    from app.living.snapshot import _own_line
+
+    await _seed_world()
+    _, handle = await _her_own_proactive(
+        _DM,
+        text_body="在呢在呢",
+        at=_at(21, 30),
+        outbound_uuid=_OUTBOUND_VECTOR["uuid"],
+    )
+    assert handle == _OUTBOUND_VECTOR["hex"], "向量里那两种写法不是同一个值"
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    printed_in_snapshot = _own_line(
+        Happening(
+            lane=LANE,
+            happening_id=f"{OUTBOUND_HAPPENING_PREFIX}{_OUTBOUND_VECTOR['hex']}",
+            seq=1,
+            actor="akao",
+            place="家/我房间",
+            kind=KIND_SPEECH,
+            medium=MEDIUM_PHONE,
+            content="在呢在呢",
+            occurred_at=_at(21, 30),
+            audience=["bezhai"],
+            who_was_where={},
+            channel_id=str(_DM),
+        )
+    )
+    marker = f"［{_OUTBOUND_VECTOR['hex']}］"
+    assert marker in printed_in_snapshot, (
+        f"用例前提没成立：快照那段印的不是这个形状。拿到：{printed_in_snapshot}"
+    )
+    assert marker in seen, (
+        f"会话里的编号跟快照那段对不上 —— 她会以为那是两种编号。拿到：\n{seen}"
+    )
 
 
 @pytest.mark.integration
@@ -451,12 +818,14 @@ async def test_a_moment_that_never_finished_did_not_read_anything(
 
 
 @pytest.mark.integration
-async def test_looking_twice_in_one_moment_does_not_show_the_same_batch_again(
+async def test_looking_twice_in_one_moment_shows_the_same_window_and_nothing_new(
     living_db, in_a_moment
 ):
-    """一缝里看两次，第二次不该把刚看过的再摆一遍。
+    """一缝里第二次打开同一条会话：**窗口内容相同**，「其中 N 条是新的」为 0。
 
-    游标延到缝末落库之后，这一条就是它唯一的代价：本缝内的"已经看过"必须自己记着。
+    真人再点开一次看到的也是同样的消息 —— 内容不该消失。变的只有"新到几条"，而它按
+    **本缝内待落库的游标**算（``_pending_cursor``）：第一次看已经把这条算成读过了，
+    只是还没落库。这就是游标延到缝末落库的唯一代价：本缝内的"已经看过"必须自己记着。
     """
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(21, 30))
@@ -465,8 +834,13 @@ async def test_looking_twice_in_one_moment_does_not_show_the_same_batch_again(
         first = await look_at_phone.invoke({"channel_id": str(_DM)})
         second = await look_at_phone.invoke({"channel_id": str(_DM)})
 
-    assert "在吗" in first
-    assert "在吗" not in second, f"同一批消息在一缝里被摆了两遍：{second}"
+    assert "在吗" in first and "其中 1 条是新的" in first
+    assert "在吗" in second, (
+        f"第二次点开会话，内容凭空没了 —— 真人再点一次看到的是同样的消息。拿到：{second}"
+    )
+    assert "其中 0 条是新的" in second, (
+        f"同一缝里第二次看，刚看过的又被算成新到的。拿到：{second}"
+    )
 
 
 @pytest.mark.integration
@@ -484,14 +858,20 @@ async def test_sleeping_through_it_piles_the_messages_up_unread(living_db):
 
 
 # --------------------------------------------------------------------------
-# 四 · 跳过的永久丢失
+# 四 · 挤出窗口的那些永久丢失
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_she_reads_the_last_few_and_the_middle_is_gone_for_good(
+async def test_she_reads_the_last_few_and_the_ones_before_are_gone_for_good(
     living_db, in_a_moment
 ):
+    """挤出窗口的那些不会补看，游标照样推到未读里最新那条。
+
+    这是设计不是 bug —— 真人"未读 47 条"就是先看最后五到十条，能自洽就到此为止。
+    改成"打开会话"之后**窗口里的东西不再消失**（下一缝点开还是那十条），真正丢的是
+    被挤出窗口的那五条：它们既不在窗口里，也已经不算未读了。
+    """
     await _seed_world()
     total = PHONE_GLANCE_LIMIT + 5
     for i in range(total):
@@ -502,11 +882,14 @@ async def test_she_reads_the_last_few_and_the_middle_is_gone_for_good(
 
     assert f"第{total - 1}条" in seen
     assert "第0条" not in seen, "她不该一次把 15 条全读完"
+    assert "还有 5 条" in seen, f"被挤出窗口的那几条得说出来。拿到：\n{seen}"
 
-    # 中间那些不会补看：游标已经推到最新那条。
+    # 下一缝再点开：**同样那十条还在**（真人再点一次看到的就是它们），但一条新的
+    # 都没有；被挤出去的那五条不会回来。
     async with in_a_moment("akao"):
         again = await look_at_phone.invoke({"channel_id": str(_DM)})
-    assert "第0条" not in again and f"第{total - 1}条" not in again
+    assert f"第{total - 1}条" in again and "其中 0 条是新的" in again
+    assert "第0条" not in again, "被挤出窗口的那条又冒出来了"
     assert [e.unread for e in await envelopes_for(lane=LANE, persona_id="akao")] == []
 
 
@@ -1406,10 +1789,15 @@ async def test_the_tail_she_speaks_from_carries_the_file_name_too(
 # 撤的、同群姐姐撤的都是同一件事。今天填这一列的只有投递侧（撤的是 bot 自己发的），
 # 但这条规则不依赖那个事实。
 #
-# **不显示，不摆一条"已撤回"的占位。** 她的记忆里已经有一条"我去撤了"（撤回那只手
-# 落的 Happening），会话里再摆一次是同一件事的第二份记录；而占位能告诉她的东西
-# （"这儿本来有句话"）她本来就知道得更清楚。真人撤完一条消息，微信里那条内容也是没
-# 有的。
+# **只有"打开会话"那一处例外，而且只对她自己撤掉的那条。** 她撤完之后不知道自己撤了
+# 什么（coe-living 实证：撤完 8 分钟还在问主人撤了啥），原样显示会让她接着一句对面看
+# 不到的话往下说，留白洞等于没修 —— 所以留痕迹并带原话，那正是真实的信息状态：她自己
+# 知道撤了什么（真人能点开重新编辑），对面不知道内容但知道有这么回事。
+#
+# 措辞只说得出口的那件事：**这条消息已经撤回了**。不说"你撤回了" —— 群主和管理员也
+# 撤得掉她的消息，而撤回这件事在库里只有一个时刻、没有操作者。
+#
+# 别人撤掉的仍然一处都不显示：真人那侧看到的是"XX 撤回了一条消息"，内容确实没了。
 
 
 @pytest.mark.integration
@@ -1438,6 +1826,100 @@ async def test_a_message_she_took_back_is_gone_from_the_tail_she_speaks_from(
     assert "你：明天见" in known, (
         f"撤一句把她别的话也一起拿掉了。拿到：\n{known}"
     )
+
+
+@pytest.mark.integration
+async def test_a_message_she_took_back_leaves_a_trace_carrying_what_it_said(
+    living_db, in_a_moment
+):
+    """她自己撤掉的那条，在她打开的会话里留下痕迹**并带着原话**。
+
+    实证（coe-living，2026-09-04）：她撤完 8 分钟后还在问主人"你刚才到底发了啥"——
+    她的记忆里只有"我去撤了那句"这个行为，会话里那句话已经消失，于是她把撤回这件事
+    安在了主人身上。原话在这里是必要的：她本人确实知道自己撤了什么（真人能点开重新
+    编辑），对面不知道内容但知道有这么回事。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="你现在能撤回飞书消息没", at=_at(14, 50))
+    took_back = await _her_own(
+        _DM, text_body="所以主人是发了什么见不得人的东西想撤回吗", at=_at(14, 50, 30)
+    )
+    await _recalled_on_the_channel(took_back, at=_at(14, 50, 54))
+    await _incoming(_DM, text_body="还真的能撤回啊", at=_at(14, 58))
+
+    async with in_a_moment("akao", now=_at(14, 59)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "所以主人是发了什么见不得人的东西想撤回吗" in seen, (
+        f"她撤掉的那句在她眼前是个白洞 —— 她不知道自己撤了什么。拿到：\n{seen}"
+    )
+    assert "这条消息已经撤回了" in seen, (
+        f"原样显示的话，她会接着一句对面根本看不到的话往下说。拿到：\n{seen}"
+    )
+    assert "你撤回" not in seen, (
+        f"库里只有撤回的时刻、没有操作者：群主和管理员也撤得掉她的消息，"
+        f"「你撤回了」是句证明不了的话。拿到：\n{seen}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_message_already_taken_back_does_not_offer_a_handle(
+    living_db, in_a_moment
+):
+    """已经撤掉的那条不再带编号 —— 它已经不是"能撤的"了。
+
+    留着编号等于同时告诉她"这条撤回了"和"拿这串去撤它"，而她照着再撤一次只会撤了个空。
+    """
+    await _seed_world()
+    took_back, handle = await _her_own_proactive(
+        _DM, text_body="那家店周一不开", at=_at(21, 30)
+    )
+    await _recalled_on_the_channel(took_back, at=_at(21, 31))
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert "这条消息已经撤回了" in seen, f"拿到：\n{seen}"
+    assert handle not in seen, (
+        f"撤掉的那条还挂着可撤的编号 —— 她照它再撤一次只会撤了个空。拿到：\n{seen}"
+    )
+
+
+@pytest.mark.integration
+async def test_what_someone_else_took_back_is_not_in_the_window_either(
+    living_db, in_a_moment
+):
+    """别人（真人、姐姐）撤掉的消息，她打开会话时一条都看不到。
+
+    真人那侧看到的是"XX 撤回了一条消息"，内容确实没了。留一条带原话的痕迹给她，就是
+    让她看到的会话跟对面看到的不是同一个。
+    """
+    await _seed_world()
+    his = await _incoming(
+        _GROUP,
+        text_body="这个别说出去",
+        at=_at(21, 30),
+        sender=_SOMEONE,
+        sender_name="路人",
+    )
+    hers = await _sister_said(_GROUP, text_body="我也撤一条", at=_at(21, 31))
+    await _incoming(
+        _GROUP,
+        text_body="刚才那条你们看到了吗",
+        at=_at(21, 32),
+        sender=_SOMEONE,
+        sender_name="路人",
+    )
+    await _recalled_on_the_channel(his, at=_at(21, 33))
+    await _recalled_on_the_channel(hers, at=_at(21, 33))
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        seen = await look_at_phone.invoke({"channel_id": str(_GROUP)})
+
+    assert "这个别说出去" not in seen and "我也撤一条" not in seen, (
+        f"别人撤掉的消息还在她眼前 —— 她看到的会话跟对面看到的不是同一个。拿到：\n{seen}"
+    )
+    assert "刚才那条你们看到了吗" in seen, f"没撤的那条也一起没了。拿到：\n{seen}"
 
 
 @pytest.mark.integration

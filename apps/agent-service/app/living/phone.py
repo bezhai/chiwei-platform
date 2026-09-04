@@ -5,6 +5,13 @@
 有动作才有"已读"这回事；把内容白送进每一缝，"看手机"就成了摆设，而"她没看见"这个真
 人每天都在经历的状态就再也不会发生。
 
+**「看手机」是「打开这条会话」，不是「看未读」。** 她看到最近若干条**往来**：双向、
+含她自己发的、含上一缝已经读过的上文。改之前那条查询同时带着三个条件（不是她发的、
+没撤掉的、游标之后的），于是她眼前只有对方那一半 —— 决定说什么的那个模型从来没见过
+一段完整的对话。实证（coe-living，2026-09-04）：她自己撤回了一句话，8 分钟后还在问
+主人"你刚才到底发了啥"，因为那一缝她眼前只有孤零零一句未读，前面的来回全在游标之前，
+而读过的消息不进任何持久记忆。真人点开一个会话看到的正是双向的最近若干条。
+
 **入站一步不碰 MQ。** 每一缝直接查她未读的 ``common_message``。两个理由：不跟旧引擎抢
 它那条入站队列；而且"投递只入信箱不唤醒"天然成立——消息本来就躺在库里，没有谁需要被
 通知。这也是"chat 只有出口没有入口"的物理保证：**这个包里根本没有消费者**。
@@ -31,9 +38,29 @@ uuidv7（按生成时刻单调），同毫秒里谁先谁后有确定答案。
 造了 ``seq`` 才解掉同类问题，这张表的写入方不是我们）。一条**晚落库、而 ``event_time``
 比水位更早**的消息仍然会被永久跳过。复合游标只覆盖了"同毫秒"这一段边界，不是全部。
 
-**跳过的永久丢失**（:data:`PHONE_GLANCE_LIMIT`）。她一眼只看最后几条，中间那些不会
-补看，游标照样推到最新。这是设计不是 bug——真人"未读 47 条"就是先看最后五到十条，
-能自洽就到此为止。给她做"补看队列"是替她做决定，而且真人根本没有那个东西。
+**窗口、未读、游标是三件事**（改之前它们是同一个查询条件的三个身份）：
+
+  * **未读集合 U**：游标之后的、别人发的、没撤掉的那些。判据跟改之前逐字相同，
+    信封和"谁在叫她"用的也是它。
+  * **展示窗口 W**：这条会话上最近 :data:`PHONE_GLANCE_LIMIT` 条，**不看游标、不分谁
+    发的**，含她自己撤掉的那条（留痕迹，见 :data:`_VISIBLE_WHEN_SHE_OPENS_IT`），不含
+    别人撤掉的。
+  * 「其中 N 条是新的」＝ ``|U ∩ W|``；「前面还有 K 条你没往回翻」＝ ``|U − W|``，也
+    就是被挤出窗口的未读。
+  * **游标推到 ``max(U)``，不是 ``max(W)``。** W 里最新那条可能是她自己发的、晚于任何
+    未读；推到它身上会让之后乱序到达、时刻更早的消息被永久跳过，也会让措辞模型那侧
+    （:func:`conversation_as_she_knows_it` 按游标开窗）把她根本没见过的消息当成"她已经
+    知道的"。一条未读都没有时游标不动。
+
+**挤出窗口的那些永久丢失。** 她一眼只看最后十来条，前面的不会补看，游标照样推到未读
+里最新那条。这是设计不是 bug——真人"未读 47 条"就是先看最后五到十条，能自洽就到此为
+止。给她做"补看队列"是替她做决定，而且真人根本没有那个东西。**但窗口里的东西不会
+消失**：下一缝再点开还是那十条，跟真人再点一次看到同样的消息一致。
+
+**看到读过的上文不配任何"防重复回应"的规则。** 不加计数器、不加去重、不加"这条你回过
+了"的标记：每条消息都带着时刻，而且「其中 N 条是新的」直接告诉她哪些是新到的。她读得
+出来，读不出来也是她的判断，不是需要被逻辑层消除的不确定性。真人翻聊天记录时看到的也
+是全部历史，靠的同样是时间和上下文。
 
 **哪些会话在她手机上**：她自己的 bot 还在的那些（``common_bot_presence`` +
 ``bot_config.persona_id``），私聊和群同一条规则。用 presence 而不是"聊过天就算"，
@@ -54,14 +81,17 @@ uuidv7（按生成时刻单调），同毫秒里谁先谁后有确定答案。
 **撤掉的那条不在会话里了。** 撤回不删 ``common_message`` 那一行（公共层是消息记录，
 删行会打断历史），撤成功只在 ``recalled_at`` 上留个时刻。这里每一处读那张表的地方都
 带着 :data:`_STILL_IN_THE_CONVERSATION` —— 少带一处，她就在那个视角下还能看见一条自己
-明明撤掉了的话，然后接着它往下说，而对面早就看不到了。**不显示，不摆"已撤回"的占位**，
-理由写在那个常量上。
+明明撤掉了的话，然后接着它往下说，而对面早就看不到了。
+
+**只有"打开会话"那一处例外，而且只对她自己撤掉的那条**：那儿留一条写明已经撤回的
+痕迹并带上原话（:data:`_VISIBLE_WHEN_SHE_OPENS_IT`）。理由写在那个常量上。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Any
@@ -87,8 +117,9 @@ from app.runtime.persist import insert_idempotent
 
 logger = logging.getLogger(__name__)
 
-# 她一眼看多少条。**不是截断上下文**——游标照样推到最新，中间那些是真的丢了，这就是
-# 设计本身（见模块 docstring）。十条约等于真人扫一眼未读的量。
+# 她点开一条会话看到多少条。**这是展示窗口的大小，不是未读的上限**——游标照样推到未读
+# 里最新那条，被挤出窗口的那些是真的丢了，这就是设计本身（见模块 docstring）。十条约
+# 等于真人点开一个会话一屏能看到的量。
 PHONE_GLANCE_LIMIT = 10
 
 # 信封里列多少条会话。手机上会话再多，一屏也就这些；超出的下一缝还在。
@@ -351,23 +382,42 @@ _SAID_BY_HER = (
 )
 
 
-# 「这一行还在会话里吗」。**每一处读 ``common_message`` 的地方都带着它。**
+# 「这一行还在会话里吗」。**除了"打开会话"那一处，每一处读 ``common_message`` 的地方
+# 都带着它**（那一处的判据是 :data:`_VISIBLE_WHEN_SHE_OPENS_IT`）。
 #
 # 撤回不删那一行（公共层是消息记录，删行会打断历史），撤成功只在 ``recalled_at`` 上
 # 留个时刻，由投递侧写（撤失败不填）。所以读的一侧不管的话，她自己刚撤掉的话还会原样
 # 出现在她眼前 —— 然后她接着那句往下说，而对面早就看不到了。
 #
-# **判据写在这一列的含义上**（这一行在渠道上已经不在了），不写在谁撤的它上面：她自己
-# 撤的、同群姐姐撤的是同一件事，读的一侧没有理由分开对待。
+# **判据写在这一列的含义上**（这一行在渠道上已经不在了），不写在谁撤的它上面：这几处
+# 回答的是"这条还算不算数"——算未读、叫不叫她、按名字搜得到搜不到，她自己撤的和同群
+# 姐姐撤的是同一件事，没有理由分开对待。
 #
-# **不显示，不摆占位。** 她的记忆里已经有一条"我去撤了"（撤回那只手落的 Happening），
-# 会话里再摆一条"已撤回"是同一件事的第二份记录；而占位能告诉她的（"这儿本来有句话"）
-# 她本来就知道得更清楚 —— 她知道那句话是什么。真人撤完一条消息，聊天记录里那条内容
-# 也是没有的。
+# 这几处**都不显示、也不摆占位**。唯一显示痕迹的是她打开会话那一眼，理由写在
+# :data:`_VISIBLE_WHEN_SHE_OPENS_IT` 上：那是她**读一段对话**的地方，跟这几处的问题
+# 不是同一个。
 #
 # NULL = 没撤过（或者还没撤掉），这是绝大多数行的样子，所以这个条件不能写成
 # ``= false`` 之类会被 NULL 吃掉的形状。
 _STILL_IN_THE_CONVERSATION = "cm.recalled_at IS NULL"
+
+# 「这一行她还没看过吗」——未读集合 U 的判据，**全模块只有这一处定义**。
+#
+# 四个地方用它，其中三个拿它当 ``WHERE``：信封的未读计数
+# （:data:`_UNREAD_SUMMARY_SQL`）、信封上点谁的名（:data:`_UNREAD_SENDERS_SQL`）、
+# 谁在叫她（:data:`_SUMMONS_SQL`，那边再 ``AND`` 上一条额外条件）。第四处是打开会话
+# 那条查询，它拿这个集合去标窗口里哪几行是新的。
+#
+# **必须是同一份。** 改之前这四处各写一遍同样的三个条件，抄漏一个就是"信封说三条、
+# 翻开却数出两条"——她只会以为自己漏看了，而库里没有任何东西对不上。
+#
+# 收 ``:after_ms`` / ``:after_id`` 两个绑定参数，所以每个用它的查询都得带上游标。
+_STILL_UNREAD = f"""(
+       NOT {_SAID_BY_HER}
+   AND {_STILL_IN_THE_CONVERSATION}
+   AND (cm.event_time, CAST(cm.common_message_id AS text))
+       > (:after_ms, :after_id)
+)"""
 
 
 async def _own_bot_names(*, persona_id: str) -> list[str]:
@@ -423,10 +473,7 @@ SELECT COUNT(*)                          AS unread,
        BOOL_OR({_NAMED_HER})             AS named_you
   FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND NOT {_SAID_BY_HER}
-   AND {_STILL_IN_THE_CONVERSATION}
-   AND (cm.event_time, CAST(cm.common_message_id AS text))
-       > (:after_ms, :after_id)
+   AND {_STILL_UNREAD}
 """
 
 _UNREAD_SENDERS_SQL = f"""
@@ -434,10 +481,7 @@ SELECT COALESCE(cm.sender_display_name, '某人') AS who,
        MAX(cm.event_time)                       AS latest
   FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND NOT {_SAID_BY_HER}
-   AND {_STILL_IN_THE_CONVERSATION}
-   AND (cm.event_time, CAST(cm.common_message_id AS text))
-       > (:after_ms, :after_id)
+   AND {_STILL_UNREAD}
  GROUP BY 1
  ORDER BY 2 DESC
  LIMIT :limit
@@ -619,10 +663,7 @@ SELECT cm.common_message_id AS message_id,
        cm.event_time        AS at_ms
   FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND NOT {_SAID_BY_HER}
-   AND {_STILL_IN_THE_CONVERSATION}
-   AND (cm.event_time, CAST(cm.common_message_id AS text))
-       > (:after_ms, :after_id)
+   AND {_STILL_UNREAD}
    AND (:is_direct OR {_NAMED_HER})
  ORDER BY cm.event_time DESC, cm.common_message_id DESC
  LIMIT 1
@@ -670,31 +711,87 @@ async def newest_unread_summons(
 # 看手机
 # ---------------------------------------------------------------------------
 
-_GLANCE_SQL = f"""
-SELECT cm.common_message_id AS message_id,
-       COALESCE(cm.sender_display_name, '某人') AS who,
-       cm.content           AS content,
-       cm.content_text      AS content_text,
-       cm.event_time        AS at_ms
-  FROM common_message cm
- WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND NOT {_SAID_BY_HER}
-   AND {_STILL_IN_THE_CONVERSATION}
-   AND (cm.event_time, CAST(cm.common_message_id AS text))
-       > (:after_ms, :after_id)
- ORDER BY cm.event_time DESC, cm.common_message_id DESC
- LIMIT :limit
-"""
+# 「她打开这条会话时这一行还看得见吗」。**只有这一处的判据跟
+# :data:`_STILL_IN_THE_CONVERSATION` 不同**，差的就是她自己撤掉的那条。
+#
+# 她撤完之后不知道自己撤了什么（coe-living 2026-09-04 实测：撤完 8 分钟还在问主人
+# 撤了啥）。三种做法只有一种成立：
+#
+#   * 原样显示 → 她会接着一句对面看不到的话往下说，这正是当初加过滤的原因；
+#   * 留个白洞 → 等于没修，她仍然不知道那里曾经有什么；
+#   * **留痕迹并带原话** → 符合真实的信息状态：她自己知道撤了什么（真人能点开重新
+#     编辑），对面不知道内容但知道有这么回事。
+#
+# **别人撤掉的仍然不显示**（判据里那个 :data:`_SAID_BY_HER`）：真人那侧看到的是
+# "XX 撤回了一条消息"，内容确实没了；给她留一条带原话的痕迹，就是让她看到的会话跟
+# 对面看到的不是同一个。
+_VISIBLE_WHEN_SHE_OPENS_IT = f"(cm.recalled_at IS NULL OR {_SAID_BY_HER})"
 
-# "前面还有 N 条你没往回翻"那个 N。跟 :data:`_GLANCE_SQL` 必须是同一条未读判据 ——
-# 两处口径一分家，她看到的数就跟她读到的东西对不上。
-_UNREAD_COUNT_SQL = f"""
-SELECT COUNT(*) FROM common_message cm
- WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND NOT {_SAID_BY_HER}
-   AND {_STILL_IN_THE_CONVERSATION}
-   AND (cm.event_time, CAST(cm.common_message_id AS text))
-       > (:after_ms, :after_id)
+# 打开会话那一眼。展示窗口 W、未读总数 ``|U|``、``max(U)`` 由**同一条语句**一次给出。
+#
+# **为什么必须是一条。** ``app/data/session.py`` 没配更强的隔离级别，PostgreSQL 默认
+# ``READ COMMITTED`` 下同一个事务里连续两条 ``SELECT`` 各取各的快照。分成两条时，一条
+# 在两次查询之间提交的新消息不在窗口里、却可能成为未读里最新那条 —— 游标推到它身上，
+# 这条她从没见过的消息就被永久跳过了，一句报错都没有。并发撤回同样会让「其中 N 条是
+# 新的」跟未读总数互相对不上。单条语句只取一个快照，三个答案必然出自同一份事实。
+#
+# ``unread`` 是未读集合 U，判据是 :data:`_STILL_UNREAD`（全模块唯一那份）。窗口那侧
+# 不重写一遍判据，而是 ``LEFT JOIN`` 回这个集合：``is_unread`` 于是**字面上就是**
+# "这一行在 U 里"，「其中 N 条是新的」＝ ``|U ∩ W|`` 由此成为结构上的事实，不再靠两处
+# 判据长得一样来维持。``common_message_id`` 是主键，join 不会把窗口里的行放大。
+#
+# 窗口 W 收游标参数但**不按游标过滤**：一行都不会因为"读过了"而被挡在窗口外。这正是
+# 这次改动的分界 —— 窗口回答"这条会话最近说了些什么"，未读回答"其中哪些是新的"。
+#
+# 多带的几列各有各的用处，缺一个她就少知道一件事：``said_by_you`` 决定这一行署"你"
+# 还是署那个人的名字（认 ``bot_name``，不认 ``role`` —— 同群的姐姐也是
+# ``role='assistant'``）；``recalled_at`` 决定要不要写明这条已经撤回；
+# ``agent_outbound_id`` 是她能拿去撤回的那个编号，只有她主动发起的行才有。
+#
+# ``unread_total`` / ``newest_unread_*`` 三列在每一行上都一样（标量子查询）。窗口一行
+# 都没有时整条语句返回零行，这三个答案也就无从读起 —— **而那恰好是对的**：U 里每一行
+# 都满足 ``recalled_at IS NULL``，也就必然满足 ``recalled_at IS NULL OR 是她说的``，
+# 所以 U 是窗口候选集的子集；候选集非空时 ``LIMIT``（≥1）取出的窗口也非空。反过来推：
+# 窗口为空 ⟹ 候选集为空 ⟹ U 为空。**"窗口为空但未读非空"在同一个快照里不可能发生。**
+# 万一这个推理哪天被破坏（比如 limit 变成 0），零行的后果是"什么都没看到、游标不动"
+# —— 宁可重看、不可漏看那一侧，不会静默跳过任何一条。
+_OPEN_CONVERSATION_SQL = f"""
+WITH unread AS (
+  SELECT cm.common_message_id AS message_id,
+         cm.event_time        AS at_ms
+    FROM common_message cm
+   WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+     AND {_STILL_UNREAD}
+),
+newest_unread AS (
+  SELECT message_id, at_ms
+    FROM unread
+   ORDER BY at_ms DESC, message_id DESC
+   LIMIT 1
+),
+recent AS (
+  SELECT cm.common_message_id AS message_id,
+         COALESCE(cm.sender_display_name, '某人') AS who,
+         {_SAID_BY_HER}       AS said_by_you,
+         cm.content           AS content,
+         cm.content_text      AS content_text,
+         cm.event_time        AS at_ms,
+         cm.recalled_at       AS recalled_at,
+         cm.agent_outbound_id AS outbound_id,
+         (u.message_id IS NOT NULL) AS is_unread
+    FROM common_message cm
+    LEFT JOIN unread u ON u.message_id = cm.common_message_id
+   WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+     AND {_VISIBLE_WHEN_SHE_OPENS_IT}
+   ORDER BY cm.event_time DESC, cm.common_message_id DESC
+   LIMIT :limit
+)
+SELECT r.*,
+       (SELECT COUNT(*) FROM unread)          AS unread_total,
+       (SELECT message_id FROM newest_unread) AS newest_unread_id,
+       (SELECT at_ms FROM newest_unread)      AS newest_unread_ms
+  FROM recent r
+ ORDER BY r.at_ms DESC, r.message_id DESC
 """
 
 
@@ -761,22 +858,62 @@ def _body_of(row) -> str:
     return (row["content_text"] or "").strip() or "（没有内容）"
 
 
+def _take_back_handle(row) -> str | None:
+    """这一行她能拿去撤回的那个编号；撤不了的行返回 ``None``。
+
+    三个条件缺一不可：**是她说的**（姐姐主动发的行同样有这一列，但她撤不动姐姐的）、
+    **还没撤掉**（已经撤回的再撤一次只会撤了个空，那时留着编号等于同时说"这条撤回了"
+    和"拿这串去撤它"）、**有这一列**（她回复别人的消息走另一条链，那条链不写它）。
+
+    印出去的写法是 32 位无短横的 hex —— 跟 :func:`app.living.snapshot._own_line` 在
+    「你刚做过、说过」那段里印的**必须逐字一致**，否则她会以为那是两种编号。库里这一
+    列是 uuid 类型，两种写法之间的相等关系由两侧共读的成对向量钉住
+    （``contracts/proactive-message-id.json`` 的 ``outbound_id_vector``）。
+    """
+    if not row["said_by_you"] or row["recalled_at"] is not None:
+        return None
+    outbound_id = row["outbound_id"]
+    if outbound_id is None:
+        return None
+    return uuid.UUID(str(outbound_id)).hex
+
+
 def _one_message(row, *, now: datetime) -> str:
-    """一条消息渲染成一行。"""
-    return (
+    """一条消息渲染成一行。
+
+    署名认 ``bot_name``（``said_by_you`` 那一列算好的），跟她开口前读的那段尾巴
+    （:func:`conversation_as_she_knows_it`）用同一条判据：同群的姐姐也是
+    ``role='assistant'``，按 role 署名就是把姐姐的话标成她自己说的。
+
+    撤回那句话只说得出口的那件事：**这条消息已经撤回了**。不说"你撤回了"——群主和
+    管理员也撤得掉她的消息，而撤回在库里只有一个时刻、没有操作者。"这行是她发的 +
+    有撤回时刻"是可证明的，"是她自己按的撤回"不是。
+    """
+    who = "你" if row["said_by_you"] else row["who"]
+    line = (
         f"{_clock(_instant(int(row['at_ms'])), now=now)} "
-        f"{row['who']}：{_body_of(row)}"
+        f"{who}：{_body_of(row)}"
     )
+    if row["recalled_at"] is not None:
+        return line + "［这条消息已经撤回了，对面看不到它］"
+    handle = _take_back_handle(row)
+    return line + (f"［{handle}］" if handle is not None else "")
 
 
-def _glance_text(*, title: str, rows: list, unread_before: int, now: datetime) -> str:
-    """她这一眼看到的东西。行数有上限，跳过的那些**不会**在别处被补回来。"""
+def _glance_text(
+    *, title: str, rows: list, fresh: int, older_unread: int, now: datetime
+) -> str:
+    """她点开这条会话看到的东西。
+
+    ``fresh``（``|U ∩ W|``）一定说，**零也说**：窗口里有她上一缝已经读过的上文，哪些
+    是新到的只有这个数说得清。``older_unread``（``|U − W|``）是被挤出窗口的未读，它们
+    不会在别处被补回来。
+    """
     lines = [_one_message(r, now=now) for r in reversed(rows)]
-    head = f"「{title}」"
-    skipped = unread_before - len(rows)
-    if skipped > 0:
-        head += f"（前面还有 {skipped} 条你没往回翻，就这么过去了）"
-    return head + "\n" + "\n".join(lines)
+    head = f"「{title}」（其中 {fresh} 条是新的"
+    if older_unread > 0:
+        head += f"，前面还有 {older_unread} 条你没往回翻，就这么过去了"
+    return head + "）\n" + "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -906,12 +1043,17 @@ async def look_at_phone(
         str, Field(description="哪条会话，用信封上那串 channel_id")
     ],
 ) -> str:
-    """拿起手机看一条会话说了什么。
+    """拿起手机打开一条会话，看最近说了些什么。
 
     信封只告诉你有动静、谁、多少条。**内容要调这个才有。**
 
-    你看到的是最近的十来条。往前那些不会再回来——就像你真的划开一个未读很多的会话，
-    扫一眼最后几条，前面的就那么过去了。
+    你看到的是这条会话上最近的十来条往来——**双向的**，你自己发的也在里面，上一次
+    看过的上文也还在。其中哪几条是新到的会单独告诉你。再往前那些不会再回来，就像你
+    真的划开一个未读很多的会话，扫一眼最后几条，前面的就那么过去了。
+
+    你自己发的、还撤得回来的那些，行末带着一串编号——要撤哪一条就照抄那串。你回复
+    别人的消息和别人发的消息没有编号，那是因为它们本来就撤不了。已经撤回的那条会
+    留在原处、写明它撤掉了，原话也还在，但对面已经看不到它了。
 
     你没调它的时候，消息照堆着、一条都不算你看过。
 
@@ -919,7 +1061,7 @@ async def look_at_phone(
         channel_id: 哪条会话（信封上那串）。
 
     Returns:
-        这条会话最近的几条消息。
+        这条会话最近的十来条往来，以及其中几条是新到的。
     """
     lane, now, persona_id, moment_id = moment_scope()
     conv = await reachable_conversation(
@@ -934,52 +1076,61 @@ async def look_at_phone(
     after_ms, after_id = await effective_cursor(
         lane=lane, persona_id=persona_id, channel_id=conv.channel_id
     )
-    window = {
+    params = {
         "channel_id": conv.channel_id,
+        "own_bots": await _own_bot_names(persona_id=persona_id),
         "after_ms": after_ms,
         "after_id": after_id,
-        "own_bots": await _own_bot_names(persona_id=persona_id),
     }
 
+    # 一条语句同时给出窗口、未读总数和 ``max(U)``，理由写在
+    # :data:`_OPEN_CONVERSATION_SQL` 上：两条语句就是两个快照，中间提交的那条消息
+    # 会被永久跳过。三列在每一行上都一样，取第一行即可。
     async with get_session() as s:
         rows = (
             await s.execute(
-                text(_GLANCE_SQL), {**window, "limit": PHONE_GLANCE_LIMIT}
+                text(_OPEN_CONVERSATION_SQL),
+                {**params, "limit": PHONE_GLANCE_LIMIT},
             )
         ).mappings().all()
-        if not rows:
-            return f"「{conv.title}」没有新消息。"
 
-        unread_before = (
-            await s.execute(text(_UNREAD_COUNT_SQL), window)
-        ).scalar_one()
+    if not rows:
+        # 窗口为空 ⟹ 未读也为空（推理见 :data:`_OPEN_CONVERSATION_SQL`），所以这里
+        # 直接返回、游标不动是完备的，不是漏了一种情况。
+        return f"「{conv.title}」上一条消息都没有。"
 
-        seen = _glance_text(
-            title=conv.title,
-            rows=list(rows),
-            unread_before=int(unread_before),
-            now=now,
-        )
+    fresh = sum(1 for r in rows if r["is_unread"])
+    unread_total = int(rows[0]["unread_total"])
+    seen = _glance_text(
+        title=conv.title,
+        rows=list(rows),
+        fresh=fresh,
+        older_unread=unread_total - fresh,
+        now=now,
+    )
 
-    # 水位推到**未读里最新的那条**，不是"她读到的最后一条"：跳过的中间那些就此丢了。
-    # 这正是这条设计要的行为，不是漏。
+    # 水位推到**未读里最新的那条**（``max(U)``），不是窗口里最新那条：窗口里最新那条
+    # 可能是她自己发的、晚于任何未读，推到它身上会让之后乱序到达、时刻更早的消息被
+    # 永久跳过，也会让措辞模型那侧把她根本没见过的消息当成"她已经知道的"。被挤出窗口
+    # 的未读就此丢了 —— 这正是这条设计要的行为，不是漏。一条未读都没有时游标不动。
     #
     # **但不在这儿落库。** 工具返回不等于她看见了——结果还要进模型的上下文，这一缝才
     # 算真的把内容送到她眼前。当场提交的话，崩在中间就是"已读了但内容从没进过她的
     # 上下文"，那几条永久消失且一句报错都没有。所以攒进本缝状态，由 ``run_moment``
     # 的收尾跟 ``LifeMoment`` 一个事务落库（:func:`commit_glances`）。
-    newest = rows[0]
-    get_context().features.setdefault(FEATURE_GLANCES, []).append(
-        {
-            "lane": lane,
-            "persona_id": persona_id,
-            "channel_id": conv.channel_id,
-            "read_through_message_id": str(newest["message_id"]),
-            "moment_id": moment_id,
-            "read_through_ms": int(newest["at_ms"]),
-            "read_at": now,
-        }
-    )
+    newest_unread_id = rows[0]["newest_unread_id"]
+    if newest_unread_id is not None:
+        get_context().features.setdefault(FEATURE_GLANCES, []).append(
+            {
+                "lane": lane,
+                "persona_id": persona_id,
+                "channel_id": conv.channel_id,
+                "read_through_message_id": str(newest_unread_id),
+                "moment_id": moment_id,
+                "read_through_ms": int(rows[0]["newest_unread_ms"]),
+                "read_at": now,
+            }
+        )
     return seen
 
 

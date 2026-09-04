@@ -18,6 +18,7 @@ TS 侧：apps/lark-service/src/lark/outbound/proactive-message-id.test.ts
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -32,3 +33,32 @@ CONTRACT: dict[str, Any] = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 
 def test_prefix_matches_contract():
     assert PROACTIVE_MESSAGE_ID_PREFIX == CONTRACT["message_id_prefix"]
+
+
+def test_the_two_spellings_of_one_outbound_id_are_the_same_value():
+    """32 位 hex 和标准 uuid 是**同一个值的两种写法**，不是两个编号。
+
+    她眼前只会出现 hex 那一种（``app/living/snapshot.py`` 印「你刚做过、说过」，
+    ``app/living/phone.py`` 印她打开的会话里自己那几行），而库里
+    ``common_message.agent_outbound_id`` 是 uuid 列、存的是带短横那一种。中间那步换算
+    错了不会报错：她照抄的编号查不到任何行，撤回只会说"没有这条"，看不出是写法错了。
+    """
+    v = CONTRACT["outbound_id_vector"]
+
+    assert uuid.UUID(hex=v["hex"]) == uuid.UUID(v["uuid"])
+    assert uuid.UUID(v["uuid"]).hex == v["hex"], "库里那一行换回她见过的写法"
+    assert str(uuid.UUID(hex=v["hex"])) == v["uuid"], "她见过的写法换成库里那一种"
+
+
+def test_both_spellings_come_off_the_same_derived_uuid():
+    """线上那一串是怎么从同一个 uuid 派生出两种写法的 —— 照 ``mouth.send_message`` 走。
+
+    那边一次派生、两处取值：``outbound_id = derived.hex`` 记进她自己的台账，
+    ``message_id = f"{前缀}{derived}"`` 走线格式发给投递方，投递方剥掉前缀落进
+    ``agent_outbound_id``。两处取值不同源的话，台账和公共层从此对不上账。
+    """
+    v = CONTRACT["outbound_id_vector"]
+    derived = uuid.UUID(hex=v["hex"])
+
+    assert derived.hex == v["hex"]
+    assert f"{PROACTIVE_MESSAGE_ID_PREFIX}{derived}" == v["message_id"]

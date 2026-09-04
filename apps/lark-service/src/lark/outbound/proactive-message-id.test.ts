@@ -23,6 +23,11 @@ import { PROACTIVE_MESSAGE_ID_PREFIX } from './deliver';
 
 interface ProactiveMessageIdContract {
     message_id_prefix: string;
+    outbound_id_vector: {
+        hex: string;
+        uuid: string;
+        message_id: string;
+    };
 }
 
 const CONTRACT_PATH = resolve(
@@ -36,5 +41,28 @@ const contract = JSON.parse(
 describe('主动发 message_id 前缀 — 跨语言契约', () => {
     it('本服务的前缀常量与契约逐字一致', () => {
         expect(PROACTIVE_MESSAGE_ID_PREFIX).toBe(contract.message_id_prefix);
+    });
+});
+
+describe('一次开口的两种写法 — 跨语言契约', () => {
+    // agent-service 那侧一次派生、两处取值：32 位无短横 hex 记进她自己的台账、也是
+    // 她在快照和会话里**唯一见得到**的写法；带短横的标准 uuid 走线格式，本服务剥掉
+    // 前缀之后落进 common_message.agent_outbound_id（列是 uuid 类型，hex 进不去）。
+    //
+    // 两种写法是同一个值这件事，此前两侧都没有测试证明 —— 契约里只有前缀。换算错了
+    // 全程零报错：她照抄的编号查不到任何行，撤回只说"没有这条"。
+
+    it('线上传的那一串 = 前缀 + 带短横的写法', () => {
+        const v = contract.outbound_id_vector;
+        expect(v.message_id).toBe(`${PROACTIVE_MESSAGE_ID_PREFIX}${v.uuid}`);
+        // deliver.ts 的 agentOutboundIdOf 就是剥掉前缀取这一段落进列里。
+        expect(v.message_id.slice(PROACTIVE_MESSAGE_ID_PREFIX.length)).toBe(v.uuid);
+    });
+
+    it('落进列里的那一种去掉短横就是她见到的那一种', () => {
+        const v = contract.outbound_id_vector;
+        expect(v.uuid.replace(/-/g, '')).toBe(v.hex);
+        expect(v.hex).toMatch(/^[0-9a-f]{32}$/);
+        expect(v.uuid).toBe(v.uuid.toLowerCase());
     });
 });
