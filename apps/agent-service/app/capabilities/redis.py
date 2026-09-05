@@ -7,8 +7,6 @@ through this capability so:
 * Raw redis failures map to the typed ``CapabilityCallFailed`` /
   ``CapabilityTimeout`` exceptions (contract §4.8) — no naked
   ``redis.RedisError`` escapes capability boundaries.
-* The pipeline proxy enforces the same small public surface as the
-  capability itself, so call-sites can't sneak back to raw ops.
 
 **No implicit lane key prefix.** Cross-lane isolation is the
 ConfigBundle's job, not the capability's. ``coe-*`` lanes get a
@@ -17,25 +15,22 @@ physically separate Redis container (chiwei-test) via
 Redis ("functional verification against real prod data"). An implicit
 ``{lane}:`` prefix split agent-service-ppe-refactor and
 chat-response-worker between two key spaces and silently dropped
-images on lane verification — see trace
+values on lane verification — see trace
 ``3de371aea10290b327f1386ea56f180c`` and hotfix commit on
 2026-05-13.
 
-Used by ``infra/image.py`` (registry Lua), the runtime's debounce /
-single-flight modules talk to the raw client directly to avoid
-inverting the dependency stack (capability → runtime).
+The runtime's debounce / single-flight modules talk to the raw client
+directly to avoid inverting the dependency stack (capability →
+runtime).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import Any
 
 import redis.exceptions
 from redis.asyncio import Redis
-from redis.asyncio.client import Pipeline as _RawPipeline
 
 from app.capabilities._errors import CapabilityCallFailed, CapabilityTimeout
 
@@ -62,55 +57,6 @@ def _wrap_error(exc: BaseException, *, op: str, key: str | None = None) -> Excep
         return CapabilityCallFailed(f"redis {op} failed: {exc}", meta=meta)
     # Fall through: not our domain — let it propagate untouched.
     return exc
-
-
-# ---------------------------------------------------------------------------
-# Pipeline proxy
-# ---------------------------------------------------------------------------
-
-
-class _LanePipeline:
-    """Pipeline wrapper exposing the small subset of ``Pipeline`` methods
-    business code actually needs (incr / eval / hset / set / expire).
-
-    The class name "_LanePipeline" survives only as a moniker; there is
-    no lane key rewriting any more (see module docstring). Keys pass to
-    the raw pipeline verbatim. The narrow surface still forces consumers
-    to come back to this file when they need something new, instead of
-    silently growing a god-pipeline.
-    """
-
-    def __init__(self, raw: _RawPipeline) -> None:
-        self._raw = raw
-
-    def incr(self, key: str, amount: int = 1) -> "_LanePipeline":
-        self._raw.incr(key, amount)
-        return self
-
-    def set(self, key: str, value: Any, **kw: Any) -> "_LanePipeline":
-        self._raw.set(key, value, **kw)
-        return self
-
-    def hset(self, key: str, *a: Any, **kw: Any) -> "_LanePipeline":
-        self._raw.hset(key, *a, **kw)
-        return self
-
-    def expire(self, key: str, seconds: int) -> "_LanePipeline":
-        self._raw.expire(key, seconds)
-        return self
-
-    def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> "_LanePipeline":
-        self._raw.eval(script, numkeys, *keys_and_args)
-        return self
-
-    async def execute(self) -> list[Any]:
-        try:
-            return await self._raw.execute()
-        except (
-            asyncio.TimeoutError,
-            redis.exceptions.RedisError,
-        ) as e:
-            raise _wrap_error(e, op="pipeline.execute") from e
 
 
 # ---------------------------------------------------------------------------
@@ -141,27 +87,7 @@ class RedisCapability:
         ) as e:
             raise _wrap_error(e, op="incr", key=key) from e
 
-    # -- Hash + Set read accessors ------------------------------------------
-
-    async def hget(self, key: str, field: str) -> Any:
-        """``HGET key field`` — returns ``None`` if missing."""
-        try:
-            return await self._client.hget(key, field)
-        except (
-            asyncio.TimeoutError,
-            redis.exceptions.RedisError,
-        ) as e:
-            raise _wrap_error(e, op="hget", key=key) from e
-
-    async def hgetall(self, key: str) -> dict[str, Any]:
-        """``HGETALL key`` — returns ``{}`` if missing."""
-        try:
-            return await self._client.hgetall(key)
-        except (
-            asyncio.TimeoutError,
-            redis.exceptions.RedisError,
-        ) as e:
-            raise _wrap_error(e, op="hgetall", key=key) from e
+    # -- Set read accessor ---------------------------------------------------
 
     async def smembers(self, key: str) -> set[Any]:
         """``SMEMBERS key`` — returns empty set if missing."""
@@ -228,22 +154,6 @@ class RedisCapability:
         ) as e:
             key_repr = keys[0] if keys else None
             raise _wrap_error(e, op="eval", key=key_repr) from e
-
-    # -- pipeline ------------------------------------------------------------
-
-    @asynccontextmanager
-    async def pipeline(self) -> AsyncIterator[_LanePipeline]:
-        """Yield a pipeline proxy; auto-resets on exception.
-
-        The yielded object queues ops verbatim against the raw pipeline;
-        ``execute()`` runs the pipeline and maps redis failures to typed
-        exceptions.
-        """
-        raw = self._client.pipeline(transaction=False)
-        try:
-            yield _LanePipeline(raw)
-        finally:
-            await raw.reset()
 
 
 # ---------------------------------------------------------------------------

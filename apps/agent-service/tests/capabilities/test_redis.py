@@ -9,7 +9,7 @@ write/read goes through this capability so:
 * Raw redis failures map to the typed ``CapabilityCallFailed`` /
   ``CapabilityTimeout`` exceptions (contract §4.8).
 * The acceptance scenario — two lanes concurrently running the same
-  dedup Lua against the same logical key — produces fully isolated state.
+  Lua against the same logical key — produces fully isolated state.
 
 Uses ``fakeredis[lua]`` so Lua scripts execute against a real interpreter.
 """
@@ -92,16 +92,6 @@ async def test_eval_runs_lua(cap, lane_prod, fake_redis):
     assert await fake_redis.get("k:eval") == "hello"
 
 
-@pytest.mark.asyncio
-async def test_pipeline_batches(cap, lane_prod):
-    async with cap.pipeline() as pipe:
-        pipe.incr("counter:pipe")
-        pipe.incr("counter:pipe")
-        pipe.incr("counter:pipe")
-        results = await pipe.execute()
-    assert results == [1, 2, 3]
-
-
 # ---------------------------------------------------------------------------
 # Lane key space: no implicit prefix
 # ---------------------------------------------------------------------------
@@ -112,10 +102,10 @@ async def test_pipeline_batches(cap, lane_prod):
 # ``class_overrides[coe]``; ppe-* lanes intentionally share prod Redis
 # because that's the whole point of ppe ("functional verification against
 # real prod data"). An implicit ``{lane}:`` prefix broke that contract: it
-# made ppe-* agent-service write to ``ppe-foo:image_registry:...`` while
-# prod chat-response-worker (which reads bare ``image_registry:...``)
-# silently missed every entry — image links dropped on lane verification
-# (see trace 3de371aea10290b327f1386ea56f180c).
+# made ppe-* agent-service write to ``ppe-foo:<key>`` while the prod
+# reader of the same logical key read it bare and silently missed every
+# entry — values dropped on lane verification (see trace
+# 3de371aea10290b327f1386ea56f180c).
 
 
 @pytest.mark.asyncio
@@ -159,44 +149,30 @@ async def test_eval_keys_pass_through_unchanged(cap, fake_redis):
     assert await fake_redis.get("coe-bar:k:b") is None
 
 
-@pytest.mark.asyncio
-async def test_pipeline_keys_pass_through_unchanged(cap, fake_redis):
-    token = _set_lane("ppe-pipe")
-    try:
-        async with cap.pipeline() as pipe:
-            pipe.incr("c:p")
-            pipe.incr("c:p")
-            await pipe.execute()
-    finally:
-        lane_var.reset(token)
-    assert await fake_redis.get("c:p") == "2"
-    assert await fake_redis.get("ppe-pipe:c:p") is None
-
-
 # ---------------------------------------------------------------------------
-# Acceptance: two lanes concurrently running dedup Lua, independent state
+# Acceptance: two lanes concurrently running the same Lua, independent state
 # ---------------------------------------------------------------------------
 
 
-# This is the actual ``infra/image.py`` register Lua, kept verbatim so the
-# B5 acceptance scenario tests the real script shape.
-_REGISTER_LUA = """
+# A read-modify-write Lua with a per-key counter — the shape that makes
+# cross-lane key-space bleed visible: if two lanes shared a key space the
+# counters would interleave instead of each starting at 1.
+_COUNT_AND_STORE_LUA = """
 local key = KEYS[1]
-local url = ARGV[1]
+local value = ARGV[1]
 local ttl = tonumber(ARGV[2])
 
 local n = redis.call('HINCRBY', key, '__counter__', 1)
-local filename = n .. '.png'
-redis.call('HSET', key, filename, url)
+redis.call('HSET', key, 'entry:' .. n, value)
 redis.call('EXPIRE', key, ttl)
 return n
 """
 
 
-async def _register(cap: RedisCapability, message_id: str, url: str) -> int:
-    """Call the register Lua for one (lane, message) pair."""
-    key = f"image_registry:{message_id}"
-    n = await cap.eval(_REGISTER_LUA, keys=[key], args=[url, 1800])
+async def _count_and_store(cap: RedisCapability, slot: str, value: str) -> int:
+    """Run the counter Lua for one (lane, slot) pair."""
+    key = f"cap:counted:{slot}"
+    n = await cap.eval(_COUNT_AND_STORE_LUA, keys=[key], args=[value, 1800])
     return int(n)
 
 
@@ -226,29 +202,29 @@ async def test_coe_lane_isolation_via_separate_redis_instances(fake_redis):
     cap_one = RedisCapability(coe_one_client)
     cap_two = RedisCapability(coe_two_client)
 
-    async def run(cap: RedisCapability, url_prefix: str) -> list[int]:
+    async def run(cap: RedisCapability, value_prefix: str) -> list[int]:
         results = []
         for i in range(5):
-            n = await _register(cap, message_id="msg-1", url=f"{url_prefix}/{i}")
+            n = await _count_and_store(cap, slot="slot-1", value=f"{value_prefix}/{i}")
             results.append(n)
             await asyncio.sleep(0)
         return results
 
     res_one, res_two = await asyncio.gather(
-        run(cap_one, "https://tos/one"),
-        run(cap_two, "https://tos/two"),
+        run(cap_one, "one"),
+        run(cap_two, "two"),
     )
 
     assert res_one == [1, 2, 3, 4, 5]
     assert res_two == [1, 2, 3, 4, 5]
 
-    one_hash = await coe_one_client.hgetall("image_registry:msg-1")
-    two_hash = await coe_two_client.hgetall("image_registry:msg-1")
-    assert one_hash["1.png"] == "https://tos/one/0"
-    assert two_hash["1.png"] == "https://tos/two/0"
+    one_hash = await coe_one_client.hgetall("cap:counted:slot-1")
+    two_hash = await coe_two_client.hgetall("cap:counted:slot-1")
+    assert one_hash["entry:1"] == "one/0"
+    assert two_hash["entry:1"] == "two/0"
     # The "main" cap (prod-style shared fakeredis) is unaffected — it
     # would only contain entries written through itself.
-    assert await fake_redis.hgetall("image_registry:msg-1") == {}
+    assert await fake_redis.hgetall("cap:counted:slot-1") == {}
 
 
 # ---------------------------------------------------------------------------
@@ -268,12 +244,6 @@ class _RaisingRedis:
     async def eval(self, *a, **kw):  # noqa: ARG002
         raise self._exc
 
-    async def hget(self, key, field):  # noqa: ARG002
-        raise self._exc
-
-    async def hgetall(self, key):  # noqa: ARG002
-        raise self._exc
-
     async def smembers(self, key):  # noqa: ARG002
         raise self._exc
 
@@ -284,9 +254,6 @@ class _RaisingRedis:
         raise self._exc
 
     async def expire(self, *a, **kw):  # noqa: ARG002
-        raise self._exc
-
-    def pipeline(self, *_a, **_kw):  # pragma: no cover — not used by these tests
         raise self._exc
 
 
@@ -322,54 +289,8 @@ async def test_asyncio_timeout_maps_to_capability_timeout(lane_prod):
 
 
 # ---------------------------------------------------------------------------
-# Hash + Set read accessors (added for C5 — image_registry / banned_words)
+# Set read accessor (added for C5 — banned_words)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_hget_returns_field(cap, lane_prod, fake_redis):
-    await fake_redis.hset("h:k", "field1", "value1")
-    assert await cap.hget("h:k", "field1") == "value1"
-
-
-@pytest.mark.asyncio
-async def test_hget_missing_returns_none(cap, lane_prod):
-    assert await cap.hget("h:missing", "field1") is None
-
-
-@pytest.mark.asyncio
-async def test_hget_passes_key_through_unchanged(cap, fake_redis):
-    """Capability does NOT rewrite the key on lane changes."""
-    token = _set_lane("ppe-x")
-    try:
-        await fake_redis.hset("h:lane", "f", "v")
-        assert await cap.hget("h:lane", "f") == "v"
-        # The phantom prefixed key is empty.
-        assert await fake_redis.hget("ppe-x:h:lane", "f") is None
-    finally:
-        lane_var.reset(token)
-
-
-@pytest.mark.asyncio
-async def test_hgetall_returns_dict(cap, lane_prod, fake_redis):
-    await fake_redis.hset("h:all", mapping={"a": "1", "b": "2"})
-    assert await cap.hgetall("h:all") == {"a": "1", "b": "2"}
-
-
-@pytest.mark.asyncio
-async def test_hgetall_missing_returns_empty(cap, lane_prod):
-    assert await cap.hgetall("h:missing") == {}
-
-
-@pytest.mark.asyncio
-async def test_hgetall_passes_key_through_unchanged(cap, fake_redis):
-    token = _set_lane("coe-y")
-    try:
-        await fake_redis.hset("h:all", mapping={"a": "1"})
-        assert await cap.hgetall("h:all") == {"a": "1"}
-        assert await fake_redis.hgetall("coe-y:h:all") == {}
-    finally:
-        lane_var.reset(token)
 
 
 @pytest.mark.asyncio
@@ -395,36 +316,6 @@ async def test_smembers_passes_key_through_unchanged(cap, fake_redis):
 
 
 # Typed-error mapping for new accessors
-
-
-@pytest.mark.asyncio
-async def test_hget_redis_error_maps_to_call_failed(lane_prod):
-    cap = RedisCapability(_RaisingRedis(redis.exceptions.RedisError("boom")))
-    with pytest.raises(CapabilityCallFailed) as ei:
-        await cap.hget("k", "f")
-    assert ei.value.meta.get("op") == "hget"
-
-
-@pytest.mark.asyncio
-async def test_hget_timeout_maps_to_capability_timeout(lane_prod):
-    cap = RedisCapability(_RaisingRedis(redis.exceptions.TimeoutError("slow")))
-    with pytest.raises(CapabilityTimeout):
-        await cap.hget("k", "f")
-
-
-@pytest.mark.asyncio
-async def test_hgetall_redis_error_maps_to_call_failed(lane_prod):
-    cap = RedisCapability(_RaisingRedis(redis.exceptions.RedisError("boom")))
-    with pytest.raises(CapabilityCallFailed) as ei:
-        await cap.hgetall("k")
-    assert ei.value.meta.get("op") == "hgetall"
-
-
-@pytest.mark.asyncio
-async def test_hgetall_timeout_maps_to_capability_timeout(lane_prod):
-    cap = RedisCapability(_RaisingRedis(asyncio.TimeoutError()))
-    with pytest.raises(CapabilityTimeout):
-        await cap.hgetall("k")
 
 
 @pytest.mark.asyncio

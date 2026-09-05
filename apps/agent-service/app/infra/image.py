@@ -1,7 +1,6 @@
-"""Image pipeline client + per-request image registry.
+"""Image pipeline client.
 
 ``image_client`` — calls tool-service for process/upload/download.
-``ImageRegistry`` — Redis Hash based N.png numbering per message.
 """
 
 from __future__ import annotations
@@ -10,7 +9,6 @@ import base64
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
 
 import httpx
 
@@ -285,83 +283,3 @@ class _ImageClient:
 
 # Module-level instance
 image_client = _ImageClient()
-
-
-# ---------------------------------------------------------------------------
-# Image registry (per-message N.png numbering via Redis Hash)
-# ---------------------------------------------------------------------------
-
-_REGISTRY_TTL = 30 * 60  # 30 minutes
-
-_REGISTER_LUA = """
-local key = KEYS[1]
-local url = ARGV[1]
-local ttl = tonumber(ARGV[2])
-
-local n = redis.call('HINCRBY', key, '__counter__', 1)
-local filename = n .. '.png'
-redis.call('HSET', key, filename, url)
-redis.call('EXPIRE', key, ttl)
-return n
-"""
-
-
-class ImageRegistry:
-    """Per-request image registry backed by a Redis Hash.
-
-    Redis key: ``image_registry:{message_id}``
-    Fields: ``__counter__`` -> N, ``1.png`` -> url, ``2.png`` -> url, ...
-    TTL: 30 minutes.
-
-    Cross-service contract: chat-response-worker reads the same bare
-    key when rendering the AI reply (replaces ``N.png`` in the text
-    with the registered TOS URL). Lane isolation is delegated to the
-    ConfigBundle (coe-* lanes get a separate Redis container); the key
-    is never rewritten by the capability — that broke ppe→prod sharing
-    in trace 3de371aea10290b327f1386ea56f180c.
-    """
-
-    def __init__(self, message_id: str) -> None:
-        self.message_id = message_id
-        self._key = f"image_registry:{message_id}"
-
-    async def register(self, tos_url: str) -> str:
-        """Register a TOS URL, return filename like ``3.png``."""
-        from app.capabilities.redis import get_redis_capability
-
-        cap = await get_redis_capability()
-        n = await cap.eval(
-            _REGISTER_LUA,
-            keys=[self._key],
-            args=[tos_url, _REGISTRY_TTL],
-        )
-        return f"{n}.png"
-
-    async def register_batch(self, urls: list[str]) -> list[str]:
-        """Register multiple URLs via pipeline."""
-        if not urls:
-            return []
-        from app.capabilities.redis import get_redis_capability
-
-        cap = await get_redis_capability()
-        async with cap.pipeline() as pipe:
-            for url in urls:
-                pipe.eval(_REGISTER_LUA, 1, self._key, url, _REGISTRY_TTL)
-            results = await pipe.execute()
-        return [f"{n}.png" for n in results]
-
-    async def resolve(self, filename: str) -> str | None:
-        """Resolve a filename to its TOS URL."""
-        from app.capabilities.redis import get_redis_capability
-
-        cap = await get_redis_capability()
-        return await cap.hget(self._key, filename)
-
-    async def resolve_all(self) -> dict[str, str]:
-        """Get all filename -> URL mappings (excludes __counter__)."""
-        from app.capabilities.redis import get_redis_capability
-
-        cap = await get_redis_capability()
-        data: dict[str, Any] = await cap.hgetall(self._key)
-        data.pop("__counter__", None)
-        return data

@@ -5,6 +5,5 @@ Public surface:
     get_redis       — app.infra.redis
     mq              — app.infra.rabbitmq
     image_client    — app.infra.image
-    ImageRegistry   — app.infra.image
     lane_router     — app.infra.lane
 """
