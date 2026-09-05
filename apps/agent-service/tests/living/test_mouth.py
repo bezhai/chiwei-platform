@@ -1519,3 +1519,35 @@ async def test_the_handle_she_copies_off_her_own_list_is_the_one_this_accepts(
     )
     (segment,) = spoken
     assert segment.picture_file_names == ["temp/tos_matcha_cat.jpg"]
+
+
+@pytest.mark.integration
+async def test_the_words_she_says_can_never_impersonate_a_picture(
+    mouth_db, in_a_moment, spoken, voice, a_picture
+):
+    """正文和图在发送身份里必须分得开。
+
+    seed 是把几段拼起来再取 uuid5 的。图那几段直接追加在正文后面的话，"说这句话配
+    这张图"和"说的话本身正好长得像那句话加那张图"算出同一串 —— 后发那条被当成重放
+    挡掉，真人什么都收不到，而她以为发了。
+    """
+    pic = await a_picture(file_name="temp/tos_cat.jpg")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        await send_message.invoke(
+            {"what": "看这个", "channel_id": str(_DM), "pictures": [pic.picture_id]}
+        )
+        await send_message.invoke(
+            {
+                "what": f"看这个\x1f{pic.file_name}",
+                "channel_id": str(_DM),
+            }
+        )
+
+    assert len(spoken) == 2, (
+        f"两条不同的消息被算成了同一条：{[s.content for s in spoken]}"
+    )

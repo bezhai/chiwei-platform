@@ -142,6 +142,11 @@ _VOICE_CFG = AgentConfig(
 # 派生出站 id 的命名空间，随手换会让历史消息全部对不上。
 _ID_NS = uuid.UUID("d4a91f62-7c05-4b3e-9a18-2f6e8c07b5d1")
 
+# 带图那一支单独一个命名空间。同一个 namespace 下"正文里正好带着分隔符和文件名"能跟
+# "配了这张图"拼出同一串，而 ``intent`` 是她给的自由文本 —— 换 namespace 让两支从根上
+# 不可能相撞，代价只是多一个常量。
+_ID_NS_WITH_PICTURES = uuid.UUID("8f3c0d27-41ab-4e6d-b95a-3c7e1f204a86")
+
 # 交出去之前那一关最多占多久。判词是一次模型调用，挂住了就是把她整缝卡在网络上 ——
 # 一缝里她还有别的事要做。20s 沿用真人说话那侧检查的期限，不另立一个数。
 #
@@ -470,17 +475,35 @@ async def send_message(
     # 真人什么都收不到，而她以为发了。选把图算进 seed，**不是**绕开去重：那道闸漏
     # 一次就是真人收到两条。
     #
-    # 图那一段是**追加**上去的，所以不带图时拼出来的仍是从前那个字符串，历史上派生
-    # 过的每一个 id 都还对得上（``tests/living/test_mouth.py`` 钉了一个写死的快照 ——
-    # 改坏了的症状是认领表在历史记录上全部失效，而不是任何一条报错）。顺序也算进去：
-    # 换个顺序发出去的就是另一条消息。
-    seed = (
-        f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{conv.channel_id}\x1f{intent}"
-        + "".join(f"\x1f{name}" for name in file_names)
-    )
+    # 带图的走**另一个命名空间**，不是在原来那串后面接几段。接着拼的话，正文和图之间
+    # 没有边界：``intent`` 里只要正好出现 ``\x1f`` 加那个文件名，"说这句话配这张图"和
+    # "说的话本身长这样、不配图"就算出同一串，后发的那条被当成重放挡掉 —— 真人什么都
+    # 收不到，而她以为发了。``intent`` 是她给的自由文本，边界不能由她的措辞来定。
+    #
+    # 不带图那一支**逐字不动**，历史上派生过的每一个 id 都还对得上
+    # （``tests/living/test_mouth.py`` 钉了一个写死的快照 —— 改坏了的症状是认领表在
+    # 历史记录上全部失效，而不是任何一条报错）。带图那一支里，张数写在文件名前面，所
+    # 以"几张、分别是哪几张、剩下的是正文"能唯一还原，两组不同的输入拼不出同一串。
+    # 顺序也算进去：换个顺序发出去的就是另一条消息。
+    if file_names:
+        seed = "\x1f".join(
+            [
+                lane,
+                persona_id,
+                moment_id,
+                conv.channel_id,
+                str(len(file_names)),
+                *file_names,
+                intent,
+            ]
+        )
+        namespace = _ID_NS_WITH_PICTURES
+    else:
+        seed = f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{conv.channel_id}\x1f{intent}"
+        namespace = _ID_NS
     # 派生自**意图**而不是渲染结果：模型每次措辞可能不同，而重放同一次发送必须落回
     # 同一个 id，否则整轮重试会真的发出两条。
-    derived = uuid.uuid5(_ID_NS, seed)
+    derived = uuid.uuid5(namespace, seed)
     outbound_id = derived.hex
     message_id = f"{PROACTIVE_MESSAGE_ID_PREFIX}{derived}"
 
