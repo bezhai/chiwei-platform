@@ -48,6 +48,11 @@ class ChatResponseSegment(Data):
         （= 真实 p2p ``common_conversation_id``）+ ``bot_name`` 投递（不靠伪 id，
         见 chat-response-worker 的 is_proactive 出站路径 / task 4）。
 
+    **图有自己的字段，不进 ``content``。** 她说话是两步：``send_message`` 收「意思」，
+    voice 模型再把它渲染成人话。第二步是自由生成、没有任何原样保留的通道（prompt 明
+    写"把它说成你会说的那句话"），图片引用混在正文里必然被改写或丢掉 —— 两种下场都
+    不报错。所以 :attr:`picture_file_names` 是图唯一的通道。
+
     ``channel`` 必填：sink dispatch 按它现算 routing key（``chat_response_{channel}``）。
     ``channel_route_for_payload`` 已经对缺字段 fail-closed，但那道校验跑在 pydantic
     填完默认值之后 —— 有默认值时它永远看到 "lark"，拦不住错投，只有把默认值去掉
@@ -66,6 +71,15 @@ class ChatResponseSegment(Data):
     bot_name: str | None = None
     lane: str | None = None
     content: str = ""
+    # 这一条要带出去的图，值是对象存储的**永久句柄**（``file_name``），不是地址。
+    #
+    # 存句柄而不是 URL，是因为预签名地址只活 1.5 小时，而队列不保证几秒就投到：
+    # 泳道队列 TTL 降级、DLQ 重投都可能隔很久。签名必须在**最靠近使用它的那一刻**
+    # 生成，那是投递侧（lark-service）的事。传 URL 的失败是静默的 —— 消息发出去了、
+    # 图片链接是个合法地址，点开是一个过期签名。
+    #
+    # 空列表 = 这一条不带图。消费侧读它时不用先分辨 null 和"没有图"两种缺席。
+    picture_file_names: list[str] = []
     status: str = "success"
     is_last: bool = False
     full_content: str | None = None

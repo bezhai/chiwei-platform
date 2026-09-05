@@ -91,10 +91,13 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     )
     from app.living.mouth import SpokenOutbound
     from app.living.phone import PhoneRead
+    from app.living.pictures import Picture
     from app.living.records import Happening, Upcoming, Whereabouts
     from tests.runtime.conftest import migrate
 
-    for cls in (Happening, Whereabouts, Upcoming, PhoneRead, SpokenOutbound):
+    for cls in (
+        Happening, Whereabouts, Upcoming, PhoneRead, SpokenOutbound, Picture
+    ):
         await migrate(cls, test_db)
     tables = [
         CommonUser.__table__,

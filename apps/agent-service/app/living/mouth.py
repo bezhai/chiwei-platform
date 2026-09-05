@@ -71,6 +71,14 @@ life 产出「我想跟谁说个什么意思」，这里把它渲染成人话，
     每漏一条都打一行 ``living_mouth_unchecked`` —— 那是数"那段时间漏了多少"的唯一
     锚，改措辞前先想清楚谁在数它。
 
+**图不走正文，走自己的字段，而且算进发送身份。** 渲染那一步是**自由生成**，没有任何
+原样保留的通道（prompt 明写"把它说成你会说的那句话"），图片引用混在 ``what`` 里必然
+被改写或丢掉 —— 两种下场都不报错。所以图是 :func:`send_message` 的结构化参数，在
+:class:`app.domain.chat_dataflow.ChatResponseSegment` 上有自己的一列，传的是对象存储
+的**永久句柄**（地址 1.5 小时就死，签名由投递侧在最靠近发送的那一刻现签）。同时图要
+算进 ``outbound_id`` 的派生：不算的话，同一缝同一条会话说同样的话配另一张图会被认领
+表判成重发挡掉 —— 她换了张图重发，真人什么都收不到。
+
 **第一版是单次渲染。** 她一缝里可以调好几次说好几条，但不能自己接着聊下去（没有对话
 窗口自主权）——那是下一版的事。
 """
@@ -104,6 +112,7 @@ from app.living.phone import (
     medium_for,
     reachable_conversation,
 )
+from app.living.pictures import her_picture, picture_id_in
 from app.living.records import (
     KIND_SPEECH,
     OUTBOUND_HAPPENING_PREFIX,
@@ -382,6 +391,13 @@ async def send_message(
     channel_id: Annotated[
         str, Field(description="发到哪条会话，用信封 / 看手机时那串 channel_id")
     ],
+    pictures: Annotated[
+        list[str] | None,
+        Field(
+            description="要跟这条一起发出去的图，填它们的句柄（看图那边给你的那串），"
+            "照抄；只说话就别填"
+        ),
+    ] = None,
 ) -> str:
     """给手机上的某条会话发一条消息。
 
@@ -389,11 +405,15 @@ async def send_message(
 
     只能发你手机上有的会话（信封上列着的那些），channel_id 照抄，别自己编。
 
+    要带图就填 pictures，**别把图写进话里**——你写在话里的图片引用到不了对方那儿。
+    只能带你自己做过的图。
+
     一缝里可以发好几条。但发完就是发完了——对方回了什么，要等你下一次拿起手机才知道。
 
     Args:
         what: 你想说的意思。
         channel_id: 发到哪条会话。
+        pictures: 要一起发出去的图的句柄。
 
     Returns:
         这条的下场，附上真的说出口那句话。有时候只能告诉你"交出去了但不知道到没到"
@@ -424,7 +444,40 @@ async def send_message(
             f"channel_id，照抄。你能发的严格等于你看得见的那些会话。"
         )
 
-    seed = f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{conv.channel_id}\x1f{intent}"
+    # 句柄换成永久句柄，就在这里。``lane`` + ``persona_id`` 是**硬条件**：句柄是从
+    # ``file_name`` 派生的，别的泳道上那张同名的图算出来的是同一串，只按句柄取的话
+    # 一个从别处拿到的串就能把姐姐画的、或者 prod 上那张取出来当成自己的发出去。
+    #
+    # 取不到就整条不发，**绝不跳过那一张把剩下的发出去**：她说的是"把这几张给他看"，
+    # 少一张的那条消息不是她要发的那条。这一步在派生 id 之前，所以被挡下的那次不占
+    # 认领 —— 她同一缝里换成自己那张图还发得成。
+    file_names: list[str] = []
+    for handle in pictures or []:
+        # 认回来那一步走 :func:`picture_id_in`，**不在这里自己解析**：印给她的是
+        # ``pic=<id>``，每只手都在叫她原样抄回来，这里认裸 id 的话她照做就撞死路。
+        picture = await her_picture(
+            lane=lane, persona_id=persona_id, picture_id=picture_id_in(handle)
+        )
+        if picture is None:
+            raise ValueError(
+                f"{handle!r} 不是你做过的图，发不了 —— 用看图那边给你的那串句柄，"
+                f"照抄。你能发的严格等于你自己做出来的那些。"
+            )
+        file_names.append(picture.file_name)
+
+    # **图算进发送身份。** 不算的话，同一缝、同一条会话、同样的话配另一张图会撞上
+    # 同一个 ``outbound_id``，被下面那道认领闸判成重发直接挡掉 —— 她换了张图重发，
+    # 真人什么都收不到，而她以为发了。选把图算进 seed，**不是**绕开去重：那道闸漏
+    # 一次就是真人收到两条。
+    #
+    # 图那一段是**追加**上去的，所以不带图时拼出来的仍是从前那个字符串，历史上派生
+    # 过的每一个 id 都还对得上（``tests/living/test_mouth.py`` 钉了一个写死的快照 ——
+    # 改坏了的症状是认领表在历史记录上全部失效，而不是任何一条报错）。顺序也算进去：
+    # 换个顺序发出去的就是另一条消息。
+    seed = (
+        f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{conv.channel_id}\x1f{intent}"
+        + "".join(f"\x1f{name}" for name in file_names)
+    )
     # 派生自**意图**而不是渲染结果：模型每次措辞可能不同，而重放同一次发送必须落回
     # 同一个 id，否则整轮重试会真的发出两条。
     derived = uuid.uuid5(_ID_NS, seed)
@@ -569,6 +622,10 @@ async def send_message(
                 bot_name=conv.bot_name,
                 lane=lane,                # sink 不注入 header lane，必须显式带
                 content=said,
+                # 图走这一列，一个字符都没经过渲染那一步（见模块 docstring 上面
+                # 那段：渲染是自由生成，混在正文里的图片引用必然被改写或丢掉）。
+                # 传的是永久句柄，地址由投递侧在最靠近发送的那一刻现签。
+                picture_file_names=file_names,
                 status="success",
                 is_last=True,
                 full_content=said,

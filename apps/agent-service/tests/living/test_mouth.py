@@ -217,9 +217,13 @@ def test_the_mouth_speaks_with_the_chat_model_not_the_life_model():
 
 
 def test_the_mouth_never_asks_her_who_the_message_is_replying_to():
-    """第一版是单次渲染，不做对话窗口自主权 —— 签名里不该有"接着上一条"的位置。"""
+    """第一版是单次渲染，不做对话窗口自主权 —— 签名里不该有"接着上一条"的位置。
+
+    ``pictures`` 在这里：图是**结构化参数**，不是正文里的一句引用（见下面第十二节）。
+    """
     props = set(send_message.definition.parameters["properties"])
-    assert props == {"what", "channel_id"}, props
+    assert props == {"what", "channel_id", "pictures"}, props
+    assert "reply" not in " ".join(props), props
 
 
 # --------------------------------------------------------------------------
@@ -1210,3 +1214,308 @@ async def test_she_can_still_answer_a_line_that_slid_out_of_the_window_mid_momen
     assert len(spoken) == 1, f"缝开头看得见的会话，她答不上了：{spoken}"
     assert spoken[0].chat_id == str(_DM)
     assert isinstance(outcome, str) and "发出去了" in outcome, outcome
+
+
+# --------------------------------------------------------------------------
+# 十二 · 她带出去的图
+# --------------------------------------------------------------------------
+
+# 不带图那条路派生出来的 outbound_id，写死。
+#
+# 它 = uuid5(_ID_NS, "coe-living\x1fakao\x1f2026-07-25T21:30+08:00\x1f{_DM}\x1f问问他")，
+# 也就是**加图这件事之前**那个 seed 一字不差算出来的东西。写死而不是"跟重新算一遍
+# 相等"：后者会跟着实现一起变，等于什么都没钉住。seed 里只要多出一个分隔符，历史上
+# 派生过的每一个 outbound_id 都会换一批 —— 认领表从此拦不住任何一次重放，同一句话
+# 会被再发一遍，而且一句报错都没有。
+_NO_PICTURE_OUTBOUND_ID = "1f5ab29326e0548b83eebb0d8f54fa24"
+
+
+@pytest.fixture
+def a_picture(mouth_db):
+    """造一张"她做过的图"。默认是这条泳道上、她自己名下的那种。"""
+    from app.living.pictures import remember_a_picture
+
+    async def make(
+        *,
+        file_name: str,
+        persona_id: str = "akao",
+        lane: str = LANE,
+        what: str = "抹茶店门口那只猫",
+    ):
+        return await remember_a_picture(
+            lane=lane,
+            persona_id=persona_id,
+            file_name=file_name,
+            what=what,
+            made_at=_at(20),
+        )
+
+    return make
+
+
+@pytest.mark.integration
+async def test_a_picture_goes_out_on_its_own_field_and_never_reaches_the_voice_step(
+    mouth_db, in_a_moment, spoken, voice, a_picture
+):
+    """图走结构化字段，一个字符都不经过渲染那一步。
+
+    渲染是**自由生成**：prompt 明写"把它说成你会说的那句话"，没有任何原样保留的
+    通道。图片引用只要进了那一步的输入，它要么被改写、要么被丢掉 —— 两种下场都不
+    报错，她以为图发出去了，而真人看到的是一条没有图的消息。
+
+    所以这里两头都验：渲染那一步**看不到**句柄和永久句柄，而出站消息上**带着**
+    永久句柄。
+    """
+    pic = await a_picture(file_name="temp/tos_matcha_cat.jpg")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao"):
+        outcome = await send_message.invoke(
+            {
+                "what": "给他看我画的那只猫",
+                "channel_id": str(_DM),
+                "pictures": [pic.picture_id],
+            }
+        )
+
+    assert isinstance(outcome, str), outcome
+    (segment,) = spoken
+    assert segment.picture_file_names == ["temp/tos_matcha_cat.jpg"], (
+        "出站消息上没有图 —— 那条链从这里就断了"
+    )
+    assert segment.content == voice.said, "正文仍然只是渲染出来那句人话"
+
+    seen = repr(voice.runs)
+    assert pic.picture_id not in seen, (
+        f"句柄进了渲染那一步的输入 —— 它会被改写或丢掉。看到：{seen!r}"
+    )
+    assert "temp/tos_matcha_cat.jpg" not in seen, (
+        f"永久句柄进了渲染那一步的输入。看到：{seen!r}"
+    )
+
+
+@pytest.mark.integration
+async def test_several_pictures_ride_out_in_the_order_she_gave_them(
+    mouth_db, in_a_moment, spoken, voice, a_picture
+):
+    one = await a_picture(file_name="temp/tos_one.jpg")
+    two = await a_picture(file_name="temp/tos_two.jpg")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao"):
+        await send_message.invoke(
+            {
+                "what": "两张一起给他",
+                "channel_id": str(_DM),
+                "pictures": [two.picture_id, one.picture_id],
+            }
+        )
+
+    (segment,) = spoken
+    assert segment.picture_file_names == ["temp/tos_two.jpg", "temp/tos_one.jpg"]
+
+
+@pytest.mark.integration
+async def test_the_same_words_with_a_different_picture_is_a_different_send(
+    mouth_db, in_a_moment, spoken, voice, a_picture
+):
+    """**图算进发送身份。**
+
+    ``outbound_id`` 从 ``(lane, persona, 这一缝, 会话, 她那句意图)`` 派生。不把图
+    算进去的话，同一缝、同一条会话、同样的话配另一张图会撞上同一个 id，被认领表判
+    成重发直接挡掉 —— 她换了张图重发，真人什么都收不到，而她以为发了。
+
+    选把图算进 seed，**不是**绕开去重：那道闸漏一次就是真人收到两条。
+    """
+    cat = await a_picture(file_name="temp/tos_cat.jpg")
+    dog = await a_picture(file_name="temp/tos_dog.jpg")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        await send_message.invoke(
+            {"what": "看这个", "channel_id": str(_DM), "pictures": [cat.picture_id]}
+        )
+        await send_message.invoke(
+            {"what": "看这个", "channel_id": str(_DM), "pictures": [dog.picture_id]}
+        )
+
+    assert len(spoken) == 2, (
+        f"同一句话换了张图，第二次被判成重发挡掉了 —— 真人什么都收不到，"
+        f"而她以为发了。出站 {len(spoken)} 条"
+    )
+    assert [s.picture_file_names for s in spoken] == [
+        ["temp/tos_cat.jpg"],
+        ["temp/tos_dog.jpg"],
+    ]
+    assert spoken[0].message_id != spoken[1].message_id, (
+        "两条出站消息撞了同一个 message_id"
+    )
+
+
+@pytest.mark.integration
+async def test_replaying_the_very_same_request_with_pictures_still_goes_out_once(
+    mouth_db, in_a_moment, spoken, voice, a_picture
+):
+    """带图不放松去重：同一句话配同一张图，重放照样只出去一次。"""
+    cat = await a_picture(file_name="temp/tos_cat.jpg")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        await send_message.invoke(
+            {"what": "看这个", "channel_id": str(_DM), "pictures": [cat.picture_id]}
+        )
+        again = await send_message.invoke(
+            {"what": "看这个", "channel_id": str(_DM), "pictures": [cat.picture_id]}
+        )
+
+    assert len(spoken) == 1, (
+        f"同一句话配同一张图出站了 {len(spoken)} 次 —— 下游不去重，真人收到两条"
+    )
+    assert isinstance(again, str) and "没有再发一遍" in again, again
+
+
+@pytest.mark.integration
+async def test_a_send_without_pictures_derives_exactly_the_id_it_always_did(
+    mouth_db, in_a_moment, spoken, voice
+):
+    """不带图那条路的 seed 一个字节都没变。
+
+    图那一段是**追加**上去的，空的时候拼出来的仍是从前那个字符串。这里钉的是一个
+    写死的快照（见 :data:`_NO_PICTURE_OUTBOUND_ID`）：改坏了的症状是认领表在历史
+    记录上全部失效，而不是任何一条报错。
+    """
+    from app.living.mouth import latest_outbound
+
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        await send_message.invoke({"what": "问问他", "channel_id": str(_DM)})
+
+    row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+    assert row.outbound_id == _NO_PICTURE_OUTBOUND_ID, (
+        f"不带图那条路的派生 seed 变了 —— 历史上所有 outbound_id 从此对不上，"
+        f"认领表拦不住任何一次重放。拿到：{row.outbound_id}"
+    )
+    (segment,) = spoken
+    assert segment.message_id == (
+        f"{PROACTIVE_MESSAGE_ID_PREFIX}{uuid.UUID(_NO_PICTURE_OUTBOUND_ID)}"
+    )
+    assert segment.picture_file_names == [], "不带图就是不带图"
+
+
+@pytest.mark.integration
+async def test_a_handle_that_is_not_hers_never_gets_sent(
+    mouth_db, in_a_moment, spoken, voice, a_picture
+):
+    """她引用一个不属于她的句柄 —— 拒，而且一个字都不发出去。
+
+    句柄是从 ``file_name`` 派生的，所以别的泳道上那张同名的图算出来的是**同一串**：
+    只按句柄取的话，一个从别处拿到的串就能把姐姐画的、或者 prod 上那张取出来当成
+    自己的发出去。``lane`` + ``persona_id`` 是硬条件，两半都得对上。
+
+    取不到就整条不发，**绝不跳过那一张把剩下的发出去** —— 她说的是"把这几张给他
+    看"，少一张的那条消息不是她要发的那条。
+    """
+    from app.living.mouth import latest_outbound
+
+    mine = await a_picture(file_name="temp/tos_mine.jpg")
+    sisters = await a_picture(file_name="temp/tos_ayana.jpg", persona_id="ayana")
+    elsewhere = await a_picture(file_name="temp/tos_prod.jpg", lane="prod")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        for handles in (
+            [sisters.picture_id],
+            [elsewhere.picture_id],
+            ["0" * 32],
+            [mine.picture_id, sisters.picture_id],
+        ):
+            outcome = await send_message.invoke(
+                {"what": "看这个", "channel_id": str(_DM), "pictures": handles}
+            )
+            assert isinstance(outcome, dict), (
+                f"{handles} 没被挡下来。拿到：{outcome!r}"
+            )
+
+    assert spoken == [], f"引用了不属于她的图，还是发出去了 {len(spoken)} 条"
+    assert await latest_outbound(lane=LANE, moment_id=_MOMENT) is None, (
+        "被挡下的那次占住了认领 —— 她这一缝里换成自己那张图都发不成了"
+    )
+    assert voice.runs == [], "被挡下的那次还白花了一次渲染"
+
+
+@pytest.mark.integration
+async def test_a_refused_picture_does_not_stop_her_from_sending_the_right_one(
+    mouth_db, in_a_moment, spoken, voice, a_picture
+):
+    """挡下来是拒这一次，不是把这一缝判死。"""
+    mine = await a_picture(file_name="temp/tos_mine.jpg")
+    sisters = await a_picture(file_name="temp/tos_ayana.jpg", persona_id="ayana")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        await send_message.invoke(
+            {"what": "看这个", "channel_id": str(_DM), "pictures": [sisters.picture_id]}
+        )
+        outcome = await send_message.invoke(
+            {"what": "看这个", "channel_id": str(_DM), "pictures": [mine.picture_id]}
+        )
+
+    assert len(spoken) == 1, f"换成自己那张也发不出去了：{spoken}"
+    assert spoken[0].picture_file_names == ["temp/tos_mine.jpg"]
+    assert isinstance(outcome, str) and "发出去了" in outcome, outcome
+
+
+@pytest.mark.integration
+async def test_the_handle_she_copies_off_her_own_list_is_the_one_this_accepts(
+    mouth_db, in_a_moment, spoken, voice, a_picture
+):
+    """印出去的那串和认回来的那串必须是同一串。
+
+    看图那边印给她的是 ``pic=<id>``（:func:`app.living.pictures._handle_of`），它的
+    docstring 反复对她说"原样抄回来"。两边各写一遍解析的话，印的是 ``pic=<id>``、认
+    的是裸 id，她照做就撞死路 —— ``read_a_bit`` 在 coe-living 上实测踩过这个坑，而这
+    次她收到的还不是"没找到"，是"这不是你做过的图"，等于系统告诉她自己的记录是假的。
+    """
+    from app.living.pictures import _handle_of
+
+    pic = await a_picture(file_name="temp/tos_matcha_cat.jpg")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    copied = _handle_of(pic)
+    assert copied.startswith("pic="), f"这条用例钉的形状变了：{copied!r}"
+
+    async with in_a_moment("akao"):
+        outcome = await send_message.invoke(
+            {"what": "给他看这只猫", "channel_id": str(_DM), "pictures": [copied]}
+        )
+
+    assert isinstance(outcome, str) and "发出去了" in outcome, (
+        f"她照抄清单上那串，发不出去：{outcome!r}"
+    )
+    (segment,) = spoken
+    assert segment.picture_file_names == ["temp/tos_matcha_cat.jpg"]

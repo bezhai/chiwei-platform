@@ -30,6 +30,35 @@ def test_chat_response_segment_is_transient():
     assert ChatResponseSegment.Meta.transient is True
 
 
+# ---- 图：结构化字段，值是永久句柄 ----
+# 她说话是两步：send_message 收「意思」→ voice 模型渲染成人话。第二步是自由生成、
+# 没有任何原样保留的通道，所以图片引用混在正文里必然被改写或丢掉。图只能有自己
+# 的字段。而字段里存的是对象存储的**永久句柄**（file_name），不是地址：预签名地址
+# 1.5 小时就死，队列却可能隔很久才投到（泳道队列 TTL 降级、DLQ 重投），签名必须在
+# 最靠近发送的那一刻由投递侧现签。
+
+
+def test_chat_response_segment_carries_pictures_as_their_own_field():
+    from app.domain.chat_dataflow import ChatResponseSegment
+    seg = ChatResponseSegment(
+        message_id="m1", persona_id="p1", part_index=0, channel="lark",
+        content="给你看这个",
+        picture_file_names=["temp/tos_cat.jpg"],
+    )
+    assert seg.picture_file_names == ["temp/tos_cat.jpg"]
+    assert "temp/tos_cat.jpg" not in seg.content, "图不该顺手也塞进正文"
+
+
+def test_a_segment_without_pictures_carries_an_empty_list_not_none():
+    """缺省是空列表：消费侧读它时不用先分辨 null 和"没有图"两种缺席。"""
+    from app.domain.chat_dataflow import ChatResponseSegment
+    seg = ChatResponseSegment(
+        message_id="m1", persona_id="p1", part_index=0, channel="lark"
+    )
+    assert seg.picture_file_names == []
+    assert seg.model_dump(mode="json")["picture_file_names"] == []
+
+
 # ---- channel 字段：必填，没有默认值 ----
 # channel 决定出站 routing key（chat_response_{channel}）。给它默认值等于让
 # 「漏传 channel」静默变成飞书：一条 QQ 消息会被记成 lark、回复投进飞书出站
