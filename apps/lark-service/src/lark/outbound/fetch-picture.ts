@@ -71,20 +71,62 @@ export function toolServicePictureUrl(deps: ToolServicePictureUrlDeps): PictureU
  * 不写成 `typeof fetch`：那个类型上还挂着 preconnect 之类的运行时私货，替身得跟着
  * 编一份才通得过编译，而它们跟下载图片一点关系都没有。
  */
-export type LarkPictureFetch = (url: string) => Promise<{
+export type LarkPictureFetch = (
+    url: string,
+    init?: { signal: AbortSignal },
+) => Promise<{
     ok: boolean;
     status: number;
     arrayBuffer(): Promise<ArrayBuffer>;
 }>;
 
-export function httpPictureDownload(fetchPicture: LarkPictureFetch = fetch): PictureDownload {
+/**
+ * 一张图最多下多久。
+ *
+ * **这是护栏，不是可配置的业务行为**：它管的是"这一跳最多占用多久"，跟发不发图、发
+ * 哪张都无关，所以不进 Dynamic Config。
+ *
+ * 时限盖住**整趟**，不只是建连那一下。对面完全可以接了连接、回一个 200、然后 body
+ * 就是不结束 —— 那种情况下 `arrayBuffer()` 永远不 resolve，"一张图挂了不连累整条回
+ * 复"这条降级一步都走不到，她那句话跟着一起吊死在这儿。
+ */
+const PICTURE_DOWNLOAD_TIMEOUT_MS = 15_000;
+
+export function httpPictureDownload(
+    fetchPicture: LarkPictureFetch = fetch,
+    timeoutMs: number = PICTURE_DOWNLOAD_TIMEOUT_MS,
+): PictureDownload {
     return async (url) => {
-        const response = await fetchPicture(url);
-        if (!response.ok) {
-            // 抛出去，由 pictures.ts 统一降级 —— 只有它知道降级文案该说什么，也只有
-            // 它知道这张图挂了不该连累整条回复。
-            throw new Error(`failed to download picture: HTTP ${response.status}`);
+        const abort = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+
+        const work = (async () => {
+            const response = await fetchPicture(url, { signal: abort.signal });
+            if (!response.ok) {
+                // 抛出去，由 pictures.ts 统一降级 —— 只有它知道降级文案该说什么，也
+                // 只有它知道这张图挂了不该连累整条回复。
+                throw new Error(`failed to download picture: HTTP ${response.status}`);
+            }
+            return Buffer.from(await response.arrayBuffer());
+        })();
+        // 到点之后 abort 会让上面这趟自己炸一次，而那时 race 已经不听它了。挂个空
+        // handler 只是别让它变成 unhandled rejection 把进程带走。
+        work.catch(() => {});
+
+        try {
+            return await Promise.race([
+                work,
+                new Promise<never>((_, reject) => {
+                    timer = setTimeout(() => {
+                        abort.abort();
+                        reject(
+                            new Error(`picture download timed out after ${timeoutMs}ms`),
+                        );
+                    }, timeoutMs);
+                }),
+            ]);
+        } finally {
+            clearTimeout(timer);
         }
-        return Buffer.from(await response.arrayBuffer());
     };
 }

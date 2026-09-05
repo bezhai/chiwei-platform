@@ -95,6 +95,24 @@ describe('httpPictureDownload', () => {
         expect(seen).toEqual(['https://tos.example/a.png?sig=x']);
     });
 
+    it('响应体永远不结束时：到点了抛出去，不把整条回复吊在这儿', async () => {
+        // 对面接了连接、回了 200，然后 body 就是不结束。没有时限的话
+        // `arrayBuffer()` 永远不 resolve —— 降级逻辑一步都走不到，她那句话跟着一起
+        // 卡在这儿。超时管的是**整趟**，不只是建连那一下。
+        const download = httpPictureDownload(
+            async () => ({
+                ok: true,
+                status: 200,
+                arrayBuffer: () => new Promise<ArrayBuffer>(() => {}),
+            }),
+            20,
+        );
+
+        expect(download('https://tos.example/hangs.png')).rejects.toThrow(
+            /timed out/i,
+        );
+    });
+
     it('对面不给：抛，状态码带在报错里', async () => {
         const download = httpPictureDownload(async () => ({
             ok: false,
