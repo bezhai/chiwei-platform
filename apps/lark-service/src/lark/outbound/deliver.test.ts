@@ -12,6 +12,8 @@ import { describe, expect, it } from 'bun:test';
 
 import type { LarkChatResponse } from './chat-response';
 import { deliverLarkChatResponse, type LarkDeliveryDeps } from './deliver';
+import type { LarkPictureDeps } from './pictures';
+import { createLarkPostRenderer } from './render';
 import type {
     LarkAgentResponseRow,
     LarkResponseLedger,
@@ -292,15 +294,33 @@ describe('发送分支 — part 0 的被动回复', () => {
         expect(dm.rendered[0]!.ctx.mentionChatId).toBeUndefined();
     });
 
-    it('图片注册表用全局 message_id，不是反查出来的飞书裸 id', async () => {
+    it('把这一段带的图片句柄原样交给渲染，一个都不改', async () => {
+        // 队列里传的是对象存储的永久句柄（签名只活 1.5 小时，现签在渲染那一步）。
+        // 这里动过它的话，症状是图签不出来 —— 而那一路的失败是降级，不会红。
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ picture_file_names: ['pictures/a.png', 'pictures/b.png'] }),
+        );
+
+        expect(h.rendered[0]!.ctx.pictureFileNames).toEqual([
+            'pictures/a.png',
+            'pictures/b.png',
+        ]);
+    });
+
+    it('老消息没有 picture_file_names：渲染那一步一个句柄都收不到', async () => {
+        // DLQ 里躺着的、旧版 agent-service 发的消息就是这种。缺字段 = 这一段不带图，
+        // 照常发正文。
         const h = harness();
         seedRefs(h.store);
 
         await deliverLarkChatResponse(h.deps, reply());
 
-        // 用裸 om_id 查注册表必 miss，图片被静默吞掉（全程无报错）。
-        expect(h.rendered[0]!.ctx.imageRegistryId).toBe('cm_trigger');
-        expect(h.rendered[0]!.ctx.imageRegistryId).not.toBe('om_trigger');
+        expect(h.rendered[0]!.ctx.pictureFileNames).toBeUndefined();
+        expect(h.api.replied).toHaveLength(1);
     });
 
     it('第一段之前不等待', async () => {
@@ -1125,5 +1145,117 @@ describe('内存实现的事务语义（测试替身自检）', () => {
             });
         });
         expect([...store.larkMessages.keys()]).toEqual(['om_1']);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 图片这一路的降级，接的是**真的渲染器**
+// ---------------------------------------------------------------------------
+
+// 上面所有用例的 render 都是替身。这一组反过来：把真的 createLarkPostRenderer 接进
+// 来，只让图片那三个协作者依次失败，然后看飞书那边到底收到了什么。
+//
+// 判据不是"渲染没抛"，是**她那句话真的送到了飞书**：一张图发不出去不能让整条消息
+// 发不出去。抛出去的结果是整条消息进重试，真人什么都收不到，而且重试大概率还是同样
+// 的失败。
+describe('图片每一步失败时：她那句话照常送到飞书', () => {
+    function withRealRender(pictures: Partial<LarkPictureDeps> = {}): Harness {
+        const h = harness();
+        h.deps.render = createLarkPostRenderer({
+            mentions: async (text) => text,
+            pictures: {
+                sign: async (fileName) => `https://tos.example/${fileName}`,
+                download: async () => Buffer.from('bytes'),
+                uploader: { uploadImage: async () => 'img_v3_uploaded' },
+                ...pictures,
+            },
+        });
+        seedRefs(h.store);
+        return h;
+    }
+
+    const carrying = { content: '看这张', picture_file_names: ['pictures/cat.png'] };
+
+    it('现签失败：正文照发，图降级成一行文字', async () => {
+        const h = withRealRender({ sign: async () => null });
+
+        await deliverLarkChatResponse(h.deps, reply(carrying));
+
+        expect(h.api.replied).toHaveLength(1);
+        const content = h.api.replied[0]!.content.content;
+        expect(content[0]).toEqual([{ tag: 'md', text: '看这张' }]);
+        expect(content.flat().some((node) => node.tag === 'img')).toBe(false);
+    });
+
+    it('下载失败：正文照发', async () => {
+        const h = withRealRender({
+            download: async () => {
+                throw new Error('HTTP 502');
+            },
+        });
+
+        await deliverLarkChatResponse(h.deps, reply(carrying));
+
+        expect(h.api.replied).toHaveLength(1);
+        expect(h.api.replied[0]!.content.content[0]).toEqual([{ tag: 'md', text: '看这张' }]);
+    });
+
+    it('上传飞书失败：正文照发', async () => {
+        const h = withRealRender({ uploader: { uploadImage: async () => null } });
+
+        await deliverLarkChatResponse(h.deps, reply(carrying));
+
+        expect(h.api.replied).toHaveLength(1);
+        expect(h.api.replied[0]!.content.content[0]).toEqual([{ tag: 'md', text: '看这张' }]);
+    });
+
+    it('三张图全挂：整条消息照样发出去，台账照样收口', async () => {
+        const h = withRealRender({ sign: async () => null });
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1', bot_name: 'chiwei' });
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({
+                content: '看这几张',
+                full_content: '看这几张',
+                picture_file_names: ['a.png', 'b.png', 'c.png'],
+            }),
+        );
+
+        expect(h.api.replied).toHaveLength(1);
+        expect(h.ledger.settled).toEqual([
+            { sessionId: 'sess-1', outcome: { status: 'completed', responseText: '看这几张' } },
+        ]);
+    });
+
+    it('顺利的时候：正文一行、图一行，都送到飞书', async () => {
+        const h = withRealRender();
+
+        await deliverLarkChatResponse(h.deps, reply(carrying));
+
+        expect(h.api.replied[0]!.content.content).toEqual([
+            [{ tag: 'md', text: '看这张' }],
+            [{ tag: 'img', image_key: 'img_v3_uploaded' }],
+        ]);
+    });
+
+    it('正文里带一个非法图片引用时，整条消息里唯一的 img 是结构化那张', async () => {
+        // 飞书认不出的 image_key 会让它拒收**整条消息**。voice 模型随手写出的引用
+        // 一个都不能变成 image_key。
+        const h = withRealRender();
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({
+                content: '先看这个 ![我编的](img_v3_totally_made_up) 再看那个',
+                picture_file_names: ['pictures/real.png'],
+            }),
+        );
+
+        expect(h.api.replied[0]!.content.content).toEqual([
+            [{ tag: 'md', text: '先看这个' }],
+            [{ tag: 'md', text: '再看那个' }],
+            [{ tag: 'img', image_key: 'img_v3_uploaded' }],
+        ]);
     });
 });

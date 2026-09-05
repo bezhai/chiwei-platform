@@ -38,7 +38,6 @@
 // 跨服务、动共享写路径，不在这一批里。
 
 import type { LarkChatResponse } from './chat-response';
-import { imageRegistryLookupId } from './chat-response';
 import type { LarkOutboundApi } from './lark-api';
 import type { LarkResponseLedger } from './ledger';
 import type { LarkPostRenderer } from './render';
@@ -352,7 +351,9 @@ async function send(
     const post = await deps.render(response.content, {
         // 私聊不解析 @：里面没有第三个人，查一次群成员纯属白花一次查询。
         mentionChatId: response.is_p2p ? undefined : target.chatId,
-        imageRegistryId: imageRegistryLookupId(response),
+        // 对象存储的永久句柄，原样往下递。签名只活 1.5 小时，所以现签在渲染那一步
+        // 做（见 render.ts / pictures.ts）；老消息没有这个字段，就是不带图。
+        pictureFileNames: response.picture_file_names,
     });
 
     if (partIndex === 0 && !isProactive) {

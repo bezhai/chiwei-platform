@@ -47,6 +47,21 @@ export interface LarkChatResponse {
     /** 这一段的正文，AI 写的原始 markdown。渲染成飞书富文本是本服务的事。 */
     content: string;
 
+    /**
+     * 这一段要带出去的图，值是对象存储的**永久句柄**（file_name），不是地址。
+     *
+     * 图有自己的字段、不在 content 里，是因为上游那边正文由一个对话模型自由生成，
+     * 没有任何原样保留的通道 —— 混在正文里的图片引用必然被改写或丢掉，而且不报错。
+     *
+     * 存句柄而不是 URL：预签名地址只活 1.5 小时，队列却不保证几秒就投到（泳道队列
+     * TTL 降级、DLQ 重投都可能隔很久）。签名要在**最靠近发送的那一刻**由本服务现签，
+     * 拿一个过期签名发出去的失败是静默的（消息发得出去，图片点开是坏的）。
+     *
+     * 可选：老消息（DLQ 里躺着的、旧版 agent-service 发的）没有这个字段，缺字段 =
+     * 这一段不带图，照常发正文。
+     */
+    picture_file_names?: string[];
+
     /** 整轮回答的全文。只有收尾那一段带，用来回填台账的 response_text。 */
     full_content?: string;
 
@@ -73,19 +88,4 @@ export interface LarkChatResponse {
 
     /** 发布时刻（ms）。消费侧据它算队列积压。 */
     published_at?: number;
-}
-
-/**
- * 查图片注册表用的 id。
- *
- * agent-service 用 `ImageRegistry(req.message_id)` 把画出来的图注册到 Redis，
- * key 是 `image_registry:{全局 message_id}`。这里必须用**同一个全局 id** 去查，
- * 绝不能用反查出来的飞书裸 om_id —— 那个键上游从来没写过，查必定 miss，图片被
- * 静默吞掉（全程无报错，用户只是收到一条没有图的回复）。
- *
- * 单独一个函数而不是在调用处直接写 `response.message_id`，是为了让"用的是哪个
- * id"这件事有一个能被测试指着的名字。
- */
-export function imageRegistryLookupId(response: Pick<LarkChatResponse, 'message_id'>): string {
-    return response.message_id;
 }
