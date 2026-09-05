@@ -746,3 +746,35 @@ async def test_the_picture_reaches_the_gemini_wire_as_real_bytes(
     inline = [p for p in content.parts if getattr(p, "inline_data", None)]
     assert inline, f"图片没进 Gemini wire：{content}"
     assert inline[0].inline_data.data == b"\x89PNG-bytes"
+
+
+@pytest.mark.integration
+async def test_she_can_walk_back_past_the_list_limit_without_remembering_anything(
+    pictures_db, her_hands, in_a_moment
+):
+    """挤下去的那些也够得到，而且不要求她记得那张是什么。
+
+    她跨不过一缝的边界：上一缝画的那张，这一缝她既没有句柄也想不起那句话。清单只给
+    最近一屏、其余靠"报得出它是什么"的话，第 21 张往前就是**永久**够不到 —— 而那些
+    全是她自己做的东西。所以清单末尾那串句柄要能当作"接着往前"的落脚点：它就印在她
+    刚看到的那一屏上，不需要她记住任何东西。
+    """
+    made = []
+    for i in range(PICTURE_LIST_LIMIT + 5):
+        made.append(await _she_has(f"第{i}张", f"stored/p{i}", _at(10, i)))
+    oldest = made[0]
+
+    async with in_a_moment("akao"):
+        first = await look_through_your_pictures.invoke({})
+        assert isinstance(first, str), first
+        assert oldest.what not in first, "最早那张本来就该被挤下去，这条用例才有意义"
+
+        # 她手上唯一的东西：刚才那一屏的最后一串句柄。原样抄回去接着往前翻。
+        further = await look_through_your_pictures.invoke(
+            {"before": f"pic={_handles(first)[-1]}"}
+        )
+
+    assert isinstance(further, str), further
+    assert oldest.what in further, f"往前翻还是够不到最早那张：{further!r}"
+    assert handle_for(oldest.file_name) in _handles(further)
+

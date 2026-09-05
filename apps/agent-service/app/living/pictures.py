@@ -206,9 +206,13 @@ async def her_picture(
 
 
 async def pictures_she_made(
-    *, lane: str, persona_id: str, limit: int | None = PICTURE_LIST_LIMIT
+    *,
+    lane: str,
+    persona_id: str,
+    limit: int | None = PICTURE_LIST_LIMIT,
+    before: datetime | None = None,
 ) -> list[Picture]:
-    """她做过的图，最近的在前。``limit=None`` = 全部。
+    """她做过的图，最近的在前。``limit=None`` = 全部，``before`` = 只要比它更早的。
 
     条数上限只是"一屏摆得下多少"，不是她只剩这几张：被挤下去的那些用
     :func:`her_picture` 照样取得到。
@@ -217,16 +221,23 @@ async def pictures_she_made(
     :mod:`app.living.reading` 那边同一条：清单有上限，报名字那条路一个上限都没有。
     截在 20 张的话，第 21 张往前的每一张她都只能靠一串十六进制指，而那串正是她拿不
     到的东西。
+
+    ``before`` 是**她能一路翻到底的那条路**（:func:`look_through_your_pictures`）。
+    分页从来不是给她的形状 —— 她记不住页码，跨一缝就忘了自己翻到哪。但"接着刚看到
+    的最后那张往前"不要求她记住任何东西：那张的句柄就印在她眼前那一屏上。
     """
     clause = "" if limit is None else " LIMIT :limit"
+    earlier = " AND made_at < :before" if before is not None else ""
     sql = (
         f"SELECT * FROM {_TABLE} "
-        f"WHERE lane = :lane AND persona_id = :persona_id "
+        f"WHERE lane = :lane AND persona_id = :persona_id{earlier} "
         f"ORDER BY made_at DESC{clause}"
     )
     params: dict[str, Any] = {"lane": lane, "persona_id": persona_id}
     if limit is not None:
         params["limit"] = limit
+    if before is not None:
+        params["before"] = before
     async with get_session() as s:
         rows = (await s.execute(text(sql), params)).mappings().all()
     return [Picture(**{k: r[k] for k in Picture.model_fields}) for r in rows]
@@ -466,7 +477,15 @@ def _one_picture(p: Picture, *, now: datetime) -> str:
 
 @tool
 @tool_error("翻你手上的图失败")
-async def look_through_your_pictures() -> str:
+async def look_through_your_pictures(
+    before: Annotated[
+        str | None,
+        Field(
+            description="接着哪一张往前翻：把上一屏最后那串 pic=… 原样抄进来；"
+            "从头看就别填"
+        ),
+    ] = None,
+) -> str:
     """翻一翻你手上都有哪些图。
 
     你自己画过的、上网找回来的，都在这儿，最近做的在最前面。每张跟着一串 pic=…，
@@ -475,15 +494,35 @@ async def look_through_your_pictures() -> str:
     **这是你下一缝还能找到那些图的唯一一条路。** 你画完那一刻看见的东西，过了这一缝
     就不在你眼前了；只有从这儿翻，才知道自己手上有什么。
 
-    一次只列最近那些，更早的没有消失——想得起那张是什么，直接把那句话报给
-    look_at_a_picture 也指得到。
+    一次只列最近那些。还想往前看就把这一屏最后那串 pic=… 抄进 before 再翻一次，
+    一直翻得到最早那张。想得起那张是什么的话，直接把那句话报给 look_at_a_picture
+    也指得到。
 
     Returns:
         你手上那些图，每张带一串 pic=…；一张都没有时如实说明。
     """
     lane, now, persona_id, _moment_id = moment_scope()
-    mine = await pictures_she_made(lane=lane, persona_id=persona_id, limit=None)
+
+    # 她抄回来的那串指的是"翻到这儿了"，落脚点是它的时刻。指不到的串**当没填**而不是
+    # 报错：她翻到底那一屏的最后一张，下一次再抄它是很自然的动作。
+    edge: datetime | None = None
+    if before and before.strip():
+        marker = await her_picture(
+            lane=lane, persona_id=persona_id, picture_id=picture_id_in(before)
+        )
+        if marker is None:
+            raise ValueError(
+                f"{before!r} 不是你手上任何一张图 —— 抄这一屏最后那串 pic=…，"
+                f"或者不填从头看。"
+            )
+        edge = marker.made_at
+
+    mine = await pictures_she_made(
+        lane=lane, persona_id=persona_id, limit=None, before=edge
+    )
     if not mine:
+        if edge is not None:
+            return "再往前就没有了 —— 这些就是你手上全部的图。"
         return "你手上还没有图 —— 想要就自己画一张，或者上网找一张。"
 
     lines = ["你手上的图（最近做的在前面）："]
@@ -491,7 +530,8 @@ async def look_through_your_pictures() -> str:
     skipped = len(mine) - PICTURE_LIST_LIMIT
     if skipped > 0:
         lines.append(
-            f"还有 {skipped} 张没列在这儿 —— 想得起是什么就直接报那句话。"
+            f"还有 {skipped} 张没列在这儿 —— 把上面最后那串 pic=… 抄进 before "
+            f"接着往前翻，或者想得起是什么就直接报那句话。"
         )
     return "\n".join(lines)
 
