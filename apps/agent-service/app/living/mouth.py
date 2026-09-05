@@ -85,6 +85,7 @@ life 产出「我想跟谁说个什么意思」，这里把它渲染成人话，
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -386,6 +387,40 @@ def _scene(scope: str, title: str) -> str:
     return f"你在群「{title}」里说话。" if scope != "direct" else f"你在跟「{title}」私聊。"
 
 
+def _handles_she_gave(pictures: list[str] | str | None) -> list[str]:
+    """她交出来的那几串句柄，无论以什么形状到达。
+
+    参数**声明**成 ``list[str]``，但到达时可能是一个字符串 —— 模型有时把整个数组序列
+    化了交过来，有时只想发一张就干脆只交那一串。直接 ``for handle in pictures`` 的话
+    字符串会被逐**字符**迭代，第一个字符当成句柄，她收到的是「``'['`` 不是你做过的
+    图」这种她无从理解的话。2026-09-05 在 coe-living 上实测踩过：她照着说明抄对了句
+    柄，连试四次全被挡，最后放弃带图只发了文字。
+
+    **这不是在替她纠正什么。** 她四次的意思一模一样：把这张图发出去。参数长什么形状
+    是模型序列化的事，不是她的意思 —— 这里接住的是那个意思。真正该拦的（句柄不是她
+    的、图不存在）一条都没放松，仍在下面那一步。
+    """
+    if pictures is None:
+        return []
+    if isinstance(pictures, list):
+        return [str(p) for p in pictures]
+
+    wanted = pictures.strip()
+    if not wanted:
+        return []
+    # 看着像被序列化的数组就按数组读。读不动就当作她只交了一串 —— 绝不在这里猜着切
+    # 分隔符，切错的下场是发出一张她没打算发的图。
+    if wanted.startswith("["):
+        try:
+            loaded = json.loads(wanted)
+        except json.JSONDecodeError:
+            return [wanted]
+        if isinstance(loaded, list):
+            return [str(p) for p in loaded]
+        return [str(loaded)]
+    return [wanted]
+
+
 @tool
 @tool_error("这条消息没发出去")
 async def send_message(
@@ -457,7 +492,7 @@ async def send_message(
     # 少一张的那条消息不是她要发的那条。这一步在派生 id 之前，所以被挡下的那次不占
     # 认领 —— 她同一缝里换成自己那张图还发得成。
     file_names: list[str] = []
-    for handle in pictures or []:
+    for handle in _handles_she_gave(pictures):
         # 认回来那一步走 :func:`picture_id_in`，**不在这里自己解析**：印给她的是
         # ``pic=<id>``，每只手都在叫她原样抄回来，这里认裸 id 的话她照做就撞死路。
         picture = await her_picture(

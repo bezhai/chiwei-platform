@@ -1551,3 +1551,47 @@ async def test_the_words_she_says_can_never_impersonate_a_picture(
     assert len(spoken) == 2, (
         f"两条不同的消息被算成了同一条：{[s.content for s in spoken]}"
     )
+
+
+@pytest.mark.integration
+async def test_a_picture_reaches_the_message_however_the_model_serialised_the_list(
+    mouth_db, in_a_moment, spoken, voice, a_picture
+):
+    """她给的那串图，无论以什么形状到达，都得接住。
+
+    2026-09-05 coe-living 实测：她照着说明抄对了句柄，连着试了四次全被挡下 ——
+    模型把 ``pictures`` 交成了**字符串**而不是数组，于是 ``for handle in pictures``
+    逐**字符**迭代，第一个字符 `[` 或 `p` 被当成了句柄。她收到的是「'[' 不是你做过
+    的图」，一句她无从理解的话；最后她放弃带图，只发了文字。
+
+    参数长什么形状是模型序列化的事，不是她的意思。她的意思四次都一样：把这张图发出
+    去。这里接住的是那个意思。
+    """
+    pic = await a_picture(file_name="temp/tos_cat.jpg")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    shapes = [
+        [f"pic={pic.picture_id}"],           # 本该是的样子
+        f'["pic={pic.picture_id}"]',         # 整个数组被序列化成一个字符串
+        f'["{pic.picture_id}"]',             # 同上，句柄没带前缀
+        f"pic={pic.picture_id}",             # 干脆只交一个，没有数组
+        pic.picture_id,                      # 只交一个、还没带前缀
+    ]
+
+    for i, shape in enumerate(shapes):
+        async with in_a_moment("akao", moment_id=f"m-shape-{i}"):
+            outcome = await send_message.invoke(
+                {"what": f"看这只猫 {i}", "channel_id": str(_DM), "pictures": shape}
+            )
+        assert isinstance(outcome, str) and "发出去了" in outcome, (
+            f"第 {i} 种形状 {shape!r} 没接住：{outcome!r}"
+        )
+
+    assert len(spoken) == len(shapes)
+    for segment in spoken:
+        assert segment.picture_file_names == ["temp/tos_cat.jpg"], (
+            f"图没跟着出去：{segment.picture_file_names}"
+        )
