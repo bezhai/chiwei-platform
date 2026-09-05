@@ -9,8 +9,8 @@
 //   - 被动回复（reply / part0）：thread 锚点已是 resolveOutboundTarget 反查出的原始
 //     QQ msg_id → 直接作 replyToMessageId。
 //   - 多段续段（sendText, part>0）：reply/sendText 端口签名不带 partIndex，但 worker
-//     把【源 common message id】放在 ctx.imageRegistryId（见 image-registry-key.ts）。
-//     用它反查 qq_message 拿回原始 QQ msg_id，让续段仍挂在同一 msg_id 下。
+//     把【源 common message id】放在 ctx.sourceCommonMessageId。用它反查 qq_message
+//     拿回原始 QQ msg_id，让续段仍挂在同一 msg_id 下。
 //   - 主动发（is_proactive / 反查不到原始 msg_id，如 proactive:<uuid> 伪 id）：抛错
 //     fail-loud，不发网关（发了也会被 QQ 拒）。网关回执 sent=false（超窗 / 超 4 次 /
 //     发送报错）同样抛错。两者都由通用 handler 的 catch 兜住（记 error、不 record），
@@ -162,14 +162,14 @@ export function createQqOutboundCapabilities(deps: QqOutboundDeps): OutboundCapa
             });
         },
 
-        // 续段 / 主动发都走这里。续段：用 ctx.imageRegistryId（源 common message id）
-        // 反查原始 QQ msg_id；反查不到 = 主动发 → 丢弃 + warn、不发网关。
+        // 续段 / 主动发都走这里。续段：用 ctx.sourceCommonMessageId 反查原始 QQ
+        // msg_id；反查不到 = 主动发 → 丢弃 + warn、不发网关。
         async sendText(
             _conv: ConversationRef,
             content: ContentItem[],
             ctx: RenderContext,
         ): Promise<MessageRef> {
-            const sourceCommonId = ctx.imageRegistryId;
+            const sourceCommonId = ctx.sourceCommonMessageId;
             let replyToMessageId: string | undefined;
             if (sourceCommonId) {
                 try {
@@ -211,7 +211,7 @@ export function createQqOutboundCapabilities(deps: QqOutboundDeps): OutboundCapa
                 conversationId: requireConversationId(ctx),
                 chatType: chatTypeFromCtx(ctx),
                 text: extractText(content),
-                idempotencySource: ctx.imageRegistryId ?? replyToMessageId,
+                idempotencySource: ctx.sourceCommonMessageId ?? replyToMessageId,
                 partIndex: ctx.partIndex ?? 0,
             });
             return postOrThrow(deps, out);

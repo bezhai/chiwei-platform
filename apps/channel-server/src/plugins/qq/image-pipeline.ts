@@ -7,8 +7,8 @@
 // 与飞书的差异（已知 gap，待 agent-service 侧收敛）：飞书传 file_key 由 agent-service
 // 经飞书 SDK 下载；QQ 附件是网关原样透传的公网 url，这里同时带上 url。tool-service
 // 的 /api/image-pipeline/process 对 url 入参的支持需 agent-service 侧确认/扩展，
-// 不在本插件范围（不碰 agent-service）。message_id 用全局 common message id（与
-// agent-service ImageRegistry 的 key 口径一致，见 workers/image-registry-key.ts）。
+// 不在本插件范围（不碰 agent-service）。message_id 用全局 common message id ——
+// tool-service 的识图结果按它挂回这条消息，喂渠道裸 id 进去就挂不上了。
 
 import type { InboundMessage } from '@inner/shared/channel';
 import { laneRouter } from '@infrastructure/lane-router';

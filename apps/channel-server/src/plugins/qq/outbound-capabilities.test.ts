@@ -64,7 +64,7 @@ describe('qq OutboundCapabilities.reply', () => {
         const thread: ThreadRef = { selfChannelMessageId: 'src_qq_msg' };
 
         const ref = await cap.reply(thread, text('你好'), {
-            imageRegistryId: 'common_src_1',
+            sourceCommonMessageId: 'common_src_1',
             groupConversationId: 'qq_conv',
             resolveMentions: true,
         });
@@ -83,7 +83,7 @@ describe('qq OutboundCapabilities.reply', () => {
         const { deps, sent } = makeDeps();
         const cap = createQqOutboundCapabilities(deps);
         await cap.reply({ selfChannelMessageId: 'src_qq_msg' }, text('hi'), {
-            imageRegistryId: 'c1',
+            sourceCommonMessageId: 'c1',
             groupConversationId: 'qq_conv',
             resolveMentions: false,
         });
@@ -102,12 +102,12 @@ describe('qq OutboundCapabilities.reply', () => {
 });
 
 describe('qq OutboundCapabilities.sendText (continuation / proactive)', () => {
-    it('continuation: reverse-resolves the source common id (ctx.imageRegistryId) to the original qq msg id', async () => {
+    it('continuation: reverse-resolves the source common id (ctx.sourceCommonMessageId) to the original qq msg id', async () => {
         const { deps, sent } = makeDeps();
         const cap = createQqOutboundCapabilities(deps);
 
         const ref = await cap.sendText({ channelId: 'qq_conv' }, text('续段'), {
-            imageRegistryId: 'common_src_1',
+            sourceCommonMessageId: 'common_src_1',
             groupConversationId: 'qq_conv',
             resolveMentions: true,
         });
@@ -122,7 +122,7 @@ describe('qq OutboundCapabilities.sendText (continuation / proactive)', () => {
         const { deps, sent } = makeDeps();
         const cap = createQqOutboundCapabilities(deps);
         const ctxBase = {
-            imageRegistryId: 'common_src_1',
+            sourceCommonMessageId: 'common_src_1',
             groupConversationId: 'qq_conv',
             resolveMentions: true,
         };
@@ -144,7 +144,7 @@ describe('qq OutboundCapabilities.sendText (continuation / proactive)', () => {
 
         await expect(
             cap.sendText({ channelId: 'qq_conv' }, text('主动发'), {
-                imageRegistryId: 'proactive:abc',
+                sourceCommonMessageId: 'proactive:abc',
                 groupConversationId: 'qq_conv',
                 resolveMentions: false,
             }),
@@ -160,7 +160,7 @@ describe('qq OutboundCapabilities.sendText (continuation / proactive)', () => {
 
         await expect(
             cap.sendText({ channelId: 'qq_conv' }, text('续段'), {
-                imageRegistryId: 'common_src_1',
+                sourceCommonMessageId: 'common_src_1',
                 groupConversationId: 'qq_conv',
                 resolveMentions: true,
             }),
@@ -178,7 +178,7 @@ describe('qq OutboundCapabilities.reply: gateway drop is fail-loud', () => {
 
         await expect(
             cap.reply({ selfChannelMessageId: 'src_qq_msg' }, text('回复'), {
-                imageRegistryId: 'common_src_1',
+                sourceCommonMessageId: 'common_src_1',
                 groupConversationId: 'qq_conv',
                 resolveMentions: true,
             }),

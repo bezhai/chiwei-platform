@@ -49,12 +49,15 @@ export interface OutboundMessageRecordInput {
 }
 
 // 出站渲染上下文。这些不是消息「内容」(那是 ContentItem[]),而是把 content
-// 渲染成平台格式时所需的「外部引用」——它们不属于渠道内 id 命名空间,故不能塞进
+// 表达成平台报文时所需的「外部引用」——它们不属于渠道内 id 命名空间,故不能塞进
 // ConversationRef/MessageRef/ThreadRef(那些只承载渠道内裸 id)。
-//   imageRegistryId  内容里若含图片占位引用,用这个【全局】id 去查图片注册表
-//                    (与产出图片的上游用的同一个 key)。注意:它是全局 id,绝不是
-//                    渠道内裸 id——这正是「用裸 id 查注册表必 miss、图片被吞」那类
-//                    bug 的根因,所以单独走渲染上下文、不混进渠道内 ref。
+//   sourceCommonMessageId  触发这次出站的那条消息的【全局】common message id。
+//                    插件拿它反查自己的私有映射(QQ 用来给续段找回原始 msg_id 作
+//                    回复锚点、并派生出站幂等键)。注意:它是全局 id,绝不是渠道内
+//                    裸 id——「拿反查后的裸 id 当全局 id 用」那类 bug 就是这么来的
+//                    (反查必 miss、消息被静默吞掉),所以它单独走这里、不混进渠道
+//                    内 ref。主动发时它是 agent-service 派生的 proactive: 伪 id,
+//                    反查不到是**预期**的(见 qq 插件 sendText)。
 //   groupConversationId  群内 mention(把内容里的 @名字 翻成平台 mention 标记)需要
 //                        的会话 id(渠道裸 id)。reply 路径只拿得到 ThreadRef(消息
 //                        锚点)、拿不到会话 id,故由上下文补。命名刻意中性、不带平台
@@ -67,7 +70,7 @@ export interface OutboundMessageRecordInput {
 // 单个字段可选——非富内容场景 / 不支持的 channel 不读对应字段即可;但 ctx 对象本身
 // 在出站调用里必填(见 OutboundCapabilities),无渲染数据时传空对象、绝不传 undefined。
 export interface RenderContext {
-    imageRegistryId?: string;
+    sourceCommonMessageId?: string;
     groupConversationId?: string;
     resolveMentions?: boolean;
     partIndex?: number;
@@ -77,11 +80,11 @@ export interface RenderContext {
 // 能力是可选的:渠道不支持某能力就不实现它(例如有的渠道压根没有撤回)——依赖该
 // 能力的指令对该渠道自然不可用。渠道差异 = 能力有没有,不是 flag、不是优雅降级。
 //
-// sendText/reply 第三参 ctx: RenderContext 必填:承载「渲染富内容所需的平台无关
-// 外部引用」(图片注册表 id / 群会话 id),让 core 侧出站方只产出 ContentItem[] +
+// sendText/reply 第三参 ctx: RenderContext 必填:承载「表达平台报文所需的平台无关
+// 外部引用」(源消息全局 id / 群会话 id),让 core 侧出站方只产出 ContentItem[] +
 // 中性 ctx、把平台翻译全留在插件。必填是刻意的——无渲染数据的调用方也要显式传空
-// 对象 {},逼出「这条出站到底带不带渲染上下文」的决策,堵死「忘传 ctx 导致图片/
-// mention 被静默吞掉」那类回归。ctx 字段一律平台无关命名,不出现任何平台名。
+// 对象 {},逼出「这条出站到底带不带上下文」的决策,堵死「忘传 ctx 导致 mention /
+// 回复锚点被静默吞掉」那类回归。ctx 字段一律平台无关命名,不出现任何平台名。
 export interface OutboundCapabilities {
     // worker / 指令只持有 common_* 全局 id。真正调用平台 API 之前，由当前
     // channel 插件把 common id 反查成渠道内 ref。反查失败必须 fail-loud。
@@ -95,7 +98,7 @@ export interface OutboundCapabilities {
     // channel 私有映射。worker 只提交中性字段，绝不直接写任何渠道私有表。
     recordOutboundMessage(input: OutboundMessageRecordInput): Promise<string>;
     // 在某会话里新发一条(承载富 Content:文本/图片/富文本等)。ctx 携带渲染所需
-    // 的外部引用(图片注册表 id / mention 会话 id),无渲染数据时传空对象 {}。
+    // 的外部引用(源消息全局 id / mention 会话 id),无渲染数据时传空对象 {}。
     sendText(
         conv: ConversationRef,
         content: ContentItem[],

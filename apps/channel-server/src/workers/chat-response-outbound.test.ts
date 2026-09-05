@@ -14,7 +14,7 @@ import type { ConversationRef, MessageRef } from '@inner/shared/channel';
 //   part 0 + proactive + 有 root     → reply(root)
 //   part 0 + proactive + 无 root     → sendText(chat)
 //   part >0                          → sendText(chat)
-// 且 content 是 AI 原始 markdown 文本、ctx 带 imageRegistryId（全局 id）+
+// 且 content 是 AI 原始 markdown 文本、ctx 带 sourceCommonMessageId（全局 id）+
 // groupConversationId（渠道裸群会话 id）+ resolveMentions（群=true / p2p=false）。
 
 function makeCap(): {
@@ -58,7 +58,7 @@ const baseInput = {
     channelMessageId: 'om_trigger',
     channelConversationId: 'oc_chat',
     channelRootMessageId: 'om_root' as string | undefined,
-    imageRegistryId: 'global_msg_ulid',
+    sourceCommonMessageId: 'global_msg_ulid',
     isP2p: false,
 };
 
@@ -80,7 +80,7 @@ describe('dispatchChatResponseOutbound', () => {
         // ctx：registry 用全局 id；groupConversationId 渠道裸；群聊 resolveMentions=true；
         // partIndex 透传（出站幂等键据它区分相同文本的不同续段）。
         expect(calls.reply[0].ctx).toEqual({
-            imageRegistryId: 'global_msg_ulid',
+            sourceCommonMessageId: 'global_msg_ulid',
             groupConversationId: 'oc_chat',
             resolveMentions: true,
             partIndex: 0,
