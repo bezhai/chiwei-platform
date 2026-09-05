@@ -470,7 +470,7 @@ async def _tool_result_to_content(
     function_response named after the call. We recover the function name from
     the call id tracked while walking the assistant turns.
 
-    Multimodal tool results (read_images / generate_image return image blocks)
+    Multimodal tool results (a tool handing back pictures returns image blocks)
     can't ride inside the function_response — that part is structured JSON, not
     image bytes. So the function_response carries the flattened text result, and
     each image block is appended to the SAME user turn as a Gemini image part,

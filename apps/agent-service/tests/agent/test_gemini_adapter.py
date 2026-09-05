@@ -524,8 +524,8 @@ async def test_complete_sends_assistant_tool_call_and_tool_result(mock_sdk):
 async def test_tool_result_image_block_surfaces_as_inline_part(mock_sdk, monkeypatch):
     """A tool result carrying image blocks must NOT silently drop the images.
 
-    read_images / generate_image return list[ContentBlock] with image_url blocks.
-    Gemini's function_response part is structured JSON (no image); flattening the
+    A tool that hands back pictures returns list[ContentBlock] with image_url
+    blocks. Gemini's function_response part is structured JSON (no image); flattening the
     tool message with .text() drops the image entirely, so the model never sees
     what the tool returned. The fix keeps the function_response (text result)
     AND surfaces each image block as a downloaded inline_data part on the same
@@ -547,7 +547,7 @@ async def test_tool_result_image_block_surfaces_as_inline_part(mock_sdk, monkeyp
         Message(
             role=Role.ASSISTANT,
             content="",
-            tool_calls=[ToolCall(id="c1", name="read_images", arguments={})],
+            tool_calls=[ToolCall(id="c1", name="look_at_pictures", arguments={})],
         ),
         Message(
             role=Role.TOOL,
@@ -566,7 +566,7 @@ async def test_tool_result_image_block_surfaces_as_inline_part(mock_sdk, monkeyp
     # function_response part still present (names the answered call)
     fr_parts = [p for p in tool_turn.parts if getattr(p, "function_response", None)]
     assert len(fr_parts) == 1
-    assert fr_parts[0].function_response.name == "read_images"
+    assert fr_parts[0].function_response.name == "look_at_pictures"
 
     # the image block reached the wire as a downloaded inline image part
     img_parts = [p for p in tool_turn.parts if getattr(p, "inline_data", None)]

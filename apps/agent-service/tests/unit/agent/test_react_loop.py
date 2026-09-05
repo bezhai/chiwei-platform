@@ -127,7 +127,7 @@ async def dict_tool(x: str) -> dict:
 
 @tool
 async def blocks_tool(x: str) -> list:
-    """A tool returning OpenAI-style content blocks (like read_images).
+    """A tool returning OpenAI-style content blocks (the shape a picture tool uses).
 
     Args:
         x: in.
@@ -382,7 +382,7 @@ class TestRunLoop:
         assert tool_msg.text() == tool_msg.content
 
     async def test_block_list_tool_result_becomes_content_blocks(self):
-        # read_images / generate_image return list[dict] OpenAI content blocks.
+        # A tool that hands back pictures returns list[dict] OpenAI content blocks.
         # The tool message must carry neutral ContentBlocks (multimodal), not
         # raw dicts the adapter can't wire.
         _run_loop, _ = _import_loops()

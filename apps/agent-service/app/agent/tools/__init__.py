@@ -9,14 +9,18 @@
 是 ``app.living`` 直接在用的（``tool_error``、``ToolOutcomeError``、``search_web``）。
 
 下面这几个具名工具**目前没有任何生产调用方**——它们原先只经上面那两份清单进旧
-chat 的主 agent。留着是因为它们是自成一体的能力（生图 / 找图 / 沙箱 / 转派 / 载入
-skill / 不回复），不是旧引擎的一部分；接进 living 只需要在用它的场景里 import。
+chat 的主 agent。留着是因为它们是自成一体的能力（沙箱 / 转派 / 载入 skill /
+不回复），不是旧引擎的一部分；接进 living 只需要在用它的场景里 import。
 要是决定不接了，连同 ``app.capabilities`` 里对应的适配器一起删。
+
+原先那三件图片工具（画一张 / 搜一批 / 看某几张）**已经删掉**，不是搬走了。它们读的
+是 ``AgentContext.image_registry``，而那个字段自旧 chat pipeline 删除之后恒为
+``None``——手工调到也只会回一句"图片生成失败"，而图其实画出来了、也传上对象存储了。
+她那侧的图走 ``app.living.pictures``：存永久句柄、按句柄取回、跨缝找得回。真正画图
+的那一层仍在 ``app.agent.image_gen``。
 """
 
 from app.agent.tools.delegation import deep_research
-from app.agent.tools.image import generate_image, read_images
-from app.agent.tools.image_search import search_images
 from app.agent.tools.no_reply import no_reply
 from app.agent.tools.sandbox import sandbox_bash
 from app.agent.tools.search import search_web
@@ -24,9 +28,6 @@ from app.agent.tools.skill import load_skill
 
 __all__ = [
     "search_web",
-    "search_images",
-    "generate_image",
-    "read_images",
     "deep_research",
     "load_skill",
     "sandbox_bash",

@@ -392,7 +392,7 @@ def _normalise_tool_result(result: ToolResult) -> ToolResult:
 
     Tools return ``str`` (search_web / sandbox_bash), ``dict`` (recall / notes /
     a ``@tool_error`` outcome), or ``list[dict]`` OpenAI-style content blocks
-    (read_images / generate_image). The model can only be fed ``str`` or
+    (any tool handing back pictures). The model can only be fed ``str`` or
     ``list[ContentBlock]`` (that's what the adapters wire and what
     ``Message.text()`` flattens), mirroring langchain's ToolNode which
     JSON-serialised dict returns and carried block lists as multimodal content:

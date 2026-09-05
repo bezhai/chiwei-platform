@@ -1,8 +1,10 @@
 """Image search capability — Phase 7d Gap 16.
 
-Hoists the inline httpx call from ``app/agent/tools/image_search.py`` into a
-capability that returns structured ``ImageHit`` records. Upload/registration
-of returned URLs remains the caller's responsibility (lives in the tool).
+Searching is all this does: it returns structured ``ImageHit`` records and
+nothing else. Putting the hits into object storage — and into her own record of
+what she made (``app.living.pictures``) — is the caller's job. The tool that
+used to call this was deleted along with the image registry it depended on;
+this capability outlived it because the search itself was never the broken part.
 """
 
 from __future__ import annotations

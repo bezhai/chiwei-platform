@@ -41,12 +41,14 @@ import 链拉到才会进 ``DATA_REGISTRY``，否则 ``Runtime.migrate_schema()`
 一路跑到真读写才炸。``WorldRound`` 由 ``clock`` -> ``world`` 的 import 链带进来，
 ``LooseEnd`` 由 ``moment`` -> ``loose_ends`` 带进来，``PhoneRead`` 由 ``moment`` ->
 ``phone`` 带进来，``FileRead`` / ``FilePickedUp`` 由下面那行 ``living.reading`` 直接
-带进来。注册 Data 和挂钟是两件事，别绑一起。
+带进来。``app.living.pictures``（她做过的图）**没有任何 import 链会顺路带到它**——它
+不挂钟、不挂边，只有工具在用，所以跟 ``records`` 一样在这里显式 import 一次。注册
+Data 和挂钟是两件事，别绑一起。
 """
 from __future__ import annotations
 
 from app.domain.chat_dataflow import ChatResponseSegment
-from app.living import records  # noqa: F401
+from app.living import pictures, records  # noqa: F401
 from app.living.clock import (
     CALENDAR_TICK_SECONDS,
     WORLD_ROUND_TICK_SECONDS,

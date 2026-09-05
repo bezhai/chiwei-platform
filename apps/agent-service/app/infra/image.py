@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -52,6 +53,29 @@ def _lane_router():
     from app.infra.lane import lane_router
 
     return lane_router
+
+
+@dataclass(frozen=True)
+class StoredImage:
+    """An image that now lives in object storage: the handle, and a link.
+
+    ``file_name`` is the object-storage key — a **permanent** handle. It is
+    the only thing worth persisting: ``/api/image-pipeline/get-url`` turns it
+    back into a downloadable address at any point in the future.
+
+    ``url`` is a pre-signed address that **dies in 1.5 hours**
+    (tool-service ``tos_client.get_file_url``: ``expires=int(1.5*60*60)``).
+    Fine for showing the image right now, useless as a stored reference —
+    and it fails silently: the link stays well-formed long after it stops
+    working.
+
+    A pair rather than a bare url because dropping the handle used to be
+    invisible: ``result["url"]`` compiled, ran, and threw away the only
+    durable half of the response.
+    """
+
+    file_name: str
+    url: str
 
 
 class _ImageClient:
@@ -98,7 +122,7 @@ class _ImageClient:
         to ``raise CapabilityTimeout/CallFailed`` is correct per the contract
         but is a deliberate behavior change; tracked as backlog L1 follow-up
         (image_client typed-error migration). Outer wrappers (e.g.
-        ``upload_and_register``) currently re-catch ``Exception`` so the
+        ``upload_image``) currently re-catch ``Exception`` so the
         migration is mechanical but needs its own dedicated single-purpose
         commit + caller-by-caller verification.
         """
@@ -162,7 +186,12 @@ class _ImageClient:
     # -- get_url (TOS pre-signed URL) --
 
     async def get_url(self, file_name: str) -> str | None:
-        """Get a pre-signed URL for a TOS file_name."""
+        """Sign a stored ``file_name`` into a downloadable address.
+
+        This is the whole reason ``file_name`` is the thing worth keeping:
+        the signature it returns expires in 1.5 hours, so callers sign as
+        late as possible rather than storing what comes back.
+        """
         data = await self._post(
             "/api/image-pipeline/get-url", {"file_name": file_name}
         )
@@ -184,14 +213,24 @@ class _ImageClient:
 
     # -- upload to TOS --
 
-    async def upload_to_tos(self, source_type: str, data: str) -> str | None:
-        """Upload image to TOS (compress + store), return pre-signed URL."""
+    async def upload_to_tos(
+        self, source_type: str, data: str
+    ) -> StoredImage | None:
+        """Upload an image to TOS (compress + store); hand back both halves.
+
+        tool-service returns ``{"url", "file_name"}``. Both are handed on:
+        the caller needs the url to show the image right now, and the
+        ``file_name`` to be able to find it again after the signature dies.
+        ``None`` when the upload did not land.
+        """
         result = await self._post(
             "/api/image-pipeline/to-tos",
             {"source_type": source_type, "data": data},
             timeout=60,
         )
-        return result["url"] if result else None
+        if not result:
+            return None
+        return StoredImage(file_name=result["file_name"], url=result["url"])
 
     # -- download as base64 --
 

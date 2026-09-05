@@ -21,6 +21,7 @@ import sys
 import pytest
 from pydantic import ValidationError
 
+from app.living.pictures import Picture
 from app.living.reading import FilePickedUp, FileRead
 from app.living.records import (
     KIND_SPEECH,
@@ -88,6 +89,14 @@ _VALID: dict[type, dict] = {
         "title": "斜阳.txt",
         "tos_file": "files/key-a",
     },
+    Picture: {
+        "lane": "coe-x",
+        "persona_id": "akao",
+        "picture_id": "0123456789abcdef0123456789abcdef",
+        "file_name": "temp/tos_ab_12.jpg",
+        "what": "一只在窗台上晒太阳的猫",
+        "made_at": _AWARE,
+    },
 }
 
 # 列名 -> pg 类型。改这张表 == 改一张已经落地的表的形状，先想清楚怎么迁。
@@ -147,6 +156,17 @@ _PINNED: dict[type, dict[str, str]] = {
         "title": "TEXT",
         "tos_file": "TEXT",
     },
+    # 她做过的一张图。**没有 URL 列**：预签名地址 1.5 小时就死，存下来的后果是静默的
+    # （那一行还在，点开是过期签名）。永久的是 ``file_name``，要看的时候现签。
+    # 也**没有 channel_id**：她画图那一刻还没有"发给谁"这回事。
+    Picture: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "picture_id": "TEXT",
+        "file_name": "TEXT",
+        "what": "TEXT",
+        "made_at": "TIMESTAMPTZ",
+    },
 }
 
 
@@ -164,7 +184,14 @@ def test_living_data_reaches_the_registry_via_app_wiring():
     )
     assert proc.returncode == 0, proc.stderr
     registered = proc.stdout
-    for name in ("Happening", "Whereabouts", "Upcoming", "FileRead", "FilePickedUp"):
+    for name in (
+        "Happening",
+        "Whereabouts",
+        "Upcoming",
+        "FileRead",
+        "FilePickedUp",
+        "Picture",
+    ):
         assert f"'{name}'" in registered, (
             f"{name} 没进 DATA_REGISTRY —— migrate_schema 不会建它的表。"
             f"registry: {registered}"
@@ -234,6 +261,7 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
     assert sorted(checked) == [
         ("FileRead", "read_at"),
         ("Happening", "occurred_at"),
+        ("Picture", "made_at"),
         ("Upcoming", "consumed_at"),
         ("Upcoming", "due_at"),
         ("Whereabouts", "noted_at"),
