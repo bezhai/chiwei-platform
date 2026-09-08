@@ -42,7 +42,7 @@ Pod**，所以这七个 Data 的形状由 ``tests/wiring/test_time_source_payloa
 ``app.living.records`` 的 import 不能删：Data 类要被 ``app.wiring`` 的 side-effect
 import 链拉到才会进 ``DATA_REGISTRY``，否则 ``Runtime.migrate_schema()`` 静默不建表、
 一路跑到真读写才炸。``WorldRound`` 由 ``clock`` -> ``world`` 的 import 链带进来，
-``DayPage`` 由下面挂钟那行的 ``living.day_page`` 带进来（同时也在
+``LivingDayPage`` 由下面挂钟那行的 ``living.day_page`` 带进来（同时也在
 ``moment`` -> ``snapshot`` -> ``day_page`` 这条链上），
 ``LooseEnd`` 由 ``moment`` -> ``loose_ends`` 带进来，``PhoneRead`` 由 ``moment`` ->
 ``phone`` 带进来，``PersonaVersion``（「她是谁」那份正文的版本链）由 ``moment`` ->

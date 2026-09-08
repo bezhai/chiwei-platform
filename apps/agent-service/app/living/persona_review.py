@@ -54,7 +54,7 @@ from app.data.queries import find_persona
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST, now_cst
 from app.living.clock import living_lane
-from app.living.day_page import DayPage, read_day_pages_between
+from app.living.day_page import LivingDayPage, read_day_pages_between
 from app.living.persona import (
     LIVING_PERSONAS,
     PersonaVersion,
@@ -125,7 +125,7 @@ def last_full_week(now: datetime) -> tuple[date, date]:
 
 async def week_material(
     *, lane: str, persona_id: str, since: date, until: date
-) -> list[DayPage]:
+) -> list[LivingDayPage]:
     """这一周她写下的那几页，按日子升序；一页都没有返回空列表。
 
     **原文照搬，中间没有第二次概括**——理由同 :func:`app.living.day_page.day_material`：
@@ -177,7 +177,7 @@ def build_persona_review_runner() -> AgentRunner:
 
 
 def _persona_review_prompt(
-    *, since: date, until: date, current: str, pages: list[DayPage]
+    *, since: date, until: date, current: str, pages: list[LivingDayPage]
 ) -> str:
     """摆到她眼前的那一段：上一周是哪几天、她现在对自己的那段描述、那一周的每一页。
 

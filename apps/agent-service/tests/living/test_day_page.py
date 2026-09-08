@@ -30,7 +30,7 @@ from app.agent.neutral import Message, Role
 from app.living.day_page import (
     DAY_PAGE_FROM,
     DAY_PAGE_UNTIL,
-    DayPage,
+    LivingDayPage,
     day_material,
     day_page_tick,
     living_day_bounds,
@@ -143,6 +143,37 @@ async def _a_day_worth_of_stuff() -> None:
         await _stand(who, "家/客厅", _on(25, 6))
     await _happened("akao", "把胶片摊了一茶几", _on(25, 10), kind=KIND_ACT)
     await _happened("ayana", "今天要下雨吧", _on(25, 15), to=["akao"])
+
+
+# --------------------------------------------------------------------------
+# 零 · 这张表不许落回旧引擎那张 data_day_page
+# --------------------------------------------------------------------------
+
+# 已删掉的旧引擎（睡前回顾）留下的那张表。prod 上有 509 行真实历史，而且它的写入方
+# 还活着 —— 今天仍然在往里写。
+_OLD_ENGINE_TABLE = "data_day_page"
+
+
+def test_the_page_table_is_not_the_old_engines_day_page_table():
+    """表名是从类名派生的，撞上旧引擎那张表的后果只在部署时才出现。
+
+    migrator 是 additive-only、只增不减：落到 ``data_day_page`` 上，它会看见
+    ``date`` / ``narrative`` / ``version`` 三列没有任何字段认领，抛 ``MigrationError``、
+    整批迁移回滚、Pod 起不来。**这一条在测试里看不见** —— 测试是在一张空库里建新表，
+    只有真的部署到已经有那张旧表的库上才炸。所以把类名派生出来的表名钉在这里。
+    """
+    from app.living.day_page import _TABLE
+    from app.runtime.migrator import _table_name
+
+    assert _table_name(LivingDayPage) != _OLD_ENGINE_TABLE, (
+        f"这个 Data 类派生出来的表名是 {_OLD_ENGINE_TABLE} —— 那是已删掉的旧引擎"
+        "（睡前回顾）的表，列的形状不一样，而且 prod 上还在被写。用这个类名 = "
+        "下次部署 MigrationError、Pod crash loop。"
+    )
+    assert _TABLE == _table_name(LivingDayPage), (
+        "模块里真正拼进 SQL 的表名跟类名派生出来的不是同一个 —— 迁移建的那张表和"
+        "读写打的那张表会是两张。"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -407,7 +438,7 @@ async def _drop_a_page(persona_id: str, day: dt.date, text: str) -> None:
     from app.runtime.persist import insert_idempotent
 
     await insert_idempotent(
-        DayPage(
+        LivingDayPage(
             lane=LANE,
             persona_id=persona_id,
             day=day,

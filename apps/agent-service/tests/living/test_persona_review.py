@@ -28,7 +28,7 @@ import pytest
 
 import app.data.session as session_mod
 from app.agent.neutral import Message, Role
-from app.living.day_page import DayPage
+from app.living.day_page import LivingDayPage
 from app.living.persona import (
     PersonaVersion,
     read_latest_persona_version,
@@ -64,7 +64,7 @@ def _at(hour: int, minute: int = 0) -> dt.datetime:
 
 @pytest.fixture
 async def review_db(living_db):
-    """``living_db`` 建齐了 ``DayPage`` / ``PersonaVersion``，再补 ``bot_persona``。
+    """``living_db`` 建齐了 ``LivingDayPage`` / ``PersonaVersion``，再补 ``bot_persona``。
 
     ``bot_persona`` 是外部锚和 seed 的来源，这一轮**真的去查它**（不 monkeypatch
     ``find_persona``）：这个文件里最要紧的一条断言是"喂进 prompt 的锚等于那个扁平列
@@ -135,7 +135,7 @@ def stub_review(monkeypatch):
 async def _page(persona_id: str, day: dt.date, text: str, *, lane: str = LANE) -> None:
     """直接落一页日记（这个文件验的不是日记怎么写出来的）。"""
     await insert_idempotent(
-        DayPage(
+        LivingDayPage(
             lane=lane,
             persona_id=persona_id,
             day=day,

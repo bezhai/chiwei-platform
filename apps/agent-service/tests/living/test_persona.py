@@ -2,7 +2,7 @@
 
 persona 慢漂（周级 review）不 UPDATE ``bot_persona`` 主表，而是落 framework Data
 版本链：每版带来源（seed＝出厂灌入 / review＝自动慢漂 / owner＝bezhai 干预），
-照 WorldArc / DayPage 模板：Key + narrative + written_at + Version、append-only、
+照 WorldArc / LivingDayPage 模板：Key + narrative + written_at + Version、append-only、
 读最新一版、整篇重写——新版**取代**旧版。
 
 钉死的语义（docstring 层契约，本文件断言数据层行为）：
@@ -100,7 +100,7 @@ def test_persona_version_fields_avoid_framework_reserved_columns():
     """字段名不撞框架保留列（id / created_at / updated_at / dedup_hash）。
 
     写下时刻叫 ``written_at`` 而不是 ``created_at``——后者是框架的落库时刻，
-    语义不同且是保留列（同 DayPage / WorldAttention 教训）。
+    语义不同且是保留列（同 LivingDayPage / WorldAttention 教训）。
     """
     reserved = {"id", "created_at", "updated_at", "dedup_hash"}
     assert not reserved & set(PersonaVersion.model_fields)

@@ -21,7 +21,7 @@ import sys
 import pytest
 from pydantic import ValidationError
 
-from app.living.day_page import DayPage
+from app.living.day_page import LivingDayPage
 from app.living.persona import PersonaVersion
 from app.living.pictures import Picture
 from app.living.reading import FilePickedUp, FileRead
@@ -99,7 +99,7 @@ _VALID: dict[type, dict] = {
         "what": "一只在窗台上晒太阳的猫",
         "made_at": _AWARE,
     },
-    DayPage: {
+    LivingDayPage: {
         "lane": "coe-x",
         "persona_id": "akao",
         "day": dt.date(2026, 7, 25),
@@ -189,7 +189,7 @@ _PINNED: dict[type, dict[str, str]] = {
     # "哪个生活日"，而生活日的边界是钟点（04:00 到次日 04:00）——存成一个时刻等于
     # 让每个读取方自己再换算一次边界。**没有 written / done 标记列**：这一行存在
     # 本身就是"这天复盘过了"，两个事实中间崩一次就永久对不上。
-    DayPage: {
+    LivingDayPage: {
         "lane": "TEXT",
         "persona_id": "TEXT",
         "day": "DATE",
@@ -235,7 +235,7 @@ def test_living_data_reaches_the_registry_via_app_wiring():
         "FileRead",
         "FilePickedUp",
         "Picture",
-        "DayPage",
+        "LivingDayPage",
         "PersonaVersion",
     ):
         assert f"'{name}'" in registered, (
@@ -305,9 +305,9 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
                 cls(**{**_VALID[cls], name: _NAIVE})
 
     assert sorted(checked) == [
-        ("DayPage", "written_at"),
         ("FileRead", "read_at"),
         ("Happening", "occurred_at"),
+        ("LivingDayPage", "written_at"),
         ("Picture", "made_at"),
         ("Upcoming", "consumed_at"),
         ("Upcoming", "due_at"),

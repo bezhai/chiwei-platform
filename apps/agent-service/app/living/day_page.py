@@ -15,8 +15,8 @@
   * **生活日不是日历日。** 凌晨三点还醒着的时候那是昨天的延续，边界在 CST 04:00
     （:data:`DAY_STARTS_AT`）。按日历日切会把一段连续的清醒劈成两天，而她自己不会
     那样记。
-  * **"这天复盘过了"的权威是页本身存在**（:class:`DayPage` 那一行在不在），绝不另
-    设标记列。理由写在 :class:`DayPage` 的 docstring 里。
+  * **"这天复盘过了"的权威是页本身存在**（:class:`LivingDayPage` 那一行在不在），
+    绝不另设标记列。理由写在 :class:`LivingDayPage` 的 docstring 里。
   * **``run`` 返回不等于成功。** 这一轮**不给她任何工具**，她的回复正文**就是**那一
     页，于是"调了工具却没写成"这整类失败根本不存在。正文 strip 后为空 = 这一轮没
     成：不落库、不占位，下一拍还会来（:func:`write_day_page`）。
@@ -94,8 +94,23 @@ _DAY_PAGE_CFG = AgentConfig(
 )
 
 
-class DayPage(Data):
+class LivingDayPage(Data):
     """她给某一个生活日写下的那一页。
+
+    **为什么不叫 ``DayPage``。** 表名是从类名派生的
+    （:func:`app.runtime.migrator._table_name` 对类名做 snake_case、前面加
+    ``data_``），所以叫 ``DayPage`` 就会落到
+    ``data_day_page`` 这张表上。那张表是已经删掉的旧引擎（睡前回顾）的，列是
+    ``lane / persona_id / date / narrative / written_at / version / dedup_hash /
+    created_at``，跟这里声明的字段对不上；而且它不是一张废表——prod 上有 509 行真实
+    历史（2026-06-11 起），旧的写入方今天仍然在往里写。migrator 只增不减，看到
+    ``date`` / ``narrative`` / ``version`` 三列没有任何字段认领就抛
+    ``MigrationError``，整批迁移回滚、Pod 起不来。**这一条在测试里看不见**：测试是
+    在空库里建新表，只有部署到已经有那张旧表的库上才炸（coe-living 上实际发生过）。
+    所以这个名字是被一张还活着的旧表挡出来的，不是随手起的——别当成冗余前缀"清理"回
+    ``DayPage``。这条由
+    ``tests/living/test_day_page.py::test_the_page_table_is_not_the_old_engines_day_page_table``
+    钉住。
 
     自然键 ``(lane, persona_id, day)``，纯 append 无版本链——一天写完就是写完了，没有
     "改一页旧日记"的语义。
@@ -134,7 +149,7 @@ class DayPage(Data):
         return _require_aware("written_at", v)
 
 
-_TABLE = _table_name(DayPage)
+_TABLE = _table_name(LivingDayPage)
 
 
 def day_page_lock_key(lane: str, persona_id: str) -> str:
@@ -189,10 +204,10 @@ async def day_material(*, lane: str, persona_id: str, day: date) -> list[str]:
 
 async def read_day_page(
     *, lane: str, persona_id: str, day: date
-) -> DayPage | None:
+) -> LivingDayPage | None:
     """她给这个生活日写下的那一页；没写过返回 ``None``。
 
-    这就是"这天复盘过了没有"的**全部**判据（见 :class:`DayPage`）。
+    这就是"这天复盘过了没有"的**全部**判据（见 :class:`LivingDayPage`）。
     """
     sql = (
         f"SELECT * FROM {_TABLE} WHERE lane = :lane "
@@ -205,12 +220,12 @@ async def read_day_page(
         row = result.mappings().first()
     if row is None:
         return None
-    return DayPage(**{k: row[k] for k in DayPage.model_fields})
+    return LivingDayPage(**{k: row[k] for k in LivingDayPage.model_fields})
 
 
 async def read_day_page_before(
     *, lane: str, persona_id: str, day: date
-) -> DayPage | None:
+) -> LivingDayPage | None:
     """**严格早于** ``day`` 的那些页里最新的一页；一页都没有返回 ``None``。
 
     "严格早于"是这条注入的全部要害，不是随手加的过滤。她凌晨写下的是**刚过去那天**
@@ -233,12 +248,12 @@ async def read_day_page_before(
         row = result.mappings().first()
     if row is None:
         return None
-    return DayPage(**{k: row[k] for k in DayPage.model_fields})
+    return LivingDayPage(**{k: row[k] for k in LivingDayPage.model_fields})
 
 
 async def read_day_pages_between(
     *, lane: str, persona_id: str, since: date, until: date
-) -> list[DayPage]:
+) -> list[LivingDayPage]:
     """``[since, until)`` 这段日子里她写下的每一页，**按 ``day`` 升序**；一页都没有
     返回空列表。
 
@@ -251,7 +266,7 @@ async def read_day_pages_between(
     升序不是可选项：读一周的日记是读一段时间的推移，乱序之后每一页仍然读得通、
     合起来仍然像一周，只是她感觉到的先后是错的 —— 没有任何东西会因此报错。
 
-    索引走 ``DayPage.Meta.indexes`` 那条 ``(lane, persona_id, day)``，跟"比某天早的
+    索引走 ``LivingDayPage.Meta.indexes`` 那条 ``(lane, persona_id, day)``，跟"比某天早的
     最新一页"共用同一条，不另加。
     """
     sql = (
@@ -270,7 +285,10 @@ async def read_day_pages_between(
             },
         )
         rows = result.mappings().all()
-    return [DayPage(**{k: row[k] for k in DayPage.model_fields}) for row in rows]
+    return [
+        LivingDayPage(**{k: row[k] for k in LivingDayPage.model_fields})
+        for row in rows
+    ]
 
 
 def build_day_page_runner() -> AgentRunner:
@@ -281,7 +299,7 @@ def build_day_page_runner() -> AgentRunner:
     return AgentRunner(_DAY_PAGE_CFG)
 
 
-def _day_page_prompt(*, day: date, lines: list[str], previous: DayPage | None) -> str:
+def _day_page_prompt(*, day: date, lines: list[str], previous: LivingDayPage | None) -> str:
     """摆到她眼前的那一段：这是哪一天、这一天发生过什么、上一页写了什么。
 
     上一页给**原文**而不是"上一页写过了"这类提示：她要看得见自己昨天怎么写的，才接
@@ -304,7 +322,7 @@ def _day_page_prompt(*, day: date, lines: list[str], previous: DayPage | None) -
 
 async def write_day_page(
     *, lane: str, persona_id: str, now: datetime
-) -> DayPage | None:
+) -> LivingDayPage | None:
     """让她把刚过去那个生活日写成一页；这一拍不该写 / 没写成就返回 ``None``。
 
     **"这天写过没有"到落库为止在排他占用里**（每人一条轴），理由同 world 的轮次：两
@@ -392,7 +410,7 @@ async def write_day_page(
             )
             return None
 
-        page = DayPage(
+        page = LivingDayPage(
             lane=lane,
             persona_id=persona_id,
             day=day,

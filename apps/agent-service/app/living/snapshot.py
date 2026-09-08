@@ -51,7 +51,7 @@ from sqlalchemy import text
 
 from app.data.session import get_session
 from app.infra.cst_time import dated_clock, to_cst_full
-from app.living.day_page import DayPage, living_day_of, read_day_page_before
+from app.living.day_page import LivingDayPage, living_day_of, read_day_page_before
 from app.living.happening import (
     PerceivedWindow,
     own_line,
@@ -92,7 +92,7 @@ class MomentSnapshot:
     persona_id: str
     now: datetime
     doing: Whereabouts | None
-    day_page: DayPage | None
+    day_page: LivingDayPage | None
     open_ends: list[LooseEnd]
     own_recent: list[Happening]
     perceived: PerceivedWindow

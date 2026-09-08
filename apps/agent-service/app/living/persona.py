@@ -2,7 +2,7 @@
 
 **她是谁不是配置，是一条会变的链。** ``bot_persona.persona_core`` 是写死的出厂快
 照，全仓没有任何代码往它里面写；她这几个月长出来的东西全落在 :class:`PersonaVersion`
-这条 framework Data 版本链上（照 WorldArc / DayPage 模板：Key + 正文 + 写下时刻 +
+这条 framework Data 版本链上（照 WorldArc / LivingDayPage 模板：Key + 正文 + 写下时刻 +
 Version、append-only、读最新一版、整篇重写——新版**取代**旧版）。主表不动，只当 v0
 的来源和冷启 fallback。
 
@@ -65,7 +65,7 @@ class PersonaVersion(Data):
     重写的身份正文全文——与 ``bot_persona.persona_core`` 同族口吻，注入方零适配。
     ``source`` 是这一版从哪来（seed / review / owner，见模块 docstring）。
     ``written_at`` 是写下这版的现实时刻（**CST ISO8601 字符串，不是 datetime**）：
-    命名避开框架保留列 ``created_at``（那是框架的落库时刻，语义不同，同 DayPage 教
+    命名避开框架保留列 ``created_at``（那是框架的落库时刻，语义不同，同 LivingDayPage 教
     训），类型也不改——这张表 prod 上已经有几十版真实数据，migrator 是 additive-only，
     改列类型 / 删列直接 ``MigrationError``、整批迁移回滚、pod crash loop。
     ``version`` 让多版正文 append-only 保留历史、读最新一版。
