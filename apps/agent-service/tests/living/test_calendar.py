@@ -16,9 +16,7 @@ import datetime as dt
 import pytest
 
 from app.living.calendar import (
-    AMBIENT_PLACE,
     DEFAULT_DAY_SCHEDULE,
-    WORLD_ACTOR,
     DaySlot,
     day_item_id,
     deliver_due,
@@ -26,6 +24,7 @@ from app.living.calendar import (
     parse_schedule,
     plan_day,
 )
+from app.living.records import AMBIENT_PLACE, WORLD_ACTOR
 from app.living.upcoming import list_due_upcoming, schedule_upcoming
 from app.living.whereabouts import note_whereabouts
 

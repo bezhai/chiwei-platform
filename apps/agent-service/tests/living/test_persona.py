@@ -1,4 +1,4 @@
-"""persona 版本链（PersonaVersion）— 「她是谁」的身份正文落点.
+"""「她是谁」：版本链本身，以及链到底有没有走到她眼前.
 
 persona 慢漂（周级 review）不 UPDATE ``bot_persona`` 主表，而是落 framework Data
 版本链：每版带来源（seed＝出厂灌入 / review＝自动慢漂 / owner＝bezhai 干预），
@@ -12,8 +12,13 @@ persona 慢漂（周级 review）不 UPDATE ``bot_persona`` 主表，而是落 f
     版本既不挡当周自动班、也不推走证据窗口。
   * 周界 = 自然周一 00:00 CST（生活日是 04:00 界，但周界用自然周一零点，
     spec 决策 4）。
-  * v0 灌入：链为空时把 ``bot_persona.persona_lite`` 原文落为第一版
-    （source='seed'）；链非空零操作，重跑无害。
+  * v0 灌入：链为空时把 ``bot_persona.persona_core`` 原文落为第一版
+    （source='seed'）；链非空零操作，重跑无害。灌的必须是**链空时她实际读到的那
+    份**——``persona_prompt_vars`` 退回的就是 ``persona_core``。
+
+文件最后一节验的是**另一件事**：链上写下的东西真的到了她眼前。链写得再对，读侧
+去读 ``bot_persona`` 那个扁平列的话，她自己改了三个月的正文一个字都不会出现——而
+且没有任何报错，只是每一缝的底色都是出厂那份。
 
 持久化用真实 Postgres（testcontainers）——版本链的正确性故事全在"能不能 append
 进去、版本是否递增、来源过滤是否只认 review"，mock pg 等于什么都没测。
@@ -27,9 +32,10 @@ import pytest
 
 import app.data.session as session_mod
 from app.infra.cst_time import CST
-from app.life.persona_chain import (
+from app.living.persona import (
     PersonaVersion,
     has_review_version_this_week,
+    persona_prompt_vars,
     read_latest_persona_version,
     read_latest_review_written_at,
     seed_persona_chain,
@@ -57,7 +63,11 @@ async def seed_db(chain_db):
     yield chain_db
 
 
-async def _seed_bot_persona(persona_id: str, persona_lite: str) -> None:
+async def _seed_bot_persona(
+    persona_id: str,
+    persona_lite: str,
+    persona_core: str = "主表上那份出厂正文。",
+) -> None:
     from app.data.models import BotPersona
 
     async with session_mod.get_session() as s:
@@ -65,7 +75,7 @@ async def _seed_bot_persona(persona_id: str, persona_lite: str) -> None:
             BotPersona(
                 persona_id=persona_id,
                 display_name="赤尾",
-                persona_core="（遗留字段，未被注入）",
+                persona_core=persona_core,
                 persona_lite=persona_lite,
                 default_reply_style="自然",
                 error_messages={},
@@ -352,22 +362,51 @@ async def test_latest_review_written_at_none_when_no_review(chain_db):
 
 
 # ---------------------------------------------------------------------------
-# v0 灌入：链为空时把 bot_persona.persona_lite 落为第一版（source='seed'），幂等
+# v0 灌入：链为空时把 bot_persona.persona_core 落为第一版（source='seed'），幂等
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_seed_persona_chain_copies_persona_lite_verbatim(seed_db):
-    """首跑：bot_persona.persona_lite 原文一字不差落为第一版 seed。"""
-    await _seed_bot_persona("akao", "出厂身份正文：她是住在杭州的赤尾。")
+async def test_seed_persona_chain_copies_persona_core_verbatim(seed_db):
+    """首跑：bot_persona.persona_core 原文一字不差落为第一版 seed。
+
+    灌的是 ``persona_core`` 而不是 ``persona_lite``：链空时
+    :func:`persona_prompt_vars` 退回的就是 ``persona_core``，起点那一版必须等于她
+    当时**实际读到的**那份。灌错列不会报错——链上的历史只是从 v1 起就是断的：v1
+    记着一段她从没读过的东西，而 v2 是在她真正读到的那份上改出来的。
+    """
+    await _seed_bot_persona(
+        "akao",
+        "lite：这一列不该被灌进链里。",
+        persona_core="出厂身份正文：她是住在杭州的赤尾。",
+    )
 
     assert await seed_persona_chain(lane="coe-t1", persona_id="akao") is True
 
     latest = await read_latest_persona_version(lane="coe-t1", persona_id="akao")
     assert latest is not None
     assert latest.narrative == "出厂身份正文：她是住在杭州的赤尾。"
+    assert "lite" not in latest.narrative, (
+        "灌的是 persona_lite —— 起点那一版记的是她从没读过的东西"
+    )
     assert latest.source == "seed"
     assert latest.version == 1
+
+
+@pytest.mark.integration
+async def test_the_seeded_version_is_what_she_was_already_reading(seed_db):
+    """灌完之后她读到的东西一个字都没变 —— 起点那一版就是链空时的 fallback。
+
+    这条是上一条的另一面：不比对列名，比对**她眼前那段文字**在灌入前后是否一致。
+    灌错列的话这里会当场变一段她从没读过的正文，而没有任何报错。
+    """
+    await _seed_bot_persona("akao", "lite：这一列不该被灌进链里。")
+
+    before = await persona_prompt_vars(lane="coe-t1", persona_id="akao")
+    await seed_persona_chain(lane="coe-t1", persona_id="akao")
+    after = await persona_prompt_vars(lane="coe-t1", persona_id="akao")
+
+    assert after == before
 
 
 @pytest.mark.integration
@@ -423,3 +462,169 @@ async def test_seed_version_does_not_satisfy_review_idempotency(seed_db):
     assert (
         await read_latest_review_written_at(lane="coe-t1", persona_id="akao") is None
     )
+
+
+# ---------------------------------------------------------------------------
+# 读侧：链上那一版有没有真的到她眼前（``{{persona_core}}`` 的值从哪来）
+# ---------------------------------------------------------------------------
+#
+# 链写对了不等于她读得到。上面每一条验的都是"写进去、读回来"，而她真正看到的是
+# :func:`persona_prompt_vars` 摆出来的那两个 prompt 变量——中间任何一处去读
+# ``bot_persona.persona_core`` 那个扁平列，她自己改了三个月的正文就一个字都不会
+# 出现，而且**一句报错都没有**：每一缝照跑，只是底色永远是出厂那份。
+
+
+@pytest.mark.integration
+async def test_what_she_wrote_herself_is_what_reaches_her(seed_db):
+    """链上有版本时，喂进 prompt 的是最新那一版的 narrative，不是扁平列。"""
+    await _seed_bot_persona("akao", "出厂身份正文。")
+    await write_persona_version(
+        lane="coe-t1",
+        persona_id="akao",
+        narrative="她今年不拍胶片了，改成每周写一篇角色分析。",
+        source="review",
+        written_at="2026-06-08T05:00:00+08:00",
+    )
+
+    got = await persona_prompt_vars(lane="coe-t1", persona_id="akao")
+
+    assert got["persona_core"] == "她今年不拍胶片了，改成每周写一篇角色分析。", (
+        "她读到的还是 bot_persona 那个扁平列 —— 版本链在读侧根本没接上"
+    )
+    assert got["persona_name"] == "赤尾"
+
+
+@pytest.mark.integration
+async def test_an_empty_chain_falls_back_to_the_flat_column(seed_db):
+    """全新泳道链上一版都没有 → 退回 ``bot_persona.persona_core``（冷启不空手）。"""
+    await _seed_bot_persona("akao", "出厂身份正文。")
+
+    got = await persona_prompt_vars(lane="coe-t1", persona_id="akao")
+
+    assert got["persona_core"] == "主表上那份出厂正文。"
+
+
+@pytest.mark.integration
+async def test_with_nothing_written_anywhere_she_is_told_so(seed_db):
+    """链空 + 扁平列也空白 → 说实话，不渲染出一个空洞。
+
+    空洞的后果是静默的：prompt 里那一段变成空行，她这一缝没有可对照的底色，而
+    模型不会因此报错——只会表现成"她想不起自己是个什么样的人"。
+    """
+    await _seed_bot_persona("akao", "出厂身份正文。", persona_core="   ")
+
+    got = await persona_prompt_vars(lane="coe-t1", persona_id="akao")
+
+    assert got["persona_core"].strip() != ""
+
+
+@pytest.mark.integration
+async def test_a_blank_version_does_not_blank_her_out(seed_db):
+    """链上最新一版正文空白 → 当成没有，退回扁平列。
+
+    写侧拦得住空白落版，但 owner 是人工写入口。这里是防御纵深：宁可退回出厂那份，
+    也不能让她这一缝拿着一段空白当自己。
+    """
+    await _seed_bot_persona("akao", "出厂身份正文。")
+    await write_persona_version(
+        lane="coe-t1",
+        persona_id="akao",
+        narrative="   ",
+        source="owner",
+        written_at="2026-06-08T05:00:00+08:00",
+    )
+
+    got = await persona_prompt_vars(lane="coe-t1", persona_id="akao")
+
+    assert got["persona_core"] == "主表上那份出厂正文。"
+
+
+@pytest.mark.integration
+async def test_the_newest_version_wins_even_when_written_at_goes_backwards(seed_db):
+    """"最新"按 ``version`` 算，不按 ``written_at``。
+
+    ``written_at`` 是**调用方给的字符串**（owner 人工盖版可以填任何时刻），乱序完全
+    可能。按它取最新的话，一次填错时刻的人工干预会让链从此永远停在那一版上。
+    """
+    await _seed_bot_persona("akao", "出厂身份正文。")
+    await write_persona_version(
+        lane="coe-t1",
+        persona_id="akao",
+        narrative="先落地的那一版。",
+        source="review",
+        written_at="2026-06-09T10:00:00+08:00",
+    )
+    await write_persona_version(
+        lane="coe-t1",
+        persona_id="akao",
+        narrative="后落地的那一版（written_at 反而更早）。",
+        source="owner",
+        written_at="2026-06-01T10:00:00+08:00",
+    )
+
+    got = await persona_prompt_vars(lane="coe-t1", persona_id="akao")
+
+    assert got["persona_core"] == "后落地的那一版（written_at 反而更早）。"
+
+
+@pytest.mark.integration
+async def test_another_lanes_version_never_reaches_this_one(seed_db):
+    """prod 那条链上的版本读不到 coe 里来 —— 键上带 lane 就是为了这个。
+
+    漏了 lane 的后果是双向的：coe 里跑实验改出来的人设会当场生效在 prod 的她身上，
+    而这件事在库里看不出来（表里两条链都在，只是读的时候挑错了行）。
+    """
+    await _seed_bot_persona("akao", "出厂身份正文。")
+    await write_persona_version(
+        lane="prod",
+        persona_id="akao",
+        narrative="prod 上那一版。",
+        source="review",
+        written_at="2026-06-08T05:00:00+08:00",
+    )
+
+    got = await persona_prompt_vars(lane="coe-living", persona_id="akao")
+
+    assert got["persona_core"] == "主表上那份出厂正文。"
+
+
+@pytest.mark.integration
+async def test_a_persona_the_table_never_heard_of_still_gets_two_variables(seed_db):
+    """库里没有这个人也不让这一轮跑不起来：名字退回 persona_id，正文说实话。"""
+    got = await persona_prompt_vars(lane="coe-t1", persona_id="ghost")
+
+    assert got["persona_name"] == "ghost"
+    assert got["persona_core"].strip() != ""
+
+
+@pytest.mark.integration
+async def test_the_variables_are_exactly_the_two_the_prompts_name(seed_db):
+    """键名就是 Langfuse 上三个 prompt 正文里写着的那两个。
+
+    改键名不会报错，只会让 ``{{persona_core}}`` 原样渲染成字面量出现在她眼前。
+    """
+    await _seed_bot_persona("akao", "出厂身份正文。")
+
+    got = await persona_prompt_vars(lane="coe-t1", persona_id="akao")
+
+    assert set(got) == {"persona_name", "persona_core"}
+
+
+def test_all_three_paths_ask_the_same_place_who_she_is():
+    """一缝、写日记、开口渲染读的是**同一个**函数。
+
+    三处各拼一份的后果不是报错，是分裂：她那一缝里是链上新的自己，一开口又变回
+    ``bot_persona`` 上出厂那份。开口那条路原先就是各拼一份，而且空白处理跟另外两处
+    还不一样。
+    """
+    from app.living import day_page as page_mod
+    from app.living import moment as moment_mod
+    from app.living import mouth as mouth_mod
+
+    for mod in (moment_mod, page_mod, mouth_mod):
+        assert mod.persona_prompt_vars is persona_prompt_vars, (
+            f"{mod.__name__} 没走同一个入口"
+        )
+        assert not hasattr(mod, "find_persona"), (
+            f"{mod.__name__} 自己又查了一遍 bot_persona —— 第二份人设组装正在长出来"
+        )

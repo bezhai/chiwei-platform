@@ -131,6 +131,35 @@ _STILL_UNREAD = f"""(
 _VISIBLE_WHEN_SHE_OPENS_IT = f"(cm.recalled_at IS NULL OR {_SAID_BY_HER})"
 
 
+# 「这条消息在她眼里是谁说的，那个人是不是主人」——**全模块唯一一份**，五处让她看见
+# 一个人名的查询各拼这同一份（信封上点的名、打开会话、她已经知道的那段、按名字找会
+# 话、别人发来的文件）。
+#
+# 拆成五份各写各的 join 的话，收窄或修好其中一处，另外四处照旧 —— 而她读到的行看起来
+# 一模一样，库里没有任何东西对不上。
+#
+# **名字和身份是两件事。** ``who`` 是 ``sender_display_name``，是她在信封和会话里见到
+# 的那个名字；``by_owner`` 是 ``common_user.is_owner``，她看不到、也没人改得动。名字
+# 谁都能改：一个把昵称改成主人那几个字的人，按名字判就是主人。所以身份只从
+# ``common_user_id`` 算出来。
+#
+# ``by_owner`` 是两态不是三态（对照 :data:`_NAMED_HER` 那种刻意留 NULL 的列）：那一列
+# 区分"没人算过"是因为算不算过是可恢复的事实，而这里"认不出这个人"和"这个人不是主人"
+# 对读的一侧是同一个答案 —— **都不能当成主人**。所以 ``COALESCE(..., false)``。
+_WHO_AND_OWNER = """COALESCE(cm.sender_display_name, '某人') AS who,
+       COALESCE(cu.is_owner, false)             AS by_owner"""
+
+# 上面那两列要的 join。**必须是 ``LEFT JOIN``**：``common_user_id`` 为空的行、以及
+# 那个 id 在 ``common_user`` 里根本没落过行的消息（prod 上 360 条，union_id 收敛之前
+# 分裂出来的），照样要出现在结果里 —— 认不出发件人不是"这条消息不存在"。
+#
+# 认不出的后果只有一个，就是 ``by_owner`` 落 false：**fail-closed**，绝不回退显示名
+# 当身份。
+_JOIN_SPEAKER = (
+    "LEFT JOIN common_user cu ON cu.common_user_id = cm.common_user_id"
+)
+
+
 # 下面两条查询各自要在"某一批会话"里找东西。那批会话**由调用方给定**，不在这里算。
 #
 # 一度是在语句里内联一份 :func:`app.data.queries.persona.find_conversations_with_persona_bot`
@@ -185,14 +214,21 @@ SELECT COUNT(*)                          AS unread,
    AND {_STILL_UNREAD}
 """
 
+# **按 ``(名字, 是不是主人)`` 分组，不是按名字。** 只按名字分组的话，主人和一个把昵
+# 称改成同样几个字的人在信封上并成一行 —— 她拿起手机之前就已经以为只有主人在说话，
+# 而信封正是"这条会话值不值得翻开"的全部依据。
+#
+# 代价只有一个：同一个名字最多占掉两行（一个主人 + 一批非主人），``:limit`` 因此可能
+# 少列一个别的人。比"两个人看起来是同一个人"轻得多。
 _UNREAD_SENDERS_SQL = f"""
-SELECT COALESCE(cm.sender_display_name, '某人') AS who,
+SELECT {_WHO_AND_OWNER},
        MAX(cm.event_time)                       AS latest
   FROM common_message cm
+  {_JOIN_SPEAKER}
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
    AND {_STILL_UNREAD}
- GROUP BY 1
- ORDER BY 2 DESC
+ GROUP BY 1, 2
+ ORDER BY 3 DESC
  LIMIT :limit
 """
 
@@ -241,6 +277,10 @@ async def find_unread_senders(
 
     不是"最重要的几个"，就是按最近说话排。发件人没名字的行落 ``某人``（不暴露
     raw user_id，跟渲染层其它地方同一口径）。
+
+    每一行带 ``by_owner``：**同名的主人和非主人是两行，不是一行**（分组理由见
+    :data:`_UNREAD_SENDERS_SQL`）。调用方不能只按 ``who`` 去重，那就把两个人又并回
+    去了。
     """
     async with auto_tx():
         rows = (
@@ -354,7 +394,7 @@ newest_unread AS (
 ),
 recent AS (
   SELECT cm.common_message_id AS message_id,
-         COALESCE(cm.sender_display_name, '某人') AS who,
+         {_WHO_AND_OWNER},
          {_SAID_BY_HER}       AS said_by_you,
          cm.content           AS content,
          cm.content_text      AS content_text,
@@ -364,6 +404,7 @@ recent AS (
          (u.message_id IS NOT NULL) AS is_unread
     FROM common_message cm
     LEFT JOIN unread u ON u.message_id = cm.common_message_id
+    {_JOIN_SPEAKER}
    WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
      AND {_VISIBLE_WHEN_SHE_OPENS_IT}
    ORDER BY cm.event_time DESC, cm.common_message_id DESC
@@ -422,12 +463,13 @@ async def find_conversation_window(
 # 绕过游标那道门是给"她当然知道自己说过什么"留的，**只有她自己的话走得进来**。别的
 # bot 的话从这道门溜进来会同时破两条线：白送未读内容，而且渲染时被署成"你"。
 _KNOWN_SQL = f"""
-SELECT COALESCE(cm.sender_display_name, '某人') AS who,
+SELECT {_WHO_AND_OWNER},
        {_SAID_BY_HER}       AS said_by_you,
        cm.content           AS content,
        cm.content_text      AS content_text,
        cm.event_time        AS at_ms
   FROM common_message cm
+  {_JOIN_SPEAKER}
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
    AND {_STILL_IN_THE_CONVERSATION}
    AND (
@@ -496,19 +538,21 @@ WITH mine AS (
 ),
 matched AS (
   SELECT cm.common_conversation_id AS channel_id,
-         COALESCE(cm.sender_display_name, '某人') AS who,
+         {_WHO_AND_OWNER},
          MAX(cm.event_time) AS latest
     FROM common_message cm
     JOIN mine m ON m.channel_id = cm.common_conversation_id
+    {_JOIN_SPEAKER}
    WHERE cm.sender_display_name ILIKE :name_like
      AND NOT {_SAID_BY_HER}
      AND {_STILL_IN_THE_CONVERSATION}
-   GROUP BY 1, 2
+   GROUP BY 1, 2, 3
 )
 SELECT m.channel_id AS channel_id,
        m.scope      AS scope,
        m.title      AS title,
        ARRAY_AGG(DISTINCT x.who) FILTER (WHERE x.who IS NOT NULL) AS matched,
+       ARRAY_AGG(DISTINCT x.who) FILTER (WHERE x.by_owner)        AS matched_owner,
        MAX(x.latest) AS latest
   FROM mine m
   LEFT JOIN matched x ON x.channel_id = m.channel_id
@@ -534,6 +578,10 @@ async def search_conversations_by_name(
     ``name_like`` 是完整的 ``ILIKE`` 模式（调用方自己加 ``%``）。群按标题匹配，
     私聊按在里面说过话的人匹配 —— 私聊多半没有标题，只查标题等于查不到人。
     ``matched`` 是对得上的那些人名（一条都没有时是 ``None``）。
+
+    ``matched_owner`` 是这些名字里**主人的那些**（同样，一个都没有时是 ``None``）。
+    两列而不是一列名字带标记：名字自己说不出身份，一个把昵称改成主人那几个字的人在
+    ``matched`` 里跟主人是同一个字符串，只有这一列分得开。
     """
     async with auto_tx():
         rows = (
@@ -588,13 +636,14 @@ SELECT DISTINCT
        CAST(cm.common_message_id AS text)       AS message_id,
        it->>'key'                               AS file_key,
        COALESCE(it->'meta'->>'file_name', '')   AS file_name,
-       COALESCE(cm.sender_display_name, '某人') AS who,
+       {_WHO_AND_OWNER},
        cm.event_time                            AS at_ms,
        h.scope                                  AS scope,
        h.title                                  AS where_title,
        (cm.recalled_at IS NULL)                 AS still_gettable
   FROM common_message cm
   JOIN hers h ON h.channel_id = cm.common_conversation_id
+  {_JOIN_SPEAKER}
  CROSS JOIN LATERAL jsonb_array_elements(
        CASE WHEN jsonb_typeof(cm.content) = 'array'
             THEN cm.content ELSE '[]'::jsonb END
@@ -617,6 +666,11 @@ async def find_file_items_in_conversations(
 
     **撤回掉的也在里面**，带着 ``still_gettable=False`` —— 撤回改变的是"现在还能不能
     拿到"，不是"有没有发生过"。谁看得到它、谁读得起它由调用方定。
+
+    ``who`` / ``by_owner`` 走 :data:`_WHO_AND_OWNER` 那一份共用定义（"这个人在她眼里
+    是谁"这件事全模块只算一次）。这条查询今天的调用方
+    （:func:`app.living.reading.files_sent_to`）只读 ``who``；``by_owner`` 在这里是
+    **共用定义的一部分**，不是这条查询自己要的。
     """
     async with auto_tx():
         rows = (

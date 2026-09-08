@@ -69,7 +69,7 @@ from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
 from app.infra.cst_time import CST, to_cst_dated
 from app.living.phone import reachable_conversations
-from app.living.records import _require_aware
+from app.living.records import _require_aware, esc
 from app.living.scope import moment_scope
 from app.runtime.data import Data, Key, Version
 from app.runtime.emit import emit
@@ -194,8 +194,12 @@ def _where_of(scope: str, title: str, who: str) -> str:
 
     跟 :func:`app.living.phone.look_up_contact` 同一条处理：在她眼里那条私聊本来
     就叫那个人。
+
+    群名和显示名都是别人写的，所以进她眼前那段文本之前过 :func:`esc` —— 这一段跟
+    ``<msg …>`` 那几行摆在同一个 prompt 里，不转义就能在她的可读清单里印出一行看
+    起来是主人说的话。
     """
-    label = title or who
+    label = esc(title or who)
     return f"群「{label}」" if scope != "direct" else f"私聊「{label}」"
 
 
@@ -277,8 +281,12 @@ async def everything_read_so_far(
 
 
 def _name_of(f: SentFile) -> str:
-    """给她看的那个名字。发的人那边就没给名字时如实说没有（只能靠 file= 那串指它）。"""
-    return f"《{f.title}》" if f.title else "（一个没有名字的文件）"
+    """给她看的那个名字。发的人那边就没给名字时如实说没有（只能靠 file= 那串指它）。
+
+    **文件名是这条链上最短的那条伪造路**：不用改昵称、不用进群，给文件起个名字发过
+    来就行。所以它跟别的外面来的字串一样过 :func:`esc`（理由写在那个函数上）。
+    """
+    return f"《{esc(f.title)}》" if f.title else "（一个没有名字的文件）"
 
 
 # 撤回掉的那份，摆在她眼前时说的那句。**说得出口的只有这件事**：这东西现在拿不到了。
@@ -305,7 +313,10 @@ def _one_file(f: SentFile, mark: FileRead | None, *, now: datetime) -> str:
         if f.still_gettable
         else f"这份东西{_NO_LONGER_GETTABLE}"
     )
-    head = f"- {_name_of(f)} {f.who} {when} 发在{f.where} {tail}"
+    # 名字、谁发的、发在哪三样都是外面来的（``_name_of`` / ``_where_of`` 自己过了
+    # :func:`esc`，显示名在这儿过）。**印象不过** —— 那是她读完之后自己写下的一段话，
+    # 不是谁能决定字节的通道，判据写在 :func:`esc` 上。
+    head = f"- {_name_of(f)} {esc(f.who)} {when} 发在{f.where} {tail}"
     if mark is None:
         return head + "\n  （还没翻开过）"
     read = "你读完了" if mark.finished else f"你已经读了 {mark.pages_read} 页"
@@ -432,8 +443,10 @@ async def read_a_bit(
     if len(hit) > 1:
         # 同名多份：这几份是**不同的东西**（各自一条印象链），所以只能她自己认。
         # 摊开来路让她指得动，绝不替她挑一个。
+        # 跟 :func:`_one_file` 同一批外面来的字串，同样过 :func:`esc`：这段回问也是
+        # 她眼前那段文本的一部分，摊开候选跟摆清单没有区别。
         spread = "\n".join(
-            f"- {_name_of(f)} {f.who} "
+            f"- {_name_of(f)} {esc(f.who)} "
             f"{to_cst_dated(f.at.isoformat(), now=now, seconds=False)} "
             f"发在{f.where} {_HANDLE_PREFIX}{f.attachment_id}"
             for f in hit

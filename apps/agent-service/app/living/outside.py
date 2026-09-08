@@ -29,9 +29,14 @@ from sqlalchemy import text
 
 from app.data.session import get_session
 from app.infra.cst_time import CST
-from app.living.calendar import AMBIENT_PLACE, WORLD_ACTOR
 from app.living.happening import record_happening
-from app.living.records import KIND_ACT, MEDIUM_IN_PERSON, Happening
+from app.living.records import (
+    AMBIENT_PLACE,
+    KIND_ACT,
+    MEDIUM_IN_PERSON,
+    WORLD_ACTOR,
+    Happening,
+)
 from app.runtime.migrator import _table_name
 
 logger = logging.getLogger(__name__)
@@ -191,7 +196,7 @@ async def look_outside(
         lane=lane,
         happening_id=outside_happening_id(today),
         # 世界自己的事，不是谁做的。写成某个 persona 的话，回声抑制
-        # （``_perceive`` 里 ``actor == persona_id`` 那条）会把它从那个人眼前抹掉。
+        # （``perceive`` 里 ``actor == persona_id`` 那条）会把它从那个人眼前抹掉。
         actor=WORLD_ACTOR,
         # 没绑地点：外面什么样是这一整片上的事，屋里每个人都在这片里面。
         place=AMBIENT_PLACE,

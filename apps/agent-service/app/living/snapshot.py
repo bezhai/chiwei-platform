@@ -11,17 +11,24 @@
   层                  从哪读                      界从哪来
   ==================  ==========================  ==============================
   手上正在做的事      最新一条 ``Whereabouts``    1 行（"当前"只有一个）
+  上一次写下的那天    ``read_day_page_before``    1 页（严格早于当前生活日的最新一页）
   挂着没了结的事      还开着的 ``LooseEnd``       她自己列多少就是多少
   她刚做过 / 说过     她自己的 ``Happening``      最近 N 条
   这段时间感知到的    ``read_perceived_by``       一条游标 + 每缝的条数上限
   ==================  ==========================  ==============================
 
-**为什么这么长不会失真**：四层没有一层是"对历史的概括"。前两层是当下状态，读一百遍
-字字一样；后两层是原文照搬的最近若干条，只是**少**，不是**歪**。失真来自压缩，这里
-一处压缩都没有。会被遗忘的只有第三层滚出窗口的那些——而第二层正是她把重要的东西从
-滚动窗口里救出来的那只手，救不救是她的决定（见 :mod:`app.living.loose_ends`）。
+**为什么这么长不会失真**：五层没有一层是"机器对历史的概括"。头两层是当下状态，读一
+百遍字字一样；后两层是原文照搬的最近若干条，只是**少**，不是**歪**。失真来自压缩，
+这里一处压缩都没有。会被遗忘的只有第四层滚出窗口的那些——而第三层正是她把重要的东
+西从滚动窗口里救出来的那只手，救不救是她的决定（见 :mod:`app.living.loose_ends`）。
 
-**第三层为什么必须单独存在**：:func:`~app.living.happening.read_perceived_by` 抑制
+**日记那一层是她自己写的，不是折叠出来的。** 这是它跟被否掉的 ``SessionTranscript``
+唯一但决定性的区别：一条原始记录都没被动过，那一页是她另写的一份东西（见
+:mod:`app.living.day_page`）。少了它她跨不过一天——上面四层全是"当下"，滚出窗口的
+东西没有任何一层接得住。这里只负责读和摆，"读哪一页"那条严格早于当前生活日的判据在
+:func:`~app.living.day_page.read_day_page_before` 里。
+
+**"她刚做过、说过"那层为什么必须单独存在**：:func:`~app.living.happening.read_perceived_by` 抑制
 回声（``actor == persona_id`` 直接丢），所以她从感知那条路**看不见自己刚说过什么**。
 少了这一层，她上一缝答应姐姐的话下一缝就凭空消失，"接得上昨天"永远无从谈起。
 
@@ -29,7 +36,7 @@
 的东西摆成她读得懂的样子。只听见动静的那条 ``content`` 本来就是 ``None``，渲染层
 再怎么写也漏不出原话。
 
-唯一一处在这里**算**出来的东西是第二层的「到点了 / 还没到」：她给线头挂的时刻当场跟
+唯一一处在这里**算**出来的东西是线头那层的「到点了 / 还没到」：她给线头挂的时刻当场跟
 ``now`` 比，库里没有这个状态（:func:`_open_end_line`）。这不是压缩，是把同一个事实
 换算成她读得懂的说法——比她自己拿第一行的钟点去减更不容易错，而"这件事算不算了结"
 仍然只有她能答。
@@ -38,21 +45,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
 from app.data.session import get_session
-from app.infra.cst_time import to_cst_dated, to_cst_full
-from app.living.calendar import WORLD_ACTOR
-from app.living.happening import Perceived, PerceivedWindow, read_perceived_by
-from app.living.loose_ends import LooseEnd, format_entry, list_open_loose_ends
-from app.living.records import (
-    KIND_SPEECH,
-    OUTBOUND_HAPPENING_PREFIX,
-    Happening,
-    Whereabouts,
+from app.infra.cst_time import dated_clock, to_cst_full
+from app.living.day_page import DayPage, living_day_of, read_day_page_before
+from app.living.happening import (
+    PerceivedWindow,
+    own_line,
+    perceived_line,
+    read_perceived_by,
 )
+from app.living.loose_ends import LooseEnd, format_entry, list_open_loose_ends
+from app.living.records import Happening, Whereabouts
 from app.living.whereabouts import current_whereabouts
 from app.runtime.migrator import _table_name
 
@@ -85,16 +92,18 @@ class MomentSnapshot:
     persona_id: str
     now: datetime
     doing: Whereabouts | None
+    day_page: DayPage | None
     open_ends: list[LooseEnd]
     own_recent: list[Happening]
     perceived: PerceivedWindow
 
     def render(self) -> str:
-        """摆成她读得懂的样子。四段，每段空的时候如实说空，不留白洞。"""
+        """摆成她读得懂的样子。每段空的时候如实说空，不留白洞。"""
         return "\n\n".join(
             (
                 self._render_now(),
                 self._render_hands(),
+                self._render_day_page(),
                 self._render_open_ends(),
                 self._render_own_recent(),
                 self._render_perceived(),
@@ -115,6 +124,23 @@ class MomentSnapshot:
             return "手上：你还没定下自己在哪、在做什么。"
         return f"手上：你在 {self.doing.place}，正在 {self.doing.doing}。"
 
+    def _render_day_page(self) -> str:
+        """她上一次写下的那一天。摆在「手上」之后、当下那三段之前：它是背景，不是
+        此刻正在发生的事。
+
+        **日子必须印出来，而且"昨天"这个词只在真的是昨天时才用。** 服务停过几天、
+        某天她一个字都没写下的时候，最近的一页可能是三天前的；把它说成"昨天"是往她
+        眼前塞一句假话，而她会拿它当今天的前一天去接因果。
+        """
+        if self.day_page is None:
+            return "你上一次写下的那一天：（还没有）"
+        when = self.day_page.day.strftime("%m-%d")
+        if self.day_page.day == living_day_of(self.now) - timedelta(days=1):
+            head = f"昨天（{when}）你写下的："
+        else:
+            head = f"你上一次写下的是 {when}："
+        return f"{head}\n{self.day_page.text}"
+
     def _render_open_ends(self) -> str:
         if not self.open_ends:
             return "心里挂着没了结的：（没有）"
@@ -125,7 +151,7 @@ class MomentSnapshot:
         if not self.own_recent:
             return "你刚做过、说过：（还没有）"
         lines = [
-            f"- {_clock(h.occurred_at, now=self.now)} {_own_line(h)}"
+            f"- {dated_clock(h.occurred_at, now=self.now)} {own_line(h)}"
             for h in self.own_recent
         ]
         return "你刚做过、说过：\n" + "\n".join(lines)
@@ -134,8 +160,8 @@ class MomentSnapshot:
         if not self.perceived.items:
             return "这段时间你感知到的：（没什么动静）"
         lines = [
-            f"- {_clock(p.occurred_at, now=self.now)} "
-            f"{_perceived_line(p, me=self.persona_id)}"
+            f"- {dated_clock(p.occurred_at, now=self.now)} "
+            f"{perceived_line(p, me=self.persona_id)}"
             for p in self.perceived.items
         ]
         return "这段时间你感知到的：\n" + "\n".join(lines)
@@ -161,81 +187,6 @@ def _open_end_line(end: LooseEnd, *, now: datetime) -> str:
         parts.append("到点了" if end.due_at <= now else "还没到")
     parts.append(f"从 {end.opened_moment_id} 那一缝起挂着")
     return " · ".join(parts)
-
-
-def _clock(moment: datetime, *, now: datetime) -> str:
-    """一条历史记录的时刻：同一个 CST 日历日给 ``HH:MM CST``，跨天补上 ``MM-DD``。
-
-    **不能给裸时分。** ``own_recent`` 按条数取、**不设时间窗**，安静的时候昨晚那几行
-    会一直挂在里面（这正是它按条数不按钟点的用意，见 :data:`OWN_RECENT_LIMIT`）；感知
-    那段也一样，游标推不动就一直是昨天的动静。而 ``23:41`` 这个形状昨晚和今晚长得一模
-    一样，她无从分辨那是几分钟前还是一整天前 —— 线上炸过一次（2026-08-03：中午 13:18
-    往群里发「大半夜的发什么疯、赶紧滚去睡觉」）。
-
-    ``now`` 从调用方传进来（``MomentSnapshot.now``），**不在这里现取**：一缝一个 now
-    是这套引擎的地基（:mod:`app.living.anchor`），渲染层自己读钟会让同一缝的输入跟它
-    的身份对不上。
-
-    走 :func:`app.infra.cst_time.to_cst_dated` 而不是自己比日期：跨天判定要按 CST 日历
-    日（不是 UTC、也不是"差了 24 小时"），这条逻辑只该有一处定义。它收的是原始时间串，
-    所以这里把已经是 ``datetime`` 的值 ``isoformat()`` 回去 —— aware ISO 正是它认的三
-    种格式之一，往返是精确的。
-    """
-    return to_cst_dated(moment.isoformat(), now=now, seconds=False)
-
-
-def _message_handle(happening_id: str) -> str | None:
-    """这一条要是她发出去的消息，给出她能拿去撤回的那个编号；否则 ``None``。
-
-    编号就是 ``outbound_id``——:func:`app.living.takeback.take_back_message` 按等值查
-    的那个键。前缀走 :data:`~app.living.records.OUTBOUND_HAPPENING_PREFIX`，跟
-    :mod:`app.living.mouth` 拼 ``happening_id`` 时用的是同一个常量，所以"这里印出去
-    的"和"她照抄回来的"必然是同一个东西。
-
-    **判据是前缀，不是** ``kind``：当面说的话和发消息的 ``kind`` 都是 ``speech``，
-    但当面说的话撤不了。给它一个编号就是给她一个指了会失败的东西。
-    """
-    if not happening_id.startswith(OUTBOUND_HAPPENING_PREFIX):
-        return None
-    return happening_id[len(OUTBOUND_HAPPENING_PREFIX):]
-
-
-def _own_line(h: Happening) -> str:
-    """她自己那条记录的样子；发出去的消息末尾带上它的编号。
-
-    带编号是**给她一个消息级句柄**。没有它的时候她只能拿原话去指要撤哪一条，于是
-    后端得在逻辑层按内容猜——同一句话说过两遍就分不出是哪一次。真人撤消息是看着那条
-    点的，句柄一直都在他手上；她的句柄就印在这里。
-
-    整串照印，不截断：截断要配一套前缀唯一性校验，而那个分支在真实数据量下永远不会
-    触发。她是模型，照抄一串字符没有负担。
-    """
-    handle = _message_handle(h.happening_id)
-    tail = f"［{handle}］" if handle is not None else ""
-    if h.kind != KIND_SPEECH:
-        return f"你 {h.content}{tail}"
-    if h.audience:
-        return f"你对 {'、'.join(h.audience)} 说：「{h.content}」{tail}"
-    return f"你说：「{h.content}」{tail}"
-
-
-def _perceived_line(p: Perceived, *, me: str) -> str:
-    """一条感知记录的样子。``content is None`` 时**没有任何口子**能漏出原话。"""
-    if p.content is None:
-        return f"{p.place} 那边有动静"
-    if p.actor == WORLD_ACTOR:
-        # 世界自己发生的事（天黑、快递到）没有"谁"，加个主语就是在编人。
-        return p.content
-    if p.kind != KIND_SPEECH:
-        return f"{p.actor} {p.content}" + ("（是冲着你来的）" if p.directed else "")
-    if p.directed:
-        # 一句话可以同时说给两个人；只说"对你说"会让她看不见姐姐也在场。
-        others = [a for a in p.audience if a != me]
-        also = f"和 {'、'.join(others)} " if others else ""
-        return f"{p.actor} 对你{also}说：「{p.content}」"
-    if p.audience:
-        return f"{p.actor} 对 {'、'.join(p.audience)} 说：「{p.content}」"
-    return f"{p.actor} 说：「{p.content}」"
 
 
 async def recent_own_happenings(
@@ -286,12 +237,20 @@ async def all_whereabouts(*, lane: str) -> list[Whereabouts]:
 async def read_snapshot(
     *, lane: str, persona_id: str, after_seq: int, now: datetime
 ) -> MomentSnapshot:
-    """读她这一缝的全部输入。四层各读各的，谁也不裁谁。"""
+    """读她这一缝的全部输入。各层各读各的，谁也不裁谁。
+
+    日记那一页按 ``day < 当前生活日`` 取最新的一页，**不是"最新一页"**：她凌晨写下
+    的那页写的是刚过去那一天，而写完的那一刻已经属于新的生活日了。理由和它错了的样子
+    写在 :func:`~app.living.day_page.read_day_page_before` 里。
+    """
     return MomentSnapshot(
         lane=lane,
         persona_id=persona_id,
         now=now,
         doing=await current_whereabouts(lane=lane, persona_id=persona_id),
+        day_page=await read_day_page_before(
+            lane=lane, persona_id=persona_id, day=living_day_of(now)
+        ),
         open_ends=await list_open_loose_ends(lane=lane, persona_id=persona_id),
         own_recent=await recent_own_happenings(lane=lane, persona_id=persona_id),
         perceived=await read_perceived_by(

@@ -45,7 +45,13 @@ from inner_shared.dynamic_config import dynamic_config
 
 from app.infra.cst_time import CST
 from app.living.happening import record_happening
-from app.living.records import KIND_ACT, MEDIUM_IN_PERSON, Happening
+from app.living.records import (
+    AMBIENT_PLACE,
+    KIND_ACT,
+    MEDIUM_IN_PERSON,
+    WORLD_ACTOR,
+    Happening,
+)
 from app.living.upcoming import (
     list_due_upcoming,
     mark_upcoming_consumed,  # module-level so tests can monkeypatch
@@ -53,16 +59,6 @@ from app.living.upcoming import (
 )
 
 logger = logging.getLogger(__name__)
-
-# 日历项和 world 排的新东西都不是谁做的，是世界自己发生的。用一个绝不会跟
-# persona_id 撞的 actor，让回声抑制（``_perceive`` 里 ``actor == persona_id``
-# 那一条）永远不会把世界的事从谁眼前抹掉。
-WORLD_ACTOR = "world"
-
-# 没绑地点的事（天黑、停电）发生在**这个家这一整片**上。屋里每个人都在这片里面，
-# 所以按 :func:`app.living.place.reach_between` 的包含档都拿得到原话，在学校的
-# 拿不到。写成路径的第一段，跟 whereabouts 用的是同一套路径词汇。
-AMBIENT_PLACE = "家"
 
 # Dynamic Config key：值 = JSON 数组，每项 {"key","at","what","place"?}。
 # ``at`` 是 CST 的 ``HH:MM``；``place`` 省略 = 不绑地点（走 AMBIENT_PLACE）。

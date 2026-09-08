@@ -149,10 +149,12 @@ def her_mouth(monkeypatch):
     async def fake_find_persona(persona_id: str):
         return SimpleNamespace(display_name="赤尾", persona_core="")
 
+    from app.living import persona as persona_mod
+
     monkeypatch.setattr(mouth_mod, "emit", fake_emit)
     monkeypatch.setattr(mouth_mod, "build_voice_runner", lambda: FakeVoice())
     monkeypatch.setattr(mouth_mod, "audit_output", fake_audit)
-    monkeypatch.setattr(mouth_mod, "find_persona", fake_find_persona)
+    monkeypatch.setattr(persona_mod, "find_persona", fake_find_persona)
     return sent
 
 

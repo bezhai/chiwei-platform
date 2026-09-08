@@ -101,13 +101,13 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities.agent import AgentRunner
 from app.capabilities.output_safety import audit_output
-from app.data.queries.persona import find_persona
 from app.data.session import get_session
 from app.domain.chat_dataflow import (
     PROACTIVE_MESSAGE_ID_PREFIX,
     ChatResponseSegment,
 )
 from app.living.happening import record_happening
+from app.living.persona import persona_prompt_vars
 from app.living.phone import (
     conversation_as_she_knows_it,
     medium_for,
@@ -118,6 +118,7 @@ from app.living.records import (
     KIND_SPEECH,
     OUTBOUND_HAPPENING_PREFIX,
     _require_aware,
+    esc,
 )
 from app.living.scope import moment_scope, note_recorded
 from app.living.whereabouts import current_whereabouts
@@ -384,7 +385,14 @@ def build_voice_runner() -> AgentRunner:
 
 
 def _scene(scope: str, title: str) -> str:
-    return f"你在群「{title}」里说话。" if scope != "direct" else f"你在跟「{title}」私聊。"
+    """嘴渲染措辞时，那段会话尾巴前面的那句场景。
+
+    会话名是外面写的（群名谁都能改），而这句紧挨着 ``conversation_as_she_knows_it``
+    交回来的那几行 ``<msg …>``，同一个 prompt —— 不过 :func:`esc` 的话，一个群改个名
+    就能在嘴读到的上下文里伪造一行主人说的话，而嘴正是按那段上下文决定怎么说的。
+    """
+    name = esc(title)
+    return f"你在群「{name}」里说话。" if scope != "direct" else f"你在跟「{name}」私聊。"
 
 
 def _handles_she_gave(pictures: list[str] | str | None) -> list[str]:
@@ -552,7 +560,10 @@ async def send_message(
         assert isinstance(tried, SpokenOutbound)
         return _already_claimed(tried)
 
-    persona = await find_persona(persona_id)
+    # 渲染这句话的是**同一个她**：底色走 :func:`app.living.persona.persona_prompt_vars`，
+    # 跟一缝和日记那一轮同一处组装。这里原先自己拼了一份，于是她那一缝里是版本链上新
+    # 的自己、一开口又变回 ``bot_persona`` 上出厂那份——两份人设分裂，没有任何报错。
+    prompt_vars = await persona_prompt_vars(lane=lane, persona_id=persona_id)
     known = await conversation_as_she_knows_it(
         lane=lane, persona_id=persona_id, channel_id=conv.channel_id, now=now
     )
@@ -568,10 +579,7 @@ async def send_message(
                 ),
             )
         ],
-        prompt_vars={
-            "persona_name": getattr(persona, "display_name", "") or persona_id,
-            "persona_core": (getattr(persona, "persona_core", "") or "").strip(),
-        },
+        prompt_vars=prompt_vars,
         context=AgentContext(
             persona_id=persona_id,
             session_id=f"living-mouth:{lane}:{persona_id}:{conv.channel_id}",

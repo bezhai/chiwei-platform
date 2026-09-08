@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import text
 
 import app.data.session as session_mod
-from app.data.models import Base, CommonConversation, CommonMessage
+from app.data.models import Base, CommonConversation, CommonMessage, CommonUser
 from app.data.queries.messages import (
     count_summons_since,
     find_conversation_window,
@@ -44,6 +44,14 @@ _CST = dt.timezone(dt.timedelta(hours=8))
 _AKAO_BOT_UID = uuid.uuid5(uuid.NAMESPACE_OID, "q-bot-akao")
 _AYANA_BOT_UID = uuid.uuid5(uuid.NAMESPACE_OID, "q-bot-ayana")
 _HUMAN = uuid.uuid5(uuid.NAMESPACE_OID, "q-human")
+_OWNER = uuid.uuid5(uuid.NAMESPACE_OID, "q-owner")
+# 显示名跟主人逐字相同、``is_owner=false`` 的那个人。
+_TWIN = uuid.uuid5(uuid.NAMESPACE_OID, "q-twin-of-owner")
+# ``common_user`` 里根本没有这一行的 id（prod 上有 360 条这种消息）。
+_UNREGISTERED = uuid.uuid5(uuid.NAMESPACE_OID, "q-never-recorded")
+
+# ``_message`` 的 ``sender`` 默认值：按 ``role`` 决定填谁，跟不填 ``None`` 分得开。
+_BY_ROLE = object()
 
 _DM = uuid.uuid5(uuid.NAMESPACE_OID, "q-conv-dm")
 _GROUP = uuid.uuid5(uuid.NAMESPACE_OID, "q-conv-group")
@@ -83,8 +91,13 @@ def _counts(rows: list[dict], conv: uuid.UUID) -> list[int]:
 
 @pytest.fixture
 async def bot_db(test_db):
-    """公共层三张 ORM 表 + channel-server 那两张裸表。"""
+    """公共层三张 ORM 表 + channel-server 那两张裸表。
+
+    ``common_user`` 必须在：五处读消息的查询都 join 它取 ``is_owner``（"这条是不是
+    主人说的"的全部依据）。缺了这张表整个文件炸在"表不存在"上。
+    """
     tables = [
+        CommonUser.__table__,
         CommonConversation.__table__,
         CommonMessage.__table__,
     ]
@@ -146,11 +159,26 @@ async def _present(conv: uuid.UUID, bot_name: str, *, is_active: bool = True) ->
         )
 
 
+async def _user(
+    uid: uuid.UUID, *, display_name: str, is_owner: bool = False
+) -> None:
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO common_user "
+                "(common_user_id, channel, display_name, is_owner) "
+                "VALUES (CAST(:u AS uuid), 'lark', :n, :o)"
+            ),
+            {"u": str(uid), "n": display_name, "o": is_owner},
+        )
+
+
 async def _message(
     conv: uuid.UUID,
     *,
     at: dt.datetime,
     role: str = "user",
+    sender: uuid.UUID | None | object = _BY_ROLE,
     who: str | None = "路人",
     body: str = "在吗",
     content: list[dict] | None = None,
@@ -163,6 +191,11 @@ async def _message(
 ) -> uuid.UUID:
     mid = message_id or uuid.uuid4()
     import json
+
+    if sender is _BY_ROLE:
+        sender_id = str(_HUMAN) if role == "user" else None
+    else:
+        sender_id = str(sender) if sender is not None else None
 
     async with session_mod.get_session() as s:
         await s.execute(
@@ -180,7 +213,7 @@ async def _message(
             {
                 "mid": str(mid),
                 "c": str(conv),
-                "u": str(_HUMAN) if role == "user" else None,
+                "u": sender_id,
                 "who": who,
                 "role": role,
                 "content": json.dumps(
@@ -201,7 +234,14 @@ async def _message(
 
 
 async def _seed_her_phone() -> None:
-    """一个 persona、两个 bot、一条私聊 + 一个群 + 一条不属于她的会话。"""
+    """一个 persona、两个 bot、一条私聊 + 一个群 + 一条不属于她的会话。
+
+    ``common_user`` 里三个人：普通人、主人、和一个显示名跟主人逐字相同的陌生人。
+    最后那个是"主人判定不能取决于名字"的物证。
+    """
+    await _user(_HUMAN, display_name="路人")
+    await _user(_OWNER, display_name="bezhai", is_owner=True)
+    await _user(_TWIN, display_name="bezhai")
     await _bot("chiwei", "akao", common_user_id=_AKAO_BOT_UID)
     await _bot("chiwei-dev", "akao", common_user_id=None)
     await _bot("ayana", "ayana", common_user_id=_AYANA_BOT_UID)
@@ -1118,3 +1158,123 @@ async def test_an_empty_set_reports_nothing_rather_than_everything(bot_db):
         )
         == []
     )
+
+
+# ---------------------------------------------------------------------------
+# 「这个人在她眼里是谁」—— 五处查询共用的那一份
+# ---------------------------------------------------------------------------
+#
+# 名字是 ``sender_display_name``（她在信封和会话里见到的那个），身份是
+# ``common_user.is_owner``（她看不到、也没人改得动的那一列）。两件事一起从
+# :data:`app.data.queries.messages._WHO_AND_OWNER` 出来，五处各拼同一份 —— 各写各的
+# join 的话，收窄了一处另外四处照旧，而她读到的行看起来一模一样。
+#
+# ``LEFT JOIN`` 是必须的：``common_user_id`` 为空、或者那个人根本没在 ``common_user``
+# 里落过行的消息照样要出现在结果里，只是认不出他是谁 → ``by_owner=false``（fail-closed）。
+
+
+async def test_the_owner_is_marked_on_every_place_she_reads_a_name(bot_db):
+    """五处查询都答得出「这条是不是主人说的」。
+
+    少一处就是那个视角下主人跟陌生人长得一样 —— 而五处的输出她全都看得到。
+    """
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), sender=_OWNER, who="bezhai", content=_FILE_CONTENT)
+
+    senders = await find_unread_senders(**_unread_args(_DM), limit=4)
+    window = await find_conversation_window(**_unread_args(_DM), limit=10)
+    known = await find_messages_known_through(
+        channel_id=str(_DM),
+        cursor_ms=_ms(_at(23)),
+        cursor_id="",
+        own_bots=["chiwei", "chiwei-dev"],
+        limit=10,
+    )
+    looked_up = await search_conversations_by_name(
+        conversations=await _her_conversations(),
+        name_like="%bezhai%",
+        own_bots=["chiwei", "chiwei-dev"],
+    )
+    files = await find_file_items_in_conversations(await _her_conversations())
+
+    assert [r["by_owner"] for r in senders] == [True], f"信封那侧：{senders}"
+    assert [r["by_owner"] for r in window] == [True], f"打开会话：{window}"
+    assert [r["by_owner"] for r in known] == [True], f"她已经知道的那段：{known}"
+    assert list(looked_up[0]["matched_owner"]) == ["bezhai"], (
+        f"按名字找会话：{looked_up}"
+    )
+    assert [r["by_owner"] for r in files] == [True], f"别人发来的文件：{files}"
+
+
+async def test_a_namesake_who_is_not_the_owner_is_not_marked(bot_db):
+    """显示名跟主人逐字相同、但 ``is_owner=false`` 的人，一处都不该被标成主人。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), sender=_TWIN, who="bezhai", content=_FILE_CONTENT)
+
+    window = await find_conversation_window(**_unread_args(_DM), limit=10)
+    files = await find_file_items_in_conversations(await _her_conversations())
+    looked_up = await search_conversations_by_name(
+        conversations=await _her_conversations(),
+        name_like="%bezhai%",
+        own_bots=["chiwei", "chiwei-dev"],
+    )
+
+    assert [(r["who"], r["by_owner"]) for r in window] == [("bezhai", False)]
+    assert [r["by_owner"] for r in files] == [False]
+    assert list(looked_up[0]["matched"]) == ["bezhai"]
+    assert looked_up[0]["matched_owner"] is None, (
+        f"名字对得上就被当成了主人。拿到：{looked_up}"
+    )
+
+
+async def test_a_sender_missing_from_common_user_is_not_the_owner(bot_db):
+    """``common_user`` 里查不到这个 id → 认不出他是谁 → 不是主人（fail-closed）。
+
+    这一行仍然要出现在结果里：认不出发件人不是"这条消息不存在"。
+    """
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), sender=_UNREGISTERED, who="bezhai")
+
+    window = await find_conversation_window(**_unread_args(_DM), limit=10)
+
+    assert [(r["who"], r["by_owner"]) for r in window] == [("bezhai", False)]
+
+
+async def test_a_message_without_a_sender_id_is_not_the_owner(bot_db):
+    """``common_user_id`` 是 NULL 的行同样 —— 而且照样出现在窗口里。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), sender=None, who="bezhai")
+
+    window = await find_conversation_window(**_unread_args(_DM), limit=10)
+
+    assert [(r["who"], r["by_owner"]) for r in window] == [("bezhai", False)]
+
+
+async def test_the_envelope_keeps_the_owner_and_his_namesake_apart(bot_db):
+    """信封那侧按 ``(名字, 是不是主人)`` 分组，同名的两个人不能缩成一个。
+
+    改之前是 ``GROUP BY`` 显示名一列：主人和冒充者在信封上并成一个人，她拿起手机之前
+    就已经以为只有主人在说话。
+    """
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), sender=_OWNER, who="bezhai")
+    await _message(_DM, at=_at(10), sender=_TWIN, who="bezhai")
+
+    rows = await find_unread_senders(**_unread_args(_DM), limit=4)
+
+    assert [(r["who"], r["by_owner"]) for r in rows] == [
+        ("bezhai", False),
+        ("bezhai", True),
+    ], f"同名的主人和非主人被并成了一个人。拿到：{rows}"
+
+
+async def test_the_same_person_speaking_twice_is_still_one_sender(bot_db):
+    """同一个人说两句照旧只占信封上一个名字 —— 分组多带一列不该把他拆开。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), sender=_OWNER, who="bezhai")
+    await _message(_DM, at=_at(10), sender=_OWNER, who="bezhai")
+
+    rows = await find_unread_senders(**_unread_args(_DM), limit=4)
+
+    assert [(r["who"], r["by_owner"]) for r in rows] == [("bezhai", True)]
+    assert rows[0]["latest"] == _ms(_at(10))

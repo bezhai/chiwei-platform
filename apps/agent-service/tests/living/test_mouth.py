@@ -195,7 +195,11 @@ def voice(monkeypatch, guard):
 
         return SimpleNamespace(display_name="赤尾", persona_core="她拍胶片、泡抹茶店。")
 
-    monkeypatch.setattr(mouth_mod, "find_persona", fake_find_persona)
+    # 开口这条路不再自己拼人设：底色跟一缝、日记走同一个 ``persona_prompt_vars``，
+    # 所以打桩打在那个模块上。
+    from app.living import persona as persona_mod
+
+    monkeypatch.setattr(persona_mod, "find_persona", fake_find_persona)
     return fake
 
 

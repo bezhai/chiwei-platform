@@ -21,6 +21,8 @@ import sys
 import pytest
 from pydantic import ValidationError
 
+from app.living.day_page import DayPage
+from app.living.persona import PersonaVersion
 from app.living.pictures import Picture
 from app.living.reading import FilePickedUp, FileRead
 from app.living.records import (
@@ -97,6 +99,22 @@ _VALID: dict[type, dict] = {
         "what": "一只在窗台上晒太阳的猫",
         "made_at": _AWARE,
     },
+    DayPage: {
+        "lane": "coe-x",
+        "persona_id": "akao",
+        "day": dt.date(2026, 7, 25),
+        "text": "胶片摊了一茶几。",
+        "written_at": _AWARE,
+        "happenings": 3,
+    },
+    PersonaVersion: {
+        "lane": "coe-x",
+        "persona_id": "akao",
+        "narrative": "她今年在准备去日本读书。",
+        "source": "review",
+        "written_at": "2026-07-25T10:00:00+08:00",
+        "version": 1,
+    },
 }
 
 # 列名 -> pg 类型。改这张表 == 改一张已经落地的表的形状，先想清楚怎么迁。
@@ -167,6 +185,32 @@ _PINNED: dict[type, dict[str, str]] = {
         "what": "TEXT",
         "made_at": "TIMESTAMPTZ",
     },
+    # 她给一个生活日写下的那一页。``day`` 是 **DATE** 不是 TIMESTAMPTZ：它答的是
+    # "哪个生活日"，而生活日的边界是钟点（04:00 到次日 04:00）——存成一个时刻等于
+    # 让每个读取方自己再换算一次边界。**没有 written / done 标记列**：这一行存在
+    # 本身就是"这天复盘过了"，两个事实中间崩一次就永久对不上。
+    DayPage: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "day": "DATE",
+        "text": "TEXT",
+        "written_at": "TIMESTAMPTZ",
+        "happenings": "BIGINT",
+    },
+    # 「她是谁」那份正文的一版。**这张表比这里任何一张都更不能动**：prod 上已经有几十
+    # 版真实数据，最新一版是她自己上周写的。``written_at`` 是 **TEXT** 不是
+    # TIMESTAMPTZ —— 当初这么选是为了避开框架保留列 ``created_at``（那是落库时刻，
+    # 语义不同），看着别扭也改不了：additive-only 的 migrator 遇到改类型直接
+    # ``MigrationError``、整批迁移回滚、pod crash loop。``version`` 是框架的
+    # ``Version`` 列（BIGINT），"最新一版"按它排，不按 ``written_at``。
+    PersonaVersion: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "narrative": "TEXT",
+        "source": "TEXT",
+        "written_at": "TEXT",
+        "version": "BIGINT",
+    },
 }
 
 
@@ -191,6 +235,8 @@ def test_living_data_reaches_the_registry_via_app_wiring():
         "FileRead",
         "FilePickedUp",
         "Picture",
+        "DayPage",
+        "PersonaVersion",
     ):
         assert f"'{name}'" in registered, (
             f"{name} 没进 DATA_REGISTRY —— migrate_schema 不会建它的表。"
@@ -259,6 +305,7 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
                 cls(**{**_VALID[cls], name: _NAIVE})
 
     assert sorted(checked) == [
+        ("DayPage", "written_at"),
         ("FileRead", "read_at"),
         ("Happening", "occurred_at"),
         ("Picture", "made_at"),

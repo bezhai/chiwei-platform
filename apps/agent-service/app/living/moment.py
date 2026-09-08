@@ -61,10 +61,15 @@
     拿出其中一张看（:mod:`app.living.pictures`，跟读东西那两只手同一个形状：先列出
     来、再点一张。**"看"这只手拆出来是必须的**——这一缝的工具结果不传给下一缝，句柄
     只出现在画图那一刻的话，下一缝她就再也找不到自己画过的东西）
+  * ``read_a_guide`` / ``run_a_script``  读一份写好的说明 / 照说明把它教她跑的那条
+    命令真的跑一遍（:mod:`app.living.guides`。她自己长什么样就写在其中一份里；四份
+    说明里三份通篇在教她跑脚本，只接读取的话读完手上没有能跑它的东西）
 
-prompt 在 Langfuse（:data:`LIFE_MOMENT_PROMPT_ID`，新 id、只发泳道 label），变量
-只有两个——``persona_name`` 和 ``persona_core``。**每缝都变的东西一律走 USER 消息**：
-prompt 变量没有编译期校验，改名会静默渲染成字面量，能少一个就少一个。
+prompt 在 Langfuse（:data:`LIFE_MOMENT_PROMPT_ID`，新 id、只发泳道 label），变量三
+个——``persona_name``、``persona_core``、``guides_you_can_read``。**每缝都变的东西一律
+走 USER 消息**：prompt 变量没有编译期校验，改名会静默渲染成字面量，能少一个就少一个。
+第三个是例外，而且只能是变量：她手边有哪些说明可读会变（注册表启动时填、每 30 秒热
+加载），工具 schema 在 import 时就定死了，装不下一份会变的清单。
 """
 
 from __future__ import annotations
@@ -87,12 +92,15 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
-from app.data.queries.persona import find_persona
 from app.data.session import get_session
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import now_cst
 from app.living.anchor import anchor_on_grid
 from app.living.clock import living_lane
+
+# 她手边那几份写好的说明：两只手，外加"有哪些可读"那一份清单（清单只能从 prompt
+# 变量进，见本模块最后一段 docstring）。
+from app.living.guides import GUIDE_TOOLS, GUIDES_VAR, guides_she_can_read
 from app.living.happening import record_happening
 from app.living.loose_ends import (
     format_entry,
@@ -100,6 +108,12 @@ from app.living.loose_ends import (
     rewrite_loose_ends,
 )
 from app.living.mouth import MOUTH_TOOLS
+
+# 谁住在这个家、她是谁那两个 prompt 变量：住在叶子模块 ``persona`` 而不是这里，
+# 因为日记那一页（``app.living.day_page``）也要用，而它在 ``snapshot`` 之下、本模块
+# 在 ``snapshot`` 之上，反向 import 会成环。**这一缝不自己查 bot_persona**：正文来自
+# 版本链还是主表由那个模块一处说了算，三条注入路各查一遍就会各漂各的。
+from app.living.persona import LIVING_PERSONAS, persona_prompt_vars
 from app.living.phone import PHONE_TOOLS, commit_glances, phone_envelope
 from app.living.pictures import PICTURE_TOOLS
 from app.living.place import Reach, reach_between_people
@@ -138,10 +152,6 @@ from app.runtime.node import node
 from app.runtime.persist import insert_idempotent
 
 logger = logging.getLogger(__name__)
-
-# 这个家里的三姐妹。写死而不是查 ``bot_persona``：这是世界设定（谁住在这儿），不是
-# 可调参数；而库里还有 ``npc:*`` 这类行，全量拉进来就是每十分钟白烧三份以上的钱。
-LIVING_PERSONAS: tuple[str, ...] = ("akao", "ayana", "chinagi")
 
 # Langfuse prompt id（新 id，只发泳道 label，不碰 production）。
 LIFE_MOMENT_PROMPT_ID = "living_life_moment"
@@ -594,9 +604,10 @@ async def look_around() -> str:
     return "\n".join(lines)
 
 
-# 手上的事 + 手机 + 嘴 + 上网 + 读东西 + 图，合在一起才是"她这一缝能做的全部"。后
-# 几样各住在自己的模块里（:mod:`app.living.phone` / :mod:`app.living.mouth` /
-# :mod:`app.living.web` / :mod:`app.living.reading` / :mod:`app.living.pictures`），
+# 手上的事 + 手机 + 嘴 + 上网 + 读东西 + 图 + 手边那几份说明，合在一起才是"她这一缝
+# 能做的全部"。后几样各住在自己的模块里（:mod:`app.living.phone` /
+# :mod:`app.living.mouth` / :mod:`app.living.web` / :mod:`app.living.reading` /
+# :mod:`app.living.pictures` / :mod:`app.living.guides`），
 # 只在这里汇成一份——拆成几份工具集就会出现"某条路进来的那一缝她没有手机"这种谁也想
 # 不到的差别。
 #
@@ -615,6 +626,7 @@ MOMENT_TOOLS = [
     *WEB_TOOLS,
     *READING_TOOLS,
     *PICTURE_TOOLS,
+    *GUIDE_TOOLS,
 ]
 
 
@@ -739,20 +751,6 @@ async def moment_ran(*, lane: str, persona_id: str, moment_id: str) -> bool:
     return row is not None
 
 
-def _persona_core_var(core: str | None) -> str:
-    """SYSTEM 变量 ``{{persona_core}}`` 的值：人写的那份人设正文；空白如实说。
-
-    有就**原文直传、不裹任何措辞**。空白（列 NOT NULL，但可能是空串）绝不能渲染
-    出一个空洞——她 90% 时间在 rest 的第二个独立病因就是这份东西全仓只有每周一次
-    的 persona_review 读过：不是想做事做不了，是根本没想起来自己有想做的事。
-
-    缺省措辞零剧情事实：人设内容全部从数据来。
-    """
-    if not core or not core.strip():
-        return "（还没有为她写下这份人设正文——这一缝没有可对照的底色。）"
-    return core.strip()
-
-
 def build_moment_runner() -> AgentRunner:
     """本缝的 agent。模块级函数，测试替身从这里换掉，不碰真模型。"""
     return AgentRunner(_MOMENT_CFG, tools=MOMENT_TOOLS)
@@ -827,7 +825,14 @@ async def run_moment(
         snapshot = await read_snapshot(
             lane=lane, persona_id=persona_id, after_seq=after_seq, now=began_at
         )
-        persona = await find_persona(persona_id)
+        # 「她是谁」那两个变量由 :mod:`app.living.persona` 一处组装（嘴和日记那两条
+        # 路共用同一份）。手边有哪些说明可读**只加在这一缝上**：只有这一缝有读它、
+        # 跑它的那两只手，塞进那个共用函数就等于把一份她在嘴和日记里用不上的清单也
+        # 灌进那两个 agent 的 prompt。
+        prompt_vars = {
+            **await persona_prompt_vars(lane=lane, persona_id=persona_id),
+            GUIDES_VAR: guides_she_can_read(),
+        }
         context = AgentContext(
             persona_id=persona_id,
             # 一个人的一整天在 langfuse 里读成一条流，逐缝翻起来才不用大海捞针。
@@ -865,12 +870,7 @@ async def run_moment(
                         content=f"{snapshot.render()}\n\n{envelope}",
                     )
                 ],
-                prompt_vars={
-                    "persona_name": getattr(persona, "display_name", "") or persona_id,
-                    "persona_core": _persona_core_var(
-                        getattr(persona, "persona_core", None)
-                    ),
-                },
+                prompt_vars=prompt_vars,
                 context=context,
                 max_retries=1,
             )

@@ -167,11 +167,12 @@ class FakeLife:
 @pytest.fixture
 def stub_life(monkeypatch):
     from app.living import moment as moment_mod
+    from app.living import persona as persona_mod
 
     async def fake_find_persona(persona_id: str):
         return SimpleNamespace(display_name="赤尾", persona_core="她泡抹茶店。")
 
-    monkeypatch.setattr(moment_mod, "find_persona", fake_find_persona)
+    monkeypatch.setattr(persona_mod, "find_persona", fake_find_persona)
 
     async def fixed_minutes() -> int:
         return DEFAULT_LIFE_MOMENT_MINUTES

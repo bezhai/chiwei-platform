@@ -75,7 +75,7 @@ from app.capabilities.image_search import image_search
 from app.data.session import get_session
 from app.infra.cst_time import to_cst_dated
 from app.infra.image import image_client
-from app.living.records import _require_aware
+from app.living.records import _require_aware, esc
 from app.living.scope import moment_scope
 from app.runtime.data import Data, Key
 from app.runtime.migrator import _table_name
@@ -135,7 +135,11 @@ class Picture(Data):
     persona_id: Annotated[str, Key]
     picture_id: Annotated[str, Key]
     file_name: str       # 对象存储的永久句柄（tool-service to-tos 回的那个）
-    what: str            # 这张图是什么：画它那句话 / 找它那个词
+    # 这张图是什么。两个来源，**其中一个是外面来的**：她画它时说的那句话（她自己写
+    # 的），或者上网找到它时那个图片站上的标题（谁都能写）。所以它摆到她眼前之前一律
+    # 过 :func:`app.living.records.esc` —— 分不出哪一张是哪个来源，也不该分：一个字段
+    # 只要有一个外面来的来源，它就是外面来的。
+    what: str
     made_at: datetime    # 她做出它的时刻
 
     class Meta:
@@ -383,7 +387,7 @@ async def draw_a_picture(
         )
     picture, url = kept
     return _shown(
-        f"你画出来了：「{picture.what}」 {_handle_of(picture)}\n"
+        f"你画出来了：「{esc(picture.what)}」 {_handle_of(picture)}\n"
         f"它已经在你手上那些图里了，以后用 look_through_your_pictures 找得回。",
         url,
     )
@@ -450,7 +454,7 @@ async def find_a_picture_online(
         # 一张存不住不该拖垮整趟：剩下那几张照样摆到她眼前（``_keep`` 已经记过一笔）。
         if kept is not None:
             picture, url = kept
-            blocks += _shown(f"{picture.what} {_handle_of(picture)}", url)
+            blocks += _shown(f"{esc(picture.what)} {_handle_of(picture)}", url)
 
     if not blocks:
         raise RuntimeError(
@@ -472,7 +476,7 @@ def _one_picture(p: Picture, *, now: datetime) -> str:
     刚画的，裸 ``21:30`` 长得一模一样。
     """
     when = to_cst_dated(p.made_at.isoformat(), now=now, seconds=False)
-    return f"- 「{p.what}」 {when} {_handle_of(p)}"
+    return f"- 「{esc(p.what)}」 {when} {_handle_of(p)}"
 
 
 @tool
@@ -606,10 +610,10 @@ async def look_at_a_picture(
     url = await image_client.get_url(picked.file_name)
     if url is None:
         raise RuntimeError(
-            f"「{picked.what}」这会儿取不出来 —— 它还在你手上，只是现在打不开它。"
+            f"「{esc(picked.what)}」这会儿取不出来 —— 它还在你手上，只是现在打不开它。"
         )
     when = to_cst_dated(picked.made_at.isoformat(), now=now, seconds=False)
-    return _shown(f"{when} 的「{picked.what}」 {_handle_of(picked)}", url)
+    return _shown(f"{when} 的「{esc(picked.what)}」 {_handle_of(picked)}", url)
 
 
 PICTURE_TOOLS = [

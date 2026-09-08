@@ -89,14 +89,21 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
         CommonMessage,
         CommonUser,
     )
+    from app.living.day_page import DayPage
     from app.living.mouth import SpokenOutbound
+    from app.living.persona import PersonaVersion
     from app.living.phone import PhoneRead
     from app.living.pictures import Picture
     from app.living.records import Happening, Upcoming, Whereabouts
     from tests.runtime.conftest import migrate
 
+    # ``DayPage`` 跟手机那几张一样建在这里：**每一缝都读那一页**（``read_snapshot``
+    # 把它当第二段摆给她），任何跑 ``run_moment`` / ``read_snapshot`` 的用例都要用到，
+    # 各文件各建各的迟早会出现"这个文件建了那个没建"。``PersonaVersion`` 同一个理由：
+    # 一缝、日记、开口三条路都要先问一遍"她是谁"（``persona_prompt_vars`` 读这条链）。
     for cls in (
-        Happening, Whereabouts, Upcoming, PhoneRead, SpokenOutbound, Picture
+        Happening, Whereabouts, Upcoming, PhoneRead, SpokenOutbound, Picture,
+        DayPage, PersonaVersion,
     ):
         await migrate(cls, test_db)
     tables = [

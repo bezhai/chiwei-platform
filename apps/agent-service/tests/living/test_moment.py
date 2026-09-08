@@ -31,7 +31,6 @@ from app.living.loose_ends import LooseEnd, list_open_loose_ends
 from app.living.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
     LIFE_MOMENT_PROMPT_ID,
-    LIVING_PERSONAS,
     MOMENT_TOOLS,
     LifeMoment,
     LifeMomentTick,
@@ -45,6 +44,7 @@ from app.living.moment import (
     say,
     switch_to,
 )
+from app.living.persona import LIVING_PERSONAS
 from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from app.runtime.schema_types import pg_type
@@ -91,8 +91,13 @@ class FakeMoment:
 
 @pytest.fixture
 def stub_moment(monkeypatch):
-    """装一个替身 life + 固定缝间隔 + 一份不碰真库的 persona。"""
-    from app.living import moment as moment_mod
+    """装一个替身 life + 固定缝间隔 + 一份不碰真库的 persona。
+
+    打桩打在 ``app.living.persona`` 上：一缝自己不查 ``bot_persona`` 了，那两个
+    prompt 变量由那个模块一处组装（版本链优先、主表 fallback）。这里链是空的，所以
+    落到 ``persona_core`` 这一层。
+    """
+    from app.living import persona as persona_mod
 
     persona = SimpleNamespace(
         display_name="赤尾",
@@ -102,7 +107,9 @@ def stub_moment(monkeypatch):
     async def fake_find_persona(persona_id: str):
         return persona
 
-    monkeypatch.setattr(moment_mod, "find_persona", fake_find_persona)
+    monkeypatch.setattr(persona_mod, "find_persona", fake_find_persona)
+
+    from app.living import moment as moment_mod
 
     async def fixed_minutes() -> int:
         return DEFAULT_LIFE_MOMENT_MINUTES
@@ -755,13 +762,13 @@ async def test_her_hobbies_are_in_front_of_her_every_moment(moment_db, stub_mome
 async def test_a_blank_core_says_so_instead_of_rendering_a_hole(
     moment_db, stub_moment, monkeypatch
 ):
-    from app.living import moment as moment_mod
+    from app.living import persona as persona_mod
 
     async def blank(persona_id: str):
         return SimpleNamespace(display_name="赤尾", persona_core="   ")
 
     runner = stub_moment(said="继续")
-    monkeypatch.setattr(moment_mod, "find_persona", blank)
+    monkeypatch.setattr(persona_mod, "find_persona", blank)
 
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
@@ -770,13 +777,51 @@ async def test_a_blank_core_says_so_instead_of_rendering_a_hole(
 
 
 @pytest.mark.integration
-async def test_the_prompt_variables_are_exactly_two(moment_db, stub_moment):
-    """变量改名会**静默**渲染成字面量，所以能少一个就少一个；每缝都变的东西走 USER。"""
+async def test_the_prompt_variables_are_exactly_three(moment_db, stub_moment):
+    """变量改名会**静默**渲染成字面量，所以能少一个就少一个；每缝都变的东西走 USER。
+
+    第三个（手边有哪些说明可读）是例外：它会变（注册表每 30 秒热加载），而工具
+    schema 在 import 时定死，装不下一份会变的清单，只能从 prompt 变量进。
+    """
     runner = stub_moment(said="继续")
 
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
-    assert set(runner.runs[0][1]["prompt_vars"]) == {"persona_name", "persona_core"}
+    assert set(runner.runs[0][1]["prompt_vars"]) == {
+        "persona_name",
+        "persona_core",
+        "guides_you_can_read",
+    }
+
+
+@pytest.mark.integration
+async def test_the_guides_she_can_read_are_listed_in_front_of_her(
+    moment_db, stub_moment, tmp_path
+):
+    """她要知道手边有哪些说明可读 —— 不然读说明那只手她永远猜不出该填什么名字。
+
+    清单跟着盘上实际有的那几份走：这里真的写一份到盘上、真的加载进注册表，断言她
+    这一缝的输入里出现的就是它。
+    """
+    from app.living.guides import GUIDES_VAR
+    from app.skills.registry import SkillRegistry
+
+    folder = tmp_path / "drawing"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(
+        "---\nname: drawing\ndescription: 人物画图指南\n---\n\n黑长直。\n",
+        encoding="utf-8",
+    )
+    SkillRegistry.load_all(tmp_path)
+    try:
+        runner = stub_moment(said="继续")
+        await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    finally:
+        # 注册表是 class-level 全局状态，留着会漏进别的用例。
+        SkillRegistry.load_all(tmp_path / "这个目录不存在")
+
+    listed = runner.runs[0][1]["prompt_vars"][GUIDES_VAR]
+    assert "drawing" in listed and "人物画图指南" in listed
 
 
 # --------------------------------------------------------------------------

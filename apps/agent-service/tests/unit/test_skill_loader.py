@@ -40,7 +40,7 @@ def skills_dir(tmp_path: Path) -> Path:
             ## 指令
 
             1. 阅读上方的表结构
-            2. 用 sandbox_bash 执行 SQL 查询
+            2. 用 run_a_script 执行 SQL 查询
         """)
     )
 

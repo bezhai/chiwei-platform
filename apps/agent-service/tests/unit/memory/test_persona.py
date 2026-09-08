@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import app.memory._persona as persona_mod
-from app.life.persona_chain import PersonaVersion
+from app.living.persona import PersonaVersion
 from app.memory._persona import PersonaContext, load_persona
 
 

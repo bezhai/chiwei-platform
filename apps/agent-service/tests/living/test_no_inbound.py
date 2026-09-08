@@ -33,6 +33,7 @@ import pytest
 
 import app.living as living_pkg
 from app.living.clock import CalendarTick, WorldRoundTick
+from app.living.day_page import DayPageTick
 from app.living.landing import LandingTick
 from app.living.moment import LifeMomentTick
 from app.living.nudge import PhoneNudgeTick
@@ -261,7 +262,14 @@ def test_no_living_module_ever_mentions_the_old_inbound_chain():
 
 @pytest.mark.parametrize(
     "cls",
-    [CalendarTick, WorldRoundTick, LifeMomentTick, PhoneNudgeTick, LandingTick],
+    [
+        CalendarTick,
+        WorldRoundTick,
+        LifeMomentTick,
+        PhoneNudgeTick,
+        LandingTick,
+        DayPageTick,
+    ],
 )
 def test_a_clock_cannot_be_turned_into_a_mailbox(cls):
     """钟上那条 Data 只有 ``ts``：装不下内容的钟没法当入站口。
@@ -275,18 +283,18 @@ def test_a_clock_cannot_be_turned_into_a_mailbox(cls):
 
 
 def test_every_living_clock_is_an_interval_and_nothing_else():
-    """living 自己挂的五条钟全是 interval：没有 cron、没有 mq、没有 http。"""
+    """living 自己挂的六条钟全是 interval：没有 cron、没有 mq、没有 http。"""
     out = _in_a_fresh_process(
         "from app.runtime.wire import WIRING_REGISTRY;"
         "print(sorted((s.data_type.__name__, x.kind)"
         " for s in WIRING_REGISTRY for x in s.sources"
         " if s.data_type.__name__ in"
         " ('CalendarTick','WorldRoundTick','LifeMomentTick','PhoneNudgeTick',"
-        "'LandingTick')))",
+        "'LandingTick','DayPageTick')))",
         lane=LANE,
     )
     assert out.strip() == (
-        "[('CalendarTick', 'interval'), ('LandingTick', 'interval'), "
-        "('LifeMomentTick', 'interval'), ('PhoneNudgeTick', 'interval'), "
-        "('WorldRoundTick', 'interval')]"
+        "[('CalendarTick', 'interval'), ('DayPageTick', 'interval'), "
+        "('LandingTick', 'interval'), ('LifeMomentTick', 'interval'), "
+        "('PhoneNudgeTick', 'interval'), ('WorldRoundTick', 'interval')]"
     ), out

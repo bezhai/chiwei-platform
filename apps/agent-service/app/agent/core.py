@@ -390,7 +390,7 @@ def _tooldefs(tools: list[Tool]) -> list[ToolDef] | None:
 def _normalise_tool_result(result: ToolResult) -> ToolResult:
     """Coerce a tool's raw return into wire-safe neutral content.
 
-    Tools return ``str`` (search_web / sandbox_bash), ``dict`` (recall / notes /
+    Tools return ``str`` (search_web / run_a_script), ``dict`` (recall / notes /
     a ``@tool_error`` outcome), or ``list[dict]`` OpenAI-style content blocks
     (any tool handing back pictures). The model can only be fed ``str`` or
     ``list[ContentBlock]`` (that's what the adapters wire and what
