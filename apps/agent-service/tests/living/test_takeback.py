@@ -45,7 +45,7 @@ _BEZHAI = uuid.uuid5(uuid.NAMESPACE_OID, "human-bezhai")
 _DM = uuid.uuid5(uuid.NAMESPACE_OID, "conv-dm-bezhai-akao")
 _GROUP = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-lab")
 
-# ``in_a_moment`` 的默认缝：下面几条用例要在缝**外面**按 outbound_id 把台账捞回来。
+# ``in_a_moment`` 的默认 moment：下面几条用例要在 moment**外面**按 outbound_id 把台账捞回来。
 _MOMENT = "2026-07-25T21:30+08:00"
 
 _SAID = "你去过那家抹茶店吗？我最近老想去。"
@@ -445,7 +445,7 @@ async def test_the_ledger_is_written_only_after_the_recall_is_handed_off(
 ):
     """顺序钉死：先把撤回交出去，成功之后才写台账。
 
-    反过来的话，台账写下了而撤回没发出去 —— 她下一缝看台账以为自己撤过了，那句话
+    反过来的话，台账写下了而撤回没发出去 —— 她下一轮看台账以为自己撤过了，那句话
     还好端端留在会话里。
     """
     from app.living import takeback as takeback_mod
@@ -484,7 +484,7 @@ async def test_the_ledger_records_when_she_pressed_it_without_touching_the_other
 
     row = await _latest(spoke)
     assert row.took_back_at == _at(21, 30), (
-        f"记的不是她按下撤回那一刻（这一缝的时间锚）。拿到：{row.took_back_at!r}"
+        f"记的不是她按下撤回那一刻（这一轮的时间锚）。拿到：{row.took_back_at!r}"
     )
     assert row.recalled_at is None, (
         "渠道那边还没撤呢 —— 这一列是对账钟补的，工具不许替它填"
@@ -539,7 +539,7 @@ async def test_a_recall_that_never_went_out_leaves_the_ledger_alone(
         == 1
     )
     assert await recent_own_happenings(lane=LANE, persona_id="akao") == [], (
-        "撤回没发出去却落成了记忆 —— 她下一缝会以为自己撤过了"
+        "撤回没发出去却落成了记忆 —— 她下一轮会以为自己撤过了"
     )
 
 
@@ -670,13 +670,13 @@ async def test_taking_it_back_lands_as_its_own_happening_and_leaves_the_old_one_
         f"撤回是她做的一个动作，不是又说了一句话。拿到：{took_back.kind!r}"
     )
     assert _SAID in took_back.content, (
-        f"没说清楚她撤的是哪一句 —— 下一缝她自己看不出来。拿到：{took_back.content!r}"
+        f"没说清楚她撤的是哪一句 —— 下一轮她自己看不出来。拿到：{took_back.content!r}"
     )
     assert took_back.occurred_at == _at(21, 30), (
         f"落的不是她请求撤回那一刻。拿到：{took_back.occurred_at!r}"
     )
     assert took_back.channel_id == str(_DM), (
-        "不带会话，下一缝她分不清撤的是哪条会话上的话"
+        "不带会话，下一轮她分不清撤的是哪条会话上的话"
     )
     assert took_back.medium == MEDIUM_PHONE, (
         "撤回是在手机上按的 —— 落成当面做的动作，坐她旁边的姐姐就看见了"
@@ -712,7 +712,7 @@ async def test_she_is_told_the_outcome_comes_later_not_that_it_is_already_gone(
 ):
     """撤回是异步的：工具返回时结果还没回来。
 
-    为了给她一个当场的答案去同步等，就是把一缝卡在网络上。所以如实说"去撤了"，撤没
+    为了给她一个当场的答案去同步等，就是把这一轮卡在网络上。所以如实说"去撤了"，撤没
     撤掉她下次拿起手机自己看得见 —— 撤掉了的那条就不在会话历史里了。
     """
     await _she_is_home()
@@ -725,7 +725,7 @@ async def test_she_is_told_the_outcome_comes_later_not_that_it_is_already_gone(
     assert _SAID in outcome, "该让她看到自己撤的是哪句话"
     for lie in ("撤掉了", "已撤回", "撤回成功"):
         assert lie not in outcome, (
-            f"「{lie}」是编的 —— 这一缝还不知道结果。拿到：{outcome!r}"
+            f"「{lie}」是编的 —— 这一轮还不知道结果。拿到：{outcome!r}"
         )
     assert "手机" in outcome, (
         f"没告诉她结果去哪儿看 —— 她下次拿起手机才知道撤没撤掉。拿到：{outcome!r}"

@@ -3,7 +3,7 @@
 **说明是别人替她写好、放在盘上的正文**（NFS 上一份一个目录，PVC 只读挂到
 ``SKILLS_DIR``）：她自己长什么样写在 ``drawing`` 那一份里，另外几份教她查番剧条目、
 查同人展。底下那套机制（扫目录、解析、热加载、渲染）住在 :mod:`app.skills`，本模块
-只是她那一缝伸出去的两只手 —— 跟 :mod:`app.living.pictures` 之于
+只是她这一轮伸出去的两只手 —— 跟 :mod:`app.living.pictures` 之于
 :mod:`app.agent.image_gen` 是同一个分法。
 
 两只手
@@ -30,8 +30,8 @@ import 时就定死了，而注册表是启动时填、每 30 秒热加载的 �
 时 ``load_all`` 记一条 warning 就留一个空注册表。交回空串的话她那段说明渲染出来是一个
 空标题，她读到的是"这里本该有东西"，而不知道到底有没有。
 
-**这两只手一个字都不落库。** 读回来的正文、跑出来的结果只进本缝的上下文，下一缝就没了
-（跟 :mod:`app.living.web` 同一条）。她想把什么留到下一缝，用她自己那份"心里挂着没了
+**这两只手一个字都不落库。** 读回来的正文、跑出来的结果只进这一轮的上下文，下一轮就没了
+（跟 :mod:`app.living.web` 同一条）。她想把什么留到下一轮，用她自己那份"心里挂着没了
 结的事"（:func:`app.living.moment.keep_in_mind`）。
 
 沙箱的边界按现状写，不夸大
@@ -49,12 +49,12 @@ Python 脚本内部发 HTTP 不受这条限制** —— 那三份说明的脚本
 **跑出来的东西有上限，裁在 :data:`app.capabilities.sandbox.OUTPUT_MAX_CHARS`**，不在
 这里。沙箱那侧一个字都不截，而这两只手走的是同一个 capability（说明里那条预处理指令
 的结果也是），裁在调用方就是两份实现、迟早漏一条。这一层只做两件事：把那句"还剩多少
-没给你"原样带到她眼前，以及留一条带缝身份的痕 —— 事后要查得出哪一缝读到的是不全的。
+没给你"原样带到她眼前，以及留一条带 moment 身份的痕 —— 事后要查得出哪一轮读到的是不全的。
 
 转义的边界划在哪儿
 ------------------
 
-她那一缝的输入是结构化的（``<msg from=".." rel="owner">``，见 :mod:`app.living.phone`），
+她这一轮的输入是结构化的（``<msg from=".." rel="owner">``，见 :mod:`app.living.phone`），
 所以外面来的字串进去之前要过 :func:`app.living.records.esc`。这两只手上那条界是这么
 划的：
 
@@ -95,7 +95,7 @@ logger = logging.getLogger(__name__)
 
 run = _sandbox_run
 
-# 她那一缝的 prompt 变量名：手边这些说明各叫什么、是讲什么的。**只在这里定义一次**
+# 她这一轮的 prompt 变量名：手边这些说明各叫什么、是讲什么的。**只在这里定义一次**
 # —— 变量名没有编译期校验，两处各写一遍字面量，改一个字就让 Langfuse 那侧原样渲染出
 # ``{{...}}`` 摆到她眼前。
 GUIDES_VAR = "guides_you_can_read"
@@ -107,9 +107,9 @@ _NOTHING_ON_HAND = (
 
 
 def guides_she_can_read() -> str:
-    """这一缝她手边有哪些说明可读，摆成 prompt 里那一段。
+    """这一轮她手边有哪些说明可读，摆成 prompt 里那一段。
 
-    每缝现算：注册表每 30 秒热加载一次，缓存下来就等于给她一份会过期的清单。
+    每轮现算：注册表每 30 秒热加载一次，缓存下来就等于给她一份会过期的清单。
     """
     return SkillRegistry.list_descriptions() or _NOTHING_ON_HAND
 
@@ -143,7 +143,7 @@ async def read_a_guide(
     **读不读是你自己的事。** 清单上那几行只有名字和一句话，正文得读了才知道；没有
     谁会在你该读的时候提醒你。
 
-    读回来的内容只在这一缝里跟着你，下一缝就没了，那时想用就再读一遍。
+    读回来的内容只在这一轮里跟着你，下一轮就没了，那时想用就再读一遍。
 
     有的说明里带着一条"先跑一下看看"的命令，你读到的是它跑出来的结果；这种结果
     **太长会被截掉**，截了多少就写在那儿 —— 看到那句话就知道这一份你读到的不是全的。
@@ -271,8 +271,8 @@ async def run_a_script(
     )
     result = await run(command=line, skill_name=from_guide)
     if result.dropped:
-        # 带缝身份的那条痕：事后要查得出哪一缝读到的是不全的东西。capability 那层也记
-        # 了一条（命令 + 砍了多少），但它不知道这是谁的哪一缝。
+        # 带 moment 身份的那条痕：事后要查得出哪一轮读到的是不全的东西。capability 那层也记
+        # 了一条（命令 + 砍了多少），但它不知道这是谁的哪一轮。
         logger.info(
             "living guides lane=%s persona=%s moment=%s 跑出来的东西太长，"
             "砍掉 %d 字才交给她：%s",
@@ -286,7 +286,7 @@ async def run_a_script(
     # 打出来的两股都过 :func:`esc`。**沙箱没有网络命名空间隔离**（见模块 docstring），
     # 那几份说明的脚本正是靠这一点上网 —— 所以"脚本抓一个网页、把内容 print 出来"跟
     # :func:`app.living.web.browse_online` 是同一条逐字通道：那几个字节由网页那边决定，
-    # 原样进她眼前，而她那一缝的输入里还摆着 ``<msg from=".." rel="owner">`` 那几行。
+    # 原样进她眼前，而她这一轮的输入里还摆着 ``<msg from=".." rel="owner">`` 那几行。
     #
     # **转义落在这只手上，不落进 capability。** 那个 capability 还被
     # :func:`app.skills.renderer.render_skill` 用着，而说明正文是主人自己写在 NFS 上的

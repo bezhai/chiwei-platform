@@ -1,4 +1,4 @@
-"""时间锚 —— 一缝 / 一轮的身份，必须跨重试保持稳定。
+"""时间锚 —— moment 与 world 一轮共用的身份，必须跨重试保持稳定。
 
 这是"重试不重复执行动作"的地基。派生 id 都带着这个锚（``moment_id``、
 ``happening_id``、``due_at``），锚一动，同一件事就会落成两行、同一句话就会被说两遍，
@@ -38,7 +38,7 @@ def test_a_moment_falls_onto_its_grid_cell(moment, minutes, expected):
 
 
 def test_two_ticks_inside_one_cell_are_the_same_moment():
-    """崩在收尾之前、下一拍一分钟后再来 —— 必须还是同一缝，否则动作会被做两遍。"""
+    """崩在收尾之前、下一拍一分钟后再来 —— 必须还是同一个 moment，否则动作会被做两遍。"""
     assert anchor_on_grid(_at(14, 0), minutes=10) == anchor_on_grid(
         _at(14, 1), minutes=10
     )

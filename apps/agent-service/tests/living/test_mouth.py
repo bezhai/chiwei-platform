@@ -6,7 +6,7 @@
     出去的就是一段推理稿。所以嘴单独一套 prompt + ``main-chat-model``。
   * **出站契约照主动发那条走。** ``is_proactive=True``、``proactive:`` 前缀的本地
     派生 message_id、``root_id`` 留空 —— worker 靠这三样决定"别反查来源消息"。
-  * **她说出去的话要落一条 Happening。** 不落的话，她下一缝不知道自己说过什么，
+  * **她说出去的话要落一条 Happening。** 不落的话，她下一轮不知道自己说过什么，
     于是对同一件事又说一遍（旧引擎实锤复现过，相隔三分钟前后矛盾）。
   * **渲染没出内容就不发。** 绝不回退发意图原文（那是 life 的内部措辞，不是人话），
     也绝不发空消息 —— 把"没发出去"喂回她自己处置。
@@ -39,8 +39,8 @@ _DM = uuid.uuid5(uuid.NAMESPACE_OID, "conv-dm-bezhai-akao")
 _GROUP = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-lab")
 _NOT_HERS = uuid.uuid5(uuid.NAMESPACE_OID, "conv-not-hers")
 
-# ``in_a_moment`` 的默认缝。写出来是因为下面几条用例要在缝**外面**按 moment_id
-# 把那条认领记录捞回来。
+# ``in_a_moment`` 的默认 moment。写出来是因为下面几条用例要在这个 moment**外面**按
+# moment_id 把那条认领记录捞回来。
 _MOMENT = "2026-07-25T21:30+08:00"
 
 
@@ -195,7 +195,7 @@ def voice(monkeypatch, guard):
 
         return SimpleNamespace(display_name="赤尾", persona_core="她拍胶片、泡抹茶店。")
 
-    # 开口这条路不再自己拼人设：底色跟一缝、日记走同一个 ``persona_prompt_vars``，
+    # 开口这条路不再自己拼人设：底色跟 moment、日记走同一个 ``persona_prompt_vars``，
     # 所以打桩打在那个模块上。
     from app.living import persona as persona_mod
 
@@ -291,7 +291,7 @@ async def test_saying_the_same_thing_twice_only_goes_out_once(
     实测过 chat-response-worker（chat-response-handler.ts:193-207 的自述 + :332 的
     无条件 ack）：出站**没有**发送级去重，同一个 ``message_id`` 投两次就是真人收到
     两条。所以派生一个稳定 id 只解决了"两条长得一样"，没解决"发了两次"——认领记录
-    才是那道闸。工具重试、整轮 @retry 重放、这一缝重跑，全走同一个派生键。
+    才是那道闸。工具重试、整轮 @retry 重放、这次醒来重跑，全走同一个派生键。
     """
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
@@ -327,7 +327,7 @@ async def test_what_she_sent_lands_as_a_happening_so_she_knows_she_said_it(
     (h,) = await recent_own_happenings(lane=LANE, persona_id="akao")
     assert h.content == voice.said, "落的必须是真的发出去那句话"
     assert h.medium == MEDIUM_PHONE
-    assert h.channel_id == str(_DM), "不带会话，下一缝她分不清这话是在哪儿说的"
+    assert h.channel_id == str(_DM), "不带会话，下一轮她分不清这话是在哪儿说的"
 
 
 @pytest.mark.integration
@@ -505,7 +505,7 @@ async def test_she_is_told_the_outcome_is_unknown_not_told_to_try_again(
 async def test_a_blown_up_handoff_is_never_handed_off_again_in_the_same_seam(
     mouth_db, in_a_moment, spoken, voice, monkeypatch
 ):
-    """同一缝里再说同一句 —— 不再交第二次。第一条可能已经躺在 broker 里了。"""
+    """同一轮里再说同一句 —— 不再交第二次。第一条可能已经躺在 broker 里了。"""
     from app.living import mouth as mouth_mod
 
     attempts: list = []
@@ -525,7 +525,7 @@ async def test_a_blown_up_handoff_is_never_handed_off_again_in_the_same_seam(
         await send_message.invoke({"what": "问问他", "channel_id": str(_DM)})
 
     assert len(attempts) == 1, (
-        f"同一缝里又交了一次 —— broker 可能已经收了第一条，真人收到两条。"
+        f"同一轮里又交了一次 —— broker 可能已经收了第一条，真人收到两条。"
         f"交了 {len(attempts)} 次"
     )
 
@@ -534,9 +534,9 @@ async def test_a_blown_up_handoff_is_never_handed_off_again_in_the_same_seam(
 async def test_the_next_seam_is_a_new_seam_so_she_can_say_it_again(
     mouth_db, in_a_moment, spoken, voice, monkeypatch
 ):
-    """这一缝不重发，不等于这句话被判死了。
+    """这一轮不重发，不等于这句话被判死了。
 
-    ``outbound_id`` 从 ``lane|persona|moment|会话|意图`` 派生 —— **下一缝是新的
+    ``outbound_id`` 从 ``lane|persona|moment|会话|意图`` 派生 —— **下一轮是新的
     ``moment_id``，就是新的 ``outbound_id``**，认领表拦不住它。所以"要不要再说一次"
     这个决定回到了她手里，而不是系统替她按重试按钮。这条推理必须在代码里真的成立，
     所以这里把它跑一遍。
@@ -569,7 +569,7 @@ async def test_the_next_seam_is_a_new_seam_so_she_can_say_it_again(
         )
 
     assert len(spoken) == 1, (
-        "下一缝她再说一次却被认领表拦下了 —— 那这句话就被系统判死了，"
+        "下一轮她再说一次却被认领表拦下了 —— 那这句话就被系统判死了，"
         f"而这个决定不该由系统做。交出去 {len(attempts)} 次，发出 {len(spoken)} 条"
     )
     assert isinstance(again, str) and voice.said in again
@@ -782,7 +782,7 @@ async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
     someone_else_went_first: list[bool] = []
 
     class RacingVoice:
-        """渲染这一步里，另一个跑同一缝同一句话的执行先认领、先交出去了。"""
+        """渲染这一步里，另一个跑同一轮同一句话的执行先认领、先交出去了。"""
 
         async def run(self, messages, **kwargs):
             if not someone_else_went_first:
@@ -808,7 +808,7 @@ async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
         f"没告诉她这一句已经有人交出去了。拿到：{outcome!r}"
     )
     assert len(await recent_own_happenings(lane=LANE, persona_id="akao")) == 1, (
-        "同一句话落了两条记忆 —— 她下一缝会以为自己说了两遍"
+        "同一句话落了两条记忆 —— 她下一轮会以为自己说了两遍"
     )
     row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
     versions = await select_all_versions(
@@ -851,10 +851,10 @@ async def test_words_that_do_not_pass_never_reach_anyone(
 
     assert spoken == [], "判不合格还交出去了 —— 这一关等于没有"
     assert await recent_own_happenings(lane=LANE, persona_id="akao") == [], (
-        "没说出去的话落成了记忆 —— 她下一缝会以为自己说过"
+        "没说出去的话落成了记忆 —— 她下一轮会以为自己说过"
     )
     assert await latest_outbound(lane=LANE, moment_id=_MOMENT) is None, (
-        "没发出去却占住了认领 —— 那个 id 就此作废，她这一缝再也说不成这件事"
+        "没发出去却占住了认领 —— 那个 id 就此作废，她这一轮再也说不成这件事"
     )
     assert isinstance(outcome, str), (
         f"拦下不是工具坏了。报成错她就会重试，而重试会换一套措辞再判一次 —— "
@@ -885,7 +885,7 @@ async def test_what_gets_judged_is_the_sentence_that_would_be_seen(
         f"判的不是真要发出去那句。拿到：{guard.judged!r}"
     )
     assert guard.deadlines == [_SEND_CHECK_TIMEOUT_S], (
-        "没给期限 —— 判词那一步挂住就是把她整缝卡在网络上"
+        "没给期限 —— 判词那一步挂住就是把她整个 moment 卡在网络上"
     )
 
 
@@ -893,9 +893,9 @@ async def test_what_gets_judged_is_the_sentence_that_would_be_seen(
 async def test_being_stopped_does_not_burn_the_id_for_that_sentence(
     mouth_db, in_a_moment, spoken, voice, guard
 ):
-    """被拦下的那次不占认领 —— 否则她这一缝里连改都改不成。
+    """被拦下的那次不占认领 —— 否则她这一轮里连改都改不成。
 
-    认领是从 ``(这一缝, 她那句意思)`` 派生的：被拦时如果占住了，同一缝里再说同一件
+    认领是从 ``(moment_id, 她那句意思)`` 派生的：被拦时如果占住了，同一轮里再说同一件
     事就会撞上"你已经说过了"，而那是假话 —— 她一个字都没说出去。
     """
     from app.capabilities.output_safety import OutputVerdict
@@ -923,7 +923,7 @@ async def test_being_stopped_does_not_burn_the_id_for_that_sentence(
 async def test_a_replay_does_not_pay_for_the_check_twice(
     mouth_db, in_a_moment, spoken, voice, guard
 ):
-    """这一缝重放时，那道去重的闸仍然在这一关**前面**。
+    """这次醒来重放时，那道去重的闸仍然在这一关**前面**。
 
     顺序反过来的话，工具重试和整轮重放都会各花一次模型调用去判一句根本不会再发的话。
     """
@@ -1069,7 +1069,7 @@ async def test_being_stopped_over_and_over_never_leaks_a_line(
 ):
     """一直判不合格就是一条都不出去 —— 换多少种说法都一样。
 
-    拦下时返回的是一句正常的话而不是错误，所以她可以在同一缝里换个说法再来。这条
+    拦下时返回的是一句正常的话而不是错误，所以她可以在同一轮里换个说法再来。这条
     守的是那条路的另一端：只要每次都判不合格，就一次都不会漏出去。**这里没有重试
     预算**，因为"还要不要再说一次"是她的判断；能保证的是每个候选都被判过。
     """
@@ -1139,11 +1139,11 @@ async def test_a_conversation_out_of_sight_is_refused_even_though_her_bot_is_in_
 async def test_sending_checks_where_her_bot_is_right_now_not_the_settled_list(
     mouth_db, in_a_moment, spoken, voice
 ):
-    """发消息那一刻查的 presence 是**实时**的，不是这一缝开头那份快照。
+    """发消息那一刻查的 presence 是**实时**的，不是这一轮开头那份快照。
 
-    这一道由两半组成，时效性刻意不同：名单读这一缝的锚（下一条用例验那半），
+    这一道由两半组成，时效性刻意不同：名单读这一轮的锚（下一条用例验那半），
     presence 每次重新查。"bot 还在不在那个会话里"是这句话能不能真的送到的物理前
-    提，读一份缝开头的快照等于这道保护不存在 —— bot 半路被移出会话，她还会照着过
+    提，读一份这一轮开头的快照等于这道保护不存在 —— bot 半路被移出会话，她还会照着过
     期的判断把话交出去。
     """
     from app.living.phone import reachable_conversations
@@ -1174,13 +1174,13 @@ async def test_sending_checks_where_her_bot_is_right_now_not_the_settled_list(
 async def test_she_can_still_answer_a_line_that_slid_out_of_the_window_mid_moment(
     mouth_db, in_a_moment, spoken, voice
 ):
-    """名单那一半读的是**这一缝的锚**：缝开头看得见，缝中途滑出时间窗照样答得上。
+    """名单那一半读的是**这一轮的锚**：这一轮开头看得见，这一轮中途滑出时间窗照样答得上。
 
     上一条用例验的是 presence 那一半实时重查。这一条钉的是另一半 —— 两半必须都被钉
     住，否则"改成整条主闸都实时重算"和"改成整条主闸都读快照"这两个方向的回归各有一
     条用例挡不住。
 
-    她这一缝要回的就是缝开头摆在她眼前的那些会话。时间窗是按 ``now`` 滑的，而模型想
+    她这一轮要回的就是这一轮开头摆在她眼前的那些会话。时间窗是按 ``now`` 滑的，而模型想
     一想、渲染一次话要花掉真实时间；名单在她张嘴那一刻重算的话，她会在"刚看完那条私
     聊、正要回"的中途发现那条会话没了 —— 而消息还挂在真人眼前。
     """
@@ -1215,7 +1215,7 @@ async def test_she_can_still_answer_a_line_that_slid_out_of_the_window_mid_momen
 
         outcome = await send_message.invoke({"what": "在", "channel_id": str(_DM)})
 
-    assert len(spoken) == 1, f"缝开头看得见的会话，她答不上了：{spoken}"
+    assert len(spoken) == 1, f"这一轮开头看得见的会话，她答不上了：{spoken}"
     assert spoken[0].chat_id == str(_DM)
     assert isinstance(outcome, str) and "发出去了" in outcome, outcome
 
@@ -1331,8 +1331,8 @@ async def test_the_same_words_with_a_different_picture_is_a_different_send(
 ):
     """**图算进发送身份。**
 
-    ``outbound_id`` 从 ``(lane, persona, 这一缝, 会话, 她那句意图)`` 派生。不把图
-    算进去的话，同一缝、同一条会话、同样的话配另一张图会撞上同一个 id，被认领表判
+    ``outbound_id`` 从 ``(lane, persona, moment_id, 会话, 她那句意图)`` 派生。不把图
+    算进去的话，同一轮、同一条会话、同样的话配另一张图会撞上同一个 id，被认领表判
     成重发直接挡掉 —— 她换了张图重发，真人什么都收不到，而她以为发了。
 
     选把图算进 seed，**不是**绕开去重：那道闸漏一次就是真人收到两条。
@@ -1461,7 +1461,7 @@ async def test_a_handle_that_is_not_hers_never_gets_sent(
 
     assert spoken == [], f"引用了不属于她的图，还是发出去了 {len(spoken)} 条"
     assert await latest_outbound(lane=LANE, moment_id=_MOMENT) is None, (
-        "被挡下的那次占住了认领 —— 她这一缝里换成自己那张图都发不成了"
+        "被挡下的那次占住了认领 —— 她这一轮里换成自己那张图都发不成了"
     )
     assert voice.runs == [], "被挡下的那次还白花了一次渲染"
 
@@ -1470,7 +1470,7 @@ async def test_a_handle_that_is_not_hers_never_gets_sent(
 async def test_a_refused_picture_does_not_stop_her_from_sending_the_right_one(
     mouth_db, in_a_moment, spoken, voice, a_picture
 ):
-    """挡下来是拒这一次，不是把这一缝判死。"""
+    """挡下来是拒这一次，不是把这一轮判死。"""
     mine = await a_picture(file_name="temp/tos_mine.jpg")
     sisters = await a_picture(file_name="temp/tos_ayana.jpg", persona_id="ayana")
     await note_whereabouts(

@@ -119,7 +119,7 @@ async def test_a_due_at_that_is_not_a_time_is_rejected_at_write(living_db):
     """坏值在写入那一刻就被挡住。
 
     ``due_at`` 是任意 TEXT 的时候，"下午三点"能顺利落库，然后**整个窗口**的 cast
-    一起失败——一条脏数据让她那一缝什么日历项都读不到。而且类型是 additive-only
+    一起失败——一条脏数据让她那一轮什么日历项都读不到。而且类型是 additive-only
     的，将来改不回来，所以只能现在挡。
     """
     with pytest.raises(ValidationError):
@@ -177,7 +177,7 @@ async def test_an_overdue_item_written_late_is_still_handed_out(living_db):
 
 @pytest.mark.integration
 async def test_an_unconsumed_item_keeps_coming_back(living_db):
-    """消费方崩在半路（拿了但没标）——下一缝还要能再拿到，不是丢掉。"""
+    """消费方崩在半路（拿了但没标）——下一轮还要能再拿到，不是丢掉。"""
     await _schedule("a", "天亮", _at(5))
 
     for _ in range(3):
@@ -206,7 +206,7 @@ async def test_a_naive_consumed_at_is_rejected(living_db):
             lane=LANE, item_id="a", consumed_at=dt.datetime(2026, 7, 25, 6, 0)
         )
 
-    # 没被标掉，下一缝还拿得到
+    # 没被标掉，下一轮还拿得到
     assert [u.item_id for u in await list_due_upcoming(lane=LANE, until=_at(6))] == [
         "a"
     ]

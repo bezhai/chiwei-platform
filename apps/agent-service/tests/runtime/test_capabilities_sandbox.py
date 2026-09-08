@@ -82,7 +82,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, *, stdout: str = "", stderr: str = ""
 async def test_a_flood_of_output_is_cut_before_it_can_reach_her(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """一条 ``print('x'*10**8)`` 就能把她那一缝冲掉 —— 沙箱那侧不截，这一层必须截。"""
+    """一条 ``print('x'*10**8)`` 就能把她那一轮冲掉 —— 沙箱那侧不截，这一层必须截。"""
     _wire(monkeypatch, stdout="x" * 100_000)
 
     result = await run(command="python3 -c \"print('x'*100000)\"")

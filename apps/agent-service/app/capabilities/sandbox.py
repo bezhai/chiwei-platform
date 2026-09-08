@@ -7,8 +7,8 @@ Lane and trace headers are auto-injected by ``HTTPClient``.
 **出量上限也在这一层**（:data:`OUTPUT_MAX_CHARS`）。沙箱那侧一个字都不截
 （``executor.py`` 直接 ``stdout_bytes.decode(...)``；``MAX_FSIZE_MB`` 限的是写文件，
 不是管道输出），agent-service 这侧的工具层也没有任何长度兜底 —— 工具返回多少就原样
-进她那一缝的上下文。一条 ``python3 -c "print('x'*10**8)"``、或者某个脚本吐一大坨，
-整缝就废了。
+进她这一轮的上下文。一条 ``python3 -c "print('x'*10**8)"``、或者某个脚本吐一大坨，
+整轮就废了。
 
 裁在这里而不是在调用方，是因为这个 capability 是**两条路唯一都要经过的地方**：她自己
 跑一条命令（``app.living.guides.run_a_script``），和一份说明里那条 ``!`cmd``` 的结果被
@@ -38,7 +38,7 @@ _CLIENT = HTTPClient(service="sandbox-worker", timeout=45.0, retries=0)
 
 # 一次交回她多少字（stdout / stderr **各**按这个数裁）。
 #
-# 取的是"她这一缝眼前最大的那件东西"同一个量级：上网查那只手一屏是 5 条命中 × 每条
+# 取的是"她这一轮眼前最大的那件东西"同一个量级：上网查那只手一屏是 5 条命中 × 每条
 # 800 字摘录 ≈ 4000 字（``app.agent.tools.search`` 里那个 ``[:800]``），读书一程是
 # 1800 字（``app.domain.reading_source.DEFAULT_PAGE_SIZE``），快照那几层各是几十条短
 # 行。再往下会切掉正常脚本的正常输出（搜一次番剧条目就是几 KB），再往上就开始跟她本
@@ -76,7 +76,7 @@ class SandboxResult:
     stdout: str
     stderr: str
     # 交回之前砍掉了多少字（两股合计）。0 = 一个字没砍。调用方靠它留痕：事后要查得出
-    # 哪一缝被截过（langfuse 会系统性丢 trace，日志是唯一查得到的地方）。
+    # 哪一轮被截过（langfuse 会系统性丢 trace，日志是唯一查得到的地方）。
     dropped: int = 0
 
 
@@ -119,8 +119,8 @@ async def run(
     stdout, out_cut = _cut(data["stdout"])
     stderr, err_cut = _cut(data["stderr"])
     if out_cut or err_cut:
-        # 这一层只知道跑的是哪条命令、哪份 skill；带缝身份那条痕由调用方留
-        # （``app.living.guides``），两条一起才查得出"哪一缝读到的是不全的东西"。
+        # 这一层只知道跑的是哪条命令、哪份 skill；带 moment 身份那条痕由调用方留
+        # （``app.living.guides``），两条一起才查得出"哪一轮读到的是不全的东西"。
         logger.warning(
             "sandbox output capped: dropped %d chars (skill=%s, command=%s)",
             out_cut + err_cut,

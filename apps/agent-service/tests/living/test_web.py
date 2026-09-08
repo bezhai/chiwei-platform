@@ -429,10 +429,10 @@ async def test_an_empty_direction_is_refused_instead_of_browsing_for_nothing(
 
 @pytest.mark.integration
 async def test_neither_hand_works_outside_one_of_her_moments(wire_web):
-    """这两只手只在她的一缝里用得了 —— 没绑上那一缝就当场报错，不是安静地照查。
+    """这两只手只在她的 moment 里用得了 —— 没绑进 moment 就当场报错，不是安静地照查。
 
-    她上网看了什么，一个字都不落库（结果只活在本缝的上下文里），事后能查到的只有
-    那行带着 lane / persona / 哪一缝的日志。工具体不去读这一缝的身份，那行日志就空
+    她上网看了什么，一个字都不落库（结果只活在本轮的上下文里），事后能查到的只有
+    那行带着 lane / persona / 哪一轮的日志。工具体不去读 moment 身份，那行日志就空
     了一半，而且没有任何东西会红。
     """
     rec = wire_web(hits=_HITS)
@@ -443,11 +443,11 @@ async def test_neither_hand_works_outside_one_of_her_moments(wire_web):
     ):
         outcome = await hand.invoke(args)
         assert isinstance(outcome, dict), (
-            f"{hand.name} 没在一缝里也照跑了。拿到：{outcome!r}"
+            f"{hand.name} 没绑进 moment 也照跑了。拿到：{outcome!r}"
         )
 
     assert rec.searched == [] and rec.browsed == [], (
-        "没在一缝里却已经把她的话打了出去"
+        "没绑进 moment 却已经把她的话打了出去"
     )
 
 
@@ -489,7 +489,7 @@ def test_both_hands_are_handed_over_as_one_set():
 def test_nothing_she_looks_up_survives_past_this_moment():
     """这两只手不落任何库。
 
-    结果只进本缝的上下文、影响她这一缝的输出，下一缝就没了 —— 跟真人刷完就忘是一
+    结果只进本轮的上下文、影响她这一轮的输出，下一轮就没了 —— 跟真人刷完就忘是一
     回事。这里长出一张表就意味着有个东西替她把「看过的东西」留了下来，而留什么该由
     她自己记（``keep_in_mind``）。
     """
@@ -504,9 +504,9 @@ def test_nothing_she_looks_up_survives_past_this_moment():
 
 
 def test_both_hands_are_ones_she_actually_has():
-    """这两只手要真在她那一缝的工具集里。
+    """这两只手要真在她的工具集里。
 
-    没挂上去是**静默失败**：模块写好了、这个文件里的用例全绿，但她那一缝的工具列表
+    没挂上去是**静默失败**：模块写好了、这个文件里的用例全绿，但她的工具列表
     里没有它们，于是永远不会调。同款用例见 ``test_phone.py`` 的
     ``test_finding_someone_is_one_of_the_hands_she_actually_has``。
     """

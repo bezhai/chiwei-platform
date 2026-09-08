@@ -8,13 +8,13 @@
     的，其余四档照常生效。
   * **算不出来就是不在名单里。** 统计查询炸了不能回退成"当作命中放行" —— 那道闸在
     最需要它的时候正好没有。
-  * **一缝之内是同一份。** 名单跟"此刻几点"同性质：一缝里多处各算一次，她看到的会话
-    集合会在一缝中途变化。
+  * **一次 moment 之内是同一份。** 名单跟"此刻几点"同性质：一次 moment 里多处各算一次，她看到的会话
+    集合会在这次 moment 中途变化。
 
 白名单只决定**哪些会话在她眼前**，不决定她要不要开口 —— 名单里那条会话她看不看、
 回不回，仍然是她自己的判断。
 
-**这个文件只钉判据本身**（几档、几条算够、算不出来怎么办、一缝里算几次）。闸真的管到
+**这个文件只钉判据本身**（几档、几条算够、算不出来怎么办、一次 moment 里算几次）。闸真的管到
 了哪几只手，用例跟着那几只手走，各在自己的文件里（那边有它们各自的替身和种子）：信封 /
 nudge 那条钟 / 看手机 / 按名字找会话在 ``test_phone.py`` 最后一节，``send_message`` 在
 ``test_mouth.py``，读文件那两只手在 ``test_reading.py``，撤回**刻意不跟随**在
@@ -388,7 +388,7 @@ async def test_a_persona_with_no_conversations_sees_nothing(living_db):
 async def test_a_count_that_blew_up_leaves_the_conversation_out_of_sight(
     living_db, monkeypatch
 ):
-    """统计查询炸了 = 这条会话这一缝不在名单里，**不是**当作命中放行。
+    """统计查询炸了 = 这条会话这次 moment 不在名单里，**不是**当作命中放行。
 
     反过来做的话，这道闸在库最不健康的时候正好整个消失 —— 而那正是最需要它的时候。
     """
@@ -437,7 +437,7 @@ async def test_a_pin_list_that_cannot_be_read_does_not_silence_the_tiers(
 
 
 # --------------------------------------------------------------------------
-# 七 · 一缝之内是同一份
+# 七 · 一次 moment 之内是同一份
 # --------------------------------------------------------------------------
 
 
@@ -445,10 +445,10 @@ async def test_a_pin_list_that_cannot_be_read_does_not_silence_the_tiers(
 async def test_the_list_does_not_change_in_the_middle_of_a_moment(
     living_db, in_a_moment
 ):
-    """一缝里名单只定一次：中途来的消息不会让一条会话半路出现在她眼前。
+    """一次 moment 里名单只定一次：中途来的消息不会让一条会话半路出现在她眼前。
 
-    名单跟"此刻几点"同性质 —— 一缝之内必须是同一个值，否则她看到的会话集合会在这一
-    缝中途变化：信封上没有的会话，她后半缝突然搜得到、发得出去。
+    名单跟"此刻几点"同性质 —— 一次 moment 之内必须是同一个值，否则她看到的会话集合会在这次
+    moment 中途变化：信封上没有的会话，她后半程突然搜得到、发得出去。
     """
     await _seed_world()
     await _they_said(_DM, how_many=1, first_at=_NOW - dt.timedelta(minutes=10))
@@ -464,17 +464,17 @@ async def test_the_list_does_not_change_in_the_middle_of_a_moment(
             names_bot=_AKAO_BOT_UID,
         )
 
-        assert await _in_sight() == first, "名单在这一缝中途变了"
+        assert await _in_sight() == first, "名单在这次 moment 中途变了"
 
-    # 缝外面（也就是下一缝）重新算，那个群就进来了。
+    # moment 之外（也就是下次 moment）重新算，那个群就进来了。
     assert await _in_sight() == {str(_DM), str(_GROUP)}
 
 
 @pytest.mark.integration
 async def test_the_list_is_counted_once_in_a_moment(living_db, in_a_moment, monkeypatch):
-    """一缝里问几次名单，统计只跑一次。
+    """一次 moment 里问几次名单，统计只跑一次。
 
-    这条钟一分钟一拍、她一缝里要问好几次（信封、看手机、找人、发消息、找文件），
+    这条钟一分钟一拍、她一次 moment 里要问好几次（信封、看手机、找人、发消息、找文件），
     每次都重算就是把这个功能最贵的那一项乘上几倍。
     """
     from app.living import whitelist as whitelist_mod
@@ -496,7 +496,7 @@ async def test_the_list_is_counted_once_in_a_moment(living_db, in_a_moment, monk
         await _in_sight()
         await _in_sight()
 
-    assert len(calls) == 1, f"一缝里统计跑了 {len(calls)} 次"
+    assert len(calls) == 1, f"一次 moment 里统计跑了 {len(calls)} 次"
     assert len(calls[0]["since_ms"]) == len(IN_SIGHT_TIERS), (
         "四个窗口该一次算完，不是一档一次"
     )

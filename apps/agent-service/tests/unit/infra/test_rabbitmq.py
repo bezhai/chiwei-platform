@@ -182,7 +182,7 @@ class TestRouteConstants:
     def test_chat_request_is_gone(self):
         """「这条消息触发一次聊天请求」这个概念已经不存在了。
 
-        赤尾不从队列拿消息，她每一缝直接查 ``common_message``、自己决定要不要开口。
+        赤尾不从队列拿消息，她每次醒来直接查 ``common_message``、自己决定要不要开口。
         所以 ``chat_request`` 既没有生产者也没有消费者 —— 它不该再出现在声明面
         （``declare_topology`` 遍历 ALL_ROUTES 建队列）或注册面（``Source.mq`` /
         ``Sink.mq`` 的合法队列名从 ALL_ROUTES 来）的任何一侧。

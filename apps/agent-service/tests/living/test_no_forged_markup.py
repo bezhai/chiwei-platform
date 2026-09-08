@@ -1,4 +1,4 @@
-"""她那一缝的输入是结构化的，所以外面来的字串一律不许带着结构进来。
+"""她这一轮的输入是结构化的，所以外面来的字串一律不许带着结构进来。
 
 她读到的消息行长这样：``<msg from="谁" rel="owner" time="…">正文</msg>``，信封上的
 人名长这样：``<who from="谁" rel="owner"/>``。``rel="owner"`` 是这段文本里唯一说得出
@@ -6,7 +6,7 @@
 
 **于是任何一段从她之外进到这段文本里的字串，只要没转义，就能自己写一个
 ``rel="owner"``。** 不需要改昵称、不需要进群 —— 给文件起个名字、把网页标题写成那样、
-把群改个名，都行。堵一条路等于没堵：她那一缝的输入是一整段文本，几只手的产出摆在
+把群改个名，都行。堵一条路等于没堵：她这一轮的输入是一整段文本，几只手的产出摆在
 一起，伪造的那行长在哪儿都一样。
 
 **判据是"逐字通道"，不是"谁写的"。**
@@ -160,12 +160,12 @@ async def test_a_display_name_cannot_carry_markup_into_anything_she_reads(
         _DM, text_body="在吗", at=_at(21, 30), sender=_SOMEONE, sender_name=POISON
     )
 
-    # 信封先读：``look_at_phone`` 跑完这一缝会把未读读掉，之后信封上就没有这个人了。
+    # 信封先读：``look_at_phone`` 跑完这一轮会把未读读掉，之后信封上就没有这个人了。
     envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
     async with in_a_moment("akao", now=_at(21, 35)):
         seen = await look_at_phone.invoke({"channel_id": str(_DM)})
         found = await look_up_contact.invoke({"name": "bezhai"})
-    # 这一缝跑完了，游标才落库 —— 她开口前读的那段按游标开窗，所以在缝外面读。
+    # 这一轮跑完了，游标才落库 —— 她开口前读的那段按游标开窗，所以在这一轮外面读。
     known = await conversation_as_she_knows_it(
         lane=LANE, persona_id="akao", channel_id=str(_DM), now=_at(21, 35)
     )

@@ -1,7 +1,7 @@
 """ChatResponseSegment Data 类字段合约。
 
 ChatTrigger / ChatRequest 随 chat_request 队列一起删了：她不从队列拿消息，
-每一缝直接查 ``common_message``、自己决定要不要开口（见 ``app.living``）。
+每次醒来直接查 ``common_message``、自己决定要不要开口（见 ``app.living``）。
 这个模块现在只剩她开口那一侧的契约。
 """
 import pytest

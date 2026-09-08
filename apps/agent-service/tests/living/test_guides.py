@@ -189,12 +189,12 @@ async def test_nothing_on_hand_says_so_instead_of_blaming_her(
 
 
 async def test_reading_outside_a_moment_does_not_quietly_work(shelf):
-    """没绑在一缝上就是 wiring 坏了，得当场看得见。"""
+    """没绑在一轮上就是 wiring 坏了，得当场看得见。"""
     shelf(drawing=_DRAWING)
 
     outcome = await read_a_guide.invoke({"which": "drawing"})
 
-    assert isinstance(outcome, dict), f"没在一缝里也照读了：{outcome!r}"
+    assert isinstance(outcome, dict), f"没在一轮里也照读了：{outcome!r}"
 
 
 # --------------------------------------------------------------------------
@@ -224,7 +224,7 @@ def test_an_empty_shelf_still_says_something(shelf):
 def test_the_list_follows_the_shelf_instead_of_being_frozen_in_the_schema(shelf):
     """清单只能从 prompt 变量进：注册表每 30 秒热加载，schema 在 import 时就定死了。
 
-    所以这里换一份盘上的内容，她下一缝读到的清单必须跟着变；同时工具参数里不许出现
+    所以这里换一份盘上的内容，她下一轮读到的清单必须跟着变；同时工具参数里不许出现
     一份写死的名字清单（``enum``）—— 那等于把这份会变的东西焊进 schema。
     """
     shelf(drawing=_DRAWING)
@@ -337,7 +337,7 @@ async def test_a_cut_result_reaches_her_with_the_notice_still_on_it(
 ):
     """裁在 capability 那一层（两条路都要过它），这只手只负责别把那句提示弄丢。
 
-    顺带留一条带缝身份的痕：事后要查得出哪一缝被截过。langfuse 会系统性丢 trace，
+    顺带留一条带 moment 身份的痕：事后要查得出哪一轮被截过。langfuse 会系统性丢 trace，
     这条日志是唯一查得到的地方。
     """
     shelf(bangumi=_BANGUMI)
@@ -361,7 +361,7 @@ async def test_a_guide_whose_preprocessing_flooded_leaves_a_trace_too(
 ):
     """说明里那条 ``!`cmd``` 的结果被替换进正文，那一路同样可能被裁。
 
-    她读到的那份说明因此是不全的 —— 事后得查得出是哪一缝、哪一份。
+    她读到的那份说明因此是不全的 —— 事后得查得出是哪一轮、哪一份。
     """
     shelf(bangumi=_BANGUMI)
     sandbox(stdout=f"usage: ...\n……（后面还有 70000 {OUTPUT_CUT_MARK} —— 略）")
@@ -401,7 +401,7 @@ async def test_running_outside_a_moment_does_not_quietly_work(shelf, sandbox):
 
     outcome = await run_a_script.invoke({"command": "echo hi"})
 
-    assert isinstance(outcome, dict), f"没在一缝里也照跑了：{outcome!r}"
+    assert isinstance(outcome, dict), f"没在一轮里也照跑了：{outcome!r}"
     assert rec.calls == []
 
 
@@ -446,7 +446,7 @@ def test_both_hands_are_handed_over_as_one_set():
 
 
 def test_both_hands_are_ones_she_actually_has():
-    """没挂进 ``MOMENT_TOOLS`` 是静默失败：本文件全绿，而她那一缝里根本没有这两只手。"""
+    """没挂进 ``MOMENT_TOOLS`` 是静默失败：本文件全绿，而她这一轮里根本没有这两只手。"""
     from app.living.moment import MOMENT_TOOLS
 
     assert read_a_guide in MOMENT_TOOLS, "她手里没有读说明这只手"
@@ -456,7 +456,7 @@ def test_both_hands_are_ones_she_actually_has():
 def test_the_list_variable_is_named_the_same_everywhere():
     """变量名没有编译期校验：改一个字，Langfuse 那边就原样渲染成 ``{{...}}`` 给她看。
 
-    所以名字只在这里定义一次，一缝那侧引它，不各写一遍字面量。
+    所以名字只在这里定义一次，moment 那侧引它，不各写一遍字面量。
     """
     from app.living import moment as moment_mod
 
@@ -465,7 +465,7 @@ def test_the_list_variable_is_named_the_same_everywhere():
 
 
 def test_nothing_she_reads_or_runs_survives_past_this_moment():
-    """这两只手不落任何库：读回来的说明、跑出来的结果都只活在本缝的上下文里。
+    """这两只手不落任何库：读回来的说明、跑出来的结果都只活在这一轮的上下文里。
 
     这里长出一张表就意味着有个东西替她把「读过什么」留了下来，而留什么该由她自己记
     （``keep_in_mind``）。

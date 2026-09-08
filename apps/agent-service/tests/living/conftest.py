@@ -75,7 +75,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
 
     除了 living 自己那几张，还包括**手机那条路要读的外部表**（``common_user`` /
     ``common_conversation`` / ``common_message`` + channel-server 那两张裸表）。
-    它们建在这里而不是各个用例文件里，是因为**每一缝都会读手机的信封**——任何跑
+    它们建在这里而不是各个用例文件里，是因为**每一轮都会读手机的信封**——任何跑
     ``run_moment`` 的用例都要用到，各建各的迟早会出现"这个文件建了那个没建"。
 
     线上对应的是 T5 的种子：``ensure_business_schema()`` 只建 SQLAlchemy Base 那批，
@@ -97,10 +97,10 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     from app.living.records import Happening, Upcoming, Whereabouts
     from tests.runtime.conftest import migrate
 
-    # ``LivingDayPage`` 跟手机那几张一样建在这里：**每一缝都读那一页**（``read_snapshot``
+    # ``LivingDayPage`` 跟手机那几张一样建在这里：**每一轮都读那一页**（``read_snapshot``
     # 把它当第二段摆给她），任何跑 ``run_moment`` / ``read_snapshot`` 的用例都要用到，
     # 各文件各建各的迟早会出现"这个文件建了那个没建"。``PersonaVersion`` 同一个理由：
-    # 一缝、日记、开口三条路都要先问一遍"她是谁"（``persona_prompt_vars`` 读这条链）。
+    # 一轮、日记、开口三条路都要先问一遍"她是谁"（``persona_prompt_vars`` 读这条链）。
     for cls in (
         Happening, Whereabouts, Upcoming, PhoneRead, SpokenOutbound, Picture,
         LivingDayPage, PersonaVersion,
@@ -130,7 +130,7 @@ def pinned(monkeypatch):
     要让一条私聊在名单里就给它真的消息。
 
     **只截白名单那一个 key**，其余的照旧走真实读取：``dynamic_config`` 是进程内的同
-    一个单例，整个 ``get`` 换掉的话这条用例里每一处配置读取（一缝多久、世界多久）拿
+    一个单例，整个 ``get`` 换掉的话这条用例里每一处配置读取（moment 多久、世界多久）拿
     到的都是这份 JSON 数组，各自解析失败、各自静默降级成默认值 —— 用例照绿，而它验
     的东西已经不是它以为的那个了。
     """
@@ -155,11 +155,11 @@ def pinned(monkeypatch):
 
 @pytest.fixture
 def in_a_moment():
-    """把一个工具放进"她的某一缝"里跑 —— 绑上工具体要读的那四样 ambient 事实。
+    """把一个工具放进"她的某个 moment"里跑 —— 绑上工具体要读的那四样 ambient 事实。
 
     工具体一律走 :func:`app.living.scope.moment_scope`，没绑 context 直接
-    ``LookupError``。用例只想验一个工具（看手机、发消息）时不必真跑一整缝，但
-    **必须走真的 context 绑定**，不然 lane 隔离、派生 id、缝的身份全是假的。
+    ``LookupError``。用例只想验一个工具（看手机、发消息）时不必真跑一整轮，但
+    **必须走真的 context 绑定**，不然 lane 隔离、派生 id、moment 的身份全是假的。
     """
     import datetime as dt
     from contextlib import asynccontextmanager
@@ -186,10 +186,10 @@ def in_a_moment():
         moment_id: str = "2026-07-25T21:30+08:00",
         finishes: bool = True,
     ):
-        """``finishes=False`` = 这一缝崩在半路，收尾那一步没跑到。
+        """``finishes=False`` = 这一轮崩在半路，收尾那一步没跑到。
 
-        手机游标是**跟着一缝落地的**（见 :func:`app.living.phone.commit_glances`），
-        所以"这一缝跑完没有"是它的输入，不能不给。
+        手机游标是**跟着这一轮落地的**（见 :func:`app.living.phone.commit_glances`），
+        所以"这一轮跑完没有"是它的输入，不能不给。
         """
         at = now or dt.datetime(2026, 7, 25, 21, 30, tzinfo=cst)
         ctx = AgentContext(

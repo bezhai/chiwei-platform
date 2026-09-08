@@ -6,10 +6,10 @@
 Version、append-only、读最新一版、整篇重写——新版**取代**旧版）。主表不动，只当 v0
 的来源和冷启 fallback。
 
-**读侧必须收口在这个模块。** 喂人设进模型的地方有三处（一缝 :mod:`app.living.moment`、
+**读侧必须收口在这个模块。** 喂人设进模型的地方有三处（一轮 moment :mod:`app.living.moment`、
 写日记 :mod:`app.living.day_page`、开口渲染 :mod:`app.living.mouth`），各自去查一遍
-主表的话，链上那些版本一个字都到不了她眼前——而且**一句报错都没有**，每一缝照跑，只
-是底色永远停在出厂那份。实际发生过：开口那条路自己另拼了一份，于是她那一缝里是链上
+主表的话，链上那些版本一个字都到不了她眼前——而且**一句报错都没有**，每一轮照跑，只
+是底色永远停在出厂那份。实际发生过：开口那条路自己另拼了一份，于是她那一轮里是链上
 新的自己，一开口又变回旧的。所以 :func:`persona_prompt_vars` 自己查库，调用方只给
 ``lane`` 和 ``persona_id``，没有第二个组装点。
 
@@ -212,7 +212,7 @@ def _persona_core_var(*candidates: str | None) -> str:
     for core in candidates:
         if core and core.strip():
             return core.strip()
-    return "（还没有为她写下这份人设正文——这一缝没有可对照的底色。）"
+    return "（还没有为她写下这份人设正文——这一轮没有可对照的底色。）"
 
 
 async def persona_prompt_vars(*, lane: str, persona_id: str) -> dict[str, str]:

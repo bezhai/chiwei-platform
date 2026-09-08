@@ -1,17 +1,17 @@
-"""强提醒可以提前一缝，但不代她回复。
+"""强提醒可以提前一轮，但不代她回复。
 
 私聊来了、群里被点名 → 她被带到那一刻、看得到信封。**回不回是她的输出**，不进验收
 条件；所以这里必须同时反证相反方向：存在被 @ 之后她没开口、而系统一切正常的轮次。
 
 只加一个"跳过间隔"的开关是不够的，三个坑各有一条用例：
 
-  1. 提前的那缝会成为"最近一缝"，把常规节奏往后推 —— 常规的间隔判断只认常规缝；
-  2. 同一分钟会跟常规缝撞 ``moment_id`` —— 提前缝的身份是**把她叫来的那条消息**，
+  1. 提前的那一轮会成为"最近一轮"，把常规节奏往后推 —— 常规的间隔判断只认常规轮次；
+  2. 同一分钟会跟常规轮次撞 ``moment_id`` —— 提前轮次的身份是**把她叫来的那条消息**，
      不是钟点，天然撞不上；
-  3. 提前缝推进共享感知游标是对的，不该让常规缝重复感知 —— 游标在同一张表上续接。
+  3. 提前轮次推进共享感知游标是对的，不该让常规轮次重复感知 —— 游标在同一张表上续接。
 
 顺带还有一条不是坑但会烧钱的：**同一条消息只提前一次**。真人手机是新消息才震，
-躺着的未读不会一直震；提前缝的身份就是那条消息，所以"只震一次"是结构，不是冷却。
+躺着的未读不会一直震；提前轮次的身份就是那条消息，所以"只震一次"是结构，不是冷却。
 """
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ async def _incoming(
 
 
 class FakeLife:
-    """替身 life：她这一缝调了哪些工具、最后说了什么，由用例写死。"""
+    """替身 life：她这一轮调了哪些工具、最后说了什么，由用例写死。"""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
@@ -241,7 +241,7 @@ async def test_she_can_be_named_and_still_say_nothing_and_everything_is_fine(
     assert moment is not None, "她连被带到那一刻的机会都没有"
     assert moment.switched is False and moment.recorded == 0
     assert moment.said == "继续"
-    # 这一缝照常留痕、游标照常推进 —— 没开口不是异常状态。
+    # 这一轮照常留痕、游标照常推进 —— 没开口不是异常状态。
     assert (await latest_moment(lane=LANE, persona_id="akao")).moment_id == \
         moment.moment_id
 
@@ -251,7 +251,7 @@ async def test_group_chatter_that_does_not_name_her_waits_for_the_next_regular_m
     nudge_db, stub_life, pinned
 ):
     # 群固定加白，所以这个群**在**她视野里：这条用例要验的是"不点名不提前、但下一个
-    # 常规缝看得见"，不是白名单挡没挡住它（:mod:`app.living.whitelist`）。
+    # 常规轮次看得见"，不是白名单挡没挡住它（:mod:`app.living.whitelist`）。
     pinned(str(_GROUP))
     await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
     await _incoming(
@@ -263,13 +263,13 @@ async def test_group_chatter_that_does_not_name_her_waits_for_the_next_regular_m
     later = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
     assert later is not None
     assert "路人" in stub_life.prompts[-1], (
-        f"不点名的消息不提前缝，但下一个常规缝一定看得到。她看到的是：\n"
+        f"不点名的消息不提前，但下一个常规轮次一定看得到。她看到的是：\n"
         f"{stub_life.prompts[-1]}"
     )
 
 
 # --------------------------------------------------------------------------
-# 二 · 坑 1：提前的那缝不能把常规节奏往后推
+# 二 · 坑 1：提前的那一轮不能把常规节奏往后推
 # --------------------------------------------------------------------------
 
 
@@ -280,11 +280,11 @@ async def test_an_early_moment_does_not_delay_the_regular_rhythm(nudge_db, stub_
     early = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
     assert early is not None
 
-    # 21:40 是原本就该来的那一缝。按"最近一缝"判间隔的话，21:34 到 21:40 只有
-    # 六分钟，这一缝会被吞掉 —— 她的节奏就被每一条私聊往后拖。
+    # 21:40 是原本就该来的那一轮。按"最近一轮"判间隔的话，21:34 到 21:40 只有
+    # 六分钟，这一轮会被吞掉 —— 她的节奏就被每一条私聊往后拖。
     on_time = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
 
-    assert on_time is not None, "提前的那一缝把常规节奏往后推了"
+    assert on_time is not None, "提前的那一轮把常规节奏往后推了"
     assert on_time.nudged is False
     assert [m.began_at for m in await _all_moments()] == [
         _at(21, 30), _at(21, 34), _at(21, 40)
@@ -292,7 +292,7 @@ async def test_an_early_moment_does_not_delay_the_regular_rhythm(nudge_db, stub_
 
 
 # --------------------------------------------------------------------------
-# 三 · 坑 2：同一分钟不能跟常规缝撞身份
+# 三 · 坑 2：同一分钟不能跟常规轮次撞身份
 # --------------------------------------------------------------------------
 
 
@@ -306,14 +306,14 @@ async def test_an_early_moment_in_the_same_minute_is_still_its_own_moment(
     early = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 30, 20))
 
     assert early is not None, (
-        "提前缝跟常规缝撞了 moment_id —— 自然键相同，这一缝被当成重放丢掉了"
+        "提前轮次跟常规轮次撞了 moment_id —— 自然键相同，这一轮被当成重放丢掉了"
     )
     assert early.moment_id != regular.moment_id
     assert len(await _all_moments()) == 2
 
 
 # --------------------------------------------------------------------------
-# 四 · 坑 3：提前缝推进游标，常规缝不重复感知
+# 四 · 坑 3：提前轮次推进游标，常规轮次不重复感知
 # --------------------------------------------------------------------------
 
 
@@ -334,12 +334,12 @@ async def test_the_regular_moment_does_not_re_perceive_what_the_early_one_read(
     await _incoming(_DM, body="在吗", at=_at(21, 33))
 
     early = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
-    assert early.perceived == 1, "提前缝没读到刚发生的事"
+    assert early.perceived == 1, "提前轮次没读到刚发生的事"
 
     on_time = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
 
     assert on_time.after_seq == early.next_seq, (
-        "常规缝的起点没接上提前缝 —— 游标各推各的"
+        "常规轮次的起点没接上提前轮次 —— 游标各推各的"
     )
     assert on_time.perceived == 0, "同一句话她听见了两遍"
 
@@ -387,15 +387,15 @@ async def test_nothing_new_means_no_early_moment_at_all(nudge_db, stub_life):
 
 
 # --------------------------------------------------------------------------
-# 六 · 游标跟着一缝落地；信封不漏掉在叫她的那条
+# 六 · 游标跟着一轮落地；信封不漏掉在叫她的那条
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.integration
 async def test_a_moment_that_blew_up_did_not_read_her_phone(nudge_db, stub_life):
-    """这一缝崩了 = 她没看过 = 下一缝原样再看到。
+    """这一轮崩了 = 她没看过 = 下一轮原样再看到。
 
-    工具返回不等于她看见了。游标跟 ``LifeMoment`` 在同一个事务里落库，缝没落地就
+    工具返回不等于她看见了。游标跟 ``LifeMoment`` 在同一个事务里落库，这一轮没落地就
     一条都不算已读 —— 宁可重看，不可漏看。
     """
     from app.living.phone import read_through
@@ -418,13 +418,13 @@ async def test_a_moment_that_blew_up_did_not_read_her_phone(nudge_db, stub_life)
 
     assert await read_through(
         lane=LANE, persona_id="akao", channel_id=str(_DM)
-    ) == (0, ""), "缝没跑完，游标却推过去了 —— 那条消息就此永久消失"
+    ) == (0, ""), "这一轮没跑完，游标却推过去了 —— 那条消息就此永久消失"
     assert await _all_moments() == []
 
 
 @pytest.mark.integration
 async def test_a_finished_moment_did_read_her_phone(nudge_db, stub_life):
-    """反面：缝跑完了，看过的就是看过了。"""
+    """反面：这一轮跑完了，看过的就是看过了。"""
     from app.living.phone import read_through
 
     await _incoming(_DM, body="在吗", at=_at(21, 31))
@@ -440,9 +440,9 @@ async def test_a_finished_moment_did_read_her_phone(nudge_db, stub_life):
 
 @pytest.mark.integration
 async def test_both_people_waiting_on_her_are_in_the_envelope(nudge_db, stub_life):
-    """一个轮询间隔里来了两条私聊 —— 提前的那一缝里两条都得在信封上。
+    """一个轮询间隔里来了两条私聊 —— 提前的那一轮里两条都得在信封上。
 
-    每拍只取**最新**那条召唤把她带过来，是有意的（一缝把她带到就够了，带两次是
+    每拍只取**最新**那条召唤把她带过来，是有意的（一轮把她带到就够了，带两次是
     重复烧钱）。但那条更早的绝不能因此消失：她被带到的那一刻，两个人在等她这件事
     必须都摆在眼前，谁值得先回是**她**判。
     """

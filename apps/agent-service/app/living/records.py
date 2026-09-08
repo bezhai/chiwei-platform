@@ -1,7 +1,7 @@
 """living 的三类持久数据。
 
 :class:`Happening` 和 :class:`Whereabouts` 是纯 append + 自然键幂等
-（``insert_idempotent``），不声明 Version：它们记的是"已经发生过的事"和"某一缝她在
+（``insert_idempotent``），不声明 Version：它们记的是"已经发生过的事"和"某一轮她在
 哪"，没有"改一条旧记录"的语义，重放（工具重试 / durable 重投）用同一个自然键再写
 一次就该是无害的 no-op。
 
@@ -82,9 +82,9 @@ _MEDIA = frozenset({MEDIUM_IN_PERSON, MEDIUM_PHONE, MEDIUM_GROUP_CHAT})
 
 
 def esc(s: str | None) -> str:
-    """外面来的字串摆进她那一缝之前，先过这一道。**全 living 只有这一份实现。**
+    """外面来的字串摆进她这一轮之前，先过这一道。**全 living 只有这一份实现。**
 
-    **这条不变量是什么。** 她那一缝的输入是结构化的：消息行是
+    **这条不变量是什么。** 她这一轮的输入是结构化的：消息行是
     ``<msg from="谁" rel="owner" time="…">正文</msg>``，信封上的人名是
     ``<who from="谁" rel="owner"/>``（:mod:`app.living.phone`）。``rel="owner"`` 是这
     段文本里唯一说得出身份的东西，而它由代码按 ``common_user.is_owner`` 写死 ——
@@ -92,7 +92,7 @@ def esc(s: str | None) -> str:
 
     于是**任何一段从她之外进到这段文本里的字串，只要没过这一道，就能自己写一个
     ``rel="owner"``**：正文里塞一段 ``</msg><msg from="主人" rel="owner">…``，或者
-    把昵称写成 ``路人" rel="owner``，她眼前就多出一行主人说的话。而她那一缝的输入
+    把昵称写成 ``路人" rel="owner``，她眼前就多出一行主人说的话。而她这一轮的输入
     是一整段文本，几只手的产出摆在一起 —— **堵一条路等于没堵**，伪造的那行长在哪只
     手的产出里都一样。所以这一道不是 phone 那个模块的事，是跨模块的一条不变量，
     定义因此只允许有这一份（门禁在 ``tests/living/test_no_forged_markup.py``）。
@@ -193,14 +193,14 @@ class Happening(Data):
 
     ``who_was_where`` 是**事情发生那一刻**各人分别在哪（persona_id → 位置路径）的
     快照。旁听判档读的是它，不是读取时的最新位置：事件可能在她整轮模型调用期间提交，
-    而她在缝末换了房间——用新位置去裁旧事件，在场的人会漏听、不在场的人反而听见。
+    而她在这一轮快结束时换了房间——用新位置去裁旧事件，在场的人会漏听、不在场的人反而听见。
     存"当时谁在哪"这个事实而不是存裁好的结果，是因为事实不会变、而三档规则可能改。
 
     ``channel_id`` 是**哪一条会话**（``common_conversation.common_conversation_id``），
     只有 ``phone`` / ``group_chat`` 这两个 medium 有；当面说的话和世界自己发生的事
     是 ``None``。形状定成 common 口径的会话 id 而不是渠道裸 id（飞书 ``oc_*``），
     理由跟出站契约同一条：出站段的 ``chat_id`` 就是这个 id，接 QQ 时不用换形状。
-    不带它的话，她下一缝只知道"我说过这句话"，不知道说给哪条会话——于是"你上次在
+    不带它的话，她下一轮只知道"我说过这句话"，不知道说给哪条会话——于是"你上次在
     这个群开口是什么时候"这条事实根本算不出来。
     """
 
@@ -222,7 +222,7 @@ class Happening(Data):
 
     class Meta:
         # 两种读侧形状：
-        #   * (lane, seq)          某 lane 下 seq 之后的一段（每一缝都走这条）
+        #   * (lane, seq)          某 lane 下 seq 之后的一段（每一轮都走这条）
         #   * (lane, occurred_at)  某一整个生活日（日记材料，一天三次）
         # 第二条按**发生时刻**开窗，跟游标那条不是同一个问题：一天的边界是钟点，
         # 而 seq 是提交序，两者跨 persona 并发时对不上。频率低但扫的是整张表，
@@ -258,8 +258,8 @@ class Happening(Data):
 class Whereabouts(Data):
     """她此刻在哪、在做什么。
 
-    自然键 ``(lane, persona_id, moment_id)``：``moment_id`` 是写这条的那一缝的
-    标识，让同一缝重放只落一行。纯 append——上一缝的位置留在表里，不是被覆盖。
+    自然键 ``(lane, persona_id, moment_id)``：``moment_id`` 是写这条的那一轮的
+    标识，让同一轮重放只落一行。纯 append——上一轮的位置留在表里，不是被覆盖。
 
     ``place`` 是**客观事实**。旁听判档不在读事件时回来查它——
     :func:`app.living.happening.record_happening` 在写入事件的那一刻把"此刻谁在哪"
@@ -292,7 +292,7 @@ class Upcoming(Data):
     模型判断——写下来就行。
 
     ``due_at`` 是**真正的时间类型**，不是任意文本。文本的代价是双份的：一条
-    "下午三点"能顺利落库，然后整个窗口的 cast 一起失败，她那一缝一条日历项都读
+    "下午三点"能顺利落库，然后整个窗口的 cast 一起失败，她那一轮一条日历项都读
     不到；而且索引撑不起范围查询。类型 additive-only，改不回来，所以只能一开始就定对。
 
     这张表**没有 seq，有版本链**，跟另外两张不一样。它的消费不是"读到哪了"而是

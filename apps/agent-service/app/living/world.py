@@ -325,7 +325,7 @@ async def run_world_round(*, lane: str, now: datetime) -> WorldRound | None:
                 FEATURE_WRITTEN: [],
             }
         )
-        # 用量落 durable PG，理由同一缝（见 app.living.moment）：langfuse 会系统性
+        # 用量落 durable PG，理由跟 moment 一样（见 app.living.moment）：langfuse 会系统性
         # 丢 trace，"这一天花了多少"只能从 PG 数。
         with collect_usage() as usage:
             reply = await build_world_runner().run(
@@ -336,7 +336,7 @@ async def run_world_round(*, lane: str, now: datetime) -> WorldRound | None:
                             # 时刻必须自己给：账本非空时"现在"还能从各行的日子钟点加
                             # 「已经发生 / 还没到」反推个大概，空账本就一个线索都没有
                             # 了——而那正是它最该判断"这个点该不该冒出点什么"的时候。
-                            # 用这一轮的锚不现取钟，跟一缝、跟账本三者同源。
+                            # 用这一轮的锚不现取钟，跟 moment、跟账本三者同源。
                             f"现在 {to_cst_full(anchor.isoformat())}。\n\n"
                             f"账上现在是这样：\n{ledger}"
                         ),

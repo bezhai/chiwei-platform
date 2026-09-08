@@ -75,7 +75,7 @@ flowchart TB
     GW --> DB --> PE
     LKS -->|投影落库| CM[("PostgreSQL<br/>common_message")]
     CS -->|投影落库| CM
-    AS -->|每一缝查未读| CM
+    AS -->|每次醒来查未读| CM
     AS -. chat_response_lark / recall_lark .-> LKO --> Feishu
     AS -. chat_response_qq .-> CRW --> QGW -->|发消息| QQ
     AS --> SB
@@ -86,7 +86,7 @@ flowchart TB
     REG -. 下发路由表 .-> LS
 ```
 
-虚线箭头是 RabbitMQ 消息队列(异步,飞书那条长连除外),实线是直接 HTTP 调用或读写数据库。**入站方向没有队列**:两个渠道服务把收到的消息投影成公共层口径写进 `common_message` 就结束,agent-service 每一缝(默认十分钟一次,Dynamic Config 可调;私聊和群里点名会把她提前叫来)自己去查未读、自己决定要不要开口。出站仍走队列,而且 agent-service 不直接发平台消息——它把回复丢进队列,由持有平台凭证的那个服务代发:飞书归 lark-outbound,QQ 归 chat-response-worker(再经 qq-gateway)。lane-sidecar / lite-registry 不在某条线性调用链上,它们横切所有服务间调用(见第五节)。tagger-service 是图里唯一不跑在 K8s 上的服务:裸机 GPU 主机 + systemd 托管,media-sync-worker 通过 HTTP 提交打标任务、用回调收结果。
+虚线箭头是 RabbitMQ 消息队列(异步,飞书那条长连除外),实线是直接 HTTP 调用或读写数据库。**入站方向没有队列**:两个渠道服务把收到的消息投影成公共层口径写进 `common_message` 就结束,agent-service 每次醒来(默认十分钟一次,Dynamic Config 可调;私聊和群里点名会把她提前叫来)自己去查未读、自己决定要不要开口。出站仍走队列,而且 agent-service 不直接发平台消息——它把回复丢进队列,由持有平台凭证的那个服务代发:飞书归 lark-outbound,QQ 归 chat-response-worker(再经 qq-gateway)。lane-sidecar / lite-registry 不在某条线性调用链上,它们横切所有服务间调用(见第五节)。tagger-service 是图里唯一不跑在 K8s 上的服务:裸机 GPU 主机 + systemd 托管,media-sync-worker 通过 HTTP 提交打标任务、用回调收结果。
 
 ---
 
@@ -107,14 +107,14 @@ sequenceDiagram
     LKS->>LKS: 解析,收敛 common 口径并决定 lane
     Note over LKS: 渠道契约链:解析→换全局身份→判泳道→存储→规则引擎
     LKS->>PG: 写 common_message 等公共层表(入站到此为止)
-    AS->>PG: 每一缝查自己未读的 common_message
+    AS->>PG: 每次醒来查自己未读的 common_message
     AS->>AS: 组装当下事实(人格/状态/手机信封) + LLM 推理 + 工具调用
     AS->>MQ: publish chat_response_lark(逐段)
     MQ->>LKO: 消费 chat_response_lark
     LKO->>U: 反查回飞书裸 ID,发送 / 追加回复
 ```
 
-**入站和出站不对称,这是设计要的**:入站是她自己去看(所以"她没看见"这个状态存在得起来),出站才是队列。她这一缝默认最多等十分钟(间隔是 Dynamic Config,不是写死的);私聊、或者群里有人点她的名,会有一条单独的钟把她提前叫到那一刻。
+**入站和出站不对称,这是设计要的**:入站是她自己去看(所以"她没看见"这个状态存在得起来),出站才是队列。她这次醒来默认最多等十分钟(间隔是 Dynamic Config,不是写死的);私聊、或者群里有人点她的名,会有一条单独的钟把她提前叫到那一刻。
 
 QQ 那条链形状相同,只是入站是 qq-gateway 把 QQ 协议归一化成 `CustomInboundMessage` 后 POST 给 channel-server,出站由 chat-response-worker 消费 `chat_response_qq` 再回投 qq-gateway。
 
@@ -122,10 +122,10 @@ QQ 那条链形状相同,只是入站是 qq-gateway 把 QQ 协议归一化成 `C
 
 - **lark-service** 是飞书渠道的全部:入站(长连 + webhook + 泳道交接接收端)、common 投影、规则与指令、以及三个定时任务(daily-photo / daily-new-photo / emoji-sync)。入站走一条钉死顺序的契约链——解析 → 收敛成 common 口径 + 换全局身份 → 判泳道(要交接就在这儿停) → 存消息 → 平台无关的规则引擎分发,**到规则引擎的终态为止,不发任何队列**。出站在同镜像的另一个 Deployment **lark-outbound** 里:它消费 `chat_response_lark` / `recall_lark` 两条队列,把话送到飞书、把判违规的撤掉。拆成两个进程是因为部署策略冲突——持长连的只能单副本 + Recreate,出站是竞争消费、可多副本可滚动更新。
 - **channel-server** 是 QQ 渠道的同类角色(入站 HTTP 入口 + 渠道核心 + 规则引擎),同样到落库为止不发队列,出站在 chat-response-worker。跟飞书那条唯一的顺序差别:QQ 先跑规则引擎再落库,飞书先落库再跑规则引擎。
-- **规则引擎对赤尾基本是空转。** 它按 bot 的角色过滤指令:飞书那 10 条里有 9 条声明了 `category: 'utility'`,人设 bot 撞上直接跳过,她唯一会命中的是没声明 category 的「撤回」;QQ 侧的指令表干脆是空的。所以一条普通的 @ 消息走完整个序列没有任何规则接住它,收敛成 `no_match` —— 这是正确终态,不是漏了一条兜底:她要不要开口是她自己在下一缝里决定的,不由入站这一段决定。
-- **agent-service** 是「大脑」。她每一缝直接查 `common_message` 看有没有人找她(`app/living/phone.py`),把赤尾的人格、当下状态、手机信封「组装」成上下文喂给大模型,用自研的 agent 工具循环驱动推理(不依赖 langchain 之类的框架),推理过程中可以调工具(搜索、画图、找图、执行代码、技能脚本、看手机、读文件),决定开口就把话分段丢进 `chat_response` 队列。
+- **规则引擎对赤尾基本是空转。** 它按 bot 的角色过滤指令:飞书那 10 条里有 9 条声明了 `category: 'utility'`,人设 bot 撞上直接跳过,她唯一会命中的是没声明 category 的「撤回」;QQ 侧的指令表干脆是空的。所以一条普通的 @ 消息走完整个序列没有任何规则接住它,收敛成 `no_match` —— 这是正确终态,不是漏了一条兜底:她要不要开口是她自己在下次醒来时决定的,不由入站这一段决定。
+- **agent-service** 是「大脑」。她每次醒来直接查 `common_message` 看有没有人找她(`app/living/phone.py`),把赤尾的人格、当下状态、手机信封「组装」成上下文喂给大模型,用自研的 agent 工具循环驱动推理(不依赖 langchain 之类的框架),推理过程中可以调工具(搜索、画图、找图、执行代码、技能脚本、看手机、读文件),决定开口就把话分段丢进 `chat_response` 队列。
 
-「回复」不是独立的一条线,它就是她生活的一部分:同一缝里她既决定要不要换手上的事、去哪儿、记住什么,也决定要不要开口。跟这一缝并排的还有 world(按自己的节奏推演客观世界)和日历(把到点的东西交付给她)。这些全跑在 agent-service 主进程里,由 dataflow runtime 的五条时间源驱动,代码在 `apps/agent-service/app/living/`。
+「回复」不是独立的一条线,它就是她生活的一部分:同一次醒来里她既决定要不要换手上的事、去哪儿、记住什么,也决定要不要开口。跟她的醒来并排的还有 world(按自己的节奏推演客观世界)和日历(把到点的东西交付给她)。这些全跑在 agent-service 主进程里,由 dataflow runtime 的五条时间源驱动,代码在 `apps/agent-service/app/living/`。
 
 ---
 
@@ -269,7 +269,7 @@ flowchart LR
 | channel-server | Bun/TS | 数据面 | QQ 入站 + 渠道契约链 + 规则引擎 + 存储,投影落库即止 |
 | chat-response-worker | Bun/TS | 数据面 | 消费 `chat_response_qq`,经 qq-gateway 发 QQ 回复 + 存储 |
 | qq-gateway | Bun/TS | 数据面 | QQ 官方 bot 协议 ↔ channel-server 通用协议的双向适配 |
-| agent-service | Python | 数据面 | 赤尾的生活引擎(自研 agent 工具循环 + dataflow runtime 的五条时间源)+ world 推演;她开口也在这一缝里发生 |
+| agent-service | Python | 数据面 | 赤尾的生活引擎(自研 agent 工具循环 + dataflow runtime 的五条时间源)+ world 推演;她开口也发生在她的 moment 里 |
 | sandbox-worker | Python | AI 工具 | 隔离环境跑 bash / 技能脚本 |
 | tool-service | Python | AI 工具 | 图像管道(下载→压缩→TOS)+ jieba 关键词 |
 | paas-engine | Go | 控制面 | 构建+部署+网关规则+动态配置+CI+日志+业务库 ops |
@@ -292,7 +292,7 @@ flowchart LR
 
 ### 1. agent-service 主进程承担过多
 
-一个 Deployment 里同时跑着 admin/DLQ 管理 HTTP、五条时间源、world 的推演轮次、三个角色各自的一缝,以及「读一程」那条 durable 边。后面几件都是模型重活,共享同一份 CPU 和同一个进程生命周期——部署一次就把所有正在跑的缝和轮次一起杀掉。
+一个 Deployment 里同时跑着 admin/DLQ 管理 HTTP、五条时间源、world 的推演轮次、三个角色各自的 moment,以及「读一程」那条 durable 边。后面几件都是模型重活,共享同一份 CPU 和同一个进程生命周期——部署一次就把所有正在跑的 moment 和轮次一起杀掉。
 
 ### 2. paas-engine 是个「全能控制面」
 

@@ -1,13 +1,13 @@
-"""一缝 —— 每十分钟她回到自己身上一次，默认答「继续」。
+"""moment —— 每十分钟她回到自己身上一次，默认答「继续」。
 
 五条硬边界，各有对应的用例：
 
-  * **默认是最便宜的那种轮次。** 一个词、零工具、零写库；但这一缝跑过要留痕，
-    不然"哪些缝是继续、哪些换了事情"根本算不出来。
+  * **默认是最便宜的那种轮次。** 一个词、零工具、零写库；但这个 moment 跑过要留痕，
+    不然"哪些 moment 是继续、哪些换了事情"根本算不出来。
   * **换的是一件事，不是一个时长。** 工具签名里不许出现任何分钟数 —— 真人对
     "多久"没有内感受，问她要一个数字就是在替她把生活切成日程表。
-  * **她记得住。** 状态快照跨缝续接：一件事被她列进心上之后，中间隔多少个"继续"
-    都还在，而且指得出是从哪一缝带过来的。
+  * **她记得住。** 状态快照跨 moment 续接：一件事被她列进心上之后，中间隔多少个"继续"
+    都还在，而且指得出是从哪个 moment 带过来的。
   * **说话必须带真内容。** 上一代 4143 条记录里 62% 是同一句"我和 X 说了几句话"，
     world 因此完全看不见姐妹之间发生了什么。
   * **动作只说自己做了什么，不替世界宣布。** ``act`` 里捎带的世界断言（别人的身体、
@@ -70,7 +70,7 @@ async def moment_db(living_db):
 
 
 class FakeMoment:
-    """替身 life：这一缝她调了哪些工具是写死的，只有模型那一步是假的。
+    """替身 life：这个 moment 她调了哪些工具是写死的，只有模型那一步是假的。
 
     走真工具 + 真 context 绑定，所以写库、派生 id、lane 隔离都是被真的验到的。
     """
@@ -91,9 +91,9 @@ class FakeMoment:
 
 @pytest.fixture
 def stub_moment(monkeypatch):
-    """装一个替身 life + 固定缝间隔 + 一份不碰真库的 persona。
+    """装一个替身 life + 固定 moment 间隔 + 一份不碰真库的 persona。
 
-    打桩打在 ``app.living.persona`` 上：一缝自己不查 ``bot_persona`` 了，那两个
+    打桩打在 ``app.living.persona`` 上：moment 自己不查 ``bot_persona`` 了，那两个
     prompt 变量由那个模块一处组装（版本链优先、主表 fallback）。这里链是空的，所以
     落到 ``persona_core`` 这一层。
     """
@@ -137,7 +137,7 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
 
 
 # --------------------------------------------------------------------------
-# 一 · 默认「继续」，而且这一缝留得下痕
+# 一 · 默认「继续」，而且这个 moment 留得下痕
 # --------------------------------------------------------------------------
 
 
@@ -159,7 +159,7 @@ async def test_a_moment_that_carries_on_costs_one_word_and_writes_nothing(
 
 @pytest.mark.integration
 async def test_every_moment_is_countable_afterwards(moment_db, stub_moment):
-    """验收要逐缝看：哪些继续、哪些换了事情、换的理由是什么。"""
+    """验收要逐个 moment 看：哪些继续、哪些换了事情、换的理由是什么。"""
     stub_moment(
         (
             "switch_to",
@@ -195,7 +195,7 @@ def test_keeping_something_in_mind_does_not_require_changing_what_she_is_doing()
         "still_on_my_mind"
     }
     assert "still_on_my_mind" not in switch_to.definition.parameters["properties"], (
-        "线头还绑在 switch_to 上 —— 她答「继续」的那些缝就永远记不住任何事"
+        "线头还绑在 switch_to 上 —— 她答「继续」的那些 moment 就永远记不住任何事"
     )
 
 
@@ -373,7 +373,7 @@ def test_an_act_does_not_get_to_declare_what_the_world_is_like():
 
 
 def test_the_moment_tool_descriptions_carry_no_medical_examples():
-    """守门：这一缝的工具文案里不许出现医疗类示例词（与旧引擎同一条守门线）。
+    """守门：moment 模块的工具文案里不许出现医疗类示例词（与旧引擎同一条守门线）。
 
     这类词进了工具描述会被模型当成"这个家里正常会发生的事"照着编，本身就是那条脏
     剧情的输入源之一。所以上一条边界只能用**类目**说（"别人的身体怎么样""测出来是
@@ -460,7 +460,7 @@ async def test_looking_around_cannot_reach_someone_who_is_out(moment_db, stub_mo
 
 
 # --------------------------------------------------------------------------
-# 五 · 她记得住 —— 状态快照跨缝续接（T2 成败所系）
+# 五 · 她记得住 —— 状态快照跨 moment 续接（T2 成败所系）
 # --------------------------------------------------------------------------
 
 
@@ -468,11 +468,11 @@ async def test_looking_around_cannot_reach_someone_who_is_out(moment_db, stub_mo
 async def test_what_a_sister_said_can_be_kept_in_a_moment_that_carries_on(
     moment_db, stub_moment
 ):
-    """**验收正条，也是整个实验最想验证的那条：跨缝因果延续。**
+    """**验收正条，也是整个实验最想验证的那条：跨 moment 因果延续。**
 
-    绫奈跟她说「周末陪我去祭典」。她手上的书没放下（这一缝答「继续」，``switched``
-    是 False），但她心里记住了。接下来三缝她什么都没做。第五缝她读到的快照里那件事
-    还在，而且指得出是从哪一缝带过来的。
+    绫奈跟她说「周末陪我去祭典」。她手上的书没放下（这个 moment 答「继续」，``switched``
+    是 False），但她心里记住了。接下来三个 moment 她什么都没做。第五个 moment 她读到的快照里那件事
+    还在，而且指得出是从哪个 moment 带过来的。
 
     「是否换事」不等于「是否记住」——把挂心事绑在 ``switch_to`` 上，这条感知在游标
     推进之后就永久消失了：她自己最近那十二条里只有她**自己**说做的，别人说的话不在
@@ -499,7 +499,7 @@ async def test_what_a_sister_said_can_be_kept_in_a_moment_that_carries_on(
     )
     first = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
-    assert first.switched is False, "她手上的事没变 —— 这一缝就是「继续」"
+    assert first.switched is False, "她手上的事没变 —— 这个 moment 就是「继续」"
     assert first.open_ends == 1
 
     quiet = stub_moment(said="继续")
@@ -513,7 +513,7 @@ async def test_what_a_sister_said_can_be_kept_in_a_moment_that_carries_on(
         "隔了三个「继续」她就忘了绫奈跟她说过什么 —— 这正是上一代的死法"
     )
     assert first.moment_id in snapshot, (
-        "快照说不出这件事是从哪一缝带过来的 —— 延续就成了没有证据的断言"
+        "快照说不出这件事是从哪个 moment 带过来的 —— 延续就成了没有证据的断言"
     )
     still = await list_open_loose_ends(lane=LANE, persona_id="akao")
     assert still[0].opened_moment_id == first.moment_id
@@ -576,7 +576,7 @@ async def test_keeping_nothing_in_mind_is_a_thing_she_can_say(moment_db, stub_mo
 
 
 def _what_she_read(run) -> str:
-    """她那一缝真正读到的 USER 消息（快照 + 手机信封）。"""
+    """她这个 moment 真正读到的 USER 消息（快照 + 手机信封）。"""
     return "\n".join(m.content for m in run[0] if m.role is Role.USER)
 
 
@@ -584,7 +584,7 @@ def _what_she_read(run) -> str:
 async def test_a_thing_she_hung_an_hour_on_comes_due_in_front_of_her(
     moment_db, stub_moment
 ):
-    """**验收正条**：她挂一件该在几点的事，下一缝显示还没到，到点之后那一缝显示到点了。
+    """**验收正条**：她挂一件该在几点的事，下一个 moment 显示还没到，到点之后那个 moment 显示到点了。
 
     她的安排不进 ``Upcoming``——那是世界的客观时刻表（快递到门口、天黑），到期交付
     一次就被消费掉。"我该去开的那个会"在她真的去之前不会因为时间过了就不算数，而且
@@ -656,7 +656,7 @@ async def test_writing_only_a_time_does_not_empty_what_she_keeps_in_mind(
     """她漏写了那件事本身，心里挂着的东西不许因此被一次性清空。
 
     ``keep_in_mind`` 是**整份重写**：一条只有时刻、没有正文的条目要是被当成空行跳过，
-    这一份就成了空清单——她上一缝挂着的全部走进关闭流程，而她收到的是一句成功。
+    这一份就成了空清单——她上一个 moment 挂着的全部走进关闭流程，而她收到的是一句成功。
     """
     await _stand("akao", "家/客厅", "看书", _at(13))
     stub_moment(("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台"]}))
@@ -711,7 +711,7 @@ async def test_a_moment_only_sees_what_happened_since_the_last_one(
     )
     third_input = "\n".join(m.content for m in runner.runs[2][0] if m.role is Role.USER)
     assert "你在看什么" in second_input
-    assert "你在看什么" not in third_input, "游标没推进 —— 同一句话每缝重读一遍"
+    assert "你在看什么" not in third_input, "游标没推进 —— 同一句话每次重读一遍"
     assert third.after_seq == second.next_seq
 
 
@@ -778,7 +778,7 @@ async def test_a_blank_core_says_so_instead_of_rendering_a_hole(
 
 @pytest.mark.integration
 async def test_the_prompt_variables_are_exactly_three(moment_db, stub_moment):
-    """变量改名会**静默**渲染成字面量，所以能少一个就少一个；每缝都变的东西走 USER。
+    """变量改名会**静默**渲染成字面量，所以能少一个就少一个；每个 moment 都变的东西走 USER。
 
     第三个（手边有哪些说明可读）是例外：它会变（注册表每 30 秒热加载），而工具
     schema 在 import 时定死，装不下一份会变的清单，只能从 prompt 变量进。
@@ -801,7 +801,7 @@ async def test_the_guides_she_can_read_are_listed_in_front_of_her(
     """她要知道手边有哪些说明可读 —— 不然读说明那只手她永远猜不出该填什么名字。
 
     清单跟着盘上实际有的那几份走：这里真的写一份到盘上、真的加载进注册表，断言她
-    这一缝的输入里出现的就是它。
+    这个 moment 的输入里出现的就是它。
     """
     from app.living.guides import GUIDES_VAR
     from app.skills.registry import SkillRegistry
@@ -891,7 +891,7 @@ async def test_a_junk_gap_falls_back_to_ten_minutes(moment_db, monkeypatch):
 
 @pytest.mark.integration
 async def test_replaying_the_same_moment_lands_one_row(moment_db, stub_moment):
-    """同一缝被重放（崩在落记录之前、durable 重投）只该在账上占一行。
+    """同一个 moment 被重放（崩在落记录之前、durable 重投）只该在账上占一行。
 
     重放大概率**不会**产出一模一样的内容，所以幂等必须落在自然键上、跟内容无关。
     """
@@ -985,7 +985,7 @@ async def test_a_moment_is_not_replayed_by_the_agent_retry(moment_db, stub_momen
 
 
 # --------------------------------------------------------------------------
-# 七 bis · 一缝的时间锚跨重试稳定（副作用写完、收尾前崩，不许重来一遍）
+# 七 bis · moment 的时间锚跨重试稳定（副作用写完、收尾前崩，不许重来一遍）
 # --------------------------------------------------------------------------
 
 
@@ -1013,7 +1013,7 @@ async def test_a_crash_before_the_record_lands_does_not_redo_her_actions(
     real_insert = moment_mod.insert_idempotent
 
     async def crash(row, **_kw):
-        raise RuntimeError("落一缝记录时崩了")
+        raise RuntimeError("落一个 moment 记录时崩了")
 
     monkeypatch.setattr(moment_mod, "insert_idempotent", crash)
     with pytest.raises(RuntimeError):
@@ -1022,7 +1022,7 @@ async def test_a_crash_before_the_record_lands_does_not_redo_her_actions(
     monkeypatch.setattr(moment_mod, "insert_idempotent", real_insert)
     again = await run_moment(lane=LANE, persona_id="akao", now=_at(14, 1))
 
-    assert again is not None, "上一缝没留下记录，这一拍该重跑"
+    assert again is not None, "上一个 moment 没留下记录，这一拍该重跑"
     assert again.moment_id == _at(14, 0).isoformat(timespec="minutes")
     said = await recent_own_happenings(lane=LANE, persona_id="akao", limit=10)
     assert [h.content for h in said] == ["我去煮点抹茶。"], (
@@ -1037,7 +1037,7 @@ async def test_a_crash_before_the_record_lands_does_not_redo_her_actions(
 
 @pytest.mark.integration
 async def test_a_moment_is_stamped_on_its_grid_cell(moment_db, stub_moment):
-    """缝的身份是格子，不是钟表上那一瞬 —— 落在格上才可能跨重试对得上。"""
+    """moment 的身份是格子，不是钟表上那一瞬 —— 落在格上才可能跨重试对得上。"""
     stub_moment(said="继续")
 
     moment = await run_moment(lane=LANE, persona_id="akao", now=_at(14, 7))
@@ -1082,18 +1082,18 @@ async def test_the_cursor_only_advances_when_the_record_lands(
 
     assert again.after_seq == 0
     retried_input = "\n".join(m.content for m in runner.runs[-1][0] if m.role is Role.USER)
-    assert "你在看什么" in retried_input, "崩掉那一缝的感知被静默吞了"
+    assert "你在看什么" in retried_input, "崩掉那个 moment 的感知被静默吞了"
 
 
 def test_the_moment_runs_on_the_life_model():
-    """life 一天 432 缝 × 三个人 —— 这条高频线走 ``life-model``，不占 world 的档位。"""
+    """life 一天 432 个 moment × 三个人 —— 这条高频线走 ``life-model``，不占 world 的档位。"""
     from app.living.moment import _MOMENT_CFG
 
     assert _MOMENT_CFG.model_id == "life-model"
 
 
 # --------------------------------------------------------------------------
-# 七 ter · 谁是"最近一缝"由**落地顺序**说了算，不由钟点
+# 七 ter · 谁是"最近一个 moment"由**落地顺序**说了算，不由钟点
 # --------------------------------------------------------------------------
 
 
@@ -1101,15 +1101,15 @@ def test_the_moment_runs_on_the_life_model():
 async def test_an_early_moment_that_lands_first_does_not_rewind_the_cursor(
     moment_db, stub_moment
 ):
-    """提前缝先落地、常规缝后落地 —— 游标不许退回提前缝那一格。
+    """提前来的 moment 先落地、常规 moment 后落地 —— 游标不许退回提前来的 moment 那一格。
 
     两条钟并发打到同一个人时 :func:`app.living.serial.hold` 让后到的**排队**而不是
-    丢掉，所以这个次序完全正常：21:34 被叫来的那一缝先拿到占用、先跑完
-    （``began_at`` 是真实时刻 21:34），21:35 那一拍的常规缝随后才轮到、跑完
+    丢掉，所以这个次序完全正常：21:34 被叫来的那个 moment 先拿到占用、先跑完
+    （``began_at`` 是真实时刻 21:34），21:35 那一拍的常规 moment 随后才轮到、跑完
     （``began_at`` 是它的格子 21:30）。**落地顺序和 ``began_at`` 顺序是反的。**
 
-    "读到哪了"问的是"**最后落地**的那一缝读到哪"。按 ``began_at`` 排会取回 21:34
-    那一行的游标，把常规缝已经读过的那一段整个丢回去——她把同一批动静又感知一遍，
+    "读到哪了"问的是"**最后落地**的那个 moment 读到哪"。按 ``began_at`` 排会取回 21:34
+    那一行的游标，把常规 moment 已经读过的那一段整个丢回去——她把同一批动静又感知一遍，
     而且一句报错都没有。
     """
     from app.living.happening import record_happening
@@ -1147,17 +1147,17 @@ async def test_an_early_moment_that_lands_first_does_not_rewind_the_cursor(
     )
     regular = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 35))
 
-    # 前提：常规缝的格子比提前缝的真实时刻早，而它读到了提前缝之后的新动静。
+    # 前提：常规 moment 的格子比提前来的 moment 的真实时刻早，而它读到了提前来的 moment 之后的新动静。
     assert regular is not None and regular.began_at == _at(21, 30)
     assert regular.next_seq > early.next_seq
 
     latest = await latest_moment(lane=LANE, persona_id="akao")
     assert latest.moment_id == regular.moment_id, (
-        "「最近一缝」取成了钟点最靠后的那一缝，不是最后落地的那一缝"
+        "「最近一个 moment」取成了钟点最靠后的那个 moment，不是最后落地的那个 moment"
     )
 
     nxt = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 45))
-    assert nxt.after_seq == regular.next_seq, "游标退回提前缝那一格了"
+    assert nxt.after_seq == regular.next_seq, "游标退回提前来的 moment 那一格了"
     assert nxt.perceived == 0, "游标退回去 —— 同一句话她又听了一遍"
 
 
@@ -1167,9 +1167,9 @@ async def test_the_regular_rhythm_measures_from_the_latest_cell_not_the_last_wri
 ):
     """乱序落地之后，常规节奏认的仍然是「最近那一格」。
 
-    这条和上一条是**两个问题、两种排序**：游标问"最后落地的那一缝"，节奏问"最近跑
+    这条和上一条是**两个问题、两种排序**：游标问"最后落地的那个 moment"，节奏问"最近跑
     过的那一格"。合成一个的话，21:30 那一格（最后落地）会被当成最近一格，21:40 明明
-    该来的那一缝就得再等十分钟。
+    该来的那个 moment 就得再等十分钟。
     """
     from app.living.moment import latest_regular_moment
 
@@ -1181,7 +1181,7 @@ async def test_the_regular_rhythm_measures_from_the_latest_cell_not_the_last_wri
 
     last_regular = await latest_regular_moment(lane=LANE, persona_id="akao")
     assert last_regular.moment_id == regular.moment_id
-    assert last_regular.nudged is False, "节奏判断认了提前缝"
+    assert last_regular.nudged is False, "节奏判断认了提前来的 moment"
     assert last_regular.began_at == _at(21, 30)
 
     on_time = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
@@ -1193,7 +1193,7 @@ async def test_the_regular_rhythm_measures_from_the_latest_cell_not_the_last_wri
 async def test_each_moment_carries_the_order_it_landed_in(moment_db, stub_moment):
     """落地顺序是一列**单调递增**的数，跟她的钟没有关系。
 
-    这条是上面两条的地基：``began_at`` 只说她这一缝的『现在』是几点，谁先谁后落库
+    这条是上面两条的地基：``began_at`` 只说她这个 moment 的『现在』是几点，谁先谁后落库
     是另一个问题，得有自己的一列去答。
     """
     stub_moment(said="继续")
@@ -1206,7 +1206,7 @@ async def test_each_moment_carries_the_order_it_landed_in(moment_db, stub_moment
 
     assert [m.seq for m in (first, early, regular)] == [1, 2, 3]
     assert regular.began_at < early.began_at, (
-        "前提没造出来：这条要的就是「后落地的那一缝钟点更早」"
+        "前提没造出来：这条要的就是「后落地的那个 moment 钟点更早」"
     )
     # 每个人一条轴，互不牵连。
     hers = await run_moment(lane=LANE, persona_id="ayana", now=_at(21, 35))
@@ -1371,7 +1371,7 @@ async def test_moving_is_not_switching_to_something_else(moment_db, stub_moment)
     """挪个地方不算「换了事情」。
 
     ``switch_to`` 的语义是"什么把你从刚才那件事里带走了"，走动没有这回事。混进去
-    会让逐缝复盘里的"换事率"把单纯的走动也算成换事情。
+    会让逐个 moment 复盘里的"换事率"把单纯的走动也算成换事情。
     """
     await _stand("ayana", "学校/教学楼走廊", "等第一节课", _at(9))
     stub_moment(("move_to", {"place": "学校/二年三班教室"}))
@@ -1440,7 +1440,7 @@ def test_moving_is_one_of_the_hands_she_actually_has():
 
 
 # --------------------------------------------------------------------------
-# 七 · 这一缝花了多少 token，得能查
+# 七 · 这个 moment 花了多少 token，得能查
 # --------------------------------------------------------------------------
 
 
@@ -1448,10 +1448,10 @@ def test_moving_is_one_of_the_hands_she_actually_has():
 async def test_a_seam_records_what_it_spent_where_it_can_be_counted(
     moment_db, stub_moment
 ):
-    """一缝的 token 用量要落 durable PG，不能只指望 langfuse。
+    """一个 moment 的 token 用量要落 durable PG，不能只指望 langfuse。
 
     ``app.agent.trace`` 里写着实测结论：langfuse **会系统性丢 trace**（这次实测
-    整夜 225 缝只到了 125 条，丢 44%），所以「真相在 PG」——用 ``collect_usage``
+    整夜 225 个 moment 只到了 125 条，丢 44%），所以「真相在 PG」——用 ``collect_usage``
     包住 run、``record_round_cost`` 落库。这一刀一开始漏了，于是「一晚上花了多少」
     根本查不出来。
     """
@@ -1473,18 +1473,18 @@ async def test_a_seam_records_what_it_spent_where_it_can_be_counted(
             "round_id": _at(14).isoformat(timespec="minutes"),
         },
     )
-    assert spent, "这一缝没有留下任何用量记录 —— 成本无从统计"
+    assert spent, "这个 moment 没有留下任何用量记录 —— 成本无从统计"
 
 
 @pytest.mark.integration
 async def test_the_conversations_she_can_see_are_settled_once_for_the_whole_moment(
     moment_db, stub_moment, monkeypatch
 ):
-    """"她这一缝看得见哪些会话"在信封那一眼定下来，整缝共用那一份。
+    """"她这个 moment 看得见哪些会话"在信封那一眼定下来，整个 moment 共用那一份。
 
-    信封是她这一缝看到的第一样东西，所以名单也在那儿定（:mod:`app.living.whitelist`）。
-    信封摆在这一缝的 context 外面算的话会有两个后果：这份名单被算两遍（它是这个功能
-    最贵的一项），而且两遍之间到达的消息会让一条会话在信封上没有、她后半缝却搜得到、
+    信封是她这个 moment 看到的第一样东西，所以名单也在那儿定（:mod:`app.living.whitelist`）。
+    信封摆在这个 moment 的 context 外面算的话会有两个后果：这份名单被算两遍（它是这个功能
+    最贵的一项），而且两遍之间到达的消息会让一条会话在信封上没有、她后半程却搜得到、
     发得出去。
     """
     from app.living import whitelist as whitelist_mod
@@ -1510,5 +1510,5 @@ async def test_the_conversations_she_can_see_are_settled_once_for_the_whole_mome
 
     assert moment is not None
     assert len(counted) == 1, (
-        f"这一缝把名单算了 {len(counted)} 遍 —— 信封和她手里的工具用的不是同一份"
+        f"这个 moment 把名单算了 {len(counted)} 遍 —— 信封和她手里的工具用的不是同一份"
     )

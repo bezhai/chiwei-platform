@@ -524,7 +524,7 @@ async def test_she_can_point_back_with_the_handle_exactly_as_it_was_shown(
 
 
 # --------------------------------------------------------------------------
-# 二 · 同一缝里拿起同一个文件，只读一程
+# 二 · 同一轮里拿起同一个文件，只读一程
 # --------------------------------------------------------------------------
 
 
@@ -532,7 +532,7 @@ async def test_she_can_point_back_with_the_handle_exactly_as_it_was_shown(
 async def test_picking_up_the_same_file_twice_in_one_moment_is_one_round(
     reading_db, in_a_moment, picked_up
 ):
-    """一缝里重复拿起（工具重试、整轮重放）派生同一个 round_id，下一缝才是新的一程。"""
+    """这次 moment 里重复拿起（工具重试、整轮重放）派生同一个 round_id，下一次才是新的一程。"""
     dm_one = _attachment(_M_DM_SHAYANG, "key-dm-shayang")
 
     async with in_a_moment("akao", moment_id="2026-07-25T21:30+08:00"):
@@ -543,8 +543,8 @@ async def test_picking_up_the_same_file_twice_in_one_moment_is_one_round(
 
     ids = [p.round_id for p in picked_up]
     assert len(ids) == 3
-    assert ids[0] == ids[1], "同一缝里拿起两次派生了两程 —— 一程会被白读两遍"
-    assert ids[2] != ids[0], "下一缝拿不起同一个文件了 —— 她再也读不下去"
+    assert ids[0] == ids[1], "同一轮里拿起两次派生了两程 —— 一程会被白读两遍"
+    assert ids[2] != ids[0], "下一轮拿不起同一个文件了 —— 她再也读不下去"
 
 
 # --------------------------------------------------------------------------
@@ -844,7 +844,7 @@ def test_the_reading_round_is_a_durable_edge_and_not_an_inbound_one():
     ``.durable()`` 只是 ``WireBuilder`` 上的一个标志位（见 ``app/runtime/wire.py``），
     它不往 ``WireSpec.sources`` 里放东西，所以 ``tests/living/test_no_inbound.py``
     那条"实验泳道上一条 mq / http 源都没有"照旧成立。这条边上跑的东西只有她自己
-    刚刚在某一缝里拿起的那个文件，投递方和消费方都是这一个进程。
+    刚刚在某一轮里拿起的那个文件，投递方和消费方都是这一个进程。
 
     同时钉住这条边在每条泳道上都挂着：挂边跟泳道名无关（那道按泳道名分流的门随
     旧实现一起删掉了）。
@@ -871,10 +871,10 @@ def test_the_reading_round_is_a_durable_edge_and_not_an_inbound_one():
 
 
 def test_both_hands_are_ones_she_actually_has():
-    """这两只手要真在她那一缝的工具集里。
+    """这两只手要真在她的工具集里。
 
     没挂上去是**静默失败**：模块写好了、这个文件里的用例全绿，durable 边也接上了，
-    但她那一缝的工具列表里没有它们，于是永远不会调、那条边永远不会被触发。同款用例
+    但她的工具列表里没有它们，于是永远不会调、那条边永远不会被触发。同款用例
     见 ``test_phone.py`` 的 ``test_finding_someone_is_one_of_the_hands_she_actually_has``。
     """
     from app.living.moment import MOMENT_TOOLS

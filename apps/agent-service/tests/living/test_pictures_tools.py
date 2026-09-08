@@ -2,15 +2,15 @@
 
 五条硬边界，各有对应的用例：
 
-  * **跨得过一缝的边界。** 这是整件事的理由：她那一缝只拿到快照和手机信封，
-    **不继承上一缝的工具结果**（``moment.py`` 的 ``run_moment``），她自己近期做过的
+  * **跨得过 moment 边界。** 这是整件事的理由：她这次 moment 只拿到快照和手机信封，
+    **不继承上一次的工具结果**（``moment.py`` 的 ``run_moment``），她自己近期做过的
     事也只有有限几条（``snapshot.OWN_RECENT_LIMIT``）。所以句柄只出现在画图那一刻的
-    返回值里的话，下一缝它就永远消失了 —— 表是满的，而她两手空空。**这条用例里，第
-    二缝一个句柄都不预置，只能靠"翻一翻"那只手把它找回来。**
+    返回值里的话，下一轮它就永远消失了 —— 表是满的，而她两手空空。**这条用例里，第
+    二轮一个句柄都不预置，只能靠"翻一翻"那只手把它找回来。**
   * **"看某一张"给的是图本身，不是一段描述。** 图片块要一路活到模型的 wire 上：
     OpenAI 那边是 ``image_url`` part，Gemini 那边是 ``inline_data``。退化成文本的
     话，她"看"到的只是自己当初说的那句话 —— 那不叫看。
-  * **上传没落地就不记。** 记下一个根本不在对象存储里的句柄，她下一缝会拿着它反复去
+  * **上传没落地就不记。** 记下一个根本不在对象存储里的句柄，她下一轮会拿着它反复去
     取一张不存在的图，而且一句报错都没有。
   * **认不准是哪一张就回问，不替她挑。** 跟 ``read_a_bit`` 同一条：一个说法对上好
     几张时摊开让她指，绝不排个序取第一个 —— 发错一张图比发不出去更糟。
@@ -43,7 +43,7 @@ from app.living.pictures import (
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
 
-# 她那一缝的钟点（``in_a_moment`` 默认就绑这个时刻）。
+# 她这一轮的钟点（``in_a_moment`` 默认就绑这个时刻）。
 _NOW = dt.datetime(2026, 7, 25, 21, 30, tzinfo=_CST)
 
 # 一张一像素的真 png，base64 编码 —— 生图那一层交回来的就是这种 data URI。
@@ -179,7 +179,7 @@ async def test_a_picture_she_drew_lands_in_her_record(
     assert mine[0].what == "一只在窗台上晒太阳的猫"
     assert mine[0].made_at == _NOW
     assert mine[0].picture_id == handle_for("stored/1")
-    # 她当场就拿到了那串句柄（这一缝里就想发出去的话用得上）。
+    # 她当场就拿到了那串句柄（这一轮里就想发出去的话用得上）。
     assert _handles(_texts(result)) == [handle_for("stored/1")]
     # 库里那一列绝不能是签出来的地址：它 1.5 小时就死，而且死得静默。
     assert "signed.example" not in mine[0].file_name
@@ -580,7 +580,7 @@ async def test_a_handle_from_another_lane_gets_her_nothing(
 
 
 # ---------------------------------------------------------------------------
-# 六 · 跨得过一缝的边界 —— 这条是整件事的理由
+# 六 · 跨得过 moment 边界 —— 这条是整件事的理由
 # ---------------------------------------------------------------------------
 
 
@@ -588,22 +588,22 @@ async def test_a_handle_from_another_lane_gets_her_nothing(
 async def test_she_finds_a_picture_from_an_earlier_moment_with_nothing_handed_to_her(
     pictures_db, her_hands, in_a_moment
 ):
-    """一缝画图 → 另一缝在**不预置任何句柄**的前提下找到它、看它、拿到可发送的引用。
+    """这次 moment 画图 → 下一次 moment 在**不预置任何句柄**的前提下找到它、看它、拿到可发送的引用。
 
-    这是 D2 那条决策的整个理由：她那一缝只拿到快照和手机信封，**不继承上一缝的工具
+    这是 D2 那条决策的整个理由：她这次 moment 只拿到快照和手机信封，**不继承上一次的工具
     结果**；她自己近期做过的事也只有有限几条。所以句柄只出现在画图那一刻的返回值里
-    的话，下一缝它就永远消失了 —— 库里那一行还在，而她两手空空。
+    的话，下一轮它就永远消失了 —— 库里那一行还在，而她两手空空。
 
-    这条用例刻意把那次返回值**整个扔掉**：第二缝唯一的输入就是"翻一翻"那只手交回来
+    这条用例刻意把那次返回值**整个扔掉**：第二轮唯一的输入就是"翻一翻"那只手交回来
     的那段文字，句柄只能从那里面读出来。
     """
     her_hands.draws = [[_A_TINY_PNG]]
 
-    # ---- 上一缝：她画了一张。这一缝结束时，返回值里的一切都不再存在。 ----
+    # ---- 上一轮：她画了一张。这一轮结束时，返回值里的一切都不再存在。 ----
     async with in_a_moment("akao", moment_id="2026-07-25T21:30+08:00"):
         await draw_a_picture.invoke({"what": "一只在窗台上晒太阳的猫"})
 
-    # ---- 下一缝：新的 moment_id，没有人递给她任何东西。 ----
+    # ---- 下一轮：新的 moment_id，没有人递给她任何东西。 ----
     async with in_a_moment(
         "akao",
         now=dt.datetime(2026, 7, 25, 21, 40, tzinfo=_CST),
@@ -612,7 +612,7 @@ async def test_she_finds_a_picture_from_an_earlier_moment_with_nothing_handed_to
         listed = await look_through_your_pictures.invoke({})
         found = _handles(listed)
         assert found, (
-            "下一缝她翻遍手上什么都没有 —— 表是满的，而她两手空空。"
+            "下一轮她翻遍手上什么都没有 —— 表是满的，而她两手空空。"
             f"翻出来的是：{listed!r}"
         )
         # 她能读到的只有这段文字里那一串；下面每一步都只用它。
@@ -638,7 +638,7 @@ async def test_she_finds_a_picture_from_an_earlier_moment_with_nothing_handed_to
 def test_all_four_hands_are_actually_in_her_tool_belt():
     """模块写好了没挂进 ``MOMENT_TOOLS`` 是这类改动最典型的静默失败：
 
-    工具都在、测试都绿，而她那一缝的工具列表里一个都没有 —— 她从来没有过这四只手，
+    工具都在、测试都绿，而她这一轮的工具列表里一个都没有 —— 她从来没有过这四只手，
     却没有任何东西会因此报错。
     """
     from app.living.moment import MOMENT_TOOLS
@@ -773,7 +773,7 @@ async def test_she_can_walk_back_past_the_list_limit_without_remembering_anythin
 ):
     """挤下去的那些也够得到，而且不要求她记得那张是什么。
 
-    她跨不过一缝的边界：上一缝画的那张，这一缝她既没有句柄也想不起那句话。清单只给
+    她跨不过 moment 边界：上一轮画的那张，这一轮她既没有句柄也想不起那句话。清单只给
     最近一屏、其余靠"报得出它是什么"的话，第 21 张往前就是**永久**够不到 —— 而那些
     全是她自己做的东西。所以清单末尾那串句柄要能当作"接着往前"的落脚点：它就印在她
     刚看到的那一屏上，不需要她记住任何东西。

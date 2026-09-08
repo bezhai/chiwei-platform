@@ -2,7 +2,7 @@
 
 跨天沉淀（:mod:`app.living.day_page`）让她记得住昨天。这一层管的是另一件事：**她
 会因为过去这一周而变**。写下的那一版进 :class:`app.living.persona.PersonaVersion`
-版本链，而链上最新一版就是她每一缝、写日记、开口说话时读到的自己
+版本链，而链上最新一版就是她每一轮、写日记、开口说话时读到的自己
 （:func:`app.living.persona.persona_prompt_vars`）——所以这里落库的东西下一分钟就在
 她眼前，不是一份存档。
 
@@ -17,7 +17,7 @@ v(n)，v(n) 的输入里有 v(n-1)。没有一个不参与这条循环的参照�
 **原始那一列**，它写死在库里、没有任何代码往里写，是唯一不随她漂的东西。
 
 **⚠️ 同名不同值，是刻意的。** :func:`app.living.persona.persona_prompt_vars` 里那个
-``{{persona_core}}`` 装的是**链上最新一版**（那是对的：每一缝她该读到现在的自己），
+``{{persona_core}}`` 装的是**链上最新一版**（那是对的：每一轮她该读到现在的自己），
 这一轮装的是**扁平列**（那也是对的：重写自己的时候需要一个循环外的参照）。两个变量
 同名不同值，因为它们答的是两个不同的问题：「她现在是谁」和「她本来是谁」。所以这一
 轮**不复用** ``persona_prompt_vars``，自己拼一份（:func:`persona_review_vars`）——
@@ -275,7 +275,7 @@ async def review_persona(
             persona_id=persona_id,
             session_id=f"living-persona-review:{lane}:{persona_id}",
         )
-        # 用量落 durable PG，理由同一缝和 world 轮次（见 app.agent.trace）：langfuse
+        # 用量落 durable PG，理由同 moment 和 world 轮次（见 app.agent.trace）：langfuse
         # 会系统性丢 trace，"这一周花了多少"只能从 PG 数。
         with collect_usage() as usage:
             reply = await build_persona_review_runner().run(

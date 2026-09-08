@@ -6,7 +6,7 @@
 //（那个文件开头写了它为什么故意改了顺序）。
 //
 // **入站到落库为止。** 「这条消息触发一次聊天请求」这个概念已经不存在了：赤尾不从队列
-// 拿消息，她每一缝直接查 common_message、自己决定要不要开口（见 agent-service 的
+// 拿消息，她每次醒来直接查 common_message、自己决定要不要开口（见 agent-service 的
 // app/living）。所以这里既不发 MQ、也不抢去重锁、也不认领消息、也不落
 // common_agent_response 的 pending 行。runRules 留着是因为指令仍然走它 —— QQ 今天一条
 // 平台指令都没注册（plugins/qq/index.ts 的 commands=[]），所以它的产出只有一条终态日志。

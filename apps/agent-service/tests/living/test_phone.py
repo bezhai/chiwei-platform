@@ -2,7 +2,7 @@
 
 五条硬边界，各有对应的用例：
 
-  * **每一缝拿到的只有信封。** 有没有动静、谁、多密多快、跟她刚才干的事有没有牵连。
+  * **每一轮拿到的只有信封。** 有没有动静、谁、多密多快、跟她刚才干的事有没有牵连。
     正文一个字都不在信封里 —— 不然"看手机"就成了摆设，她躺着就把消息读完了。
   * **打开一条会话看到的是最近若干条往来**，双向、含她自己说过的、含读过的上文。
     窗口、未读、游标是三件事：窗口不看游标，未读是"游标之后别人发的没撤的"，游标只
@@ -532,7 +532,7 @@ async def test_an_empty_phone_says_so_instead_of_leaving_a_hole(living_db):
 # "没撤掉的"、"游标之后的"，于是"看手机"不是翻聊天记录，是**看未读**。
 #
 # 实证（coe-living，2026-09-04）：她自己撤回了一句话，8 分钟后还在问主人"你刚才到底
-# 发了啥、这么想让我看到又撤回"。那一缝她眼前只有孤零零一句「还真的能撤回啊」——
+# 发了啥、这么想让我看到又撤回"。那一轮她眼前只有孤零零一句「还真的能撤回啊」——
 # 前面的来回全在游标之前，而读过的消息不进任何持久记忆。**决定说什么的那个模型，
 # 从来没见过一段双向对话。**
 #
@@ -608,7 +608,7 @@ async def test_a_conversation_with_nothing_unread_does_not_move_the_cursor(
 ):
     """没有未读时打开会话，游标一动不动 —— 窗口里那些行不是"读到了这儿"的依据。
 
-    游标只由未读集合决定。让窗口推游标的话，她开口说了句话、下一缝随手点开会话，
+    游标只由未读集合决定。让窗口推游标的话，她开口说了句话、下一轮随手点开会话，
     游标就跳到她自己那句上，之后乱序到达、时刻更早的消息永久被跳过。
     """
     await _seed_world()
@@ -654,7 +654,7 @@ async def test_her_own_latest_word_does_not_take_the_cursor(living_db, in_a_mome
 async def test_it_says_how_many_of_them_are_new(living_db, in_a_moment):
     """「其中 N 条是新的」= 未读集合与展示窗口的交集。
 
-    窗口里会有她上一缝已经看过的消息（决策 2b：不配任何"防重复回应"的规则），所以
+    窗口里会有她上一轮已经看过的消息（决策 2b：不配任何"防重复回应"的规则），所以
     哪些是新到的必须直接说出来 —— 她读得出来，读不出来也是她的判断。
     """
     await _seed_world()
@@ -743,7 +743,7 @@ async def test_the_window_and_the_unread_set_come_from_one_query(
     await _her_own(_DM, text_body="马上回你", at=_at(20, 12))
 
     async with in_a_moment("akao", now=_at(20, 20)):
-        # 先把这一缝的名单定下来 —— 真链路里这一步发生在信封那一眼（见
+        # 先把这一轮的名单定下来 —— 真链路里这一步发生在信封那一眼（见
         # ``run_moment``）。白名单那次统计也读 ``common_message``，不先定下来的话它
         # 会混进下面这个数里，而这里要数的是"打开会话那一眼"发了几条。
         await reachable_conversations(persona_id="akao", now=_at(20, 20))
@@ -909,12 +909,12 @@ async def test_a_glance_that_failed_is_not_counted_as_read(
 async def test_a_moment_that_never_finished_did_not_read_anything(
     living_db, in_a_moment
 ):
-    """**看手机算不算数，绑在这一缝跑完上。**
+    """**看手机算不算数，绑在这一轮跑完上。**
 
-    工具返回 ≠ 她看见了：工具结果要先进模型的上下文，这一缝才算真的把内容送到她
+    工具返回 ≠ 她看见了：工具结果要先进模型的上下文，这一轮才算真的把内容送到她
     眼前。中间崩掉的话，游标要是已经推过去了，那几条消息就此永久消失、而且一句
-    报错都没有 —— 所以游标跟着一缝一起落库，缝没落地就一条都不算已读。
-    她下一缝原样再看到（宁可重看，不可漏看）。
+    报错都没有 —— 所以游标跟着这一轮一起落库，这一轮没落地就一条都不算已读。
+    她下一轮原样再看到（宁可重看，不可漏看）。
     """
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(21, 30))
@@ -923,7 +923,7 @@ async def test_a_moment_that_never_finished_did_not_read_anything(
         seen = await look_at_phone.invoke({"channel_id": str(_DM)})
 
     assert "在吗" in seen, "工具本身该正常返回"
-    assert await read_through(lane=LANE, persona_id="akao", channel_id=str(_DM)) == NEVER_LOOKED, "这一缝没跑完，游标却已经推过去了"
+    assert await read_through(lane=LANE, persona_id="akao", channel_id=str(_DM)) == NEVER_LOOKED, "这一轮没跑完，游标却已经推过去了"
     assert [
         e.unread
         for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
@@ -934,11 +934,11 @@ async def test_a_moment_that_never_finished_did_not_read_anything(
 async def test_looking_twice_in_one_moment_shows_the_same_window_and_nothing_new(
     living_db, in_a_moment
 ):
-    """一缝里第二次打开同一条会话：**窗口内容相同**，「其中 N 条是新的」为 0。
+    """这一轮里第二次打开同一条会话：**窗口内容相同**，「其中 N 条是新的」为 0。
 
     真人再点开一次看到的也是同样的消息 —— 内容不该消失。变的只有"新到几条"，而它按
-    **本缝内待落库的游标**算（``_pending_cursor``）：第一次看已经把这条算成读过了，
-    只是还没落库。这就是游标延到缝末落库的唯一代价：本缝内的"已经看过"必须自己记着。
+    **本轮内待落库的游标**算（``_pending_cursor``）：第一次看已经把这条算成读过了，
+    只是还没落库。这就是游标延到本轮末尾落库的唯一代价：本轮内的"已经看过"必须自己记着。
     """
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(21, 30))
@@ -952,7 +952,7 @@ async def test_looking_twice_in_one_moment_shows_the_same_window_and_nothing_new
         f"第二次点开会话，内容凭空没了 —— 真人再点一次看到的是同样的消息。拿到：{second}"
     )
     assert "其中 0 条是新的" in second, (
-        f"同一缝里第二次看，刚看过的又被算成新到的。拿到：{second}"
+        f"同一轮里第二次看，刚看过的又被算成新到的。拿到：{second}"
     )
 
 
@@ -982,7 +982,7 @@ async def test_she_reads_the_last_few_and_the_ones_before_are_gone_for_good(
     """挤出窗口的那些不会补看，游标照样推到未读里最新那条。
 
     这是设计不是 bug —— 真人"未读 47 条"就是先看最后五到十条，能自洽就到此为止。
-    改成"打开会话"之后**窗口里的东西不再消失**（下一缝点开还是那十条），真正丢的是
+    改成"打开会话"之后**窗口里的东西不再消失**（下一轮点开还是那十条），真正丢的是
     被挤出窗口的那五条：它们既不在窗口里，也已经不算未读了。
     """
     await _seed_world()
@@ -997,7 +997,7 @@ async def test_she_reads_the_last_few_and_the_ones_before_are_gone_for_good(
     assert "第0条" not in seen, "她不该一次把 15 条全读完"
     assert "还有 5 条" in seen, f"被挤出窗口的那几条得说出来。拿到：\n{seen}"
 
-    # 下一缝再点开：**同样那十条还在**（真人再点一次看到的就是它们），但一条新的
+    # 下一轮再点开：**同样那十条还在**（真人再点一次看到的就是它们），但一条新的
     # 都没有；被挤出去的那五条不会回来。
     async with in_a_moment("akao"):
         again = await look_at_phone.invoke({"channel_id": str(_DM)})
@@ -1010,7 +1010,7 @@ async def test_she_reads_the_last_few_and_the_ones_before_are_gone_for_good(
 
 
 # --------------------------------------------------------------------------
-# 五 · 谁在叫她 —— 提前一缝的输入（判断在 nudge 那边，这里只验事实）
+# 五 · 谁在叫她 —— 提前一轮的输入（判断在 nudge 那边，这里只验事实）
 # --------------------------------------------------------------------------
 
 
@@ -1248,7 +1248,7 @@ async def test_the_conversation_that_is_calling_her_is_always_in_the_envelope(
 # --------------------------------------------------------------------------
 #
 # 信箱既没有时间窗也没有 TTL：她睡着的时候消息照堆、一条都不算已读（上面第三节），
-# 所以昨晚积压的未读原样进这一缝。裸时分下 ``23:50`` 昨晚和今晚一个形状 —— 线上同一
+# 所以昨晚积压的未读原样进这一轮。裸时分下 ``23:50`` 昨晚和今晚一个形状 —— 线上同一
 # 个病炸过（2026-08-03：中午 13:18 往群里发「大半夜的发什么疯」）。出口是
 # ``app.infra.cst_time.to_cst_dated``。
 
@@ -1635,7 +1635,7 @@ async def test_the_address_sits_next_to_the_name_it_belongs_to(living_db):
 
     实测（coe-living，2026-08-31 20:21）：信封把标题摆在最显眼处、``channel_id``
     挂在一长串属性的最后，她于是拿人名去调 ``look_at_phone``，被 fail-loud 顶回来，
-    白费一缝。**这不是她的错**——在她的认知里那条私聊就叫那个名字，uuid 是工程
+    白费一轮。**这不是她的错**——在她的认知里那条私聊就叫那个名字，uuid 是工程
     产物；工具描述再喊「照抄别自己编」也是在跟这个错位对抗。名字和地址绑在一起，
     她要指哪条会话时才有一个完整的东西可指。
     """
@@ -1771,7 +1771,7 @@ async def test_every_match_is_listed_without_picking_one(
 async def test_finding_someone_is_one_of_the_hands_she_actually_has(living_db):
     """这只手要真在她的工具集里。
 
-    没注册是**静默失败**：代码写好了、测试也绿，但她那一缝的工具列表里没有它，
+    没注册是**静默失败**：代码写好了、测试也绿，但她那一轮的工具列表里没有它，
     于是永远不会调——症状跟"零未读就找不回这个人"一模一样，而且更难查。
     """
     from app.living.moment import MOMENT_TOOLS
@@ -1941,7 +1941,7 @@ async def test_the_tail_she_speaks_from_carries_the_file_name_too(
 
     看手机和渲染措辞是两个读取方、同一份正文。只修一边的话，她在手机上看见
     「[文件: 三体.epub]」、转头开口时上下文里又变回「[file]」—— 同一个东西在
-    一缝之内长了两副样子，她会当成两件事。
+    一轮之内长了两副样子，她会当成两件事。
     """
     await _seed_world()
     await _incoming(_DM, at=_at(22, 27), items=[_FILE_ITEM], content_text="[file]")
@@ -2627,7 +2627,7 @@ async def test_both_places_she_reads_a_message_render_it_identically(
     """她点开会话看到的那一行，跟她开口前读到的那一行，**逐字相同**。
 
     两处是两个读取方（:func:`look_at_phone` 和 :func:`conversation_as_she_knows_it`）
-    同一份事实。形状分家的话，同一条消息在一缝之内长两副样子：她在手机上看到主人说
+    同一份事实。形状分家的话，同一条消息在一轮之内长两副样子：她在手机上看到主人说
     的话带着印，转头开口时那条印没了 —— 她会以为那是两个人。
     """
     await _seed_world()
@@ -2865,7 +2865,7 @@ async def test_a_window_row_that_lost_the_recall_columns_fails_loudly(
     """窗口那条查询少了 ``recalled_at``，这一眼当场失败，不端一份看起来正常的东西给她。
 
     **新的失败形态是"看手机失败"**：`@tool_error` 把它报回去，游标一条都不推
-    （跟渲染那步自己炸掉是同一条路），她下一缝原样再看到这条会话。
+    （跟渲染那步自己炸掉是同一条路），她下一轮原样再看到这条会话。
     旧形态是她收到一条**已经撤回、却挂着可撤编号**的消息，而且没有任何报错。
     """
     from app.living import phone as phone_mod

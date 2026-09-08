@@ -6,7 +6,7 @@
   * :mod:`app.living.persona`     这个家里的人：谁住在这儿、「她是谁」那份正文的版本链
     （她自己每周改的那条），以及喂进 prompt 的那两个变量——三条注入路一处组装
   * :mod:`app.living.place`       位置比对规则（三档，纯函数，不问模型）
-  * :mod:`app.living.anchor`      时间锚：一缝 / 一轮的身份，派生 id 全挂在它上面
+  * :mod:`app.living.anchor`      时间锚：moment / world 一轮的身份，派生 id 全挂在它上面
   * :mod:`app.living.serial`      进程内排他占用 + 提交序 append
   * :mod:`app.living.happening`   谁在哪、对谁、通过什么渠道、做了什么说了什么
   * :mod:`app.living.whereabouts` 她此刻在做什么、在哪
@@ -22,20 +22,20 @@
 
 她一直在推进（T2）+ 她对外说话（T4）——嘴在外面，耳朵没有：
 
-  * :mod:`app.living.scope`       一缝里每个工具都要问的那四样（谁 / 哪个泳道 / 几点 / 哪一缝）
-  * :mod:`app.living.snapshot`    她进入一缝时读到的东西：状态快照，不是历史回放
+  * :mod:`app.living.scope`       这一轮里每个工具都要问的那四样（谁 / 哪个泳道 / 几点 / 哪一轮）
+  * :mod:`app.living.snapshot`    她进入这一轮时读到的东西：状态快照，不是历史回放
   * :mod:`app.living.day_page`    跨天沉淀：每天凌晨她把刚过去那一天自己写成一页，
-    之后每一缝都读得到（不是机器折叠原文，原始记录一条不动）
+    之后每一轮都读得到（不是机器折叠原文，原始记录一条不动）
   * :mod:`app.living.persona_review` 每周回看：周一早上她读上一周自己写的那几页，
     重写一版「我是谁」进版本链。锚是 ``bot_persona.persona_core`` 那个扁平列——不给
     锚她就是在自我回流
   * :mod:`app.living.loose_ends`  她自己挂着没了结的事
-  * :mod:`app.living.moment`      一缝：默认「继续」，被带走时换的是一件事
+  * :mod:`app.living.moment`      她的醒来周期：默认「继续」，被带走时换的是一件事
   * :mod:`app.living.phone`       手机：信封可感、内容要她去看，持久游标
   * :mod:`app.living.whitelist`   会话白名单：哪些会话进她的视野（手机那道主闸的判据）
   * :mod:`app.living.reading`     读别人发给她的文件（没有"书"这个注册物）
   * :mod:`app.living.pictures`    她自己做过的图：画 / 上网找 / 翻一翻 / 拿出一张看；
-    存永久句柄，跨缝找得回
+    存永久句柄，跨轮找得回
   * :mod:`app.living.web`         上网：手里有问题就查，没有就随便翻
   * :mod:`app.living.guides`      手边那几份写好的说明：读一份 / 照说明在沙箱里跑一条
     命令。她自己长什么样就写在其中一份里；正文在盘上（:mod:`app.skills` 扫目录、热
@@ -43,7 +43,7 @@
   * :mod:`app.living.mouth`       嘴：把她的意思渲染成人话发出去（**没有入口**）
   * :mod:`app.living.takeback`    撤回自己说过的话，按她自己台账上的编号指
   * :mod:`app.living.landing`     渠道那边关于她这次开口的事实，事后按 id 取回来
-  * :mod:`app.living.nudge`       有人叫她就提前一缝，但不代她回复
+  * :mod:`app.living.nudge`       有人叫她就提前叫醒她一次，但不代她回复
 
 三条贯穿全包的判断，散在各模块里容易只看到一半：
 

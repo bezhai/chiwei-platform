@@ -359,7 +359,7 @@ async def test_three_sisters_get_three_different_days(page_db):
 
 @pytest.mark.integration
 async def test_the_snapshot_carries_the_page_she_wrote(page_db, stub_page):
-    """写了没人读 = 白写。这一段必须真的进她每一缝的输入。"""
+    """写了没人读 = 白写。这一段必须真的进她每一轮的输入。"""
     await _a_day_worth_of_stuff()
     stub_page("胶片摊了一茶几，绫奈说要下雨。")
     await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))

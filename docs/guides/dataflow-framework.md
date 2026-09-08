@@ -233,7 +233,7 @@ Source.interval(seconds=10)          # 秒级定时
 Source.http("/api/trigger")          # HTTP endpoint(Runtime 自动注册 FastAPI)
 ```
 
-> **当前图里用了哪几种**：业务边只有 `Source.interval`（五条钟，`app/wiring/living.py`）和 `Source.http`（运维 admin / DLQ 端点，`app/wiring/admin.py`）。**业务侧一条 `Source.mq` 都没有** —— 入站不经队列：两个渠道服务把消息投影成公共层口径写进 `common_message` 就结束，她每一缝自己去查（`app/living/phone.py`），自己决定要不要开口。唯一一条 `Source.mq` 是框架内部的 `runtime_delayed_trigger_agent-service`（`app/runtime/delayed_trigger.py::register_runtime_trigger_wire`，`emit_delayed` 的跨进程回投）。`Source.cron` 有 adapter 但当前没有边在用。也没有专门的 `Source.manual`，因为它跟 http 没有运行时差异。
+> **当前图里用了哪几种**：业务边只有 `Source.interval`（五条钟，`app/wiring/living.py`）和 `Source.http`（运维 admin / DLQ 端点，`app/wiring/admin.py`）。**业务侧一条 `Source.mq` 都没有** —— 入站不经队列：两个渠道服务把消息投影成公共层口径写进 `common_message` 就结束，她每次醒来自己去查（`app/living/phone.py`），自己决定要不要开口。唯一一条 `Source.mq` 是框架内部的 `runtime_delayed_trigger_agent-service`（`app/runtime/delayed_trigger.py::register_runtime_trigger_wire`，`emit_delayed` 的跨进程回投）。`Source.cron` 有 adapter 但当前没有边在用。也没有专门的 `Source.manual`，因为它跟 http 没有运行时差异。
 
 用法:
 
@@ -465,7 +465,7 @@ make deploy APP=agent-service LANE=<your-lane> GIT_REF=<branch>
 #    图里没有入站队列，所以不存在"发一条消息把它推进图"这回事。两条路：
 #    - 等钟：五条 Source.interval 最长 5 分钟必拍一次；
 #    - 要她读到人说的话：/ops bind bot dev <your-lane> 之后在飞书 dev bot 发消息，
-#      消息落进 common_message，她下一缝自己查到。
+#      消息落进 common_message，她下次醒来自己查到。
 
 # 5. 查日志验证新节点跑起来了
 make logs APP=agent-service LANE=<your-lane> SINCE=10m
@@ -495,7 +495,7 @@ make logs APP=agent-service LANE=<your-lane> SINCE=10m
 
 | 入口 | 代码位置 | 例子 |
 |---|---|---|
-| LLM tool（她在一缝里调） | `app/living/moment.py` 的 `@tool`，实现落在 `app/living/*.py` | `keep_in_mind`(@tool) → `rewrite_loose_ends`(`loose_ends.py`) |
+| LLM tool（她醒来时调） | `app/living/moment.py` 的 `@tool`，实现落在 `app/living/*.py` | `keep_in_mind`(@tool) → `rewrite_loose_ends`(`loose_ends.py`) |
 | @node 内部委托 | `app/wiring/living.py` 挂的五个 tick 节点调底层 mutation | `calendar_tick`(@node) → `plan_day` / `deliver_due`(`calendar.py`) |
 
 **这种 mutation function 要触发下游 EventData 时，必须用 `transactional_emit(s)` 在事务内 append**，不能 commit 后再 `await emit(...)`。
@@ -916,12 +916,12 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 
 ### 当前 topology（按 pipeline）
 
-**图里没有入站队列。** 业务边全是时间源，她收消息靠每一缝自己查 `common_message`（`app/living/phone.py`），不靠谁把消息推给她。
+**图里没有入站队列。** 业务边全是时间源，她收消息靠每次醒来自己查 `common_message`（`app/living/phone.py`），不靠谁把消息推给她。
 
 | Pipeline | 入口 Source | wiring 文件 | 主要 @node | Deployment |
 |---|---|---|---|---|
-| **她的一缝** | `Source.interval(60s)` | `wiring/living.py` | `LifeMomentTick` → `life_moment_tick`（真实间隔是 Dynamic Config（默认 10 分钟），门在节点里；查手机 → 模型一轮 → 工具 → 落 `LifeMoment`） | agent-service |
-| **被叫来提前一缝** | `Source.interval(60s)` | `wiring/living.py` | `PhoneNudgeTick` → `phone_nudge_tick`（私聊、或群里点了她的名，就把她带到那一刻） | agent-service |
+| **她的 moment** | `Source.interval(60s)` | `wiring/living.py` | `LifeMomentTick` → `life_moment_tick`（真实间隔是 Dynamic Config（默认 10 分钟），门在节点里；查手机 → 模型一轮 → 工具 → 落 `LifeMoment`） | agent-service |
+| **被提前叫醒** | `Source.interval(60s)` | `wiring/living.py` | `PhoneNudgeTick` → `phone_nudge_tick`（私聊、或群里点了她的名，就把她带到那一刻） | agent-service |
 | **日历** | `Source.interval(60s)` | `wiring/living.py` | `CalendarTick` → `calendar_tick`（排今天还没到点的槽 + 到期交付成 `Happening`，一分模型钱不花） | agent-service |
 | **world 轮次** | `Source.interval(300s)` | `wiring/living.py` | `WorldRoundTick` → `world_round_tick`（真实轮次间隔是 Dynamic Config，门在节点里） | agent-service |
 | **开口落地对账** | `Source.interval(300s)` | `wiring/living.py` | `LandingTick` → `landing_tick`（按 `agent_outbound_id` 把落地时刻和撤回时刻对回台账） | agent-service |
@@ -938,7 +938,7 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 
 1. `app/wiring/living.py` —— 五条钟 + 那条 durable 边 + 出口 sink，整张图就这一个文件。开头的 docstring 讲清了"为什么这里没有、也不会有入站边"。
 2. `app/living/clock.py` —— `CalendarTick` / `WorldRoundTick` 两个 tick Data + 节点，看时间源 Data 的形状约束（只能有一个 `ts` 字段）。
-3. `app/living/moment.py` —— 一缝，业务最重的那个 @node，`@tool` 也都在这儿。
+3. `app/living/moment.py` —— moment，业务最重的那个 @node，`@tool` 也都在这儿。
 4. `app/living/phone.py` —— 她怎么查 `common_message`、游标怎么走。入站不经 MQ 这件事在这里落地。
 5. `app/domain/chat_dataflow.py` —— `ChatResponseSegment`，出图那一侧的 Data 契约。
 6. `app/domain/safety.py` —— `Recall`，撤回出图的 Data 契约。

@@ -41,7 +41,7 @@
       （原始报文在 prod 那次已经记过，这里不重复审计落库）
   → 投影成 common 口径写进 common_message —— 入站到此为止，没有队列
 
-agent-service(X) 靠自己的钟醒来，每一缝查 common_message 才看到它
+agent-service(X) 靠自己的钟醒来，每次醒来查 common_message 才看到它
       （前提是 X 是 coe：ppe 共用 prod 库，看到它的是 prod 那个进程，见上方硬约束）
   → 她决定开口 → chat_response_lark_X 队列 → lark-outbound(X) → 飞书回复
 ```

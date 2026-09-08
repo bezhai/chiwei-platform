@@ -38,11 +38,11 @@ flowchart LR
     RR -.-> LLM
 ```
 
-**图里没有入站队列**，五条边界全是 `Source.interval`（`app/wiring/living.py`）。她每一缝直接查 `common_message` 看有没有人找她（`app/living/phone.py`），自己决定要不要开口 —— 没有谁把消息推给她。
+**图里没有入站队列**，五条边界全是 `Source.interval`（`app/wiring/living.py`）。她每次醒来直接查 `common_message` 看有没有人找她（`app/living/phone.py`），自己决定要不要开口 —— 没有谁把消息推给她。
 
 开口那侧出图：`ChatResponseSegment` → `Sink.mq("chat_response")` → 按 channel 落 `chat_response_lark` / `chat_response_qq`，飞书那条由 lark-outbound 消费、QQ 那条由 chat-response-worker 消费。撤回同理，`Recall` → `Sink.mq("recall")` → `recall_{channel}`。
 
-`read_a_round` 那条是**图内的 durable 边**（`FilePickedUp`）：她在某一缝拿起一个文件，读那一程（取字节、解码、几轮模型调用）在边的另一头异步跑，不把她卡在一缝里。durable 只是边的传输方式，不是入口 —— 边上跑的只有她自己刚 emit 的那个信号。
+`read_a_round` 那条是**图内的 durable 边**（`FilePickedUp`）：她在某次醒来拿起一个文件，读那一程（取字节、解码、几轮模型调用）在边的另一头异步跑，不把她卡在这次醒来里。durable 只是边的传输方式，不是入口 —— 边上跑的只有她自己刚 emit 的那个信号。
 
 ## 边的两种：默认 vs durable
 

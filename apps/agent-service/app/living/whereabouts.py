@@ -36,7 +36,7 @@ async def note_whereabouts(
     doing: str,
     noted_at: datetime,
 ) -> Whereabouts:
-    """记下她这一缝在哪、在做什么。同一 ``moment_id`` 重放只落一行。"""
+    """记下她这一轮在哪、在做什么。同一 ``moment_id`` 重放只落一行。"""
     return await append_in_commit_order(
         Whereabouts,
         stream=whereabouts_seq_lock_key(lane, persona_id),

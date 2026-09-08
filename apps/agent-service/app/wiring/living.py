@@ -2,8 +2,8 @@
 
   interval 60s  -> CalendarTick      -> calendar_tick       （日历，不花模型钱）
   interval 300s -> WorldRoundTick    -> world_round_tick    （world 稀疏轮次，门在节点里）
-  interval 60s  -> LifeMomentTick    -> life_moment_tick    （三个 life 的一缝，门在节点里）
-  interval 60s  -> PhoneNudgeTick    -> phone_nudge_tick    （有人叫她就提前一缝）
+  interval 60s  -> LifeMomentTick    -> life_moment_tick    （三个 life 共用的这一轮，门在节点里）
+  interval 60s  -> PhoneNudgeTick    -> phone_nudge_tick    （有人叫她就提前叫醒她一次）
   interval 300s -> LandingTick       -> landing_tick        （她那次开口落地成哪一行）
   interval 300s -> DayPageTick       -> day_page_tick       （凌晨把昨天写成一页，窗口在节点里）
   interval 300s -> PersonaReviewTick -> persona_review_tick （周一早上重写一版「我是谁」）
@@ -18,13 +18,13 @@ Pod**，所以这七个 Data 的形状由 ``tests/wiring/test_time_source_payloa
 ``tests/living/test_moment.py`` 和 ``tests/living/test_no_inbound.py`` 钉住。
 
 后四条钟拍得都比它们真正的间隔密（world 五分钟拍、一小时跑一轮；life 一分钟拍、
-十分钟跑一缝；日记和每周回看五分钟拍、各自只在一个两小时的窗口里做事），因为
+十分钟醒一次；日记和每周回看五分钟拍、各自只在一个两小时的窗口里做事），因为
 ``Source.interval`` 的秒数在 import 时就固定了——想让间隔成为可调的业务参数
 （Dynamic Config），只能让钟拍得比最密的间隔更密、然后在节点里判"够不够久"。
 
 **这里没有、也不会有任何入站边。** 七条钟全是 interval，一条 ``Source.mq`` /
 ``Source.http`` 都没有：chat 是嘴，没有耳朵，而这件事靠"根本没有接消息的地方"来
-保证，不靠哪个分支里的 if。她收消息走的是每一缝直接查 ``common_message``
+保证，不靠哪个分支里的 if。她收消息走的是每一轮直接查 ``common_message``
 （``app.living.phone``），不碰队列。
 
 守这条的是 ``tests/living/test_no_inbound.py``，它判的是**这条来源通向谁**：时间源
@@ -37,7 +37,7 @@ Pod**，所以这七个 Data 的形状由 ``tests/wiring/test_time_source_payloa
 
 除七条钟之外还有一条 durable 边（``FilePickedUp -> read_a_round``，她拿起一个文件
 读一程）。它**同样不是入站口**：``.durable()`` 只是 ``WireBuilder`` 上的标志位，不
-产生任何 ``Source``，边上跑的只有她自己刚在某一缝里 emit 的那个信号。
+产生任何 ``Source``，边上跑的只有她自己刚在某一轮里 emit 的那个信号。
 
 ``app.living.records`` 的 import 不能删：Data 类要被 ``app.wiring`` 的 side-effect
 import 链拉到才会进 ``DATA_REGISTRY``，否则 ``Runtime.migrate_schema()`` 静默不建表、
@@ -106,7 +106,7 @@ wire(PhoneNudgeTick).from_(Source.interval(PHONE_NUDGE_TICK_SECONDS)).to(
     phone_nudge_tick
 )
 # 对账：把她说出去的那些跟公共层落下的那一行接回来。单独一条钟，不塞进上面任何
-# 一条 —— 那几条钟各有各的节奏理由（日历的到期误差、world 的轮次分辨率、一缝的
+# 一条 —— 那几条钟各有各的节奏理由（日历的到期误差、world 的轮次分辨率、life 醒来的
 # 提前延迟），把一件跟它们无关的事挂上去就是职责混淆，而且从此改不动其中任何
 # 一个的频率。
 wire(LandingTick).from_(Source.interval(LANDING_TICK_SECONDS)).to(landing_tick)
@@ -130,8 +130,8 @@ wire(PersonaReviewTick).from_(Source.interval(PERSONA_REVIEW_TICK_SECONDS)).to(
     persona_review_tick
 )
 
-# 读一程：她在某一缝拿起一个文件 → emit 一个 durable ``FilePickedUp`` → 这条边
-# 把它接给 ``read_a_round`` 去读（取字节、解码、几轮模型调用，塞进一缝里会把她
+# 读一程：她在某一轮拿起一个文件 → emit 一个 durable ``FilePickedUp`` → 这条边
+# 把它接给 ``read_a_round`` 去读（取字节、解码、几轮模型调用，塞进这一轮里会把她
 # 卡在网络上）。durable 让它跨进程可达且不丢，并按 ``(lane, round_id)`` 去重。
 #
 # **这条边不是入站口。** ``.durable()`` 只是 ``WireBuilder`` 上的一个标志位，

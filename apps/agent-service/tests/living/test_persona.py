@@ -18,7 +18,7 @@ persona 慢漂（周级 review）不 UPDATE ``bot_persona`` 主表，而是落 f
 
 文件最后一节验的是**另一件事**：链上写下的东西真的到了她眼前。链写得再对，读侧
 去读 ``bot_persona`` 那个扁平列的话，她自己改了三个月的正文一个字都不会出现——而
-且没有任何报错，只是每一缝的底色都是出厂那份。
+且没有任何报错，只是每一轮的底色都是出厂那份。
 
 持久化用真实 Postgres（testcontainers）——版本链的正确性故事全在"能不能 append
 进去、版本是否递增、来源过滤是否只认 review"，mock pg 等于什么都没测。
@@ -471,7 +471,7 @@ async def test_seed_version_does_not_satisfy_review_idempotency(seed_db):
 # 链写对了不等于她读得到。上面每一条验的都是"写进去、读回来"，而她真正看到的是
 # :func:`persona_prompt_vars` 摆出来的那两个 prompt 变量——中间任何一处去读
 # ``bot_persona.persona_core`` 那个扁平列，她自己改了三个月的正文就一个字都不会
-# 出现，而且**一句报错都没有**：每一缝照跑，只是底色永远是出厂那份。
+# 出现，而且**一句报错都没有**：每一轮照跑，只是底色永远是出厂那份。
 
 
 @pytest.mark.integration
@@ -508,7 +508,7 @@ async def test_an_empty_chain_falls_back_to_the_flat_column(seed_db):
 async def test_with_nothing_written_anywhere_she_is_told_so(seed_db):
     """链空 + 扁平列也空白 → 说实话，不渲染出一个空洞。
 
-    空洞的后果是静默的：prompt 里那一段变成空行，她这一缝没有可对照的底色，而
+    空洞的后果是静默的：prompt 里那一段变成空行，她这一轮没有可对照的底色，而
     模型不会因此报错——只会表现成"她想不起自己是个什么样的人"。
     """
     await _seed_bot_persona("akao", "出厂身份正文。", persona_core="   ")
@@ -523,7 +523,7 @@ async def test_a_blank_version_does_not_blank_her_out(seed_db):
     """链上最新一版正文空白 → 当成没有，退回扁平列。
 
     写侧拦得住空白落版，但 owner 是人工写入口。这里是防御纵深：宁可退回出厂那份，
-    也不能让她这一缝拿着一段空白当自己。
+    也不能让她这一轮拿着一段空白当自己。
     """
     await _seed_bot_persona("akao", "出厂身份正文。")
     await write_persona_version(
@@ -611,9 +611,9 @@ async def test_the_variables_are_exactly_the_two_the_prompts_name(seed_db):
 
 
 def test_all_three_paths_ask_the_same_place_who_she_is():
-    """一缝、写日记、开口渲染读的是**同一个**函数。
+    """一轮、写日记、开口渲染读的是**同一个**函数。
 
-    三处各拼一份的后果不是报错，是分裂：她那一缝里是链上新的自己，一开口又变回
+    三处各拼一份的后果不是报错，是分裂：她那一轮里是链上新的自己，一开口又变回
     ``bot_persona`` 上出厂那份。开口那条路原先就是各拼一份，而且空白处理跟另外两处
     还不一样。
     """

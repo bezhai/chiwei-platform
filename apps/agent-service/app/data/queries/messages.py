@@ -529,7 +529,7 @@ async def find_messages_known_through(
 #
 # 代价是没有索引可用，只能扫。**过滤必须下推进扫描**（``WHERE ... ILIKE`` 在 matched
 # 里，不是先聚合再 FILTER）：prod 实测 akao 名下 323 条会话共 254 万条消息，下推之后
-# 是一次并行 seq scan，EXPLAIN ANALYZE 386ms。这只手她一天调不了几次、不在每一缝的
+# 是一次并行 seq scan，EXPLAIN ANALYZE 386ms。这只手她一天调不了几次、不在每次醒来的
 # 路径上，386ms 换"她能主动找回一个人"是划算的——所以这里不加时间窗，加了她就再也
 # 找不回久没联系的人。
 _LOOK_UP_SQL = f"""

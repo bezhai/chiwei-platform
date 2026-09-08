@@ -136,9 +136,9 @@ class LivingDayPage(Data):
     happenings: int             # 摆给她的材料有几行
 
     class Meta:
-        # 读侧唯一形状：某个人比某一天更早的最新一页（注入那条路，每一缝都走）。
+        # 读侧唯一形状：某个人比某一天更早的最新一页（注入那条路，每一轮都走）。
         # 键列上没有自动索引（migrator 只给 dedup_hash 和 Version 类建），不声明的话
-        # 这条查询随着日记一天天变长而变慢，而症状只是"她那一缝有点久"。
+        # 这条查询随着日记一天天变长而变慢，而症状只是"她那一轮有点久"。
         indexes = (("lane", "persona_id", "day"),)
 
     @field_validator("written_at")
@@ -189,7 +189,7 @@ async def day_material(*, lane: str, persona_id: str, day: date) -> list[str]:
     :func:`~app.living.happening.own_line`，别人的先过
     :func:`~app.living.happening.perceive` 按当时在不在场裁。直接用
     :func:`~app.living.happening.read_perceived_by` 是错的——那条路抑制回声（丢掉
-    ``actor == persona_id``），对一缝是对的，对"回看这一整天"是致命的：她的一天里会
+    ``actor == persona_id``），对每一轮是对的，对"回看这一整天"是致命的：她的一天里会
     只剩别人做的事。
 
     每行的时刻用**这个生活日的起点**当 ``now`` 判跨不跨天，不是用"现在"：一个生活日
@@ -375,7 +375,7 @@ async def write_day_page(
             persona_id=persona_id,
             session_id=f"living-day-page:{lane}:{persona_id}",
         )
-        # 用量落 durable PG，理由同一缝和 world 轮次（见 app.agent.trace）：langfuse
+        # 用量落 durable PG，理由同 moment 和 world 轮次（见 app.agent.trace）：langfuse
         # 会系统性丢 trace，"这一天花了多少"只能从 PG 数。
         with collect_usage() as usage:
             reply = await build_day_page_runner().run(

@@ -1,7 +1,7 @@
-"""她进入一缝时读到的东西 —— 状态快照，不是历史回放。
+"""她进入这一轮时读到的东西 —— 状态快照，不是历史回放。
 
 **为什么不套 ``SessionTranscript``。** 那个有 200 条 / 256KiB 硬上限、每 100 条触发
-一次模型折叠。她一天 144 缝，两天就撞顶，而且折叠频率跟着缝的密度走：缝越密、折叠
+一次模型折叠。她一天 144 轮，两天就撞顶，而且折叠频率跟着轮次的密度走：轮次越密、折叠
 越频繁、失真越快。更根本的是折叠这个动作本身——它把"发生过什么"压成一段概括，压完
 之后原文没了，压错了没人知道。
 
@@ -14,7 +14,7 @@
   上一次写下的那天    ``read_day_page_before``    1 页（严格早于当前生活日的最新一页）
   挂着没了结的事      还开着的 ``LooseEnd``       她自己列多少就是多少
   她刚做过 / 说过     她自己的 ``Happening``      最近 N 条
-  这段时间感知到的    ``read_perceived_by``       一条游标 + 每缝的条数上限
+  这段时间感知到的    ``read_perceived_by``       一条游标 + 每轮的条数上限
   ==================  ==========================  ==============================
 
 **为什么这么长不会失真**：五层没有一层是"机器对历史的概括"。头两层是当下状态，读一
@@ -30,7 +30,7 @@
 
 **"她刚做过、说过"那层为什么必须单独存在**：:func:`~app.living.happening.read_perceived_by` 抑制
 回声（``actor == persona_id`` 直接丢），所以她从感知那条路**看不见自己刚说过什么**。
-少了这一层，她上一缝答应姐姐的话下一缝就凭空消失，"接得上昨天"永远无从谈起。
+少了这一层，她上一轮答应姐姐的话下一轮就凭空消失，"接得上昨天"永远无从谈起。
 
 **裁剪不在这里重做。** 谁感知得到什么由 T1 的读取路径说了算；这里只负责把已经裁好
 的东西摆成她读得懂的样子。只听见动静的那条 ``content`` 本来就是 ``None``，渲染层
@@ -66,12 +66,12 @@ from app.runtime.migrator import _table_name
 # 她自己最近做过 / 说过的多少条。按**条数**而不是按时间窗：安静一整天的时候，她
 # 上一次开口仍然读得到；而热闹的时候也不会把半天的行为一次全灌进来。
 #
-# 12 的量级依据：她真正动手 / 开口的缝远少于"继续"的缝，12 条大致覆盖她最近几个
+# 12 的量级依据：她真正动手 / 开口的轮次远少于"继续"的轮次，12 条大致覆盖她最近几个
 # 小时的行为轨迹 —— 足够让"刚答应姐姐的事"活到她下一次换事情、把它列进心上为止。
 OWN_RECENT_LIMIT = 12
 
-# 一缝最多读多少条感知记录。不是截断上下文：游标推到本次扫过的最大 seq，剩下的
-# 下一缝接着拿（见 ``PerceivedWindow``）。60 条约等于半小时的动静，积压时几缝就
+# 每一轮最多读多少条感知记录。不是截断上下文：游标推到本次扫过的最大 seq，剩下的
+# 下一轮接着拿（见 ``PerceivedWindow``）。60 条约等于半小时的动静，积压时过几轮就
 # 追平。
 PERCEIVED_LIMIT = 60
 
@@ -81,10 +81,10 @@ _WHEREABOUTS_TABLE = _table_name(Whereabouts)
 
 @dataclass(frozen=True)
 class MomentSnapshot:
-    """她这一缝读到的全部。
+    """她这一轮读到的全部。
 
     ``perceived`` 原样带着 :class:`~app.living.happening.PerceivedWindow`，因为
-    调用方要拿 ``next_cursor`` 续接下一缝——把游标拆出去传会让"读到哪了"变成两个
+    调用方要拿 ``next_cursor`` 续接下一轮——把游标拆出去传会让"读到哪了"变成两个
     地方各记一份。
     """
 
@@ -114,7 +114,7 @@ class MomentSnapshot:
 
     def _render_now(self) -> str:
         # 完整口径（年月日 + 星期），不是裸时分：下面几段跨天的行渲染成 ``07-24 23:41
-        # CST``，而这一缝喂给她的全部输入就是快照 + 信封（``app.living.moment``），
+        # CST``，而这一轮喂给她的全部输入就是快照 + 信封（``app.living.moment``），
         # 没有第二个地方说今天几号 —— 不说的话 ``07-24`` 是昨天还是上个月她算不出来，
         # 记日程 / 算 ``remind_at`` 时更是只能瞎填日期分量。
         return f"现在 {to_cst_full(self.now.isoformat())}。"
@@ -168,10 +168,10 @@ class MomentSnapshot:
 
 
 def _open_end_line(end: LooseEnd, *, now: datetime) -> str:
-    """她心上一条线头的样子：这件事（可能带该在几点）· 到了没有 · 从哪一缝带过来的。
+    """她心上一条线头的样子：这件事（可能带该在几点）· 到了没有 · 从哪一轮带过来的。
 
     **前半段走** :func:`~app.living.loose_ends.format_entry`，所以她读到的形状就是她
-    下一缝该照抄回 ``keep_in_mind`` 的形状（整份重写意味着她每一缝都要抄一遍）。抄回
+    下一轮该照抄回 ``keep_in_mind`` 的形状（整份重写意味着她每一轮都要抄一遍）。抄回
     来解析不出同一件事的话，那条会在她眼皮底下被关掉、再以另一个身份重开。
 
     **"到点了"在这里当场算，库里没有这个状态。** 有个东西替她把"挂着"改成"到点了"
@@ -179,13 +179,13 @@ def _open_end_line(end: LooseEnd, *, now: datetime) -> str:
     会她还是没去开。这跟 :class:`~app.living.records.Upcoming` 到期交付一次就被消费
     掉是两种东西，理由见 :mod:`app.living.loose_ends`。
 
-    ``opened_moment_id`` 而不是只给钟点：跨天之后"12:00 那一缝"分不清是哪一天，而这条
-    正是"指得出它是从哪一缝带过来的"这个验收的落点。
+    ``opened_moment_id`` 而不是只给钟点：跨天之后"12:00 那一轮"分不清是哪一天，而这条
+    正是"指得出它是从哪一轮带过来的"这个验收的落点。
     """
     parts = [format_entry(end.what, end.due_at)]
     if end.due_at is not None:
         parts.append("到点了" if end.due_at <= now else "还没到")
-    parts.append(f"从 {end.opened_moment_id} 那一缝起挂着")
+    parts.append(f"从 {end.opened_moment_id} 那一刻起挂着")
     return " · ".join(parts)
 
 
@@ -237,7 +237,7 @@ async def all_whereabouts(*, lane: str) -> list[Whereabouts]:
 async def read_snapshot(
     *, lane: str, persona_id: str, after_seq: int, now: datetime
 ) -> MomentSnapshot:
-    """读她这一缝的全部输入。各层各读各的，谁也不裁谁。
+    """读她这一轮的全部输入。各层各读各的，谁也不裁谁。
 
     日记那一页按 ``day < 当前生活日`` 取最新的一页，**不是"最新一页"**：她凌晨写下
     的那页写的是刚过去那一天，而写完的那一刻已经属于新的生活日了。理由和它错了的样子

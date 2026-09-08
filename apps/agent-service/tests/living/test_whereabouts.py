@@ -41,7 +41,7 @@ async def test_latest_note_wins(living_db):
 
 @pytest.mark.integration
 async def test_history_is_kept_not_overwritten(living_db):
-    """纯 append：上一缝的位置留在表里，不是被覆盖掉。"""
+    """纯 append：上一轮的位置留在表里，不是被覆盖掉。"""
     first = await _note("akao", "m1", "家/客厅", "看视觉小说")
     second = await _note("akao", "m2", "家/厨房", "煮抹茶")
     assert second.seq > first.seq

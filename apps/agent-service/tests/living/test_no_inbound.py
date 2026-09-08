@@ -221,7 +221,7 @@ def test_no_external_source_reaches_the_living_engine():
     assert ears == [], (
         "外面的东西能到达 living 的消费者了 —— 新引擎长出了耳朵：\n  "
         + "\n  ".join(ears)
-        + "\nliving 只能自己按钟醒；她收消息走的是每一缝直接查 common_message，"
+        + "\nliving 只能自己按钟醒；她收消息走的是每一轮直接查 common_message，"
         "不接任何人推进来的东西。"
     )
 

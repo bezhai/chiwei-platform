@@ -3,8 +3,8 @@
 这一层是整个 T2 的命门：滚动窗口会把东西滚出去，清单是她**主动从窗口里救出来**
 的东西。所以三件事必须真的成立：
 
-  * 她列出来的东西会一直跟着她，跨多少缝都不掉；
-  * 每一条能指出**是从哪一缝带过来的**（``opened_moment_id`` 第一次写下就不再变）；
+  * 她列出来的东西会一直跟着她，跨多少轮都不掉；
+  * 每一条能指出**是从哪一轮带过来的**（``opened_moment_id`` 第一次写下就不再变）；
   * 她下一次不再列出来的，就是关掉了 —— 关掉是**她的省略**在生效，不是代码替她
     判断"这条过期了"。
 """
@@ -72,7 +72,7 @@ async def test_something_she_listed_stays_on_her_mind(ends_db):
 async def test_a_thing_carried_across_many_moments_names_the_moment_it_came_from(
     ends_db,
 ):
-    """验收正条：跨多缝没被遗忘，而且指得出是从哪一缝带过来的。"""
+    """验收正条：跨多轮没被遗忘，而且指得出是从哪一轮带过来的。"""
     await _rewrite("周末陪绫奈去祭典", at=_at(14, 0))
     for minute in (10, 20, 30, 40, 50):
         await _rewrite("周末陪绫奈去祭典", at=_at(14, minute))
@@ -80,7 +80,7 @@ async def test_a_thing_carried_across_many_moments_names_the_moment_it_came_from
     open_now = await list_open_loose_ends(lane=LANE, persona_id="akao")
     assert len(open_now) == 1
     assert open_now[0].opened_moment_id == _moment(14, 0), (
-        "重写清单把「从哪一缝带过来的」冲掉了 —— 这条一丢，跨缝延续就没有证据了"
+        "重写清单把「从哪一轮带过来的」冲掉了 —— 这条一丢，跨轮延续就没有证据了"
     )
     assert open_now[0].opened_at == _at(14, 0)
 
@@ -140,7 +140,7 @@ async def test_a_closed_thing_records_which_moment_closed_it(ends_db):
 
 @pytest.mark.integration
 async def test_picking_a_closed_thing_back_up_keeps_its_original_moment(ends_db):
-    """她又惦记起来 = 这件事从最早那一缝起就一直在她心上，不是今天新长出来的。"""
+    """她又惦记起来 = 这件事从最早那一轮起就一直在她心上，不是今天新长出来的。"""
     await _rewrite("洗的衣服还在阳台", at=_at(12))
     await _rewrite(at=_at(13))
 
@@ -197,7 +197,7 @@ async def test_another_lane_is_another_world(ends_db):
 
 @pytest.mark.integration
 async def test_rewrite_hands_back_what_is_open_now(ends_db):
-    """调用方（一缝）要能立刻报出"缝末还挂着几件"，不用再查一次库。"""
+    """调用方（这一轮）要能立刻报出"轮末还挂着几件"，不用再查一次库。"""
     got = await _rewrite("洗的衣服还在阳台", "周末陪绫奈去祭典", at=_at(12))
 
     assert sorted(e.what for e in got) == sorted(
@@ -211,9 +211,9 @@ async def test_rewrite_hands_back_what_is_open_now(ends_db):
 
 
 def test_the_line_she_reads_back_is_a_line_she_can_write_again():
-    """渲染给她看的那个形状，和她下一缝抄回来时被解析的形状，必须是同一个。
+    """渲染给她看的那个形状，和她下一轮抄回来时被解析的形状，必须是同一个。
 
-    整份重写意味着她**每一缝**都要把带时刻的那条原样抄一遍。抄回来解析不出同一件事
+    整份重写意味着她**每一轮**都要把带时刻的那条原样抄一遍。抄回来解析不出同一件事
     的话，那条会在她眼皮底下被关掉、再以另一个身份重开，而她什么都没做错。
     """
     assert parse_entry(format_entry("家属谈话会", _at(15))) == ("家属谈话会", _at(15))
@@ -284,7 +284,7 @@ async def test_leaving_the_hour_out_drops_the_hour_and_keeps_the_thing(ends_db):
 
 @pytest.mark.integration
 async def test_relisting_the_same_hour_does_not_pile_up_versions(ends_db):
-    """她每十分钟重列一遍整份清单 —— 没变的那条不该每缝 append 一版。"""
+    """她每十分钟重列一遍整份清单 —— 没变的那条不该每轮 append 一版。"""
     from app.runtime.persist import select_all_versions
 
     for minute in (0, 10, 20):
@@ -345,7 +345,7 @@ def test_a_blank_line_is_still_just_a_blank_line():
 async def test_a_time_with_nothing_after_it_does_not_quietly_wipe_her_list(ends_db):
     """**这一条是命门**：静默跳过的话，她心里挂着的东西会被一次性清空且没有报错。
 
-    她这一缝只列了「[2026-07-25 15:00]」（时刻写了、那件事忘了写）。跳过它 = 这份
+    她这一轮只列了「[2026-07-25 15:00]」（时刻写了、那件事忘了写）。跳过它 = 这份
     清单是空的 = 她原有的两条全部走进关闭流程，而工具还回她一句"心里挂着：没有"。
     """
     await _rewrite("洗的衣服还在阳台", "周末陪绫奈去祭典", at=_at(12))

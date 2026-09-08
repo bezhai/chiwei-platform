@@ -31,7 +31,7 @@ apps/
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark` 两条出站队列，发飞书消息与撤回 |
 | channel-server | **channel-server** | HTTP 服务，QQ 入站（`POST /api/internal/qq/inbound`，由 qq-gateway 投递） |
 | channel-server | **chat-response-worker** | 消费 RabbitMQ 回复队列，经 qq-gateway 发 QQ 消息 |
-| agent-service | **agent-service** | 生活引擎：五条钟自己跑，每一缝查库决定要不要开口。**不消费任何入站队列**。另有运维 HTTP（health、admin DLQ） |
+| agent-service | **agent-service** | 生活引擎：五条钟自己跑，每次醒来查库决定要不要开口。**不消费任何入站队列**。另有运维 HTTP（health、admin DLQ） |
 
 **常见错误：查 chat-response-worker 的日志时用 `make logs APP=channel-server`，这是错的。** chat-response-worker 是独立 Deployment，必须用 `make logs APP=chat-response-worker`。同理 lark-outbound 也是独立服务，飞书发不出消息要查 `make logs APP=lark-outbound`，不是 `APP=lark-service`。
 
@@ -47,7 +47,7 @@ apps/
 飞书 --websocket 长连--> lark-service:3000 (投影成 common 口径写进 common_message + 规则引擎跑飞书指令 + 决定 lane)
      ↓ 入站到此为止，没有队列
 
-agent-service:8000 (五条钟自己醒，每一缝直接查 common_message，自己决定要不要开口)
+agent-service:8000 (五条钟自己醒，每次醒来直接查 common_message，自己决定要不要开口)
      → RabbitMQ: chat_response_lark / recall_lark 队列
      → lark-outbound → 飞书
 ```
@@ -59,7 +59,7 @@ QQ bot gateway --websocket 长连--> qq-gateway (QQ 协议 → CustomInboundMess
    → channel-server:3000 (POST /api/internal/qq/inbound) → 投影成 common 口径写进 common_message
      ↓ 同样到此为止
 
-agent-service:8000 (同上，每一缝查库)
+agent-service:8000 (同上，每次醒来查库)
    → RabbitMQ: chat_response_qq 队列
    → chat-response-worker → qq-gateway (POST /qq/outbound) → QQ
 ```

@@ -1,4 +1,4 @@
-"""她进入一缝时读到的东西 —— 状态快照，不是历史回放。
+"""她进入这一轮时读到的东西 —— 状态快照，不是历史回放。
 
 四层，每层各有**结构性**的上界，所以它永远不会像 transcript 那样撞顶、也永远不需要
 模型折叠（折叠才会失真）：
@@ -9,11 +9,11 @@
   手上正在做的事      最新一条 Whereabouts  1 行
   挂着没了结的事      LooseEnd 还开着的     她自己列多少就是多少
   她刚做过 / 说过     她自己的 Happening    最近 N 条（**回声在这里**）
-  这段时间感知到的    read_perceived_by     一条游标 + 每缝的条数上限
+  这段时间感知到的    read_perceived_by     一条游标 + 每轮的条数上限
   ==================  ====================  ==========================
 
 第三层单独存在的理由：``read_perceived_by`` 抑制回声（``actor == persona_id`` 直接
-丢），所以她**看不见自己刚说过什么**。少了这一层，她上一缝答应姐姐的话下一缝就凭空
+丢），所以她**看不见自己刚说过什么**。少了这一层，她上一轮答应姐姐的话下一轮就凭空
 消失，"接得上昨天"永远无从谈起。
 """
 from __future__ import annotations
@@ -96,7 +96,7 @@ async def test_the_snapshot_opens_with_what_is_in_her_hands(snap_db):
 
 @pytest.mark.integration
 async def test_she_can_be_nowhere_yet_and_the_snapshot_says_so_plainly(snap_db):
-    """冷启动第一缝她还没定下在哪 —— 不许编一个位置，也不许渲染出一片空白。"""
+    """冷启动第一轮她还没定下在哪 —— 不许编一个位置，也不许渲染出一片空白。"""
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(8))
 
     assert snap.doing is None
@@ -104,7 +104,7 @@ async def test_she_can_be_nowhere_yet_and_the_snapshot_says_so_plainly(snap_db):
 
 
 # --------------------------------------------------------------------------
-# 二 · 挂着没了结的事（跨缝续接的载体）
+# 二 · 挂着没了结的事（跨轮续接的载体）
 # --------------------------------------------------------------------------
 
 
@@ -124,7 +124,7 @@ async def test_things_on_her_mind_ride_into_the_snapshot(snap_db):
     text = snap.render()
     assert "周末陪绫奈去祭典" in text
     assert _at(12).isoformat(timespec="minutes") in text, (
-        "快照没告诉她这件事是从哪一缝带过来的 —— 光有钟点在跨天之后就分不清是哪一天"
+        "快照没告诉她这件事是从哪一轮带过来的 —— 光有钟点在跨天之后就分不清是哪一天"
     )
 
 
@@ -146,7 +146,7 @@ async def test_a_thing_with_no_hour_reads_exactly_as_it_always_did(snap_db):
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(20))
 
     assert (
-        "- 周末陪绫奈去祭典 · 从 2026-07-25T12:00+08:00 那一缝起挂着"
+        "- 周末陪绫奈去祭典 · 从 2026-07-25T12:00+08:00 那一刻起挂着"
         in snap.render()
     )
 
@@ -161,7 +161,7 @@ async def test_a_thing_she_should_do_at_a_certain_hour_shows_that_hour(snap_db):
 
     assert (
         "- [2026-07-25 15:00] 家属谈话会 · 还没到 · "
-        "从 2026-07-25T12:00+08:00 那一缝起挂着" in text
+        "从 2026-07-25T12:00+08:00 那一刻起挂着" in text
     ), f"她读不出这条该在几点、也抄不回那个形状。拿到：\n{text}"
 
 
@@ -190,7 +190,7 @@ async def test_a_thing_that_came_due_stays_until_she_stops_listing_it(snap_db):
         later = await read_snapshot(
             lane=LANE, persona_id="akao", after_seq=0, now=_at(hour)
         )
-        assert "到点了" in later.render(), f"{hour} 点那一缝它自己消失了"
+        assert "到点了" in later.render(), f"{hour} 点那一轮它自己消失了"
 
     await _keep(at=_at(23, 10))
 
@@ -223,7 +223,7 @@ async def test_another_sisters_mind_never_leaks_into_hers(snap_db):
 
 @pytest.mark.integration
 async def test_she_can_see_what_she_herself_just_said(snap_db):
-    """``read_perceived_by`` 抑制回声；少了这一层她上一缝的承诺就凭空消失。"""
+    """``read_perceived_by`` 抑制回声；少了这一层她上一轮的承诺就凭空消失。"""
     await _stand("akao", "家/客厅", "待着", _at(13))
     await _say("akao", "周末祭典我陪你去。", _at(13, 50), place="家/客厅", to=["ayana"])
 
@@ -525,7 +525,7 @@ async def test_what_she_heard_before_midnight_carries_its_day(snap_db):
 async def test_the_now_line_says_which_calendar_day_it_is(snap_db):
     """带日期的行只有在「今天是几号」也说了的时候才读得懂。
 
-    这一缝喂给她的全部输入就是快照 + 信封（见 ``app.living.moment.run_moment``），
+    这一轮喂给她的全部输入就是快照 + 信封（见 ``app.living.moment.run_moment``），
     没有别的地方告诉她今天几号、星期几。只给 ``07-24`` 而不说今天是 ``07-25``，她算
     不出那是昨天还是上个月；日程 / 提醒要填绝对日期时更是只能瞎填。
     """

@@ -4,7 +4,7 @@ ChatResponseSegment: 她说的每一段，经 sink.mq(chat_response) 出 graph�
 
 **这个模块里没有入站契约。** 原先还有 ChatTrigger（消息队列入口的原始 body）和
 ChatRequest（fan-out 之后 per-persona 的请求），它们随那条队列一起删了：她不从队列
-拿消息 —— 每一缝直接查 ``common_message``、自己决定要不要开口（见 ``app.living``）。
+拿消息 —— 每次醒来直接查 ``common_message``、自己决定要不要开口（见 ``app.living``）。
 """
 from __future__ import annotations
 

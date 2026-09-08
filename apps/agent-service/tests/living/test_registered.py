@@ -365,7 +365,7 @@ async def test_a_row_written_before_the_column_existed_still_reads_back(living_d
 
     got = await latest_moment(lane="coe-living", persona_id="akao")
     assert got is not None, "旧行读不出来 —— 加列之后这个泳道的 life 循环直接推不动了"
-    assert got.nudged is False, "NULL 必须当成「不是提前缝」，不能是 None"
+    assert got.nudged is False, "NULL 必须当成「不是被提前叫醒」，不能是 None"
     assert got.seq == 0, "NULL 必须当成 0 号，不能是 None"
 
     regular = await latest_regular_moment(lane="coe-living", persona_id="akao")
@@ -381,11 +381,11 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
     """加 ``seq`` 列之后，"读到哪了"不许被旧行钉死。
 
     这是同一个陷阱的另一面，而且比 ``ValidationError`` 更阴：DESC 排序下 pg 把 NULL
-    放**最前**，所以 ``ORDER BY seq DESC`` 会让加列之前的每一行永远压在新缝前面 ——
-    游标从此取回那条旧行、再也推不动，她每一缝把同一批动静重新感知一遍，一句报错
+    放**最前**，所以 ``ORDER BY seq DESC`` 会让加列之前的每一行永远压在新一轮前面 ——
+    游标从此取回那条旧行、再也推不动，她每一轮把同一批动静重新感知一遍，一句报错
     都没有。
 
-    钟点故意造反：新缝的 ``began_at`` 比两条旧行都早。落地顺序赢的必须是新缝。
+    钟点故意造反：新一轮的 ``began_at`` 比两条旧行都早。落地顺序赢的必须是新一轮。
     """
     import datetime as dt
 
@@ -440,8 +440,8 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
 
     got = await latest_moment(lane="coe-living", persona_id="akao")
     assert got.moment_id == "nudge:m-1", (
-        "加列之前的旧行（seq 是 NULL）压在了新缝前面 —— 游标从此钉死，"
-        "她每一缝把同一批动静重新感知一遍"
+        "加列之前的旧行（seq 是 NULL）压在了新一轮前面 —— 游标从此钉死，"
+        "她每一轮把同一批动静重新感知一遍"
     )
     assert got.next_seq == 9
 

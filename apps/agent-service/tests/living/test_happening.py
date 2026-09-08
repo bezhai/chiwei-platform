@@ -211,14 +211,14 @@ async def test_lane_isolation(living_db):
 async def test_she_still_hears_what_was_said_while_she_was_in_the_room(living_db):
     """事情发生时她在客厅，之后上了楼——那句话仍然是她听见过的原话。
 
-    按「读取时的最新位置」判会把这条反向裁掉：她在缝末换了房间，下一缝就用新
+    按「读取时的最新位置」判会把这条反向裁掉：她在这一轮快结束时换了房间，下一轮就用新
     位置去裁旧事件，在场的人漏听。事件可以在她整轮模型调用期间提交，所以这不是
     小概率——是每次她移动都可能发生。
     """
     await _stand("mio", "家/客厅", moment="m1")
     await _say("h1", content="哼着歌洗碗")
 
-    # 缝末她上楼了（事情早就发生过了）
+    # 这一轮快结束时她上楼了（事情早就发生过了）
     await _stand("mio", "家/楼上/三妹房间", moment="m2")
 
     window = await read_perceived_by(lane=LANE, persona_id="mio", after_seq=0)
