@@ -663,6 +663,25 @@ def test_her_instruction_manual_is_written_for_her():
         assert t.definition.description.strip(), f"{t.name} 没有给她的说明"
 
 
+def test_the_drawing_hand_says_there_is_a_guide_about_drawing_people():
+    """画人的说明书不在这只手上，而她不会自己想起去翻。
+
+    旧实现把这条线写在画图工具自己的文案里（``b99ee101^`` 的 ``generate_image``：
+    「涉及三姐妹或 Cosplay 时，先 ``load_skill("drawing")``」）。重写时那句没了，
+    ``drawing`` 那份说明于是只挂在「清单 + 她自己选择读」这一层，跟画笔之间一条线
+    都没有 —— coe-living 上她画自画像时一次都没读过它（``read_a_guide`` 零调用），
+    画出来的人漏了那份说明里才有的细节。
+
+    只钉「她知道这份说明存在、也知道拿什么读它」，**不钉「她必须读」**：读不读是她
+    的事，这里给的是输入不是规则。
+    """
+    desc = draw_a_picture.definition.description
+    assert "drawing" in desc, (
+        "没写出那份说明叫什么 —— 她无从知道画人这件事还有一份说明"
+    )
+    assert "read_a_guide" in desc, "没告诉她拿哪只手去读它"
+
+
 # ---------------------------------------------------------------------------
 # 八 · 图片真的走到了模型那一侧，不是在半路退化成文本
 # ---------------------------------------------------------------------------
