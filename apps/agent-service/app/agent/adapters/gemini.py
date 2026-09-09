@@ -348,19 +348,35 @@ class GeminiAdapter(ModelClient):
         result needs the name of the call it answers, so we track call_id→name
         as we walk the assistant function_call turns. Async because image blocks
         are downloaded to inline bytes (see module docstring).
+
+        Gemini requires the function_response parts answering a model turn to
+        match that turn's function_call parts in number AND to arrive as a
+        single user turn; a model turn with N calls answered by N separate user
+        turns is rejected with 400 INVALID_ARGUMENT. The neutral layer carries
+        one TOOL message per result (OpenAI's shape), so consecutive TOOL
+        messages are merged into the open tool-result Content. Any other message
+        closes it — results from two different rounds must stay apart, since
+        each answers its own model turn.
         """
         contents: list[types.Content] = []
         system_parts: list[str] = []
         call_names: dict[str, str] = {}
+        open_tool_turn: types.Content | None = None
 
         for msg in messages:
             if msg.role == Role.SYSTEM:
                 system_parts.append(msg.text())
                 continue
             if msg.role == Role.TOOL:
-                contents.append(await _tool_result_to_content(msg, call_names))
+                turn = await _tool_result_to_content(msg, call_names)
+                if open_tool_turn is None:
+                    open_tool_turn = turn
+                    contents.append(turn)
+                else:
+                    open_tool_turn.parts.extend(turn.parts or [])
                 continue
 
+            open_tool_turn = None
             role = "model" if msg.role == Role.ASSISTANT else "user"
             parts = await _message_parts(msg)
             for tc in msg.tool_calls:

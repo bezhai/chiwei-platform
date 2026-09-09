@@ -576,6 +576,115 @@ async def test_tool_result_image_block_surfaces_as_inline_part(mock_sdk, monkeyp
 
 
 # ---------------------------------------------------------------------------
+# parallel tool calls — Gemini requires the function_response parts answering a
+# model turn to equal that turn's function_call parts, and to ride in ONE user
+# turn. One Content per neutral TOOL message 400s every round where the model
+# called more than one tool ("Please ensure that the number of function response
+# parts is equal to the number of function call parts of the function call
+# turn.", INVALID_ARGUMENT).
+# ---------------------------------------------------------------------------
+
+
+async def test_parallel_tool_results_merge_into_one_user_turn(mock_sdk):
+    """Two tool results answering one model turn become one Content, two parts."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    history = [
+        Message(role=Role.USER, content="cats and weather"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[
+                ToolCall(id="call_1", name="search", arguments={"q": "cats"}),
+                ToolCall(id="call_2", name="weather", arguments={"city": "sh"}),
+            ],
+        ),
+        Message(role=Role.TOOL, content="3 cats", tool_call_id="call_1"),
+        Message(role=Role.TOOL, content="sunny", tool_call_id="call_2"),
+    ]
+    await adapter.complete(history)
+
+    contents = mock_sdk.instance.last_generate_kwargs["contents"]
+    assert [c.role for c in contents] == ["user", "model", "user"]
+
+    calls = [p for p in contents[1].parts if getattr(p, "function_call", None)]
+    responses = [p for p in contents[2].parts if getattr(p, "function_response", None)]
+    assert len(responses) == len(calls) == 2
+
+    # each part keeps the name of the call it answers (call_id → name mapping)
+    assert [p.function_response.name for p in responses] == ["search", "weather"]
+    assert [p.function_response.response for p in responses] == [
+        {"result": "3 cats"},
+        {"result": "sunny"},
+    ]
+
+
+async def test_single_tool_result_keeps_its_one_part_turn(mock_sdk):
+    """One tool call keeps the shape it already had: one user turn, one part."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    history = [
+        Message(role=Role.USER, content="find cats"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="call_1", name="search", arguments={"q": "cats"})],
+        ),
+        Message(role=Role.TOOL, content="3 results", tool_call_id="call_1"),
+    ]
+    await adapter.complete(history)
+
+    contents = mock_sdk.instance.last_generate_kwargs["contents"]
+    assert [c.role for c in contents] == ["user", "model", "user"]
+    assert len(contents[2].parts) == 1
+    assert contents[2].parts[0].function_response.name == "search"
+    assert contents[2].parts[0].function_response.response == {"result": "3 results"}
+
+
+async def test_tool_results_from_different_rounds_stay_in_separate_turns(mock_sdk):
+    """Only *consecutive* tool results merge.
+
+    Two rounds each have their own model turn with one function_call, so their
+    results must stay two user turns — merging across the assistant message
+    between them would break the same count rule the merge exists to keep.
+    """
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    history = [
+        Message(role=Role.USER, content="cats then weather"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="call_1", name="search", arguments={"q": "cats"})],
+        ),
+        Message(role=Role.TOOL, content="3 cats", tool_call_id="call_1"),
+        Message(
+            role=Role.ASSISTANT,
+            content="now the weather",
+            tool_calls=[
+                ToolCall(id="call_2", name="weather", arguments={"city": "sh"})
+            ],
+        ),
+        Message(role=Role.TOOL, content="sunny", tool_call_id="call_2"),
+    ]
+    await adapter.complete(history)
+
+    contents = mock_sdk.instance.last_generate_kwargs["contents"]
+    assert [c.role for c in contents] == ["user", "model", "user", "model", "user"]
+    assert [p.function_response.name for p in contents[2].parts] == ["search"]
+    assert [p.function_response.name for p in contents[4].parts] == ["weather"]
+
+
+# ---------------------------------------------------------------------------
 # thought_signature — Gemini 2.5 thinking models attach an opaque signature to
 # the functionCall part. It MUST round-trip: resending an assistant
 # function_call turn WITHOUT its signature 400s with
