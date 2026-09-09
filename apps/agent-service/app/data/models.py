@@ -202,6 +202,10 @@ class ModelProvider(Base):
     client_type: Mapped[str] = mapped_column(String(50), default="openai")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     use_proxy: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Pins the API version segment the google-genai SDK appends to base_url;
+    # only client_type='google' reads it (text and image alike). NULL keeps
+    # that SDK's own default.
+    api_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
 

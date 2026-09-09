@@ -280,6 +280,11 @@ async def _generate_image_gemini(
     http_opts: dict[str, Any] = {}
     if info.get("base_url"):
         http_opts["base_url"] = info["base_url"]
+    if info.get("api_version"):
+        # The SDK appends {api_version}/models/... to base_url, so a provider
+        # routing only one version can't be reached by baking it into
+        # base_url. Left unset, the SDK picks its own default.
+        http_opts["api_version"] = info["api_version"]
     if info.get("use_proxy") and settings.forward_proxy_url:
         http_opts["client_args"] = {"proxy": settings.forward_proxy_url}
 

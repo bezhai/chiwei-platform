@@ -103,10 +103,11 @@ class GeminiAdapter(ModelClient):
         api_key: str,
         base_url: str | None,
         use_proxy: bool = False,
+        api_version: str | None = None,
         **_extra: Any,
     ) -> None:
         self._model = model_name
-        http_options = self._build_http_options(base_url, use_proxy)
+        http_options = self._build_http_options(base_url, use_proxy, api_version)
         self._client = genai.Client(api_key=api_key, http_options=http_options)
 
     # ------------------------------------------------------------------
@@ -134,14 +135,23 @@ class GeminiAdapter(ModelClient):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_http_options(base_url: str | None, use_proxy: bool) -> types.HttpOptions:
-        """Build genai HttpOptions: base_url + retry-off + optional proxy."""
+    def _build_http_options(
+        base_url: str | None,
+        use_proxy: bool,
+        api_version: str | None = None,
+    ) -> types.HttpOptions:
+        """Build genai HttpOptions: base_url + retry-off + optional proxy/version."""
         opts: dict[str, Any] = {
             # attempts=1 ⇒ a single attempt, no SDK-side retry (Agent owns it).
             "retry_options": types.HttpRetryOptions(attempts=1),
         }
         if base_url:
             opts["base_url"] = base_url
+        if api_version:
+            # The SDK appends {api_version}/models/... to base_url, so a
+            # provider routing only one version can't be reached by baking it
+            # into base_url. Left unset, the SDK picks its own default.
+            opts["api_version"] = api_version
         if use_proxy and settings.forward_proxy_url:
             proxy_args = {"proxy": settings.forward_proxy_url}
             opts["client_args"] = proxy_args

@@ -878,6 +878,28 @@ async def test_base_url_passed_to_http_options(mock_sdk):
     assert mock_sdk.http_options.base_url == "https://g"
 
 
+async def test_api_version_passed_to_http_options(mock_sdk):
+    """A gateway pinned to one API version needs it configurable per provider.
+
+    The SDK appends ``{api_version}/models/...`` to base_url, so a provider
+    that only routes ``/v1`` cannot be reached by putting v1 in the base_url —
+    the version segment is always appended on top.
+    """
+    GeminiAdapter(
+        model_name="gemini-3.7-flash",
+        api_key="k",
+        base_url="https://gw/prefix",
+        api_version="v1",
+    )
+    assert mock_sdk.http_options.api_version == "v1"
+
+
+async def test_no_api_version_leaves_the_sdk_default(mock_sdk):
+    """Providers that don't set one keep whatever the SDK picks (v1beta)."""
+    GeminiAdapter(model_name="gemini-2.5-flash", api_key="k", base_url="https://g")
+    assert mock_sdk.http_options.api_version is None
+
+
 async def test_automatic_function_calling_disabled(mock_sdk):
     """The SDK must not run tools itself — the Agent layer owns the ReAct loop."""
     adapter = GeminiAdapter(

@@ -167,4 +167,5 @@ async def build_model_client(
         api_key=info["api_key"],
         base_url=info.get("base_url"),
         use_proxy=info.get("use_proxy", False),
+        api_version=info.get("api_version"),
     )

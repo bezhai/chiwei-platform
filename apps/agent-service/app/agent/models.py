@@ -97,6 +97,7 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
             "is_active": provider.is_active,
             "client_type": provider.client_type or "openai",
             "use_proxy": provider.use_proxy,
+            "api_version": provider.api_version,
         }
 
     _model_info_cache[model_id] = (result, now + _CACHE_TTL_SECONDS)

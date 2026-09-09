@@ -12,6 +12,8 @@ tested under ``tests/agent``. ``resolve_model_info`` is the retained core that
 """
 
 import time
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -178,3 +180,50 @@ class TestResolveModelInfo:
                 await resolve_model_info(
                     "no-base-url", required_fields=("api_key", "base_url")
                 )
+
+
+# ---------------------------------------------------------------------------
+# Provider row -> info dict
+# ---------------------------------------------------------------------------
+
+
+class TestProviderRowReachesTheInfoDict:
+    async def test_api_version_travels_with_the_rest_of_the_provider_config(
+        self, monkeypatch
+    ):
+        """A provider that pins its API version must carry it to the adapter.
+
+        Nothing between the row and the adapter reads it, so a dropped field
+        fails silently: the client dials the SDK default version instead and
+        the gateway answers 404.
+        """
+        provider = SimpleNamespace(
+            api_key="k",
+            base_url="https://gw/prefix",
+            is_active=True,
+            client_type="google",
+            use_proxy=False,
+            api_version="v1",
+        )
+        mapping = SimpleNamespace(
+            provider_name="gw", real_model_name="gemini-3.7-flash"
+        )
+
+        @asynccontextmanager
+        async def _no_tx():
+            yield None
+
+        monkeypatch.setattr(mod, "tx", _no_tx)
+        monkeypatch.setattr(
+            "app.data.queries.find_model_mapping", AsyncMock(return_value=mapping)
+        )
+        monkeypatch.setattr(
+            "app.data.queries.find_provider_by_name", AsyncMock(return_value=provider)
+        )
+
+        info = await _get_model_and_provider_info("life-model")
+
+        assert info is not None
+        assert info["api_version"] == "v1"
+        assert info["model_name"] == "gemini-3.7-flash"
+        assert info["client_type"] == "google"
