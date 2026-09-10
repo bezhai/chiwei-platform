@@ -18,6 +18,22 @@ import pytest
 from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
 
 
+def glance_text(shown) -> str:
+    """「看手机」交回来的那段文本。
+
+    ``look_at_phone`` 交回的是一串内容块：第一项是她读到的那段会话，后面跟着别人发
+    来的图（一句说明 + 一个图片块，见 :func:`app.living.phone._shown_picture`）。断
+    言文本的用例只关心第一项，从这里取，各文件不各拆一遍。
+
+    形状不对就当场炸：拿一个 ``@tool_error`` 的失败 dict 去 ``in`` 一个字串，结果是
+    一条读起来像"她没看到这句话"的失败，而真相是这一眼根本没成。
+    """
+    assert isinstance(shown, list) and shown, f"这不是一份看手机的结果：{shown!r}"
+    first = shown[0]
+    assert first.get("type") == "text", f"第一项不是那段文本：{first!r}"
+    return first["text"]
+
+
 def _docker_unavailable_reason() -> str | None:
     """docker 不可用时给出原因；可用返回 ``None``。"""
     try:

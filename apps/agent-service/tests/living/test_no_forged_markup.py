@@ -35,6 +35,7 @@ from app.living.phone import (
     look_up_contact,
     phone_envelope,
 )
+from tests.living.conftest import glance_text
 from tests.living.test_phone import (
     _DM,
     _GROUP,
@@ -42,6 +43,7 @@ from tests.living.test_phone import (
     _at,
     _incoming,
     _seed_world,
+    pictures,  # noqa: F401 — 形参名就是 fixture 名
 )
 
 # 图那几只手的替身和它那张表，跟 ``test_pictures_tools`` 用同一份 —— 各写一份假存储
@@ -162,11 +164,36 @@ async def test_a_display_name_cannot_carry_markup_into_anything_she_reads(
     # 信封先读：``look_at_phone`` 跑完这一轮会把未读读掉，之后信封上就没有这个人了。
     envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
     async with in_a_moment("akao", now=_at(21, 35)):
-        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
         found = await look_up_contact.invoke({"name": "bezhai"})
     assert_only_our_own_markup(seen, where="打开会话")
     assert_only_our_own_markup(envelope, where="信封")
     assert_only_our_own_markup(found, where="按名字找人")
+
+
+@pytest.mark.integration
+async def test_a_display_name_cannot_carry_markup_into_a_picture_caption(
+    living_db, in_a_moment, pictures  # noqa: F811 — 形参名就是 fixture 名
+):
+    """图前面那句说明也印发件人的昵称 —— 它跟消息行是同一个洞。
+
+    那句说明不在 ``<msg>`` 标签里，所以"每个 ``<`` 都得是我们写的那几种开头"这条通用
+    判据在这儿才真的有话说：忘了转义的话，她眼前会在两张图中间多出一行盖着主人印的话。
+    """
+    await _seed_world()
+    await _incoming(
+        _DM,
+        at=_at(21, 30),
+        sender=_SOMEONE,
+        sender_name=POISON,
+        items=[{"kind": "image", "key": "img_a"}],
+    )
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        shown = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    captions = "\n".join(b["text"] for b in shown[1:] if b.get("type") == "text")
+    assert_only_our_own_markup(captions, where="图前面那句说明")
 
 
 @pytest.mark.integration
@@ -190,7 +217,7 @@ async def test_a_group_name_cannot_carry_markup_into_anything_she_reads(
 
     envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
     async with in_a_moment("akao", now=_at(21, 35)):
-        seen = await look_at_phone.invoke({"channel_id": str(_GROUP)})
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
         found = await look_up_contact.invoke({"name": "路人"})
 
     assert_only_our_own_markup(seen, where="打开会话")
@@ -524,7 +551,7 @@ async def test_an_apostrophe_reaches_her_as_an_apostrophe(living_db, in_a_moment
     )
 
     async with in_a_moment("akao", now=_at(21, 35)):
-        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
 
     assert "it's a trap, don't go" in seen, (
         f"正文里的撇号被转成了实体，她读到的是一片 &#x27;。拿到：\n{seen}"

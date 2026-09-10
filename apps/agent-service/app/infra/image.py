@@ -283,3 +283,36 @@ class _ImageClient:
 
 # Module-level instance
 image_client = _ImageClient()
+
+
+# How long to wait when checking that a signed address has an object behind it.
+# Short on purpose: this runs before anything is shown, so a stalled object
+# store must degrade into "can't open it" rather than hold up the caller.
+_REACHABLE_TIMEOUT = 10.0
+
+
+async def image_is_reachable(url: str) -> bool:
+    """Whether a signed address actually has an image behind it.
+
+    Signing is pure computation — tool-service ``get-url`` hands the key to
+    ``tos_client.pre_signed_url``, which never looks at the bucket. So a
+    well-formed url proves nothing about the object: expired ``temp/`` objects,
+    keys the inbound pipeline never stored, and keys that were never object
+    names to begin with all sign just fine and 404 on fetch.
+
+    Callers that feed a url to the model must check first. The Gemini adapter
+    downloads image urls itself and ``raise_for_status()`` on them
+    (``app.agent.adapters.gemini._fetch_remote_image``), so one absent object
+    does not degrade that turn — it ends it.
+
+    Only the response head is read; the connection is dropped before the body.
+    The decision needs the status code, and whoever shows the image downloads
+    the bytes on their own path.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_REACHABLE_TIMEOUT) as client:
+            async with client.stream("GET", url) as resp:
+                return resp.status_code == 200
+    except Exception as exc:
+        logger.info("image url is not reachable: %s (%s)", url, exc)
+        return False

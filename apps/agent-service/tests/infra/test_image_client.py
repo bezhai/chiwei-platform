@@ -242,3 +242,60 @@ async def test_the_tool_upload_helper_never_hands_back_the_bytes_it_was_given(
 
     _on_the_wire(monkeypatch, handler)
     assert await _common.upload_image("base64", "AAAA") is None
+
+
+# ---------------------------------------------------------------------------
+# 签出来的地址背后到底有没有东西
+# ---------------------------------------------------------------------------
+#
+# 签名是纯计算（tool-service 的 ``get-url`` 把名字交给 ``tos_client.pre_signed_url``，
+# 那个函数一眼都不看 bucket）。所以"签得出地址"和"图在那儿"是两件事：过期的 ``temp/``
+# 对象、入站那一步从没存过的 key、根本就不是对象名的 key，都能签出一个格式完好的地址。
+#
+# 谁要把地址递给模型谁就得先验一次。Gemini 那侧会自己去下载并 ``raise_for_status``
+# （``app.agent.adapters.gemini._fetch_remote_image``），所以一张取不到的图不是"她少
+# 看见一张"，是**那一轮整个结束**。
+
+
+def _fetching(monkeypatch, handler):
+    """让 ``image_is_reachable`` 的那次取走 ``handler``，不出网。"""
+    from app.infra import image as image_mod
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(*_args, **kwargs):
+        kwargs.pop("transport", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(image_mod.httpx, "AsyncClient", fake_client)
+    return image_mod.image_is_reachable
+
+
+@pytest.mark.asyncio
+async def test_an_address_with_an_image_behind_it_is_reachable(monkeypatch):
+    """取得到 = 可以摆到她眼前。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"\xff\xd8\xff", headers={"content-type": "image/jpeg"})
+
+    assert await _fetching(monkeypatch, handler)("https://tos.example/a.jpg") is True
+
+
+@pytest.mark.asyncio
+async def test_a_signed_address_with_nothing_behind_it_is_not_reachable(monkeypatch):
+    """签得出来、对象不在 —— 这正是签名那一步分辨不了的那一半。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="NoSuchKey")
+
+    assert await _fetching(monkeypatch, handler)("https://tos.example/gone.jpg") is False
+
+
+@pytest.mark.asyncio
+async def test_a_fetch_that_blew_up_is_not_reachable(monkeypatch):
+    """取的时候炸了也是取不到 —— 这一步的失败绝不能冒泡。
+
+    它跑在"把地址递给模型"之前，冒泡就等于把一次对象存储抖动升级成她整轮看不了手机。
+    """
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("object store unreachable")
+
+    assert await _fetching(monkeypatch, handler)("https://tos.example/a.jpg") is False

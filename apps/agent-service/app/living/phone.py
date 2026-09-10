@@ -12,6 +12,19 @@
 主人"你刚才到底发了啥"，因为那一轮她眼前只有孤零零一句未读，前面的来回全在游标之前，
 而读过的消息不进任何持久记忆。真人点开一个会话看到的正是双向的最近若干条。
 
+**别人发来的图真的进她眼里。** 「看手机」交回的不是一段文字，是一串内容块：先是那段
+会话，后面每张图跟着一句说明和图本身（:func:`_shown_picture`）。正文里那张图的位置留
+一个编号（``[图片1]``），编号和后面附的那张对得上 —— 只把图堆在末尾的话，一条「这张
+和这张哪个好看」在她眼里就是两张没有出处的图。取不到的那些如实写成「打不开」：**绝不
+退回一个光秃秃的「[图片]」**，那个写法她读起来跟"我看到一张图"没有区别，于是她会照着
+一张自己根本没看见的图往下编，而且一句报错都没有（这正是 2026-09-02 那条文件消息的
+形状，文件那条修了、图片这条到这次才修）。
+
+图不存在这个包里：入站那一步 lark-service 已经把每个 image_key 交给 tool-service 存
+进对象存储，命名是确定性的（``temp/<image_key>.jpg``），所以这边拿库里的 key 就算得出
+它在哪儿（:func:`picture_file_of`）。**但签得出地址不等于图在那儿** —— 签名是纯计算，
+所以每张都要真取一次才摆给她（:func:`viewable_picture`）。
+
 **入站一步不碰 MQ。** 每一轮直接查她未读的 ``common_message``。两个理由：不跟旧引擎抢
 它那条入站队列；而且"投递只入信箱不唤醒"天然成立——消息本来就躺在库里，没有谁需要被
 通知。这也是"chat 只有出口没有入口"的物理保证：**这个包里根本没有消费者**。
@@ -120,6 +133,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Any
@@ -130,6 +144,7 @@ from sqlalchemy import text
 from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
+from app.capabilities.concurrency import fan_out_wait
 from app.data.queries.messages import (
     find_conversation_window,
     find_newest_unread_summons,
@@ -144,6 +159,7 @@ from app.data.queries.persona import (
 )
 from app.data.session import get_session
 from app.infra.cst_time import CST, to_cst_dated
+from app.infra.image import image_client, image_is_reachable
 from app.living.records import (
     MEDIUM_GROUP_CHAT,
     MEDIUM_PHONE,
@@ -159,10 +175,18 @@ from app.runtime.persist import insert_idempotent
 
 logger = logging.getLogger(__name__)
 
+# ``image_client`` / ``image_is_reachable`` 是 module-level 名字，测试从这里换替身
+# —— 真跑那两步要打 tool-service（签名）和对象存储（验对象在不在）。
+
 # 她点开一条会话看到多少条。**这是展示窗口的大小，不是未读的上限**——游标照样推到未读
 # 里最新那条，被挤出窗口的那些是真的丢了，这就是设计本身（见模块 docstring）。十条约
 # 等于真人点开一个会话一屏能看到的量。
 PHONE_GLANCE_LIMIT = 10
+
+# 一次「看手机」最多把别人发来的几张图摆到她眼前。**不是精心算过的数**：真实数据里
+# 最近十条里有好几张图很罕见，它挡的只是有人连发一屏图片时把整个上下文塞满。超出的
+# 那几张在正文里如实说没给她看，不假装没有过。
+PHONE_PICTURE_LIMIT = 12
 
 # 信封里列多少条会话。手机上会话再多，一屏也就这些；超出的下一轮还在。
 ENVELOPE_LIMIT = 8
@@ -676,17 +700,121 @@ async def newest_unread_summons(
 # （``app.chat.content_parser``），它随那条路一起删了。
 #
 # 名字能带就带：她要判断"这东西我看没看过、值不值得打开"，靠的是文件名，不是
-# ``file_v3_...`` 那串 key。图片、表情包、语音本来就没有文件名，自然落回没名字那档。
+# ``file_v3_...`` 那串 key。表情包、语音本来就没有文件名，自然落回没名字那档。
+#
+# **图片不在这张表上**：这一档是"只留个名字"的东西，而图会真的取出来摆到她眼前
+# （:func:`_shown_picture`），正文里留的是一个跟那张图对得上的编号。
 _ATTACHMENT_LABEL = {
-    "image": "图片",
     "sticker": "表情包",
     "audio": "语音",
     "file": "文件",
     "media": "视频",
 }
 
+# 图片项的 kind。两套形状（``kind`` 与历史行的 ``type``）用的都是这个字串。
+_PICTURE_KIND = "image"
 
-def _body_of(row) -> str:
+# 有这张图，但现在取不出来 —— 签不出地址、对象不在、下载失败都是这一档，不区分原因：
+# 对她来说都是同一件事。**绝不能退回一个光秃秃的「[图片]」**：那个写法她读起来跟
+# "我看到一张图"没有区别，于是她会照着一张自己根本没看见的图往下编，一句报错都没有。
+_PICTURE_SHUT = "[图片：打不开]"
+
+# 超过 :data:`PHONE_PICTURE_LIMIT` 的那几张。同样如实说 —— 这条会话里有过这张图，
+# 只是这一轮没摆到她眼前。
+_PICTURE_HELD_BACK = "[图片：这轮没给你看]"
+
+
+def _content_items(row) -> list:
+    """这一行的 ``content`` 解成 items 列表。
+
+    jsonb 里存的不保证是数组（同一条防线在
+    :data:`app.data.queries.messages._SENT_FILES_SQL` 的 ``jsonb_typeof`` 那儿）。
+    认不出形状就给空列表，正文那边还有 ``content_text`` 可以指望
+    （:func:`_body_of`）。
+
+    **渲染正文和取图走的是同一份解析。** 两边各解一次的话，"这条消息里第几张图"在
+    两边可能数出不同的答案，于是正文里的编号跟附上的那张图错位 —— 她照着编号说的每
+    一句都指错了图，而且没有任何报错。
+    """
+    items = row["content"]
+    if isinstance(items, str):
+        items = json.loads(items)
+    return items if isinstance(items, list) else []
+
+
+def picture_file_of(item: dict) -> str | None:
+    """一个图片项在对象存储里叫什么；算不出来时 ``None``。
+
+    自己带着 ``tos_file`` 的直接用（少数 ``type``/``value`` 形状的历史行是这样），
+    其余按入站那侧的命名派生：lark-service 把正文里每个 image_key 交给 tool-service
+    的 ``/api/image-pipeline/process``（``apps/lark-service`` 的 ``attachments.ts``），
+    那条管线把压过的图存成 ``temp/<image_key>.jpg``（``apps/tool-service`` 的
+    ``image_pipeline.process_image``）。命名是确定性的，所以这边不用再记一份映射。
+
+    **派生出来的名字不保证真有那个对象。** 群没开"所有人可下载"时入站那一步整条跳过、
+    QQ 那侧的 ``key`` 根本不是 image_key 而是一个公网地址、``temp/`` 还有保留期。所以
+    取图那一步一律要验（:func:`viewable_picture`），签得出地址不算图在那儿。
+    """
+    stored = item.get("tos_file")
+    if isinstance(stored, str) and stored.strip():
+        return stored.strip()
+    key = item.get("key") or item.get("value")
+    if not isinstance(key, str) or not key.strip():
+        return None
+    return f"temp/{key.strip()}.jpg"
+
+
+def _picture_files_in(row) -> list[str | None]:
+    """这条消息里每张图的对象名，按正文里出现的先后。
+
+    ``None`` 是"这一项是图、但算不出它存在哪儿"。这种项照样占正文里一个位置 ——
+    整条略过的话，她看到的就是一条没有那张图的消息，而对面明明发了。
+    """
+    return [
+        picture_file_of(item)
+        for item in _content_items(row)
+        if (item.get("type") or item.get("kind")) == _PICTURE_KIND
+    ]
+
+
+async def viewable_picture(tos_file: str | None) -> str | None:
+    """别人发来的一张图现在能不能看：能就交回一个下载得到的地址，不能就 ``None``。
+
+    **签名和验对象是两件事，一件都不能省。** 签名是纯计算（tool-service 的
+    ``get-url`` 把名字交给 ``tos_client.pre_signed_url``），对象在不在它一个字都不
+    知道 —— 取不到的图照样签得出一个格式完好的地址。省掉验那一步的下场不是"她看不到
+    这张图"，是**她那一轮整个炸掉**：Gemini 那侧会自己去下这个地址并
+    ``raise_for_status``（:func:`app.agent.adapters.gemini._fetch_remote_image`）。
+
+    **地址现签，一次都不存。** 签名 1.5 小时就死（``tos_client.get_file_url`` 的
+    ``expires``），跟 :mod:`app.living.pictures` 那边同一条。
+
+    取图这条路单独拎出来，是为了以后"翻回去看别人发过的图"能原样用它 —— 那只手要的
+    正是"给一个对象名，交回现在能不能看"。
+    """
+    if not tos_file:
+        return None
+    url = await image_client.get_url(tos_file)
+    if url is None:
+        logger.info("看手机：%s 签不出地址，这张不摆给她", tos_file)
+        return None
+    if not await image_is_reachable(url):
+        logger.info("看手机：%s 签出来了但取不到，这张不摆给她", tos_file)
+        return None
+    return url
+
+
+async def _open_pictures(files: list[str | None]) -> list[str | None]:
+    """一批图各自现在能不能看，顺序跟传进来的一样，取不到的位置是 ``None``。
+
+    并发发出去：一张图卡住不该让她眼前其余几张跟着等
+    （``fan_out_wait`` 默认 ``return_exceptions=True``，超时和异常都落回 ``None``）。
+    """
+    outcomes = await fan_out_wait([viewable_picture(f) for f in files])
+    return [url if isinstance(url, str) else None for url in outcomes]
+
+
+def _body_of(row, *, pictures: Iterator[str]) -> str:
     """一条消息的正文。**以 items 为准，``content_text`` 只是兜底。**
 
     反过来（先信 ``content_text``）她就永远看不出附件是什么东西：那一列不是正文，
@@ -698,19 +826,16 @@ def _body_of(row) -> str:
     只知道有个东西、不知道是什么，回了一句「发来看看」—— 那文件早就发过来了。
     图文混排更狠：文字非空就直接返回，附件在她眼里整个不存在。
 
+    ``pictures`` 是这一眼里每张图占位写什么，按显示顺序排好的一串
+    （:func:`_glance_text` 算的）。每碰到一个图片项取一个 —— 所以这个迭代器的顺序
+    必须跟 :func:`_picture_files_in` 数出来的完全一致，两边共用
+    :func:`_content_items` 就是为了钉住这一点。
+
     ``content_text`` 仍然留着当兜底 —— ``content`` 不是数组、或者一条 item 都渲染
     不出东西的历史行，还有这一列可以指望。
     """
-    items = row["content"]
-    if isinstance(items, str):
-        items = json.loads(items)
-    if not isinstance(items, list):
-        # jsonb 里存的不保证是数组（同一条防线在
-        # :data:`app.data.queries.messages._SENT_FILES_SQL` 的
-        # ``jsonb_typeof`` 那儿）。认不出形状就整条交给 ``content_text``。
-        items = []
     parts: list[str] = []
-    for item in items:
+    for item in _content_items(row):
         # 两套形状都得认：现在的写入方用 ``kind``，少数历史行用 ``type``/``value``。
         kind = item.get("type") or item.get("kind")
         value = item.get("value", item.get("text", ""))
@@ -721,6 +846,8 @@ def _body_of(row) -> str:
             parts.append(str(value))
         elif kind == "mention":
             parts.append(f"@{value}")
+        elif kind == _PICTURE_KIND:
+            parts.append(next(pictures))
         elif kind in _ATTACHMENT_LABEL:
             name = (item.get("meta") or {}).get("file_name")
             label = _ATTACHMENT_LABEL[kind]
@@ -761,7 +888,13 @@ def _take_back_handle(row) -> str | None:
     return uuid.UUID(str(outbound_id)).hex
 
 
-def _one_message(row, *, now: datetime) -> str:
+def _who_and_when(row, *, now: datetime) -> tuple[str, str]:
+    """这一行的署名和时刻。消息行和图片那句说明共用一处，两边说的是同一条消息。"""
+    who = "你" if row["said_by_you"] else row["who"]
+    return who, _clock(_instant(int(row["at_ms"])), now=now)
+
+
+def _one_message(row, *, now: datetime, pictures: Iterator[str]) -> str:
     """一条消息渲染成一行：``<msg from=".." rel=".." time="..">正文</msg>``。
 
     署名认 ``bot_name``（``said_by_you`` 那一列算好的）：同群的姐姐也是
@@ -780,32 +913,92 @@ def _one_message(row, *, now: datetime) -> str:
     ``recalled_at`` 和 ``outbound_id`` 用 ``[]`` 读，缺列当场 ``KeyError`` —— 理由写
     在 :func:`_take_back_handle` 上。
     """
-    who = "你" if row["said_by_you"] else row["who"]
+    who, when = _who_and_when(row, now=now)
     attrs = [f'from="{esc(who)}"']
     # ``rel`` 的值是 :data:`OWNER` 这个常量，不是任何人写得进来的字串 —— 所以它不需要
     # 转义，也正因为如此它才说得出身份。``who`` 反过来：别人写的，只能待在被转义的
     # 属性值里。
     if not row["said_by_you"] and row["by_owner"]:
         attrs.append(f'rel="{OWNER}"')
-    attrs.append(f'time="{esc(_clock(_instant(int(row["at_ms"])), now=now))}"')
+    attrs.append(f'time="{esc(when)}"')
     if row["recalled_at"] is not None:
         attrs.append('recalled="true"')
     handle = _take_back_handle(row)
     if handle is not None:
         attrs.append(f'take_back_id="{handle}"')
-    return f"<msg {' '.join(attrs)}>{esc(_body_of(row))}</msg>"
+    return f"<msg {' '.join(attrs)}>{esc(_body_of(row, pictures=pictures))}</msg>"
+
+
+def _place_pictures(
+    by_row: list[tuple[Any, list[str | None]]], urls: list[str | None]
+) -> tuple[list[str], list[tuple[Any, int, str]]]:
+    """给这一眼里的每张图定下正文里的写法，并挑出真摆得出来的那几张。
+
+    ``urls`` 是按显示顺序排在前 :data:`PHONE_PICTURE_LIMIT` 位的那几张各自的地址
+    （取不到的位置是 ``None``），再往后的根本没去取 —— 它们落在"这轮没给你看"那一档。
+
+    **编号只给真摆出来的那几张。** 取不到的也占一个号的话，她眼前会出现一个指不到任何
+    东西的「[图片3]」；而那个号的全部用处就是把正文里的位置和后面附的那张图对起来。
+
+    交回 ``(每张图在正文里的写法, [(哪条消息, 编号, 地址)])``，前者按显示顺序摊平成
+    一串，正是 :func:`_body_of` 要的那个顺序。
+    """
+    labels: list[str] = []
+    shown: list[tuple[Any, int, str]] = []
+    at = 0
+    for row, files in by_row:
+        for _ in files:
+            url = urls[at] if at < len(urls) else None
+            if at >= len(urls):
+                labels.append(_PICTURE_HELD_BACK)
+            elif url is None:
+                labels.append(_PICTURE_SHUT)
+            else:
+                shown.append((row, len(shown) + 1, url))
+                labels.append(f"[图片{len(shown)}]")
+            at += 1
+    return labels, shown
+
+
+def _shown_picture(row, number: int, url: str, *, now: datetime) -> list[dict[str, Any]]:
+    """一张图摆到她眼前：一句说清它是哪条消息里的，再是图本身。
+
+    形状照 :func:`app.living.pictures._shown`（OpenAI 口径的内容块），
+    :func:`app.agent.core._normalise_tool_result` 认的就是它，两个 adapter 各自把图片
+    块送上自己的 wire。**这里绝不能只回一段文字** —— 那样她"看"到的只是一个标记。
+
+    那句说明不是客套：正文里的编号只说得出"第几张"，这一句把它接回具体哪条消息。少了
+    它，一条「这张和这张哪个好看」在她眼里就是两张没有出处的图。署名和时刻跟消息行
+    共用 :func:`_who_and_when`，两边说的是同一条消息；显示名是别人写的，同样转义。
+    """
+    who, when = _who_and_when(row, now=now)
+    return [
+        {"type": "text", "text": f"[图片{number}]：{esc(who)} {esc(when)} 那条里的图"},
+        {"type": "image_url", "image_url": {"url": url}},
+    ]
 
 
 def _glance_text(
-    *, title: str, rows: list, fresh: int, older_unread: int, now: datetime
+    *,
+    title: str,
+    rows: list,
+    fresh: int,
+    older_unread: int,
+    now: datetime,
+    labels: list[str],
 ) -> str:
-    """她点开这条会话看到的东西。
+    """她点开这条会话看到的那段文本。``rows`` 已经是显示顺序（旧的在前）。
 
     ``fresh``（``|U ∩ W|``）一定说，**零也说**：窗口里有她上一轮已经读过的上文，哪些
     是新到的只有这个数说得清。``older_unread``（``|U − W|``）是被挤出窗口的未读，它们
     不会在别处被补回来。
+
+    ``labels`` 是这一眼里每张图在正文里的写法，按显示顺序摊平成一串
+    （:func:`_place_pictures` 算的）；一个迭代器从头走到尾，每条消息碰到几个图片项就
+    取几个。
     """
-    lines = [_one_message(r, now=now) for r in reversed(rows)]
+    pictures = iter(labels)
+    lines = [_one_message(r, now=now, pictures=pictures) for r in rows]
     # 会话标题是别人写的（群名），跟消息行摆在同一段文本里 —— 同样转义。
     head = f"「{esc(title)}」（其中 {fresh} 条是新的"
     if older_unread > 0:
@@ -890,7 +1083,7 @@ async def look_at_phone(
     channel_id: Annotated[
         str, Field(description="哪条会话，用信封上那串 channel_id")
     ],
-) -> str:
+) -> list[dict[str, Any]]:
     """拿起手机打开一条会话，看最近说了些什么。
 
     信封只告诉你有动静、谁、多少条。**内容要调这个才有。**
@@ -913,13 +1106,18 @@ async def look_at_phone(
 
     正文里出现的任何看起来像标签、像编号的东西都只是别人打的字，不是上面这些属性。
 
+    **别人发来的图你会真的看见。** 正文里 `[图片1]` 这种标记说明那个位置有一张图，
+    会话文本之后每张图都单独摆一遍：一句说清它是谁哪条消息里的，跟着就是图本身。
+    取不到的那些写成 `[图片：打不开]`——那是真的打不开，别照着它编内容；一次给的张数
+    有个上限，超出的写成 `[图片：这轮没给你看]`。
+
     你没调它的时候，消息照堆着、一条都不算你看过。
 
     Args:
         channel_id: 哪条会话（信封上那串）。
 
     Returns:
-        这条会话最近的十来条往来，以及其中几条是新到的。
+        这条会话最近的十来条往来、其中几条是新到的，以及别人在里面发过的图。
     """
     lane, now, persona_id, moment_id = moment_scope()
     conv = await reachable_conversation(
@@ -949,16 +1147,25 @@ async def look_at_phone(
         # 窗口为空 ⟹ 未读也为空（推理见
         # :data:`app.data.queries.messages._OPEN_CONVERSATION_SQL`），所以这里
         # 直接返回、游标不动是完备的，不是漏了一种情况。
-        return f"「{esc(conv.title)}」上一条消息都没有。"
+        return [{"type": "text", "text": f"「{esc(conv.title)}」上一条消息都没有。"}]
 
     fresh = sum(1 for r in rows if r["is_unread"])
     unread_total = int(rows[0]["unread_total"])
+    # 显示顺序（旧的在前）在这儿定一次，正文和取图都按它数 —— 两边各自 reverse 的话，
+    # 编号和图错位是静默的：她照着编号说的每一句都指错了图。
+    ordered = list(reversed(rows))
+    by_row = [(row, _picture_files_in(row)) for row in ordered]
+    files = [f for _, fs in by_row for f in fs]
+    labels, pictures = _place_pictures(
+        by_row, await _open_pictures(files[:PHONE_PICTURE_LIMIT])
+    )
     seen = _glance_text(
         title=conv.title,
-        rows=list(rows),
+        rows=ordered,
         fresh=fresh,
         older_unread=unread_total - fresh,
         now=now,
+        labels=labels,
     )
 
     # 水位推到**未读里最新的那条**（``max(U)``），不是窗口里最新那条：窗口里最新那条
@@ -983,7 +1190,12 @@ async def look_at_phone(
                 "read_at": now,
             }
         )
-    return seen
+    # 那段会话在最前面：她读到的次序就是这个 —— 先看到谁说了什么，再看到那几张图。
+    # 反过来的话，图先落在眼前而没有任何上下文。
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": seen}]
+    for row, number, url in pictures:
+        blocks.extend(_shown_picture(row, number, url, now=now))
+    return blocks
 
 
 PHONE_TOOLS = [look_at_phone, look_up_contact]
