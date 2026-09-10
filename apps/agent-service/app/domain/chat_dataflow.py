@@ -48,10 +48,12 @@ class ChatResponseSegment(Data):
         （= 真实 p2p ``common_conversation_id``）+ ``bot_name`` 投递（不靠伪 id，
         见 chat-response-worker 的 is_proactive 出站路径 / task 4）。
 
-    **图有自己的字段，不进 ``content``。** 她说话是两步：``send_message`` 收「意思」，
-    voice 模型再把它渲染成人话。第二步是自由生成、没有任何原样保留的通道（prompt 明
-    写"把它说成你会说的那句话"），图片引用混在正文里必然被改写或丢掉 —— 两种下场都
-    不报错。所以 :attr:`picture_file_names` 是图唯一的通道。
+    **图有自己的字段，不进 ``content``。** 投递侧只按 :attr:`picture_file_names` 上传
+    图，``content`` 里的 markdown 图片引用一个都不会变成图：投递侧切节点时把匹配到的
+    引用整段丢掉、只留周围的文字（``lark-service`` 的
+    ``src/lark/outbound/post-content.ts`` 那么切，``src/lark/outbound/render.test.ts``
+    钉着这条）—— 写进正文的图就这么静默消失，不报错。所以
+    :attr:`picture_file_names` 是图唯一的通道。
 
     ``channel`` 必填：sink dispatch 按它现算 routing key（``chat_response_{channel}``）。
     ``channel_route_for_payload`` 已经对缺字段 fail-closed，但那道校验跑在 pydantic

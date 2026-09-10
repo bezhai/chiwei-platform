@@ -29,7 +29,6 @@ __all__ = [
     "find_unread_senders",
     "find_newest_unread_summons",
     "find_conversation_window",
-    "find_messages_known_through",
     "search_conversations_by_name",
     "find_file_items_in_conversations",
     "count_summons_since",
@@ -131,11 +130,10 @@ _STILL_UNREAD = f"""(
 _VISIBLE_WHEN_SHE_OPENS_IT = f"(cm.recalled_at IS NULL OR {_SAID_BY_HER})"
 
 
-# 「这条消息在她眼里是谁说的，那个人是不是主人」——**全模块唯一一份**，五处让她看见
-# 一个人名的查询各拼这同一份（信封上点的名、打开会话、她已经知道的那段、按名字找会
-# 话、别人发来的文件）。
+# 「这条消息在她眼里是谁说的，那个人是不是主人」——**全模块唯一一份**，四处让她看见
+# 一个人名的查询各拼这同一份（信封上点的名、打开会话、按名字找会话、别人发来的文件）。
 #
-# 拆成五份各写各的 join 的话，收窄或修好其中一处，另外四处照旧 —— 而她读到的行看起来
+# 拆成四份各写各的 join 的话，收窄或修好其中一处，另外三处照旧 —— 而她读到的行看起来
 # 一模一样，库里没有任何东西对不上。
 #
 # **名字和身份是两件事。** ``who`` 是 ``sender_display_name``，是她在信封和会话里见到
@@ -444,64 +442,6 @@ async def find_conversation_window(
                     "channel_id": channel_id,
                     "after_ms": after_ms,
                     "after_id": after_id,
-                    "own_bots": own_bots,
-                    "limit": limit,
-                },
-            )
-        ).mappings().all()
-    return [dict(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# 她**已经知道**的那一段
-# ---------------------------------------------------------------------------
-
-# 边界就是游标：她看过的（event_time <= 水位）+ **她自己**发出去的。**没看过的一个
-# 字都不给** —— 给它未读内容，"内容要她去看"这条线当场就漏了：她会回应一句自己根本
-# 没读过的话。
-#
-# 绕过游标那道门是给"她当然知道自己说过什么"留的，**只有她自己的话走得进来**。别的
-# bot 的话从这道门溜进来会同时破两条线：白送未读内容，而且渲染时被署成"你"。
-_KNOWN_SQL = f"""
-SELECT {_WHO_AND_OWNER},
-       {_SAID_BY_HER}       AS said_by_you,
-       cm.content           AS content,
-       cm.content_text      AS content_text,
-       cm.event_time        AS at_ms
-  FROM common_message cm
-  {_JOIN_SPEAKER}
- WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND {_STILL_IN_THE_CONVERSATION}
-   AND (
-        {_SAID_BY_HER}
-        OR (cm.event_time, CAST(cm.common_message_id AS text))
-           <= (:cursor_ms, :cursor_id)
-   )
- ORDER BY cm.event_time DESC, cm.common_message_id DESC
- LIMIT :limit
-"""
-
-
-async def find_messages_known_through(
-    *,
-    channel_id: str,
-    cursor_ms: int,
-    cursor_id: str,
-    own_bots: list[str],
-    limit: int,
-) -> list[dict]:
-    """这条会话上她已经知道的那一段：游标之前的 + 她自己说过的，最近 ``limit`` 条。
-
-    按 ``at_ms`` **降序**返回（最近的在前），撤掉的行一条都不在里面。
-    """
-    async with auto_tx():
-        rows = (
-            await current_session().execute(
-                text(_KNOWN_SQL),
-                {
-                    "channel_id": channel_id,
-                    "cursor_ms": cursor_ms,
-                    "cursor_id": cursor_id,
                     "own_bots": own_bots,
                     "limit": limit,
                 },

@@ -1240,8 +1240,8 @@ describe('图片每一步失败时：她那句话照常送到飞书', () => {
     });
 
     it('正文里带一个非法图片引用时，整条消息里唯一的 img 是结构化那张', async () => {
-        // 飞书认不出的 image_key 会让它拒收**整条消息**。voice 模型随手写出的引用
-        // 一个都不能变成 image_key。
+        // 飞书认不出的 image_key 会让它拒收**整条消息**。赤尾在正文里随手写出的
+        // 图片引用一个都不能变成 image_key。
         const h = withRealRender();
 
         await deliverLarkChatResponse(

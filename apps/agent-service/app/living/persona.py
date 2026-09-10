@@ -6,12 +6,11 @@
 Version、append-only、读最新一版、整篇重写——新版**取代**旧版）。主表不动，只当 v0
 的来源和冷启 fallback。
 
-**读侧必须收口在这个模块。** 喂人设进模型的地方有三处（一轮 moment :mod:`app.living.moment`、
-写日记 :mod:`app.living.day_page`、开口渲染 :mod:`app.living.mouth`），各自去查一遍
-主表的话，链上那些版本一个字都到不了她眼前——而且**一句报错都没有**，每一轮照跑，只
-是底色永远停在出厂那份。实际发生过：开口那条路自己另拼了一份，于是她那一轮里是链上
-新的自己，一开口又变回旧的。所以 :func:`persona_prompt_vars` 自己查库，调用方只给
-``lane`` 和 ``persona_id``，没有第二个组装点。
+**读侧必须收口在这个模块。** 喂人设进模型的地方有两处（一轮 moment
+:mod:`app.living.moment`、写日记 :mod:`app.living.day_page`），各自去查一遍主表的话，
+链上那些版本一个字都到不了她眼前——而且**一句报错都没有**，每一轮照跑，只是底色永远
+停在出厂那份。所以 :func:`persona_prompt_vars` 自己查库，调用方只给 ``lane`` 和
+``persona_id``，没有第二个组装点。
 
 每版带来源 ``source``，一条链同时承担三件事、不拆来源就互相污染：
 
@@ -221,7 +220,7 @@ async def persona_prompt_vars(*, lane: str, persona_id: str) -> dict[str, str]:
     **只有不随轮次变的东西才配当 prompt 变量**：她叫什么、她是个什么样的人。每一轮
     都变的（快照、手机信封、那一天的材料）一律走 USER 消息，理由是 prompt 变量没有
     编译期校验、改名会静默渲染成字面量，能少一个就少一个。同理这两个键名
-    （``persona_name`` / ``persona_core``）就是 Langfuse 上那三个 prompt 正文里写着
+    （``persona_name`` / ``persona_core``）就是 Langfuse 上那两个 prompt 正文里写着
     的名字，改代码这边等于让它们原样渲染成字面量出现在她眼前。
 
     正文取链上最新一版（不分来源，owner 盖版即刻生效），链空 / 那一版空白才退回主表

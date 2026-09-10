@@ -31,11 +31,12 @@ def test_chat_response_segment_is_transient():
 
 
 # ---- 图：结构化字段，值是永久句柄 ----
-# 她说话是两步：send_message 收「意思」→ voice 模型渲染成人话。第二步是自由生成、
-# 没有任何原样保留的通道，所以图片引用混在正文里必然被改写或丢掉。图只能有自己
-# 的字段。而字段里存的是对象存储的**永久句柄**（file_name），不是地址：预签名地址
-# 1.5 小时就死，队列却可能隔很久才投到（泳道队列 TTL 降级、DLQ 重投），签名必须在
-# 最靠近发送的那一刻由投递侧现签。
+# 投递侧只按 picture_file_names 上传图，正文里的 markdown 图片引用一个都不会变成图
+# （lark-service 的 src/lark/outbound/render.test.ts 钉着这条）——写进正文的引用要么
+# 原样当文字发出去、要么让渠道拒收整条消息。图只能有自己的字段。而字段里存的是对象
+# 存储的**永久句柄**（file_name），不是地址：预签名地址 1.5 小时就死，队列却可能隔
+# 很久才投到（泳道队列 TTL 降级、DLQ 重投），签名必须在最靠近发送的那一刻由投递侧
+# 现签。
 
 
 def test_chat_response_segment_carries_pictures_as_their_own_field():

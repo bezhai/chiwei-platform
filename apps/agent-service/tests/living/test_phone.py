@@ -26,7 +26,6 @@ from app.data import session as session_mod
 from app.living.phone import (
     NEVER_LOOKED,
     PHONE_GLANCE_LIMIT,
-    conversation_as_she_knows_it,
     conversations_her_bot_is_in,
     envelopes_for,
     look_at_phone,
@@ -543,8 +542,8 @@ async def test_an_empty_phone_says_so_instead_of_leaving_a_hole(living_db):
 #     那条（留痕迹），不含别人撤掉的。
 #   * 「其中 N 条是新的」= |U ∩ W|；「前面还有 K 条你没往回翻」= |U − W|。
 #   * **游标推到 max(U)，不是 max(W)**：W 里最新那条可能是她自己发的、晚于任何未读，
-#     推到它身上会让之后乱序到达、时刻更早的消息被永久跳过，也会让措辞模型那侧把她
-#     根本没见过的消息当成"她已经知道的"。
+#     推到它身上会让之后乱序到达、时刻更早的消息被永久跳过 —— 她一个字都没看过，那
+#     几条却已经被算成读过了。
 
 
 @pytest.mark.integration
@@ -631,9 +630,8 @@ async def test_a_conversation_with_nothing_unread_does_not_move_the_cursor(
 async def test_her_own_latest_word_does_not_take_the_cursor(living_db, in_a_moment):
     """窗口里最新那条是她自己发的时，游标停在**未读**里最新那条上。
 
-    推到她自己那句上有两处后果：之后乱序到达、时刻更早的消息被永久跳过；而且措辞
-    模型那侧（``conversation_as_she_knows_it`` 按游标开窗）会把她根本没见过的消息
-    当成"她已经知道的"。
+    推到她自己那句上的后果是：之后乱序到达、时刻更早的消息被永久跳过 —— 她一个字
+    都没看过，那几条却已经被算成读过了。
     """
     await _seed_world()
     unread = await _incoming(_DM, text_body="在吗", at=_at(21, 30))
@@ -1347,44 +1345,25 @@ async def test_messages_she_reads_carry_the_day_they_were_sent(
     )
 
 
-# --------------------------------------------------------------------------
-# 六 · 她开口前看到的那段会话尾巴
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.integration
-async def test_the_tail_she_speaks_from_dates_what_crossed_the_night(living_db):
-    """渲染措辞时看到的那段会话，跨夜同样必须说是哪天。
+async def test_messages_she_reads_today_stay_undated(living_db, in_a_moment):
+    """同一天的那几条**刻意不带**日期。
 
-    这一段是她**开口前**读的最后一样东西（``mouth.send_message`` 拿它做上下文），
-    ``KNOWN_TAIL_LIMIT=20`` 条、**没有时间窗**——昨晚说过的话原样躺在里面。裸时分下
-    「23:50 我先睡了」和五分钟前刚说的长得一个样，她会接着一段其实已经隔夜的对话往
-    下说。跟信封、跟快照是同一个坑，同一处修法。
+    信封那侧有同一条断言，但两侧是两个渲染出口（信封走
+    :func:`app.living.phone.render_envelopes`，消息行走
+    :func:`app.living.phone._one_message`）。消息行这侧改成一律带日期的话，
+    信封那条用例照样绿 —— 所以这条否定断言在这侧也得有。
     """
     await _seed_world()
-    await _her_own(_DM, text_body="我先睡了", at=_at(23, 50) - dt.timedelta(days=1))
+    await _incoming(_DM, text_body="在吗", at=_at(21, 30))
 
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_DM), now=_at(0, 20)
-    )
+    async with in_a_moment("akao", now=_at(21, 35)):
+        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
 
-    assert "07-24 23:50" in known, (
-        f"隔夜那句渲染成了裸时分 —— 她会当成刚说完，接着往下聊。拿到：\n{known}"
-    )
-
-
-@pytest.mark.integration
-async def test_the_tail_stays_undated_within_the_same_day(living_db):
-    """同一天的不带日期：全带上等于每行都要她过滤一次冗余，反而稀释掉真正的跨天信号。"""
-    await _seed_world()
-    await _her_own(_DM, text_body="在的在的", at=_at(9, 30))
-
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_DM), now=_at(9, 40)
-    )
-
-    assert "09:30 CST" in known and "07-25" not in known, (
-        f"同一天的行不该背日期。拿到：\n{known}"
+    assert "21:30 CST" in _line_with(seen, "在吗")
+    assert "07-25 21:30" not in seen, (
+        f"当天的消息行背上了日期 —— 每行都要她过滤一次冗余，真正的跨天信号反而被"
+        f"稀释掉。拿到：\n{seen}"
     )
 
 
@@ -1397,8 +1376,7 @@ async def test_the_tail_stays_undated_within_the_same_day(living_db):
 # 拿 ``role`` 单独判"是不是她说的"会同时错两次：
 #
 #   * 姐姐的话被整段排除出"未读" —— 她从手机上**永远**看不到同一个群里姐姐说了什么；
-#   * 姐姐的话又被无条件塞进"她已经知道的那段"、还署上"你" —— 她开口前读到的上下文里，
-#     姐姐说的话写着是她自己说的。
+#   * 姐姐的话又被署上"你" —— 她点开会话看到的那几行里，姐姐说的话写着是她自己说的。
 #
 # 分得开这两者的只有 ``bot_name``（``bot_config`` 里 bot → persona 的映射）。
 #
@@ -1546,33 +1524,13 @@ async def test_the_envelope_does_not_claim_she_was_named_when_nobody_scanned(
 
 
 @pytest.mark.integration
-async def test_a_sister_word_she_has_not_read_is_not_something_she_knows(living_db):
-    """没看过就是没看过，姐姐的话也一样。
-
-    ``_KNOWN_SQL`` 让 ``role='assistant'`` 无条件绕过已读游标 —— 那是给**她自己**
-    说过的话留的门（她当然知道自己说过什么），姐姐的话从这道门溜进来就是白送未读内容：
-    她会在措辞里回应一句自己根本没读过的话。
-    """
-    await _seed_world()
-    await _sister_said(_GROUP, text_body="今晚吃什么", at=_at(21, 30))
-
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_GROUP), now=_at(21, 35)
-    )
-
-    assert "今晚吃什么" not in known, (
-        f"姐姐没被她读过的话绕过了游标，直接进了她开口前的上下文。拿到：\n{known}"
-    )
-
-
-@pytest.mark.integration
-async def test_a_sister_word_she_did_read_is_attributed_to_the_sister(
+async def test_a_sister_word_is_attributed_to_the_sister_not_to_her(
     living_db, in_a_moment, pinned
 ):
-    """她看过之后那句在上下文里，署的是**姐姐的名字**，不是"你"。
+    """她点开会话，姐姐那句署的是**姐姐的名字**，不是"你"。
 
     这是前六次那个病的镜像版：之前是"她把自己的回声当成别人在说话"，这次是"她把姐姐
-    的话当成自己说的"。
+    的话当成自己说的"。分得开两者的只有 ``bot_name``，``role`` 两边都是 assistant。
     """
     await _seed_world()
     pinned(str(_GROUP))
@@ -1582,30 +1540,11 @@ async def test_a_sister_word_she_did_read_is_attributed_to_the_sister(
         seen = await look_at_phone.invoke({"channel_id": str(_GROUP)})
     assert "今晚吃什么" in seen, f"拿起手机也看不到姐姐说了什么。拿到：{seen}"
 
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_GROUP), now=_at(21, 35)
-    )
-    line = _line_with(known, "今晚吃什么")
+    line = _line_with(seen, "今晚吃什么")
     assert 'from="绫奈"' in line, (
-        f"姐姐说的话在她开口前的上下文里署成了「你」—— 她会以为那是自己说的。"
-        f"拿到：\n{known}"
+        f"姐姐说的话署成了「你」—— 她会以为那是自己说的。拿到：\n{seen}"
     )
     assert 'from="你"' not in line
-
-
-@pytest.mark.integration
-async def test_her_own_words_stay_hers_in_what_she_knows(living_db):
-    """她自己那句照旧无条件在她已知范围内，署"你"。"""
-    await _seed_world()
-    await _her_own(_GROUP, text_body="我在", at=_at(21, 30))
-
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_GROUP), now=_at(21, 35)
-    )
-
-    assert 'from="你"' in _line_with(known, "我在"), (
-        f"她自己说过的话认不出来了。拿到：\n{known}"
-    )
 
 
 @pytest.mark.integration
@@ -1933,29 +1872,6 @@ async def test_the_older_type_value_shape_still_reads(living_db, in_a_moment):
     assert "旧消息[图片]" in seen, f"拿到：\n{seen}"
 
 
-@pytest.mark.integration
-async def test_the_tail_she_speaks_from_carries_the_file_name_too(
-    living_db, in_a_moment
-):
-    """她开口前读的那段会话尾巴同样要带文件名。
-
-    看手机和渲染措辞是两个读取方、同一份正文。只修一边的话，她在手机上看见
-    「[文件: 三体.epub]」、转头开口时上下文里又变回「[file]」—— 同一个东西在
-    一轮之内长了两副样子，她会当成两件事。
-    """
-    await _seed_world()
-    await _incoming(_DM, at=_at(22, 27), items=[_FILE_ITEM], content_text="[file]")
-
-    async with in_a_moment("akao", now=_at(22, 30)):
-        await look_at_phone.invoke({"channel_id": str(_DM)})  # 读过了才进她已知范围
-
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_DM), now=_at(22, 30)
-    )
-
-    assert "[文件: 三体.epub]" in known, f"拿到：\n{known}"
-
-
 # --------------------------------------------------------------------------
 # 十一 · 撤掉的那条不在会话里了
 # --------------------------------------------------------------------------
@@ -1977,34 +1893,6 @@ async def test_the_tail_she_speaks_from_carries_the_file_name_too(
 # 撤得掉她的消息，而撤回这件事在库里只有一个时刻、没有操作者。
 #
 # 别人撤掉的仍然一处都不显示：真人那侧看到的是"XX 撤回了一条消息"，内容确实没了。
-
-
-@pytest.mark.integration
-async def test_a_message_she_took_back_is_gone_from_the_tail_she_speaks_from(
-    living_db,
-):
-    """她自己撤掉的那句，不在她开口前读的那段会话里。
-
-    这是最要命的一处：``conversation_as_she_knows_it`` 是嘴渲染措辞前读的最后一样
-    东西（``app.living.mouth.send_message``）。撤掉的那句留在里面，她就会接着一句
-    对面根本看不到的话往下说。
-    """
-    await _seed_world()
-    took_back = await _her_own(_DM, text_body="那家店周一不开", at=_at(21, 30))
-    await _her_own(_DM, text_body="明天见", at=_at(21, 32))
-    await _recalled_on_the_channel(took_back, at=_at(21, 31))
-
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_DM), now=_at(21, 35)
-    )
-
-    assert "那家店周一不开" not in known, (
-        f"她撤掉的那句还在她开口前的上下文里 —— 她会接着一句对面看不到的话说下去。"
-        f"拿到：\n{known}"
-    )
-    assert 'from="你"' in _line_with(known, "明天见"), (
-        f"撤一句把她别的话也一起拿掉了。拿到：\n{known}"
-    )
 
 
 @pytest.mark.integration
@@ -2102,36 +1990,6 @@ async def test_what_someone_else_took_back_is_not_in_the_window_either(
         f"别人撤掉的消息还在她眼前 —— 她看到的会话跟对面看到的不是同一个。拿到：\n{seen}"
     )
     assert "刚才那条你们看到了吗" in seen, f"没撤的那条也一起没了。拿到：\n{seen}"
-
-
-@pytest.mark.integration
-async def test_a_sister_word_taken_back_is_gone_from_what_she_knows_too(
-    living_db, in_a_moment, pinned
-):
-    """姐姐撤掉的那句同样不在 —— 哪怕她之前已经读过。
-
-    判据是"这一行在渠道上还在不在"，不是"谁撤的"。她读过之后那句本来会绕过游标
-    进入她已知的那段（前一节那批用例），撤掉之后不该再进。
-    """
-    await _seed_world()
-    pinned(str(_GROUP))
-    took_back = await _sister_said(_GROUP, text_body="今晚吃火锅", at=_at(21, 30))
-    await _sister_said(_GROUP, text_body="七点楼下集合", at=_at(21, 31))
-
-    async with in_a_moment("akao"):
-        await look_at_phone.invoke({"channel_id": str(_GROUP)})  # 两条都读过了
-    await _recalled_on_the_channel(took_back, at=_at(21, 32))
-
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_GROUP), now=_at(21, 35)
-    )
-
-    assert "今晚吃火锅" not in known, (
-        f"姐姐撤掉的那句还在她已知的那段里。拿到：\n{known}"
-    )
-    assert 'from="绫奈"' in _line_with(known, "七点楼下集合"), (
-        f"没撤的那句也一起没了。拿到：\n{known}"
-    )
 
 
 @pytest.mark.integration
@@ -2621,34 +2479,6 @@ async def test_her_own_line_and_her_sisters_line_carry_no_relation(
 
 
 @pytest.mark.integration
-async def test_both_places_she_reads_a_message_render_it_identically(
-    living_db, in_a_moment
-):
-    """她点开会话看到的那一行，跟她开口前读到的那一行，**逐字相同**。
-
-    两处是两个读取方（:func:`look_at_phone` 和 :func:`conversation_as_she_knows_it`）
-    同一份事实。形状分家的话，同一条消息在一轮之内长两副样子：她在手机上看到主人说
-    的话带着印，转头开口时那条印没了 —— 她会以为那是两个人。
-    """
-    await _seed_world()
-    await _incoming(_DM, text_body="周末有空吗", at=_at(21, 30))
-
-    async with in_a_moment("akao", now=_at(21, 35)):
-        seen = await look_at_phone.invoke({"channel_id": str(_DM)})
-
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_DM), now=_at(21, 35)
-    )
-
-    assert _line_with(seen, "周末有空吗") == _line_with(known, "周末有空吗"), (
-        f"两处渲染出来的不是同一行。\n看手机：\n{seen}\n开口前：\n{known}"
-    )
-    assert 'rel="owner"' in _line_with(known, "周末有空吗"), (
-        f"她开口前读的那段里，主人那条丢了印。拿到：\n{known}"
-    )
-
-
-@pytest.mark.integration
 async def test_the_envelope_marks_the_owner_and_never_merges_him_with_a_namesake(
     living_db, in_a_moment
 ):
@@ -2850,12 +2680,12 @@ async def test_both_tool_descriptions_name_the_place_the_handle_actually_sits(
 # 十五 · 撤回那两列缺了就当场炸，不悄悄退化成"这条撤不了"
 # --------------------------------------------------------------------------
 #
-# 她打开会话那一眼和她开口前读的那段尾巴共用同一条渲染（`_one_message`），而两条查询
-# 的列不一样：窗口那条带 ``recalled_at`` / ``outbound_id``，尾巴那条没有。
+# 她打开会话那一眼靠 ``recalled_at`` / ``outbound_id`` 两列决定这一行印不印撤回状态、
+# 印不印可撤的编号。渲染（`_one_message`）用 ``[]`` 读它们，缺列当场 ``KeyError``。
 #
-# 用 ``row.get(...)`` 兜住这个差别的话，"窗口那条查询哪天丢了 ``recalled_at``"就跟
-# "尾巴那条本来就没有它"长得一模一样 —— 结果是**已经撤回的消息重新长出一个可撤的
-# 编号**，而她照着再撤一次只会撤了个空，全程零报错。所以那个差别由调用方明说。
+# 换成 ``row.get(...)`` 的话，"这条查询哪天丢了 ``recalled_at``"就退化成"这一行没撤
+# 回过" —— 结果是**已经撤回的消息重新长出一个可撤的编号**，而她照着再撤一次只会撤了
+# 个空，全程零报错。缺列必须炸在这一眼上，游标一条都不推。
 
 
 @pytest.mark.integration
@@ -2903,24 +2733,3 @@ async def test_a_window_row_that_lost_the_recall_columns_fails_loudly(
     ) == NEVER_LOOKED, "这一眼没成，游标却推过去了"
 
 
-@pytest.mark.integration
-async def test_the_tail_she_speaks_from_never_asks_for_the_recall_columns(
-    living_db, in_a_moment
-):
-    """尾巴那条查询本来就没有那两列，渲染它不许去读 —— 读了就是每一行都炸。
-
-    这一条钉的是"两条查询列不一样"这个事实由**调用方**说明白，而不是渲染层自己猜。
-    """
-    await _seed_world()
-    await _incoming(_DM, text_body="在吗", at=_at(21, 30))
-    async with in_a_moment("akao", now=_at(21, 31)):
-        await look_at_phone.invoke({"channel_id": str(_DM)})
-
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_DM), now=_at(21, 35)
-    )
-
-    assert 'from="bezhai"' in _line_with(known, "在吗")
-    assert "take_back_id=" not in known and "recalled=" not in known, (
-        f"她开口前读的那段冒出了只有打开会话才有的属性。拿到：\n{known}"
-    )

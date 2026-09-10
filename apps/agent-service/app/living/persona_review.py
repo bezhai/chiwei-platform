@@ -2,7 +2,7 @@
 
 跨天沉淀（:mod:`app.living.day_page`）让她记得住昨天。这一层管的是另一件事：**她
 会因为过去这一周而变**。写下的那一版进 :class:`app.living.persona.PersonaVersion`
-版本链，而链上最新一版就是她每一轮、写日记、开口说话时读到的自己
+版本链，而链上最新一版就是她每一轮、写日记时读到的自己
 （:func:`app.living.persona.persona_prompt_vars`）——所以这里落库的东西下一分钟就在
 她眼前，不是一份存档。
 

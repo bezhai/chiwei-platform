@@ -825,10 +825,10 @@ async def run_moment(
         snapshot = await read_snapshot(
             lane=lane, persona_id=persona_id, after_seq=after_seq, now=began_at
         )
-        # 「她是谁」那两个变量由 :mod:`app.living.persona` 一处组装（嘴和日记那两条
-        # 路共用同一份）。手边有哪些说明可读**只加在这个 moment 上**：只有这个 moment 有读它、
-        # 跑它的那两只手，塞进那个共用函数就等于把一份她在嘴和日记里用不上的清单也
-        # 灌进那两个 agent 的 prompt。
+        # 「她是谁」那两个变量由 :mod:`app.living.persona` 一处组装（这一轮和日记那两
+        # 条路共用同一份）。手边有哪些说明可读**只加在这个 moment 上**：只有这个 moment
+        # 有读它、跑它的那两只手，塞进那个共用函数就等于把一份写日记时用不上的清单也
+        # 灌进那个 agent 的 prompt。
         prompt_vars = {
             **await persona_prompt_vars(lane=lane, persona_id=persona_id),
             GUIDES_VAR: guides_she_can_read(),

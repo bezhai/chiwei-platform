@@ -128,9 +128,6 @@ def her_mouth(monkeypatch):
     只有这一条用例需要它：那条用例要的是**真的走一遍她开口那条路**，``happening_id``
     由嘴自己拼、快照自己解析、撤回自己收 —— 中间任何一处各写一份拼接规则，它就红。
     """
-    from types import SimpleNamespace
-
-    from app.agent.neutral import Message, Role
     from app.capabilities.output_safety import OutputVerdict
     from app.living import mouth as mouth_mod
 
@@ -139,22 +136,11 @@ def her_mouth(monkeypatch):
     async def fake_emit(data):
         sent.append(data)
 
-    class FakeVoice:
-        async def run(self, messages, **kwargs):
-            return Message(role=Role.ASSISTANT, content=_SAID)
-
     async def fake_audit(said: str, *, timeout_s: float | None = None):
         return OutputVerdict(ok=True)
 
-    async def fake_find_persona(persona_id: str):
-        return SimpleNamespace(display_name="赤尾", persona_core="")
-
-    from app.living import persona as persona_mod
-
     monkeypatch.setattr(mouth_mod, "emit", fake_emit)
-    monkeypatch.setattr(mouth_mod, "build_voice_runner", lambda: FakeVoice())
     monkeypatch.setattr(mouth_mod, "audit_output", fake_audit)
-    monkeypatch.setattr(persona_mod, "find_persona", fake_find_persona)
     return sent
 
 
@@ -326,7 +312,7 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
 
     async with in_a_moment("akao", moment_id=_MOMENT):
         said = await send_message.invoke(
-            {"what": "问问他抹茶店去过没", "channel_id": str(_DM)}
+            {"what": _SAID, "channel_id": str(_DM)}
         )
         assert isinstance(said, str), f"她这条没发出去，后面无从谈起。拿到：{said!r}"
 

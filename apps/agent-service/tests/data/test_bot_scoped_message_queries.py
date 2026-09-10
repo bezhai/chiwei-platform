@@ -26,7 +26,6 @@ from app.data.queries.messages import (
     find_conversations_others_spoke_in,
     find_file_items_in_conversations,
     find_messages_by_outbound_ids,
-    find_messages_known_through,
     find_newest_unread_summons,
     find_recall_state_by_outbound_ids,
     find_unread_senders,
@@ -93,7 +92,7 @@ def _counts(rows: list[dict], conv: uuid.UUID) -> list[int]:
 async def bot_db(test_db):
     """公共层三张 ORM 表 + channel-server 那两张裸表。
 
-    ``common_user`` 必须在：五处读消息的查询都 join 它取 ``is_owner``（"这条是不是
+    ``common_user`` 必须在：四处读消息的查询都 join 它取 ``is_owner``（"这条是不是
     主人说的"的全部依据）。缺了这张表整个文件炸在"表不存在"上。
     """
     tables = [
@@ -574,79 +573,6 @@ async def test_the_window_carries_the_handle_she_can_take_a_line_back_with(bot_d
 async def test_an_empty_conversation_yields_no_window_rows(bot_db):
     await _seed_her_phone()
     assert await find_conversation_window(**_unread_args(_DM), limit=10) == []
-
-
-# ---------------------------------------------------------------------------
-# 她已经知道的那一段（嘴渲染措辞时看的全部）
-# ---------------------------------------------------------------------------
-
-
-async def test_what_she_knows_stops_at_the_cursor(bot_db):
-    await _seed_her_phone()
-    await _message(_DM, at=_at(9), body="读过的")
-    await _message(_DM, at=_at(11), body="还没读的")
-    rows = await find_messages_known_through(
-        channel_id=str(_DM),
-        cursor_ms=_ms(_at(10)),
-        cursor_id="z",
-        own_bots=["chiwei", "chiwei-dev"],
-        limit=20,
-    )
-    assert [r["content_text"] for r in rows] == ["读过的"]
-
-
-async def test_her_own_lines_walk_past_the_cursor(bot_db):
-    """她当然知道自己说过什么 —— 但只有她自己的话走得进这道门。"""
-    await _seed_her_phone()
-    await _message(
-        _DM, at=_at(11), role="assistant", bot_name="chiwei", body="我刚说的"
-    )
-    await _message(
-        _GROUP,
-        at=_at(11),
-        role="assistant",
-        bot_name="ayana",
-        body="姐姐说的",
-        scope="group",
-    )
-    mine = await find_messages_known_through(
-        channel_id=str(_DM),
-        cursor_ms=0,
-        cursor_id="",
-        own_bots=["chiwei", "chiwei-dev"],
-        limit=20,
-    )
-    assert [r["content_text"] for r in mine] == ["我刚说的"]
-    assert mine[0]["said_by_you"] is True
-
-    sisters = await find_messages_known_through(
-        channel_id=str(_GROUP),
-        cursor_ms=0,
-        cursor_id="",
-        own_bots=["chiwei", "chiwei-dev"],
-        limit=20,
-    )
-    assert sisters == []
-
-
-async def test_a_recalled_line_is_gone_from_what_she_knows(bot_db):
-    await _seed_her_phone()
-    await _message(
-        _DM,
-        at=_at(9),
-        role="assistant",
-        bot_name="chiwei",
-        body="撤掉的",
-        recalled_at=_at(9, 1),
-    )
-    rows = await find_messages_known_through(
-        channel_id=str(_DM),
-        cursor_ms=_ms(_at(10)),
-        cursor_id="z",
-        own_bots=["chiwei", "chiwei-dev"],
-        limit=20,
-    )
-    assert rows == []
 
 
 # ---------------------------------------------------------------------------
@@ -1161,35 +1087,28 @@ async def test_an_empty_set_reports_nothing_rather_than_everything(bot_db):
 
 
 # ---------------------------------------------------------------------------
-# 「这个人在她眼里是谁」—— 五处查询共用的那一份
+# 「这个人在她眼里是谁」—— 四处查询共用的那一份
 # ---------------------------------------------------------------------------
 #
 # 名字是 ``sender_display_name``（她在信封和会话里见到的那个），身份是
 # ``common_user.is_owner``（她看不到、也没人改得动的那一列）。两件事一起从
-# :data:`app.data.queries.messages._WHO_AND_OWNER` 出来，五处各拼同一份 —— 各写各的
-# join 的话，收窄了一处另外四处照旧，而她读到的行看起来一模一样。
+# :data:`app.data.queries.messages._WHO_AND_OWNER` 出来，四处各拼同一份 —— 各写各的
+# join 的话，收窄了一处另外三处照旧，而她读到的行看起来一模一样。
 #
 # ``LEFT JOIN`` 是必须的：``common_user_id`` 为空、或者那个人根本没在 ``common_user``
 # 里落过行的消息照样要出现在结果里，只是认不出他是谁 → ``by_owner=false``（fail-closed）。
 
 
 async def test_the_owner_is_marked_on_every_place_she_reads_a_name(bot_db):
-    """五处查询都答得出「这条是不是主人说的」。
+    """四处查询都答得出「这条是不是主人说的」。
 
-    少一处就是那个视角下主人跟陌生人长得一样 —— 而五处的输出她全都看得到。
+    少一处就是那个视角下主人跟陌生人长得一样 —— 而四处的输出她全都看得到。
     """
     await _seed_her_phone()
     await _message(_DM, at=_at(9), sender=_OWNER, who="bezhai", content=_FILE_CONTENT)
 
     senders = await find_unread_senders(**_unread_args(_DM), limit=4)
     window = await find_conversation_window(**_unread_args(_DM), limit=10)
-    known = await find_messages_known_through(
-        channel_id=str(_DM),
-        cursor_ms=_ms(_at(23)),
-        cursor_id="",
-        own_bots=["chiwei", "chiwei-dev"],
-        limit=10,
-    )
     looked_up = await search_conversations_by_name(
         conversations=await _her_conversations(),
         name_like="%bezhai%",
@@ -1199,7 +1118,6 @@ async def test_the_owner_is_marked_on_every_place_she_reads_a_name(bot_db):
 
     assert [r["by_owner"] for r in senders] == [True], f"信封那侧：{senders}"
     assert [r["by_owner"] for r in window] == [True], f"打开会话：{window}"
-    assert [r["by_owner"] for r in known] == [True], f"她已经知道的那段：{known}"
     assert list(looked_up[0]["matched_owner"]) == ["bezhai"], (
         f"按名字找会话：{looked_up}"
     )

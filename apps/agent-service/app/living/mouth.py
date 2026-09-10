@@ -1,10 +1,10 @@
 """chat 是她的嘴 —— 只有出口，没有入口。
 
-life 产出「我想跟谁说个什么意思」，这里把它渲染成人话，发出去。
+她写下要发的那句话，这里把它交给投递发出去。
 
-**为什么嘴要单独一个模型。** moment 用的 ``life-model`` 推理强、对话差；拿它写对外的话，
-出去的是一段推理稿（旧引擎实测：堆黑话、叫「主人」）。所以嘴用 ``main-chat-model`` +
-自己的一份 prompt，跟 life 那一轮彻底分开。
+**她写下什么就发什么。** ``send_message`` 收到的 ``what`` 逐字就是出站正文、是交出去
+之前那道检查判的那一串、也是落进 :class:`SpokenOutbound` 和她记忆里的那一句。这条链
+上只有一处文本，中间任何一步改写它都会让这四样对不上。
 
 **没有入口。** 这个模块里没有任何 ``@node``、没有 ``Source``、没有队列消费者，一次都
 不出现旧 chat 入站链的名字。「被 @ 不能触发 chat」不是靠哪个分支里的 if 拦住的——是
@@ -47,40 +47,43 @@ life 产出「我想跟谁说个什么意思」，这里把它渲染成人话，
 2 和 4 之间是这样，``emit`` 抛错也是这样，同一格，同一个待遇。
 
 **不重发不等于把这句话判死。** ``outbound_id`` 从 ``(lane, persona, moment_id, 会话,
-她那句意图)`` 派生 —— 下一轮是新的 ``moment_id``、就是新的 ``outbound_id``，认领表
+她那句话)`` 派生 —— 下一轮是新的 ``moment_id``、就是新的 ``outbound_id``，认领表
 拦不住它。所以"要不要再说一次"这个决定回到了**她**手里，而不是系统替她按重试按钮。
 这也是为什么这里没有重试计数器、没有退避、没有超时阈值：那些东西是替她做决定。
 
 **她说出去的话要落一条 Happening。** 不落的话她下一轮不知道自己说过什么，于是对同一
 件事又说一遍——旧引擎在 prod 上实锤复现过：两条主动发相隔三分钟、对同一件事说法前后
-矛盾。落的是**真的发出去那句**（渲染后的），不是她那句内部意图。
+矛盾。落的就是发出去那句，逐字。
 
-**渲染没出内容就不发。** 不回退发意图原文（那是她脑子里的措辞，不是人话），也不发空
-消息——把"没发出去"作为工具结果喂回她，她自己决定重说还是算了。
+**她一个字都没写就不发。** 空消息发出去，真人看到的是一条空白 —— 把"没发出去"作为
+工具结果喂回她，她自己决定重说还是算了。
 
 **交出去之前先过一道检查，不合格就不发。** 真人问她、她答的那条链是"先发后撤"（流式
 回复没有同步检查的窗口）；她主动开口没有这个压力，所以检查放得进发送之前 —— 拦下的话
 真人一个字都没看见，不用撤。判据在 :mod:`app.capabilities.output_safety`，两条链共用
 同一份。
 
-  * 位置在**渲染之后、认领之前**：判的是真人会看见的那句人话；拦下时不占那个 id，
-    否则同一轮里她再说同一件事会撞上"你已经说过了"——而那是假话。
+  * 位置在**认领之前**：拦下时不占那个 id，否则同一轮里她再说同一件事会撞上"你已经
+    说过了"——而那是假话，她一个字都没说出去。判的那一串就是 ``what``，也就是真人会
+    看见的那一串。
   * **这一关自己坏了的时候照发**（超时、模型挂了、词表读不到）。挡下来挡的不是一条
     消息、是整条线：她和三个姐妹一起哑掉，挂多久哑多久，而这道检查的实测拦截率本来
     就很低。用一个大且显眼的故障换一个小且罕见的风险不划算。代价是它**静默**，所以
     每漏一条都打一行 ``living_mouth_unchecked`` —— 那是数"那段时间漏了多少"的唯一
     锚，改措辞前先想清楚谁在数它。
 
-**图不走正文，走自己的字段，而且算进发送身份。** 渲染那一步是**自由生成**，没有任何
-原样保留的通道（prompt 明写"把它说成你会说的那句话"），图片引用混在 ``what`` 里必然
-被改写或丢掉 —— 两种下场都不报错。所以图是 :func:`send_message` 的结构化参数，在
-:class:`app.domain.chat_dataflow.ChatResponseSegment` 上有自己的一列，传的是对象存储
-的**永久句柄**（地址 1.5 小时就死，签名由投递侧在最靠近发送的那一刻现签）。同时图要
-算进 ``outbound_id`` 的派生：不算的话，同一轮同一条会话说同样的话配另一张图会被认领
-表判成重发挡掉 —— 她换了张图重发，真人什么都收不到。
+**图不走正文，走自己的字段，而且算进发送身份。** 投递侧只按
+:attr:`app.domain.chat_dataflow.ChatResponseSegment.picture_file_names` 那一列上传图，
+正文里的 markdown 图片引用一个都不会变成图：投递侧切节点时把匹配到的引用整段丢掉、
+只留周围的文字（``lark-service`` 的 ``src/lark/outbound/post-content.ts`` 那么切，
+``src/lark/outbound/render.test.ts`` 钉着这条）—— 写在 ``what`` 里的图就这么静默消失，
+不报错、也没有任何东西对不上。所以图是 :func:`send_message` 的
+结构化参数，传的是对象存储的**永久句柄**（地址 1.5 小时就死，签名由投递侧在最靠近发送
+的那一刻现签）。同时图要算进 ``outbound_id`` 的派生：不算的话，同一轮同一条会话说同样
+的话配另一张图会被认领表判成重发挡掉 —— 她换了张图重发，真人什么都收不到。
 
-**第一版是单次渲染。** 她一轮里可以调好几次说好几条，但不能自己接着聊下去（没有对话
-窗口自主权）——那是下一版的事。
+**她没有对话窗口自主权。** 一轮里可以调好几次说好几条，但不能自己接着聊下去 —— 对方
+回了什么，要等她下一次拿起手机才知道。
 """
 
 from __future__ import annotations
@@ -94,12 +97,8 @@ from typing import Annotated
 from pydantic import Field, field_validator
 from sqlalchemy import text
 
-from app.agent.context import AgentContext
-from app.agent.core import AgentConfig
-from app.agent.neutral import Message, Role
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
-from app.capabilities.agent import AgentRunner
 from app.capabilities.output_safety import audit_output
 from app.data.session import get_session
 from app.domain.chat_dataflow import (
@@ -107,18 +106,12 @@ from app.domain.chat_dataflow import (
     ChatResponseSegment,
 )
 from app.living.happening import record_happening
-from app.living.persona import persona_prompt_vars
-from app.living.phone import (
-    conversation_as_she_knows_it,
-    medium_for,
-    reachable_conversation,
-)
+from app.living.phone import medium_for, reachable_conversation
 from app.living.pictures import her_picture, picture_id_in
 from app.living.records import (
     KIND_SPEECH,
     OUTBOUND_HAPPENING_PREFIX,
     _require_aware,
-    esc,
 )
 from app.living.scope import moment_scope, note_recorded
 from app.living.whereabouts import current_whereabouts
@@ -129,23 +122,11 @@ from app.runtime.persist import insert_append, select_latest
 
 logger = logging.getLogger(__name__)
 
-# Langfuse prompt id（新 id，只发泳道 label，不碰 production）。
-LIVING_CHAT_VOICE_PROMPT_ID = "living_chat_voice"
-
-# main-chat-model：这一步要的**只有**对话能力——把一个意思说成她会说的那句话。
-# recursion_limit 1：嘴没有工具，一次生成就该收口。
-_VOICE_CFG = AgentConfig(
-    LIVING_CHAT_VOICE_PROMPT_ID,
-    "main-chat-model",
-    "living-chat-voice",
-    recursion_limit=1,
-)
-
 # 派生出站 id 的命名空间，随手换会让历史消息全部对不上。
 _ID_NS = uuid.UUID("d4a91f62-7c05-4b3e-9a18-2f6e8c07b5d1")
 
 # 带图那一支单独一个命名空间。同一个 namespace 下"正文里正好带着分隔符和文件名"能跟
-# "配了这张图"拼出同一串，而 ``intent`` 是她给的自由文本 —— 换 namespace 让两支从根上
+# "配了这张图"拼出同一串，而 ``said`` 是她给的自由文本 —— 换 namespace 让两支从根上
 # 不可能相撞，代价只是多一个常量。
 _ID_NS_WITH_PICTURES = uuid.UUID("8f3c0d27-41ab-4e6d-b95a-3c7e1f204a86")
 
@@ -173,7 +154,7 @@ class SpokenOutbound(Data):
     挡在 ``emit`` **之前**。
 
     自然键 ``(lane, outbound_id)``；``outbound_id`` 从 ``(lane, persona, moment_id,
-    会话, 她那句意图)`` 派生，所以工具重试、整轮 ``@retry`` 重放、这次醒来重跑全撞同
+    会话, 她那句话)`` 派生，所以工具重试、整轮 ``@retry`` 重放、这次醒来重跑全撞同
     一条记录。
 
     **有版本链**，因为它有真实的状态变化（认领 → 收口），跟
@@ -181,7 +162,7 @@ class SpokenOutbound(Data):
 
     **认领过就不再交第二次，一种状态都不例外。** ``emit`` 抛错也算认领过 —— 抛错
     只说明我们没等到确认，不说明 broker 没收到（见模块 docstring）。这一轮里她那句
-    意图从此只对应这一条记录；要再说一次，得是下一轮（新的 ``moment_id`` = 新的
+    话从此只对应这一条记录；要再说一次，得是下一轮（新的 ``moment_id`` = 新的
     ``outbound_id``），而那是**她**的决定。
 
     **落地是独立的一根轴，不是 ``state`` 上的第三档。** 本地认领（``claimed`` /
@@ -204,7 +185,7 @@ class SpokenOutbound(Data):
     persona_id: str
     channel_id: str
     moment_id: str
-    said: str            # 真的交出去那句话（渲染后的），不是她那句内部意图
+    said: str            # 交出去那句话，逐字就是她写下的那一串
     state: str
     claimed_at: datetime
     settled_at: datetime | None = None
@@ -379,22 +360,6 @@ async def _settle(claim: SpokenOutbound, *, at: datetime) -> None:
         current = latest
 
 
-def build_voice_runner() -> AgentRunner:
-    """嘴的 agent。模块级函数，测试替身从这里换掉，不碰真模型。"""
-    return AgentRunner(_VOICE_CFG, tools=None)
-
-
-def _scene(scope: str, title: str) -> str:
-    """嘴渲染措辞时，那段会话尾巴前面的那句场景。
-
-    会话名是外面写的（群名谁都能改），而这句紧挨着 ``conversation_as_she_knows_it``
-    交回来的那几行 ``<msg …>``，同一个 prompt —— 不过 :func:`esc` 的话，一个群改个名
-    就能在嘴读到的上下文里伪造一行主人说的话，而嘴正是按那段上下文决定怎么说的。
-    """
-    name = esc(title)
-    return f"你在群「{name}」里说话。" if scope != "direct" else f"你在跟「{name}」私聊。"
-
-
 def _handles_she_gave(pictures: list[str] | str | None) -> list[str]:
     """她交出来的那几串句柄，无论以什么形状到达。
 
@@ -434,7 +399,7 @@ def _handles_she_gave(pictures: list[str] | str | None) -> list[str]:
 async def send_message(
     what: Annotated[
         str,
-        Field(description="你想说的意思，一句话就行——措辞不用你操心"),
+        Field(description="你要发出去的那句话，原话"),
     ],
     channel_id: Annotated[
         str, Field(description="发到哪条会话，用信封 / 看手机时那串 channel_id")
@@ -449,8 +414,6 @@ async def send_message(
 ) -> str:
     """给手机上的某条会话发一条消息。
 
-    你给的是**意思**，不是原话：怎么说出口这一步不用你操心。
-
     只能发你手机上有的会话（信封上列着的那些），channel_id 照抄，别自己编。
 
     要带图就填 pictures，**别把图写进话里**——你写在话里的图片引用到不了对方那儿。
@@ -459,19 +422,19 @@ async def send_message(
     这一轮里可以发好几条。但发完就是发完了——对方回了什么，要等你下一次拿起手机才知道。
 
     Args:
-        what: 你想说的意思。
+        what: 你要发出去的那句话，原话。
         channel_id: 发到哪条会话。
         pictures: 要一起发出去的图的句柄。
 
     Returns:
-        这条的下场，附上真的说出口那句话。有时候只能告诉你"交出去了但不知道到没到"
+        这条的下场，附上你那句话。有时候只能告诉你"交出去了但不知道到没到"
         —— 那就是真的不知道，别当成发出去了，也别当成没发。也可能这句话过不了、
         压根没发出去，那就换个说法或者换件事说。
     """
     lane, now, persona_id, moment_id = moment_scope()
-    intent = what.strip()
-    if not intent:
-        raise ValueError("说点什么：意思不能是空的。")
+    said = what.strip()
+    if not said:
+        raise ValueError("说点什么：这句话不能是空的。")
 
     # 这一道是**这一轮定下的那份名单 ∩ 实时 presence**，两半的时效性刻意不同：
     #
@@ -519,9 +482,9 @@ async def send_message(
     # 一次就是真人收到两条。
     #
     # 带图的走**另一个命名空间**，不是在原来那串后面接几段。接着拼的话，正文和图之间
-    # 没有边界：``intent`` 里只要正好出现 ``\x1f`` 加那个文件名，"说这句话配这张图"和
+    # 没有边界：``said`` 里只要正好出现 ``\x1f`` 加那个文件名，"说这句话配这张图"和
     # "说的话本身长这样、不配图"就算出同一串，后发的那条被当成重放挡掉 —— 真人什么都
-    # 收不到，而她以为发了。``intent`` 是她给的自由文本，边界不能由她的措辞来定。
+    # 收不到，而她以为发了。``said`` 是她给的自由文本，边界不能由她的措辞来定。
     #
     # 不带图那一支**逐字不动**，历史上派生过的每一个 id 都还对得上
     # （``tests/living/test_mouth.py`` 钉了一个写死的快照 —— 改坏了的症状是认领表在
@@ -537,22 +500,22 @@ async def send_message(
                 conv.channel_id,
                 str(len(file_names)),
                 *file_names,
-                intent,
+                said,
             ]
         )
         namespace = _ID_NS_WITH_PICTURES
     else:
-        seed = f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{conv.channel_id}\x1f{intent}"
+        seed = f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{conv.channel_id}\x1f{said}"
         namespace = _ID_NS
-    # 派生自**意图**而不是渲染结果：模型每次措辞可能不同，而重放同一次发送必须落回
-    # 同一个 id，否则整轮重试会真的发出两条。
+    # seed 里的每一段都是这一次发送的身份：哪条泳道、谁、这一轮、发到哪、发的什么。
+    # 重放同一次发送必须落回同一个 id，否则整轮重试会真的发出两条。
     derived = uuid.uuid5(namespace, seed)
     outbound_id = derived.hex
     message_id = f"{PROACTIVE_MESSAGE_ID_PREFIX}{derived}"
 
-    # **去重挡在渲染和出站之前。** 下游没有发送级去重（见模块 docstring 里 worker 那
-    # 两处行号），所以这条闸漏一次就是真人收到两条。放在渲染之前还顺手省掉一次白花的
-    # 模型调用。
+    # **去重挡在出站之前，而且在下面那道检查之前。** 下游没有发送级去重（见模块
+    # docstring 里 worker 那两处行号），所以这条闸漏一次就是真人收到两条。放在检查
+    # 之前还顺手省掉一次白花的判词调用 —— 那是一次要等的模型调用。
     tried = await select_latest(
         SpokenOutbound, {"lane": lane, "outbound_id": outbound_id}
     )
@@ -560,43 +523,9 @@ async def send_message(
         assert isinstance(tried, SpokenOutbound)
         return _already_claimed(tried)
 
-    # 渲染这句话的是**同一个她**：底色走 :func:`app.living.persona.persona_prompt_vars`，
-    # 跟 moment 和日记那一轮同一处组装。这里原先自己拼了一份，于是她那次醒来里是版本链上新
-    # 的自己、一开口又变回 ``bot_persona`` 上出厂那份——两份人设分裂，没有任何报错。
-    prompt_vars = await persona_prompt_vars(lane=lane, persona_id=persona_id)
-    known = await conversation_as_she_knows_it(
-        lane=lane, persona_id=persona_id, channel_id=conv.channel_id, now=now
-    )
-    reply = await build_voice_runner().run(
-        [
-            Message(
-                role=Role.USER,
-                content=(
-                    f"{_scene(conv.scope, conv.title)}\n\n"
-                    f"这条会话上你已经知道的：\n{known}\n\n"
-                    f"你现在想说的意思：{intent}\n\n"
-                    f"把它说成你会说的那句话，直接给话，别解释。"
-                ),
-            )
-        ],
-        prompt_vars=prompt_vars,
-        context=AgentContext(
-            persona_id=persona_id,
-            session_id=f"living-mouth:{lane}:{persona_id}:{conv.channel_id}",
-        ),
-        max_retries=1,
-    )
-    said = reply.text().strip()
-    if not said:
-        # 只报事实。「没发出去」由 @tool_error 的前缀说完了，这里补的是为什么；
-        # 接下来重试、换个说法、还是转头去干别的，是她的判断，工具不替她安排。
-        raise RuntimeError("渲染没出内容")
-
-    # 交出去之前先过这一关。位置钉死在**渲染之后、认领之前**：
-    #
-    #   * 渲染之后 —— 判的必须是真人会看见的那句人话，不是她脑子里那个意思。
-    #   * 认领之前 —— 拦下时不占那个 id。占了的话，她这次醒来里再说同一件事就会撞上
-    #     "你已经说过了"，而那是假话：她一个字都没说出去。
+    # 交出去之前先过这一关。判的是 ``said`` —— 她写下的那一串，也就是真人会看见的那
+    # 一串，两者是同一个东西。位置钉死在**认领之前**：拦下时不占那个 id。占了的话，
+    # 她这次醒来里再说同一件事就会撞上"你已经说过了"，而那是假话：她一个字都没说出去。
     #
     # 而去重那道闸在这一关**更前面**（上面那段预检查），所以工具重试和整轮重放不会
     # 各花一次模型调用去判一句根本不会再发的话。
@@ -688,9 +617,9 @@ async def send_message(
                 bot_name=conv.bot_name,
                 lane=lane,                # sink 不注入 header lane，必须显式带
                 content=said,
-                # 图走这一列，一个字符都没经过渲染那一步（见模块 docstring 上面
-                # 那段：渲染是自由生成，混在正文里的图片引用必然被改写或丢掉）。
-                # 传的是永久句柄，地址由投递侧在最靠近发送的那一刻现签。
+                # 图走这一列，正文里一个字符都不是它（见模块 docstring 上面那段：
+                # 写在正文里的图片引用到不了对方那儿）。传的是永久句柄，地址由投递
+                # 侧在最靠近发送的那一刻现签。
                 picture_file_names=file_names,
                 status="success",
                 is_last=True,

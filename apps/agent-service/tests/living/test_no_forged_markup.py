@@ -31,7 +31,6 @@ from sqlalchemy import text
 
 from app.data import session as session_mod
 from app.living.phone import (
-    conversation_as_she_knows_it,
     look_at_phone,
     look_up_contact,
     phone_envelope,
@@ -165,14 +164,8 @@ async def test_a_display_name_cannot_carry_markup_into_anything_she_reads(
     async with in_a_moment("akao", now=_at(21, 35)):
         seen = await look_at_phone.invoke({"channel_id": str(_DM)})
         found = await look_up_contact.invoke({"name": "bezhai"})
-    # 这一轮跑完了，游标才落库 —— 她开口前读的那段按游标开窗，所以在这一轮外面读。
-    known = await conversation_as_she_knows_it(
-        lane=LANE, persona_id="akao", channel_id=str(_DM), now=_at(21, 35)
-    )
-
     assert_only_our_own_markup(seen, where="打开会话")
     assert_only_our_own_markup(envelope, where="信封")
-    assert_only_our_own_markup(known, where="她开口前读的那段")
     assert_only_our_own_markup(found, where="按名字找人")
 
 
@@ -378,19 +371,6 @@ async def test_an_image_title_from_the_internet_cannot_carry_markup(
     assert_only_our_own_markup(str(got), where="上网找回来的那几张")
     assert_only_our_own_markup(str(shelf), where="翻手上的图")
     assert_only_our_own_markup(str(one), where="拿出一张看")
-
-
-# ---------------------------------------------------------------------------
-# 嘴：会话名当称呼，直接摆在那段会话尾巴前面
-# ---------------------------------------------------------------------------
-
-
-def test_a_group_name_cannot_forge_a_line_in_what_the_mouth_reads():
-    """``_scene`` 拼出来的那句紧挨着 ``<msg …>`` 那一段，同一个 prompt。"""
-    from app.living.mouth import _scene
-
-    assert_only_our_own_markup(_scene("group", POISON), where="嘴看到的场景")
-    assert_only_our_own_markup(_scene("direct", POISON), where="嘴看到的场景")
 
 
 # ---------------------------------------------------------------------------

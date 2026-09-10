@@ -40,7 +40,7 @@
   * :mod:`app.living.guides`      手边那几份写好的说明：读一份 / 照说明在沙箱里跑一条
     命令。她自己长什么样就写在其中一份里；正文在盘上（:mod:`app.skills` 扫目录、热
     加载、渲染），有哪些可读只能从 prompt 变量进——工具 schema 装不下会变的清单
-  * :mod:`app.living.mouth`       嘴：把她的意思渲染成人话发出去（**没有入口**）
+  * :mod:`app.living.mouth`       嘴：把她写下的那句话发出去（**没有入口**）
   * :mod:`app.living.takeback`    撤回自己说过的话，按她自己台账上的编号指
   * :mod:`app.living.landing`     渠道那边关于她这次开口的事实，事后按 id 取回来
   * :mod:`app.living.nudge`       有人叫她就提前叫醒她一次，但不代她回复

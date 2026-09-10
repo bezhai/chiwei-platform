@@ -599,7 +599,7 @@ async def test_a_persona_the_table_never_heard_of_still_gets_two_variables(seed_
 
 @pytest.mark.integration
 async def test_the_variables_are_exactly_the_two_the_prompts_name(seed_db):
-    """键名就是 Langfuse 上三个 prompt 正文里写着的那两个。
+    """键名就是 Langfuse 上那两个 prompt 正文里写着的那两个。
 
     改键名不会报错，只会让 ``{{persona_core}}`` 原样渲染成字面量出现在她眼前。
     """
@@ -610,18 +610,18 @@ async def test_the_variables_are_exactly_the_two_the_prompts_name(seed_db):
     assert set(got) == {"persona_name", "persona_core"}
 
 
-def test_all_three_paths_ask_the_same_place_who_she_is():
-    """一轮、写日记、开口渲染读的是**同一个**函数。
+def test_both_paths_ask_the_same_place_who_she_is():
+    """一轮和写日记读的是**同一个**函数。
 
-    三处各拼一份的后果不是报错，是分裂：她那一轮里是链上新的自己，一开口又变回
-    ``bot_persona`` 上出厂那份。开口那条路原先就是各拼一份，而且空白处理跟另外两处
-    还不一样。
+    两处各拼一份的后果不是报错，是分裂：她那一轮里是链上新的自己，写日记时又变回
+    ``bot_persona`` 上出厂那份，而且空白处理还各有一套。
+
+    喂人设进模型的地方就这两处 —— 她开口那条路不喂 prompt，她写下什么就发什么。
     """
     from app.living import day_page as page_mod
     from app.living import moment as moment_mod
-    from app.living import mouth as mouth_mod
 
-    for mod in (moment_mod, page_mod, mouth_mod):
+    for mod in (moment_mod, page_mod):
         assert mod.persona_prompt_vars is persona_prompt_vars, (
             f"{mod.__name__} 没走同一个入口"
         )

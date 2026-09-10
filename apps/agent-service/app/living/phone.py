@@ -49,9 +49,8 @@ uuidv7（按生成时刻单调），同毫秒里谁先谁后有确定答案。
   * 「其中 N 条是新的」＝ ``|U ∩ W|``；「前面还有 K 条你没往回翻」＝ ``|U − W|``，也
     就是被挤出窗口的未读。
   * **游标推到 ``max(U)``，不是 ``max(W)``。** W 里最新那条可能是她自己发的、晚于任何
-    未读；推到它身上会让之后乱序到达、时刻更早的消息被永久跳过，也会让措辞模型那侧
-    （:func:`conversation_as_she_knows_it` 按游标开窗）把她根本没见过的消息当成"她已经
-    知道的"。一条未读都没有时游标不动。
+    未读；推到它身上会让之后乱序到达、时刻更早的消息被永久跳过 —— 她一个字都没看过，
+    那几条却已经被算成读过了。一条未读都没有时游标不动。
 
 **挤出窗口的那些永久丢失。** 她一眼只看最后十来条，前面的不会补看，游标照样推到未读
 里最新那条。这是设计不是 bug——真人"未读 47 条"就是先看最后五到十条，能自洽就到此为
@@ -84,7 +83,7 @@ presence 而不是"聊过天就算"，是因为 bot 被移出群之后历史还�
 ``common_bot_presence`` 实测：一个群里同时有 ayana / chinagi / chiwei），她们的出站
 落进 ``common_message`` 全是 ``role='assistant'`` —— 长得一模一样。所以拿 ``role``
 单独判会同时错两次：姐姐的话被整段排除出未读（她永远看不见同一个群里姐姐说了什么），
-同时又被无条件塞进"她已经知道的"、还署上"你"。分得开这两者的是 ``bot_name``
+同时她点开会话时姐姐那几行又署着"你"。分得开这两者的是 ``bot_name``
 （``bot_config`` 里 bot → persona 的映射），判据写在
 :data:`app.data.queries.messages._SAID_BY_HER` 上。
 
@@ -133,7 +132,6 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.data.queries.messages import (
     find_conversation_window,
-    find_messages_known_through,
     find_newest_unread_summons,
     find_unread_senders,
     find_unread_summary,
@@ -750,11 +748,10 @@ def _take_back_handle(row) -> str | None:
     类型，两种写法之间的相等关系由两侧共读的成对向量钉住
     （``contracts/proactive-message-id.json`` 的 ``outbound_id_vector``）。
 
-    **两列一律用 ``[]`` 读，不用 ``.get``。** 她开口前读的那段尾巴那条查询没有这两列，
-    但那个差别由调用方在 :func:`_one_message` 上明说（``with_recall_state``），不由
-    这里猜。``.get`` 猜的下场是"窗口那条查询哪天丢了 ``recalled_at``"跟"尾巴那条本来
-    就没有它"长得一模一样：已经撤回的行重新长出一个可撤的编号，她照着再撤一次只会撤
-    了个空，而且一句报错都没有。缺列就 ``KeyError``，这一眼当场失败、游标一条都不推。
+    **两列一律用 ``[]`` 读，不用 ``.get``。** ``.get`` 会把"这条查询哪天丢了
+    ``recalled_at``"退化成"这一行没撤回过"：已经撤回的行重新长出一个可撤的编号，她
+    照着再撤一次只会撤了个空，而且一句报错都没有。缺列就 ``KeyError``，这一眼当场
+    失败、游标一条都不推。
     """
     if not row["said_by_you"] or row["recalled_at"] is not None:
         return None
@@ -764,13 +761,8 @@ def _take_back_handle(row) -> str | None:
     return uuid.UUID(str(outbound_id)).hex
 
 
-def _one_message(row, *, now: datetime, with_recall_state: bool) -> str:
+def _one_message(row, *, now: datetime) -> str:
     """一条消息渲染成一行：``<msg from=".." rel=".." time="..">正文</msg>``。
-
-    **她打开会话看到的和她开口前读到的是同一个函数。** 那两处是两个读取方
-    （:func:`look_at_phone` 和 :func:`conversation_as_she_knows_it`）读同一份事实，
-    形状分家的话同一条消息在一轮之内长两副样子 —— 她在手机上看到主人说的话带着印，
-    转头开口时那条印没了。所以不是"两处各写一份、写得一样"，是**只有一份**。
 
     署名认 ``bot_name``（``said_by_you`` 那一列算好的）：同群的姐姐也是
     ``role='assistant'``，按 role 署名就是把姐姐的话标成她自己说的。
@@ -785,17 +777,8 @@ def _one_message(row, *, now: datetime, with_recall_state: bool) -> str:
     ＝这条消息已经撤回了），不说"你撤回了"：群主和管理员也撤得掉她的消息，而撤回在库
     里只有一个时刻、没有操作者。
 
-    ``with_recall_state`` 是**调用方声明这一行是从哪条查询来的**，不是一个开关：
-
-      * ``True`` —— 打开会话那条查询（:func:`_glance_text`），它带着 ``recalled_at``
-        和 ``outbound_id``。这两列于是用 ``[]`` 读，缺了当场 ``KeyError``。
-      * ``False`` —— 她开口前读的那段尾巴（:func:`conversation_as_she_knows_it`），
-        那条查询本来就没有这两列（撤掉的行它一条都不返回），所以一个字都不去读。
-
-    **两条查询的列不一样是事实，但"哪条查询"只有调用方知道。** 让这里自己 ``.get``
-    去猜的话，"窗口那条哪天丢了 ``recalled_at``"就跟"尾巴那条本来就没有"长得一模一样
-    —— 而前者的下场是已经撤回的行重新长出一个可撤的编号，她照着再撤一次撤了个空，
-    一句报错都没有。
+    ``recalled_at`` 和 ``outbound_id`` 用 ``[]`` 读，缺列当场 ``KeyError`` —— 理由写
+    在 :func:`_take_back_handle` 上。
     """
     who = "你" if row["said_by_you"] else row["who"]
     attrs = [f'from="{esc(who)}"']
@@ -805,12 +788,11 @@ def _one_message(row, *, now: datetime, with_recall_state: bool) -> str:
     if not row["said_by_you"] and row["by_owner"]:
         attrs.append(f'rel="{OWNER}"')
     attrs.append(f'time="{esc(_clock(_instant(int(row["at_ms"])), now=now))}"')
-    if with_recall_state:
-        if row["recalled_at"] is not None:
-            attrs.append('recalled="true"')
-        handle = _take_back_handle(row)
-        if handle is not None:
-            attrs.append(f'take_back_id="{handle}"')
+    if row["recalled_at"] is not None:
+        attrs.append('recalled="true"')
+    handle = _take_back_handle(row)
+    if handle is not None:
+        attrs.append(f'take_back_id="{handle}"')
     return f"<msg {' '.join(attrs)}>{esc(_body_of(row))}</msg>"
 
 
@@ -823,11 +805,7 @@ def _glance_text(
     是新到的只有这个数说得清。``older_unread``（``|U − W|``）是被挤出窗口的未读，它们
     不会在别处被补回来。
     """
-    # ``with_recall_state=True``：这些行来自打开会话那条查询，它带着 ``recalled_at``
-    # 和 ``outbound_id``。说明白而不是让渲染层去猜，理由写在 ``_one_message`` 上。
-    lines = [
-        _one_message(r, now=now, with_recall_state=True) for r in reversed(rows)
-    ]
+    lines = [_one_message(r, now=now) for r in reversed(rows)]
     # 会话标题是别人写的（群名），跟消息行摆在同一段文本里 —— 同样转义。
     head = f"「{esc(title)}」（其中 {fresh} 条是新的"
     if older_unread > 0:
@@ -985,8 +963,8 @@ async def look_at_phone(
 
     # 水位推到**未读里最新的那条**（``max(U)``），不是窗口里最新那条：窗口里最新那条
     # 可能是她自己发的、晚于任何未读，推到它身上会让之后乱序到达、时刻更早的消息被
-    # 永久跳过，也会让措辞模型那侧把她根本没见过的消息当成"她已经知道的"。被挤出窗口
-    # 的未读就此丢了 —— 这正是这条设计要的行为，不是漏。一条未读都没有时游标不动。
+    # 永久跳过 —— 她一个字都没看过，那几条却已经被算成读过了。被挤出窗口的未读就此
+    # 丢了 —— 这正是这条设计要的行为，不是漏。一条未读都没有时游标不动。
     #
     # **但不在这儿落库。** 工具返回不等于她看见了——结果还要进模型的上下文，这一轮才
     # 算真的把内容送到她眼前。当场提交的话，崩在中间就是"已读了但内容从没进过她的
@@ -1010,61 +988,6 @@ async def look_at_phone(
 
 PHONE_TOOLS = [look_at_phone, look_up_contact]
 
-
-# ---------------------------------------------------------------------------
-# 她**已经知道**的那部分会话（嘴渲染措辞时能看的全部）
-# ---------------------------------------------------------------------------
-
-# 渲染措辞时回看多少条。够她接住上下文，又不至于把一整天的会话灌进去。
-KNOWN_TAIL_LIMIT = 20
-
-
-async def conversation_as_she_knows_it(
-    *,
-    lane: str,
-    persona_id: str,
-    channel_id: str,
-    now: datetime,
-    limit: int = KNOWN_TAIL_LIMIT,
-) -> str:
-    """这条会话上她已经知道的那一段，按时间升序，一条一行。
-
-    没看过的消息不在里面 —— 边界就是游标：她看过的（``event_time <=`` 水位）+
-    **她自己**发出去的，判据在
-    :func:`app.data.queries.messages.find_messages_known_through`。嘴是用来把她的
-    意思说成人话的，不是用来替她读消息的；给它未读内容，"内容要她去看"这条线当场
-    就漏了。她从没看过、也没说过话的会话，返回一句如实的空。
-
-    **每一行走 :func:`_one_message`，跟她打开会话看到的是同一个函数。** 两处各写一份
-    的话，同一条消息在一轮之内长两副样子：手机上主人那条带着印，转头开口时印没了。
-
-    署名认 ``bot_name``：只有**她自己**那些 bot 发的才写"你"。同一个群里姐姐也是
-    ``role='assistant'``，按 role 署名就是把姐姐的话标成她自己说的。
-
-    ``now`` 是**这一轮的时间锚**（``moment_scope()`` 的第二个返回值），不是现取的钟——
-    跟信封、快照同一个来源，否则同一轮里两处时间会差开。它只用来判每一行要不要背
-    ``MM-DD``：这 :data:`KNOWN_TAIL_LIMIT` 条**没有时间窗**，昨晚说过的话原样躺在里面，
-    而这一段是她开口前读的最后一样东西（:func:`app.living.mouth.send_message`）。裸时分
-    下「23:50 我先睡了」和五分钟前刚说的长得一个样，她会接着一段其实已经隔夜的对话往
-    下说。
-    """
-    cursor_ms, cursor_id = await effective_cursor(
-        lane=lane, persona_id=persona_id, channel_id=channel_id
-    )
-    rows = await find_messages_known_through(
-        channel_id=channel_id,
-        cursor_ms=cursor_ms,
-        cursor_id=cursor_id,
-        own_bots=await find_bot_names_for_persona(persona_id),
-        limit=limit,
-    )
-    if not rows:
-        return "（这条会话上你还什么都没看过、也没说过）"
-    # ``with_recall_state=False``：这一段来自 ``find_messages_known_through``，那条
-    # 查询没有撤回那两列（撤掉的行它一条都不返回）。
-    return "\n".join(
-        _one_message(r, now=now, with_recall_state=False) for r in reversed(rows)
-    )
 
 # medium 由会话本身决定：私聊是手机上一对一，群是群里说话。两者都隔着设备，所以坐在
 # 她旁边的姐姐一个字都看不见（裁剪在 app.living.happening 的读取路径里）。
