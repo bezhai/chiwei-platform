@@ -299,3 +299,47 @@ async def test_a_fetch_that_blew_up_is_not_reachable(monkeypatch):
         raise httpx.ConnectError("object store unreachable")
 
     assert await _fetching(monkeypatch, handler)("https://tos.example/a.jpg") is False
+
+
+class _BodyThatNeverArrives(httpx.AsyncByteStream):
+    """状态行回来了、正文一个字节都没到就超时的那种响应。
+
+    对象存储抖动时真实的形状：连接建得起来、``200`` 已经在手上，正文卡死。
+    """
+
+    async def __aiter__(self):
+        raise httpx.ReadTimeout("body never arrived")
+        yield b""  # pragma: no cover - 只为让它是 async generator
+
+
+@pytest.mark.asyncio
+async def test_an_address_whose_body_never_arrives_is_not_reachable(monkeypatch):
+    """``200`` 不等于取得到 —— 只看状态码就放行，等于什么都没验。
+
+    Gemini 那侧拿到地址后自己去下载并 ``raise_for_status``
+    （``app.agent.adapters.gemini._fetch_remote_image``），正文取不下来它抛
+    ``ReadTimeout``，**她那一轮整个失败**，连退成「[图片：打不开]」的机会都没有。
+    这一步存在的全部理由就是不让这种图带走她一整轮，所以它必须把正文真的读完，
+    读不完就是取不到。
+    """
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/jpeg"},
+            stream=_BodyThatNeverArrives(),
+        )
+
+    assert await _fetching(monkeypatch, handler)("https://tos.example/stalled.jpg") is False
+
+
+@pytest.mark.asyncio
+async def test_an_address_with_an_empty_body_is_not_reachable(monkeypatch):
+    """``200`` + 零字节 = 那儿没有图。
+
+    交上去 Gemini 会收到一个空的 inline blob 并拒掉这次调用，落点跟正文取不下来
+    是同一个：她那一轮失败。
+    """
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"", headers={"content-type": "image/jpeg"})
+
+    assert await _fetching(monkeypatch, handler)("https://tos.example/empty.jpg") is False

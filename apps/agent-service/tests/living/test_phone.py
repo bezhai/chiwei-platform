@@ -2850,7 +2850,11 @@ async def test_the_object_name_is_derived_from_the_key(
 async def test_the_older_shape_brings_its_own_object_name(
     living_db, in_a_moment, pictures
 ):
-    """``type``/``value`` 那套历史行**自己带着** ``tos_file``，有就直接用，不再派生。"""
+    """``type``/``value`` 那套历史行**自己带着** ``tos_file``，有就直接用，不再派生。
+
+    这里的 ``tos_file`` 故意跟派生结果（``temp/img_v3_0215d_54ab.jpg``）不一样：两者
+    取同一个值的话，把实现里那条优先级整个删掉这条用例照样绿，它就一点回归都挡不住。
+    """
     await _seed_world()
     await _incoming(
         _DM,
@@ -2860,7 +2864,7 @@ async def test_the_older_shape_brings_its_own_object_name(
             {
                 "type": "image",
                 "value": "img_v3_0215d_54ab",
-                "tos_file": "temp/img_v3_0215d_54ab.jpg",
+                "tos_file": "temp/img_v3_0215d_54ab_compressed.png",
             },
         ],
         content_text="这是什么歌[image]",
@@ -2869,7 +2873,7 @@ async def test_the_older_shape_brings_its_own_object_name(
     async with in_a_moment("akao", now=_at(22, 30)):
         shown = await look_at_phone.invoke({"channel_id": str(_DM)})
 
-    assert pictures.signed == ["temp/img_v3_0215d_54ab.jpg"], (
+    assert pictures.signed == ["temp/img_v3_0215d_54ab_compressed.png"], (
         f"这一行自己带着对象名，不该再派生一个。拿到：{pictures.signed!r}"
     )
     assert len(_picture_urls(shown)) == 1, f"拿到：\n{shown!r}"

@@ -285,14 +285,14 @@ class _ImageClient:
 image_client = _ImageClient()
 
 
-# How long to wait when checking that a signed address has an object behind it.
-# Short on purpose: this runs before anything is shown, so a stalled object
-# store must degrade into "can't open it" rather than hold up the caller.
+# How long to wait when fetching a signed address to see whether an image comes
+# back. Short on purpose: this runs before anything is shown, so a stalled
+# object store must degrade into "can't open it" rather than hold up the caller.
 _REACHABLE_TIMEOUT = 10.0
 
 
 async def image_is_reachable(url: str) -> bool:
-    """Whether a signed address actually has an image behind it.
+    """Whether a signed address actually hands back an image.
 
     Signing is pure computation — tool-service ``get-url`` hands the key to
     ``tos_client.pre_signed_url``, which never looks at the bucket. So a
@@ -302,17 +302,19 @@ async def image_is_reachable(url: str) -> bool:
 
     Callers that feed a url to the model must check first. The Gemini adapter
     downloads image urls itself and ``raise_for_status()`` on them
-    (``app.agent.adapters.gemini._fetch_remote_image``), so one absent object
-    does not degrade that turn — it ends it.
+    (``app.agent.adapters.gemini._fetch_remote_image``), so an image it cannot
+    download does not degrade that turn — it ends it.
 
-    Only the response head is read; the connection is dropped before the body.
-    The decision needs the status code, and whoever shows the image downloads
-    the bytes on their own path.
+    The body is read to the end, and empty bodies fail. A status code is not
+    the thing being checked: a ``200`` whose body then stalls or arrives empty
+    ends that turn exactly like a ``404`` does, so the only answer worth
+    anything here is "the bytes came back". The bytes are dropped — whoever
+    shows the image downloads them on their own path.
     """
     try:
         async with httpx.AsyncClient(timeout=_REACHABLE_TIMEOUT) as client:
-            async with client.stream("GET", url) as resp:
-                return resp.status_code == 200
+            resp = await client.get(url)
+            return resp.status_code == 200 and bool(resp.content)
     except Exception as exc:
         logger.info("image url is not reachable: %s (%s)", url, exc)
         return False
