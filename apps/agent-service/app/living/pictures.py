@@ -46,8 +46,8 @@ runtime 不给任何 Data 自动加 lane，不显式带上就跟 prod 的行混�
 **"看"给的是图本身，不是一段描述。** 这四只手交回去的是 OpenAI 口径的内容块
 （``text`` + ``image_url``），``app.agent.core._normalise_tool_result`` 把它变成
 ``list[ContentBlock]``，两个 adapter 各自把图片块送上 wire（OpenAI 是 ``image_url``
-part，Gemini 把它下载成 ``inline_data`` 挂在同一个 user turn 上）。退化成文本的话，她
-"看"到的只是自己当初说的那句话。
+part，Gemini 下载成字节装进 ``function_response`` 里面）。退化成文本的话，她"看"到的
+只是自己当初说的那句话。
 
 **摆到她眼前的每一张都当场进她的记录，包括搜回来的那几张。** 看得见却发不出去是这件事
 最典型的坏掉方式：她眼前有三张候选，而下一步只能干瞪眼。所以"是她画的"和"是她找的"

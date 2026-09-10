@@ -24,7 +24,9 @@ gs:// / Files-API URIs) and rejects wildcard mime types, so — mirroring the
 old ``langchain-google-genai`` path (``ImageBytesLoader.load_part``) — the
 adapter *downloads* http(s) urls (and decodes ``data:`` URIs) to bytes and
 sends them as an *inline_data* part with a concrete mime type. Because this
-needs network I/O, ``neutral → wire`` content building is async.
+needs network I/O, ``neutral → wire`` content building is async. On a *tool
+result* the same bytes ride one level in, as ``FunctionResponse.parts``, so one
+answered call stays one part (see ``_tool_result_to_content``).
 
 **Thinking.** Outbound we ask for thoughts via
 ``thinking_config.include_thoughts=True``; inbound, a response ``Part`` with
@@ -490,32 +492,53 @@ def _tool_call_to_part(tc: ToolCall) -> types.Part:
 async def _tool_result_to_content(
     message: Message, call_names: dict[str, str]
 ) -> types.Content:
-    """A neutral TOOL message → a user-role Content with a function_response part.
+    """A neutral TOOL message → a user-role Content with one function_response part.
 
     Gemini's protocol delivers tool results as a user turn carrying a
     function_response named after the call. We recover the function name from
     the call id tracked while walking the assistant turns.
 
     Multimodal tool results (a tool handing back pictures returns image blocks)
-    can't ride inside the function_response — that part is structured JSON, not
-    image bytes. So the function_response carries the flattened text result, and
-    each image block is appended to the SAME user turn as a Gemini image part,
-    so the model still sees the image the tool returned (flattening to .text()
-    alone would silently drop it).
+    carry their bytes *inside* the function_response, in ``FunctionResponse.parts``
+    — the shape Gemini documents for tool-returned media. The structured
+    ``response`` still holds the flattened text (flattening to .text() alone
+    would silently drop the pictures). Nesting keeps the answer to one call at
+    exactly one part however many pictures came back, which is what Gemini
+    counts against the model turn's function_call parts.
     """
     name = call_names.get(message.tool_call_id or "", message.tool_call_id or "tool")
-    parts: list[types.Part] = [
-        types.Part.from_function_response(
-            name=name, response={"result": message.text()}
-        )
-    ]
+    media: list[types.FunctionResponsePart] = []
     if isinstance(message.content, list):
         for block in message.content:
-            if block.type in ("image", "image_url"):
-                img_part = await _block_to_part(block)
-                if img_part is not None:
-                    parts.append(img_part)
-    return types.Content(role="user", parts=parts)
+            if block.type not in ("image", "image_url"):
+                continue
+            img_part = await _block_to_part(block)
+            blob = getattr(img_part, "inline_data", None)
+            if blob is None:
+                # Only inline bytes nest into a function response. A block with
+                # no usable url, or a by-reference gs:// image, has nothing to
+                # nest — say it was dropped instead of going out blind.
+                logger.warning(
+                    "gemini: tool result %s carried an image with no inline bytes, "
+                    "dropping it",
+                    name,
+                )
+                continue
+            media.append(
+                types.FunctionResponsePart(
+                    inline_data=types.FunctionResponseBlob(
+                        data=blob.data, mime_type=blob.mime_type
+                    )
+                )
+            )
+    response = types.FunctionResponse(
+        name=name,
+        response={"result": message.text()},
+        # Unset, not empty: an empty list is not None, so it would serialise a
+        # "parts": [] onto every text-only tool result.
+        parts=media or None,
+    )
+    return types.Content(role="user", parts=[types.Part(function_response=response)])
 
 
 def _tool_to_declaration(tool: ToolDef) -> types.FunctionDeclaration:
@@ -685,20 +708,30 @@ def _part_for_trace(part: types.Part) -> dict[str, Any]:
         return {"function_call": {"name": fc.name, "args": dict(fc.args or {})}}
     fr = getattr(part, "function_response", None)
     if fr is not None:
-        return {"function_response": {"name": fr.name}}
+        rendered: dict[str, Any] = {"name": fr.name}
+        # The pictures a tool handed back live inside the function_response, so
+        # this is the only place a trace can show they went out at all.
+        media = [getattr(p, "inline_data", None) for p in (fr.parts or [])]
+        if media:
+            rendered["images"] = [_blob_for_trace(b) for b in media]
+        return {"function_response": rendered}
     inline = getattr(part, "inline_data", None)
     if inline is not None:
-        data = getattr(inline, "data", b"") or b""
-        return {
-            "inline_data": {
-                "mime_type": getattr(inline, "mime_type", None),
-                "bytes": len(data),
-            }
-        }
+        return {"inline_data": _blob_for_trace(inline)}
     fd = getattr(part, "file_data", None)
     if fd is not None:
         return {"file_data": {"file_uri": getattr(fd, "file_uri", None)}}
     return {"part": "?"}
+
+
+def _blob_for_trace(blob: Any) -> dict[str, Any]:
+    """One picture on the wire, for the trace: what it is and how big.
+
+    The bytes themselves never go to the trace — a base64 image would bury the
+    conversation it belongs to.
+    """
+    data = getattr(blob, "data", b"") or b""
+    return {"mime_type": getattr(blob, "mime_type", None), "bytes": len(data)}
 
 
 def _usage_details(response: Any) -> dict[str, int] | None:

@@ -739,10 +739,11 @@ async def test_the_picture_reaches_the_openai_wire_as_a_picture(
 async def test_the_picture_reaches_the_gemini_wire_as_real_bytes(
     pictures_db, her_hands, in_a_moment, monkeypatch
 ):
-    """Gemini 那条线：tool 结果里的图片被下载成 ``inline_data``，模型真的看得见它。
+    """Gemini 那条线：tool 结果里的图片被下载成字节，模型真的看得见它。
 
-    Gemini 的 ``function_response`` part 是结构化 JSON，装不下图片字节 —— 所以
-    adapter 把图片块单独挂在**同一个 user turn** 上。少了那一步，图就是静默丢掉的。
+    字节装在 ``function_response`` 里面（``FunctionResponse.parts``），这是 Gemini
+    给多模态工具结果定的形状：一次调用的回答仍然只占一个 part。少了这一步，图就是
+    静默丢掉的。
     """
     from app.agent.adapters import gemini as gemini_mod
     from app.agent.core import _normalise_tool_result
@@ -762,9 +763,10 @@ async def test_the_picture_reaches_the_gemini_wire_as_real_bytes(
         ToolResult(tool_call_id="c1", content=result)
     ).to_message()
     content = await gemini_mod._tool_result_to_content(message, {"c1": "look_at_a_picture"})
-    inline = [p for p in content.parts if getattr(p, "inline_data", None)]
-    assert inline, f"图片没进 Gemini wire：{content}"
-    assert inline[0].inline_data.data == b"\x89PNG-bytes"
+    assert len(content.parts) == 1, f"一次调用的回答不止一个 part：{content}"
+    media = content.parts[0].function_response.parts or []
+    assert media, f"图片没进 Gemini wire：{content}"
+    assert media[0].inline_data.data == b"\x89PNG-bytes"
 
 
 @pytest.mark.integration
