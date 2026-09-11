@@ -1,14 +1,14 @@
-"""Phase 5a chat pipeline Data 类。
+"""她开口那一侧的 Data 契约。
 
-ChatTrigger:        mq(chat_request) 入口的原始 body（channel-server publish）。
-ChatRequest:        route_chat_node fan-out 后 per-persona 的请求。
-ChatResponseSegment: chat_node 输出的段，最终 publish 到 mq(chat_response)。
+ChatResponseSegment: 她说的每一段，经 sink.mq(chat_response) 出 graph。
+
+**这个模块里没有入站契约。** 原先还有 ChatTrigger（消息队列入口的原始 body）和
+ChatRequest（fan-out 之后 per-persona 的请求），它们随那条队列一起删了：她不从队列
+拿消息 —— 每次醒来直接查 ``common_message``、自己决定要不要开口（见 ``app.living``）。
 """
 from __future__ import annotations
 
 from typing import Annotated
-
-from pydantic import Field
 
 from app.runtime import Data, Key
 
@@ -18,74 +18,18 @@ from app.runtime import Data, Key
 # is_proactive 分支据 is_proactive 走不反查的路径，这个前缀只是让 message_id 在语义
 # 上明确「非来源消息 id」。单一定义处（宪法「禁止重复定义」），write 端（life_tools
 # 派生）与读端（本模块 Data 契约文档 / 测试）都从这里取。
+#
+# 它同时是一个**跨语言线格式**：出站投递方 lark-service（TS）剥掉这个前缀取出 uuid，
+# 落进 common_message.agent_outbound_id。跨语言没法共享一个运行时定义（两个镜像都不
+# COPY contracts/），所以线格式落在一份两侧测试共读的向量上：
+# contracts/proactive-message-id.json。改这个字面量而不改那份向量，
+# tests/domain/test_proactive_message_id_contract.py 立刻转红 —— 没有这道闸的话，
+# 只改一边的症状是投递方静默认不出主动消息、那次开口在库里永久失联，全程零报错。
 PROACTIVE_MESSAGE_ID_PREFIX = "proactive:"
 
 
-class ChatTrigger(Data):
-    """mq(chat_request) 入口原始 body。
-
-    transient=True：source.mq 不做 insert_idempotent，business 幂等由
-    route_chat_node 进入 graph 后的 (message_id, persona_id) 联合 Key
-    在 ChatRequest 上完成。message_id 设 Optional 以容忍 channel-server
-    偶发缺字段的 payload 反序列化失败。
-
-    ``channel`` 必填，不跟 message_id 走同一套容忍：它一路透传到
-    ``ChatResponseSegment``，最终决定回复投 ``chat_response_{channel}`` 的哪一条。
-    默认值会把「入站服务漏带 channel」变成静默的错渠道 —— 一条 QQ 消息记成 lark、
-    回复投进飞书队列，QQ 用户收不到，全程不报错。缺字段就在这里报
-    ValidationError，MQ source 会把这条报文打进 DLQ（可查、不重投）。
-    """
-    # 来源 channel。agent-service 对它无感知、只透传。
-    channel: str
-    message_id: Annotated[str | None, Key] = None
-    session_id: str | None = None
-    chat_id: str | None = None
-    is_p2p: bool = False
-    root_id: str | None = None
-    user_id: str | None = None
-    lane: str | None = None
-    is_proactive: bool = False
-    bot_name: str | None = None
-    persona_ids: list[str] = Field(default_factory=list)
-    enqueued_at: int | None = None
-
-    class Meta:
-        transient = True
-
-
-class ChatRequest(Data):
-    """route_chat_node fan-out 后 per-persona 的请求。
-
-    transient=False（默认）：runtime 自动建 ``data_chat_request`` 表，
-    (message_id, persona_id) 联合 Key 提供 in-graph durable redelivery
-    去重。
-
-    ``channel`` 必填，理由同 :class:`ChatTrigger`：它由 route_chat_node 从
-    trigger 透传过来，再往下决定出站队列。这条 Data 走 ``.durable()``，缺
-    channel 的报文会在 durable consumer 反序列化时报 ValidationError 并进 DLQ。
-    """
-    channel: str
-    message_id: Annotated[str, Key] = ""
-    persona_id: Annotated[str, Key] = ""
-    session_id: str | None = None
-    chat_id: str | None = None
-    is_p2p: bool = False
-    root_id: str | None = None
-    user_id: str | None = None
-    is_proactive: bool = False
-    bot_name: str | None = None
-    lane: str | None = None
-    enqueued_at: int | None = None
-
-    class Meta:
-        # transient 显式不设 —— runtime 默认 transient=False，自动建
-        # ``data_chat_request`` 表用于 in-graph durable redelivery 去重。
-        # 留空 Meta 让 ``getattr(Meta, "transient", False)`` 拿到 False。
-        pass
-
-
 class ChatResponseSegment(Data):
-    """chat_node 产出的回复段，经 sink.mq(chat_response) 出 graph。
+    """她说的每一段，经 sink.mq(chat_response) 出 graph。
 
     (message_id, persona_id, part_index) 联合 Key 用于段内去重；
     lane 必须显式带在 body —— sink dispatch 拿它当 ``outbound_context`` 的
@@ -94,7 +38,7 @@ class ChatResponseSegment(Data):
 
     两类来源对 ``message_id`` 的契约不同：
 
-      * **被动回复**（chat_node 回飞书来的消息）：``message_id`` 是触发这次回复的
+      * **回话**（她读到一条消息之后接着说）：``message_id`` 是触发这次回复的
         真实来源 ``common_message_id``，worker 据它反查渠道裸消息地址做 reply。
       * **主动发**（life ``send_message`` 给真人飞书私聊，``is_proactive=True``）：
         **没有来源消息**，所以 ``message_id`` **绝不是**指向任何真实来源消息的 id ——
@@ -103,6 +47,13 @@ class ChatResponseSegment(Data):
         主动发分支据 ``is_proactive`` **不反查来源消息**、直接用 ``chat_id``
         （= 真实 p2p ``common_conversation_id``）+ ``bot_name`` 投递（不靠伪 id，
         见 chat-response-worker 的 is_proactive 出站路径 / task 4）。
+
+    **图有自己的字段，不进 ``content``。** 投递侧只按 :attr:`picture_file_names` 上传
+    图，``content`` 里的 markdown 图片引用一个都不会变成图：投递侧切节点时把匹配到的
+    引用整段丢掉、只留周围的文字（``lark-service`` 的
+    ``src/lark/outbound/post-content.ts`` 那么切，``src/lark/outbound/render.test.ts``
+    钉着这条）—— 写进正文的图就这么静默消失，不报错。所以
+    :attr:`picture_file_names` 是图唯一的通道。
 
     ``channel`` 必填：sink dispatch 按它现算 routing key（``chat_response_{channel}``）。
     ``channel_route_for_payload`` 已经对缺字段 fail-closed，但那道校验跑在 pydantic
@@ -122,6 +73,15 @@ class ChatResponseSegment(Data):
     bot_name: str | None = None
     lane: str | None = None
     content: str = ""
+    # 这一条要带出去的图，值是对象存储的**永久句柄**（``file_name``），不是地址。
+    #
+    # 存句柄而不是 URL，是因为预签名地址只活 1.5 小时，而队列不保证几秒就投到：
+    # 泳道队列 TTL 降级、DLQ 重投都可能隔很久。签名必须在**最靠近使用它的那一刻**
+    # 生成，那是投递侧（lark-service）的事。传 URL 的失败是静默的 —— 消息发出去了、
+    # 图片链接是个合法地址，点开是一个过期签名。
+    #
+    # 空列表 = 这一条不带图。消费侧读它时不用先分辨 null 和"没有图"两种缺席。
+    picture_file_names: list[str] = []
     status: str = "success"
     is_last: bool = False
     full_content: str | None = None

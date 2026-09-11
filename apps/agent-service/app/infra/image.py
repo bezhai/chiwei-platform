@@ -1,7 +1,6 @@
-"""Image pipeline client + per-request image registry.
+"""Image pipeline client.
 
 ``image_client`` — calls tool-service for process/upload/download.
-``ImageRegistry`` — Redis Hash based N.png numbering per message.
 """
 
 from __future__ import annotations
@@ -9,7 +8,7 @@ from __future__ import annotations
 import base64
 import logging
 import time
-from typing import Any
+from dataclasses import dataclass
 
 import httpx
 
@@ -52,6 +51,29 @@ def _lane_router():
     from app.infra.lane import lane_router
 
     return lane_router
+
+
+@dataclass(frozen=True)
+class StoredImage:
+    """An image that now lives in object storage: the handle, and a link.
+
+    ``file_name`` is the object-storage key — a **permanent** handle. It is
+    the only thing worth persisting: ``/api/image-pipeline/get-url`` turns it
+    back into a downloadable address at any point in the future.
+
+    ``url`` is a pre-signed address that **dies in 1.5 hours**
+    (tool-service ``tos_client.get_file_url``: ``expires=int(1.5*60*60)``).
+    Fine for showing the image right now, useless as a stored reference —
+    and it fails silently: the link stays well-formed long after it stops
+    working.
+
+    A pair rather than a bare url because dropping the handle used to be
+    invisible: ``result["url"]`` compiled, ran, and threw away the only
+    durable half of the response.
+    """
+
+    file_name: str
+    url: str
 
 
 class _ImageClient:
@@ -98,7 +120,7 @@ class _ImageClient:
         to ``raise CapabilityTimeout/CallFailed`` is correct per the contract
         but is a deliberate behavior change; tracked as backlog L1 follow-up
         (image_client typed-error migration). Outer wrappers (e.g.
-        ``upload_and_register``) currently re-catch ``Exception`` so the
+        ``upload_image``) currently re-catch ``Exception`` so the
         migration is mechanical but needs its own dedicated single-purpose
         commit + caller-by-caller verification.
         """
@@ -162,7 +184,12 @@ class _ImageClient:
     # -- get_url (TOS pre-signed URL) --
 
     async def get_url(self, file_name: str) -> str | None:
-        """Get a pre-signed URL for a TOS file_name."""
+        """Sign a stored ``file_name`` into a downloadable address.
+
+        This is the whole reason ``file_name`` is the thing worth keeping:
+        the signature it returns expires in 1.5 hours, so callers sign as
+        late as possible rather than storing what comes back.
+        """
         data = await self._post(
             "/api/image-pipeline/get-url", {"file_name": file_name}
         )
@@ -184,14 +211,24 @@ class _ImageClient:
 
     # -- upload to TOS --
 
-    async def upload_to_tos(self, source_type: str, data: str) -> str | None:
-        """Upload image to TOS (compress + store), return pre-signed URL."""
+    async def upload_to_tos(
+        self, source_type: str, data: str
+    ) -> StoredImage | None:
+        """Upload an image to TOS (compress + store); hand back both halves.
+
+        tool-service returns ``{"url", "file_name"}``. Both are handed on:
+        the caller needs the url to show the image right now, and the
+        ``file_name`` to be able to find it again after the signature dies.
+        ``None`` when the upload did not land.
+        """
         result = await self._post(
             "/api/image-pipeline/to-tos",
             {"source_type": source_type, "data": data},
             timeout=60,
         )
-        return result["url"] if result else None
+        if not result:
+            return None
+        return StoredImage(file_name=result["file_name"], url=result["url"])
 
     # -- download as base64 --
 
@@ -248,81 +285,36 @@ class _ImageClient:
 image_client = _ImageClient()
 
 
-# ---------------------------------------------------------------------------
-# Image registry (per-message N.png numbering via Redis Hash)
-# ---------------------------------------------------------------------------
-
-_REGISTRY_TTL = 30 * 60  # 30 minutes
-
-_REGISTER_LUA = """
-local key = KEYS[1]
-local url = ARGV[1]
-local ttl = tonumber(ARGV[2])
-
-local n = redis.call('HINCRBY', key, '__counter__', 1)
-local filename = n .. '.png'
-redis.call('HSET', key, filename, url)
-redis.call('EXPIRE', key, ttl)
-return n
-"""
+# How long to wait when fetching a signed address to see whether an image comes
+# back. Short on purpose: this runs before anything is shown, so a stalled
+# object store must degrade into "can't open it" rather than hold up the caller.
+_REACHABLE_TIMEOUT = 10.0
 
 
-class ImageRegistry:
-    """Per-request image registry backed by a Redis Hash.
+async def image_is_reachable(url: str) -> bool:
+    """Whether a signed address actually hands back an image.
 
-    Redis key: ``image_registry:{message_id}``
-    Fields: ``__counter__`` -> N, ``1.png`` -> url, ``2.png`` -> url, ...
-    TTL: 30 minutes.
+    Signing is pure computation — tool-service ``get-url`` hands the key to
+    ``tos_client.pre_signed_url``, which never looks at the bucket. So a
+    well-formed url proves nothing about the object: expired ``temp/`` objects,
+    keys the inbound pipeline never stored, and keys that were never object
+    names to begin with all sign just fine and 404 on fetch.
 
-    Cross-service contract: chat-response-worker reads the same bare
-    key when rendering the AI reply (replaces ``N.png`` in the text
-    with the registered TOS URL). Lane isolation is delegated to the
-    ConfigBundle (coe-* lanes get a separate Redis container); the key
-    is never rewritten by the capability — that broke ppe→prod sharing
-    in trace 3de371aea10290b327f1386ea56f180c.
+    Callers that feed a url to the model must check first. The Gemini adapter
+    downloads image urls itself and ``raise_for_status()`` on them
+    (``app.agent.adapters.gemini._fetch_remote_image``), so an image it cannot
+    download does not degrade that turn — it ends it.
+
+    The body is read to the end, and empty bodies fail. A status code is not
+    the thing being checked: a ``200`` whose body then stalls or arrives empty
+    ends that turn exactly like a ``404`` does, so the only answer worth
+    anything here is "the bytes came back". The bytes are dropped — whoever
+    shows the image downloads them on their own path.
     """
-
-    def __init__(self, message_id: str) -> None:
-        self.message_id = message_id
-        self._key = f"image_registry:{message_id}"
-
-    async def register(self, tos_url: str) -> str:
-        """Register a TOS URL, return filename like ``3.png``."""
-        from app.capabilities.redis import get_redis_capability
-
-        cap = await get_redis_capability()
-        n = await cap.eval(
-            _REGISTER_LUA,
-            keys=[self._key],
-            args=[tos_url, _REGISTRY_TTL],
-        )
-        return f"{n}.png"
-
-    async def register_batch(self, urls: list[str]) -> list[str]:
-        """Register multiple URLs via pipeline."""
-        if not urls:
-            return []
-        from app.capabilities.redis import get_redis_capability
-
-        cap = await get_redis_capability()
-        async with cap.pipeline() as pipe:
-            for url in urls:
-                pipe.eval(_REGISTER_LUA, 1, self._key, url, _REGISTRY_TTL)
-            results = await pipe.execute()
-        return [f"{n}.png" for n in results]
-
-    async def resolve(self, filename: str) -> str | None:
-        """Resolve a filename to its TOS URL."""
-        from app.capabilities.redis import get_redis_capability
-
-        cap = await get_redis_capability()
-        return await cap.hget(self._key, filename)
-
-    async def resolve_all(self) -> dict[str, str]:
-        """Get all filename -> URL mappings (excludes __counter__)."""
-        from app.capabilities.redis import get_redis_capability
-
-        cap = await get_redis_capability()
-        data: dict[str, Any] = await cap.hgetall(self._key)
-        data.pop("__counter__", None)
-        return data
+    try:
+        async with httpx.AsyncClient(timeout=_REACHABLE_TIMEOUT) as client:
+            resp = await client.get(url)
+            return resp.status_code == 200 and bool(resp.content)
+    except Exception as exc:
+        logger.info("image url is not reachable: %s (%s)", url, exc)
+        return False

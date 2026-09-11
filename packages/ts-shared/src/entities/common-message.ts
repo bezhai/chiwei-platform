@@ -9,6 +9,7 @@ export interface CommonMessageContent {
 @Index('idx_common_message_conversation_time', ['common_conversation_id', 'event_time'])
 @Index('idx_common_message_user_time', ['common_user_id', 'event_time'])
 @Index('idx_common_message_response_id', ['response_id'])
+@Index('ix_common_message_agent_outbound_id', ['agent_outbound_id'])
 export class CommonMessage {
     @PrimaryColumn({ type: 'uuid' })
     common_message_id!: string;
@@ -40,6 +41,20 @@ export class CommonMessage {
     @Column({ type: 'uuid', nullable: true })
     common_reply_message_id?: string;
 
+    /**
+     * 这条消息点了谁的名，按公共层 id。
+     *
+     * 存 common_user_id 而不是渠道那边的 union_id / open_id：读它的人（agent-service
+     * 判"群里叫的是不是我"）只认公共层 id，而渠道裸 id 一律不上浮到这一层。
+     *
+     * **NULL 和 `[]` 是两件事。** NULL = 没人算过这条消息（加列之前的存量行、QQ 的
+     * 行、飞书新写入方上线之前的行）；`[]` = 算过，确实谁都没点。读的一侧把 NULL 当
+     * "不知道"，也就是不算被点名 —— 这是唯一安全的方向。所以这一列既不能 NOT NULL，
+     * 也不能给默认值：给了就把"没算过"和"算过没人"合并了，而且合并之后再也分不开。
+     */
+    @Column({ type: 'uuid', array: true, nullable: true })
+    mentioned_common_user_ids?: string[];
+
     @Column({ type: 'varchar', length: 16 })
     scope!: string;
 
@@ -51,6 +66,52 @@ export class CommonMessage {
 
     @Column({ type: 'varchar', length: 100, nullable: true })
     response_id?: string;
+
+    /**
+     * 这一行是赤尾**哪一次主动开口**的产物。
+     *
+     * 她在生活引擎里自己发起说话时，agent-service 先派生一个稳定唯一的 id，再以
+     * `proactive:<uuid>` 的形式放在出站信封的 message_id 上。渠道服务落这条
+     * assistant 行时，把**前缀之后那个 uuid** 记在这里 —— 前缀是线格式的命名空间
+     * 标记，列是 uuid 类型，整串进不来。
+     *
+     * 没有这一列时，主动发的行上 response_id 和 common_reply_message_id 都是空、
+     * common_root_message_id 回落成它自己，于是「库里这一行」和「她哪一次开口」之间
+     * 一个可用的关联键都没有，只能靠内容加时间戳猜。发送前的安全检查、以及她自己
+     * 撤回说过的话，都要按这一列做等值反查。
+     *
+     * **NULL = 没记过这行是哪次开口的产物。** 三种情况都落在 NULL 上：加列之前的
+     * 存量行、QQ 渠道写的行、以及所有被动回复的行（被动回复本来就不是任何一次
+     * 主动开口）。所以这一列既不能 NOT NULL，也不能给默认值：给了就把「没记过」和
+     * 「确实不是主动发的」合并了，而且合并之后再也分不开。这张表三个服务共写，
+     * 这段注释是这条契约唯一的载体。
+     */
+    @Column({ type: 'uuid', nullable: true })
+    agent_outbound_id?: string;
+
+    /**
+     * 这条消息什么时候被撤回的。
+     *
+     * **两个写者，都只写"这条已经不在会话里了"这一件事**：
+     *
+     * - 出站撤回链（她自己要收回一句话）把飞书那条消息删掉之后写，**只在真的删掉之后
+     *   写** —— 写了就等于对上游说"这句话已经不在群里了"，而上游（agent-service 的
+     *   安全判定、以及她自己想收回一句话时）就是按这一列判的。删不掉却写上，她会以为
+     *   自己收回了。
+     * - 入站撤回事件（真人在飞书上撤回一条消息）由 lark-service 的
+     *   `receiveLarkRecall` 写。所以**别人发的消息这一列也可能非空**。
+     *
+     * 两个写者写的是同一件事实，所以这一列里读不出"是谁撤的" —— 飞书的撤回事件根本
+     * 不带操作者身份，只带一个角色枚举。要区分只能看那一行是谁发的。
+     *
+     * **NULL = 没被撤回。** 存量行、QQ 渠道的行、以及撤回请求发出去但一直没成功的那些，
+     * 全落在 NULL 上 —— 最后一种正是要让上游看见的"请求过撤回但没确认撤掉"。所以这
+     * 一列既不能 NOT NULL 也不能给默认值：给了就得替这些行编一个撤回时刻出来。
+     *
+     * 记时刻而不是布尔：事后"什么时候撤的"没有第二个地方能查。
+     */
+    @Column({ type: 'timestamptz', nullable: true })
+    recalled_at?: Date;
 
     @Column({ type: 'bigint' })
     event_time!: string;

@@ -34,7 +34,7 @@ import {
     readLarkMessageEvent,
     type LarkMessageReading,
 } from './message/read-message-event';
-import type { LarkMessageEvent } from './message/wire';
+import type { LarkMessageEvent, LarkRecallEvent } from './message/wire';
 
 export interface LarkInboundPorts {
     /** 本进程负责哪些 bot。 */
@@ -60,6 +60,16 @@ export interface LarkInboundPorts {
      * 由认领它的人自己解释（见 photo/callback.ts）。
      */
     onCardAction: (payload: unknown) => Promise<void>;
+    /**
+     * 有人在飞书撤回了一条消息。
+     *
+     * **也不过解析层**：报文里没有发送者、没有正文，它不会在公共层建任何新行，要做的
+     * 只是把已经在库里的那一行标成撤回。
+     *
+     * `receivedAt` 是入口应答那一刻的时间，报文不带撤回时刻时拿它兜底 —— 在这里传下去
+     * 而不是由认领者现取，因为认领者跑在应答之后（见 ingress/lark-event.ts 的 receivedAt）。
+     */
+    onRecall: (recall: LarkRecallEvent, receivedAt: Date) => Promise<void>;
 }
 
 export interface LarkInbound {
@@ -97,6 +107,12 @@ export function createLarkInbound(ports: LarkInboundPorts): LarkInbound {
         },
         // 第二条入站路径，与消息那条完全不搭界：不过解析、不过规则、不看 @。
         'card.action.trigger': (event) => ports.onCardAction(event.payload),
+        // 第三条。同样不过解析层，而且**不往外抛任何东西** —— 报文里全部字段都可选，
+        // 缺字段、定位不到、库报错各自走到终态并留下日志（见 lark/recall-message.ts）。
+        // 消息那条路上抛错是为了让泳道交接应答非 2xx，而撤回不走交接（spec 决策 5）：
+        // 抛出去没有任何人接得住，只会把"到底是哪种失败"这个区分丢掉。
+        'im.message.recalled_v1': (event) =>
+            ports.onRecall(event.payload as LarkRecallEvent, event.receivedAt),
     };
 
     const deliver = (event: LarkEvent) => deliverLarkEvent(event, handlers);

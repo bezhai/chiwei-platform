@@ -9,7 +9,6 @@
 import type { Repository } from 'typeorm';
 
 import { BotConfig } from '../entities/bot-config';
-import { CommonAgentResponse } from '../entities/common-agent-response';
 import { CommonUser } from '../entities/common-user';
 import { UserBlacklist } from '../entities/user-blacklist';
 import { repositoryFor } from './data-source';
@@ -20,10 +19,6 @@ export function botConfigRepo(): Repository<BotConfig> {
 
 export function commonUserRepo(): Repository<CommonUser> {
     return repositoryFor(CommonUser);
-}
-
-export function commonAgentResponseRepo(): Repository<CommonAgentResponse> {
-    return repositoryFor(CommonAgentResponse);
 }
 
 export function userBlacklistRepo(): Repository<UserBlacklist> {

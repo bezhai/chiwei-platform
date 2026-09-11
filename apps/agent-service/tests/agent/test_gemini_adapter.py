@@ -521,15 +521,18 @@ async def test_complete_sends_assistant_tool_call_and_tool_result(mock_sdk):
     assert fr_part.function_response.response == {"result": "3 results"}
 
 
-async def test_tool_result_image_block_surfaces_as_inline_part(mock_sdk, monkeypatch):
-    """A tool result carrying image blocks must NOT silently drop the images.
+async def test_tool_result_image_rides_inside_the_function_response(
+    mock_sdk, monkeypatch
+):
+    """A tool result's pictures ride INSIDE the function_response.
 
-    read_images / generate_image return list[ContentBlock] with image_url blocks.
-    Gemini's function_response part is structured JSON (no image); flattening the
-    tool message with .text() drops the image entirely, so the model never sees
-    what the tool returned. The fix keeps the function_response (text result)
-    AND surfaces each image block as a downloaded inline_data part on the same
-    user turn.
+    A tool that hands back pictures returns list[ContentBlock] with image_url
+    blocks. Flattening the tool message with .text() drops the image entirely,
+    so the model never sees what the tool returned; hanging it beside the
+    function_response makes the tool-result turn carry more parts than the model
+    turn had function_calls. Gemini's documented shape for a multimodal tool
+    result nests the media in ``FunctionResponse.parts``, so the answer to one
+    call stays exactly one part.
     """
 
     async def _stub(url: str) -> tuple[bytes, str]:
@@ -547,7 +550,7 @@ async def test_tool_result_image_block_surfaces_as_inline_part(mock_sdk, monkeyp
         Message(
             role=Role.ASSISTANT,
             content="",
-            tool_calls=[ToolCall(id="c1", name="read_images", arguments={})],
+            tool_calls=[ToolCall(id="c1", name="look_at_pictures", arguments={})],
         ),
         Message(
             role=Role.TOOL,
@@ -563,16 +566,317 @@ async def test_tool_result_image_block_surfaces_as_inline_part(mock_sdk, monkeyp
     tool_turn = mock_sdk.instance.last_generate_kwargs["contents"][2]
     assert tool_turn.role == "user"
 
-    # function_response part still present (names the answered call)
-    fr_parts = [p for p in tool_turn.parts if getattr(p, "function_response", None)]
-    assert len(fr_parts) == 1
-    assert fr_parts[0].function_response.name == "read_images"
+    # one call answered ⇒ one part, whatever came back inside it
+    assert len(tool_turn.parts) == 1
+    fr = tool_turn.parts[0].function_response
+    assert fr.name == "look_at_pictures"
+    assert fr.response == {"result": "@3.png:"}
 
-    # the image block reached the wire as a downloaded inline image part
-    img_parts = [p for p in tool_turn.parts if getattr(p, "inline_data", None)]
-    assert len(img_parts) == 1
-    assert img_parts[0].inline_data.data == b"IMG3"
-    assert img_parts[0].inline_data.mime_type == "image/png"
+    # the image block reached the wire as downloaded bytes, nested in the response
+    assert [(b.inline_data.data, b.inline_data.mime_type) for b in fr.parts] == [
+        (b"IMG3", "image/png")
+    ]
+    # and nothing rides beside the function_response
+    assert not [p for p in tool_turn.parts if getattr(p, "inline_data", None)]
+
+
+async def test_many_pictures_from_one_tool_stay_one_part(mock_sdk, monkeypatch):
+    """``find_a_picture_online`` hands back several pictures at once.
+
+    Every one of them must reach the model, and they must all ride in the SAME
+    function_response: N pictures beside it would make one answered call cost
+    N+1 parts, and Gemini counts parts against the model turn's function_calls.
+    """
+    fetched: list[str] = []
+
+    async def _stub(url: str) -> tuple[bytes, str]:
+        fetched.append(url)
+        return url.encode(), "image/jpeg"
+
+    monkeypatch.setattr("app.agent.adapters.gemini._fetch_remote_image", _stub)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="nice")]))
+
+    history = [
+        Message(role=Role.USER, content="find me cats"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[
+                ToolCall(id="c1", name="find_a_picture_online", arguments={})
+            ],
+        ),
+        Message(
+            role=Role.TOOL,
+            tool_call_id="c1",
+            content=[
+                ContentBlock.from_text("猫 pic=a"),
+                ContentBlock.from_image_url({"url": "https://img/a.jpg"}),
+                ContentBlock.from_text("猫 pic=b"),
+                ContentBlock.from_image_url({"url": "https://img/b.jpg"}),
+                ContentBlock.from_text("猫 pic=c"),
+                ContentBlock.from_image_url({"url": "https://img/c.jpg"}),
+            ],
+        ),
+    ]
+    await adapter.complete(history)
+
+    tool_turn = mock_sdk.instance.last_generate_kwargs["contents"][2]
+    assert len(tool_turn.parts) == 1
+    fr = tool_turn.parts[0].function_response
+    # all three, in the order the tool handed them back
+    assert [b.inline_data.data for b in fr.parts] == [
+        b"https://img/a.jpg",
+        b"https://img/b.jpg",
+        b"https://img/c.jpg",
+    ]
+    assert fetched == [
+        "https://img/a.jpg",
+        "https://img/b.jpg",
+        "https://img/c.jpg",
+    ]
+
+
+async def test_text_only_tool_result_carries_no_media_field(mock_sdk):
+    """A tool result with no pictures leaves ``parts`` unset, not empty.
+
+    An empty list is not None, so it would serialise a ``"parts": []`` onto
+    every text-only tool result on the wire.
+    """
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    history = [
+        Message(role=Role.USER, content="find cats"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c1", name="search", arguments={"q": "cats"})],
+        ),
+        Message(role=Role.TOOL, content="3 results", tool_call_id="c1"),
+    ]
+    await adapter.complete(history)
+
+    tool_turn = mock_sdk.instance.last_generate_kwargs["contents"][2]
+    assert tool_turn.parts[0].function_response.parts is None
+
+
+async def test_parallel_tool_results_with_pictures_keep_the_part_count(
+    mock_sdk, monkeypatch
+):
+    """Two calls answered in one turn stay two parts, pictures and all.
+
+    This is the case that breaks with sibling images: two calls, one of them
+    handing back two pictures, used to make a four-part user turn answering a
+    two-call model turn.
+    """
+
+    async def _stub(url: str) -> tuple[bytes, str]:
+        return url.encode(), "image/png"
+
+    monkeypatch.setattr("app.agent.adapters.gemini._fetch_remote_image", _stub)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    history = [
+        Message(role=Role.USER, content="look and search"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[
+                ToolCall(id="c1", name="look_at_phone", arguments={}),
+                ToolCall(id="c2", name="search", arguments={"q": "cats"}),
+            ],
+        ),
+        Message(
+            role=Role.TOOL,
+            tool_call_id="c1",
+            content=[
+                ContentBlock.from_text("[图片1]"),
+                ContentBlock.from_image_url({"url": "https://img/1.png"}),
+                ContentBlock.from_image_url({"url": "https://img/2.png"}),
+            ],
+        ),
+        Message(role=Role.TOOL, content="3 results", tool_call_id="c2"),
+    ]
+    await adapter.complete(history)
+
+    contents = mock_sdk.instance.last_generate_kwargs["contents"]
+    calls = [p for p in contents[1].parts if getattr(p, "function_call", None)]
+    tool_turn = contents[2]
+    assert len(tool_turn.parts) == len(calls) == 2
+
+    phone, search = (p.function_response for p in tool_turn.parts)
+    assert phone.name == "look_at_phone"
+    assert [b.inline_data.data for b in phone.parts] == [
+        b"https://img/1.png",
+        b"https://img/2.png",
+    ]
+    assert search.name == "search"
+    assert search.parts is None
+
+
+async def test_trace_input_shows_the_pictures_in_a_tool_result(mock_sdk, monkeypatch):
+    """Langfuse must still show that pictures went out with a tool result.
+
+    They no longer ride as top-level inline_data parts, so the trace renders
+    them from the function_response: how many, what each one is, how big.
+    """
+
+    async def _stub(url: str) -> tuple[bytes, str]:
+        return b"IMG3", "image/png"
+
+    monkeypatch.setattr("app.agent.adapters.gemini._fetch_remote_image", _stub)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="a dog")]))
+
+    history = [
+        Message(role=Role.USER, content="show me 3.png"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c1", name="look_at_pictures", arguments={})],
+        ),
+        Message(
+            role=Role.TOOL,
+            tool_call_id="c1",
+            content=[
+                ContentBlock.from_text("@3.png:"),
+                ContentBlock.from_image_url({"url": "https://img/3.png"}),
+            ],
+        ),
+    ]
+    await adapter.complete(history)
+
+    traced = _span_calls[0]["input"][2]
+    assert traced["parts"] == [
+        {
+            "function_response": {
+                "name": "look_at_pictures",
+                "images": [{"mime_type": "image/png", "bytes": 4}],
+            }
+        }
+    ]
+
+
+# ---------------------------------------------------------------------------
+# parallel tool calls — Gemini requires the function_response parts answering a
+# model turn to equal that turn's function_call parts, and to ride in ONE user
+# turn. One Content per neutral TOOL message 400s every round where the model
+# called more than one tool ("Please ensure that the number of function response
+# parts is equal to the number of function call parts of the function call
+# turn.", INVALID_ARGUMENT).
+# ---------------------------------------------------------------------------
+
+
+async def test_parallel_tool_results_merge_into_one_user_turn(mock_sdk):
+    """Two tool results answering one model turn become one Content, two parts."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    history = [
+        Message(role=Role.USER, content="cats and weather"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[
+                ToolCall(id="call_1", name="search", arguments={"q": "cats"}),
+                ToolCall(id="call_2", name="weather", arguments={"city": "sh"}),
+            ],
+        ),
+        Message(role=Role.TOOL, content="3 cats", tool_call_id="call_1"),
+        Message(role=Role.TOOL, content="sunny", tool_call_id="call_2"),
+    ]
+    await adapter.complete(history)
+
+    contents = mock_sdk.instance.last_generate_kwargs["contents"]
+    assert [c.role for c in contents] == ["user", "model", "user"]
+
+    calls = [p for p in contents[1].parts if getattr(p, "function_call", None)]
+    responses = [p for p in contents[2].parts if getattr(p, "function_response", None)]
+    assert len(responses) == len(calls) == 2
+
+    # each part keeps the name of the call it answers (call_id → name mapping)
+    assert [p.function_response.name for p in responses] == ["search", "weather"]
+    assert [p.function_response.response for p in responses] == [
+        {"result": "3 cats"},
+        {"result": "sunny"},
+    ]
+
+
+async def test_single_tool_result_keeps_its_one_part_turn(mock_sdk):
+    """One tool call keeps the shape it already had: one user turn, one part."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    history = [
+        Message(role=Role.USER, content="find cats"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="call_1", name="search", arguments={"q": "cats"})],
+        ),
+        Message(role=Role.TOOL, content="3 results", tool_call_id="call_1"),
+    ]
+    await adapter.complete(history)
+
+    contents = mock_sdk.instance.last_generate_kwargs["contents"]
+    assert [c.role for c in contents] == ["user", "model", "user"]
+    assert len(contents[2].parts) == 1
+    assert contents[2].parts[0].function_response.name == "search"
+    assert contents[2].parts[0].function_response.response == {"result": "3 results"}
+
+
+async def test_tool_results_from_different_rounds_stay_in_separate_turns(mock_sdk):
+    """Only *consecutive* tool results merge.
+
+    Two rounds each have their own model turn with one function_call, so their
+    results must stay two user turns — merging across the assistant message
+    between them would break the same count rule the merge exists to keep.
+    """
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    history = [
+        Message(role=Role.USER, content="cats then weather"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="call_1", name="search", arguments={"q": "cats"})],
+        ),
+        Message(role=Role.TOOL, content="3 cats", tool_call_id="call_1"),
+        Message(
+            role=Role.ASSISTANT,
+            content="now the weather",
+            tool_calls=[
+                ToolCall(id="call_2", name="weather", arguments={"city": "sh"})
+            ],
+        ),
+        Message(role=Role.TOOL, content="sunny", tool_call_id="call_2"),
+    ]
+    await adapter.complete(history)
+
+    contents = mock_sdk.instance.last_generate_kwargs["contents"]
+    assert [c.role for c in contents] == ["user", "model", "user", "model", "user"]
+    assert [p.function_response.name for p in contents[2].parts] == ["search"]
+    assert [p.function_response.name for p in contents[4].parts] == ["weather"]
 
 
 # ---------------------------------------------------------------------------
@@ -876,6 +1180,28 @@ async def test_sdk_auto_retry_disabled(mock_sdk):
 async def test_base_url_passed_to_http_options(mock_sdk):
     GeminiAdapter(model_name="gemini-2.5-flash", api_key="k", base_url="https://g")
     assert mock_sdk.http_options.base_url == "https://g"
+
+
+async def test_api_version_passed_to_http_options(mock_sdk):
+    """A gateway pinned to one API version needs it configurable per provider.
+
+    The SDK appends ``{api_version}/models/...`` to base_url, so a provider
+    that only routes ``/v1`` cannot be reached by putting v1 in the base_url —
+    the version segment is always appended on top.
+    """
+    GeminiAdapter(
+        model_name="gemini-3.7-flash",
+        api_key="k",
+        base_url="https://gw/prefix",
+        api_version="v1",
+    )
+    assert mock_sdk.http_options.api_version == "v1"
+
+
+async def test_no_api_version_leaves_the_sdk_default(mock_sdk):
+    """Providers that don't set one keep whatever the SDK picks (v1beta)."""
+    GeminiAdapter(model_name="gemini-2.5-flash", api_key="k", base_url="https://g")
+    assert mock_sdk.http_options.api_version is None
 
 
 async def test_automatic_function_calling_disabled(mock_sdk):

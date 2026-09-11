@@ -229,6 +229,45 @@ describe('handleChatResponse — 主动发端到端', () => {
     });
 });
 
+describe('handleChatResponse — agent-service 带了图，QQ 忽略它', () => {
+    // agent-service 在出站段上多了一列 picture_file_names（对象存储永久句柄），
+    // 由飞书那侧现签地址发出去。QQ 出站只发纯文本（CustomOutboundMessage 只有
+    // text），本来就没有图片路径 —— 所以这里的契约是「多出来的字段不炸、也不泄进
+    // 正文」。写下来是因为不写的话，下一个人读 payload 会以为 agent-service 没发图。
+    function withPictures() {
+        return {
+            ...proactivePayload(),
+            picture_file_names: ['temp/tos_matcha_cat.jpg'],
+        };
+    }
+
+    it('带 picture_file_names 的 payload 照常发出去：整链不炸、ack 一次', async () => {
+        const { cap } = makeCap();
+        let acks = 0;
+        let nacks = 0;
+        const deps = makeDeps({ cap, ack: () => acks++, nack: () => nacks++ });
+
+        await handleChatResponse(deps, makeMsg(withPictures()));
+
+        expect(acks).toBe(1);
+        expect(nacks).toBe(0);
+    });
+
+    it('图一个字符都不进 QQ 出站：content / ctx / 落库正文里都没有那个句柄', async () => {
+        const { cap, calls } = makeCap();
+        const deps = makeDeps({ cap });
+
+        await handleChatResponse(deps, makeMsg(withPictures()));
+
+        expect(calls.sendText.length).toBe(1);
+        expect(calls.sendText[0].content).toEqual([
+            { kind: 'text', text: '在吗？我刚刚在想你' },
+        ]);
+        expect(JSON.stringify(calls.sendText[0].ctx)).not.toContain('temp/tos_matcha_cat.jpg');
+        expect(calls.recordOutboundMessage[0].contentText).toBe('在吗？我刚刚在想你');
+    });
+});
+
 describe('handleChatResponse — 出站失败显眼日志', () => {
     it('出站发送失败：记 error 级显眼日志（带 chat_id / bot_name / persona_id），仍 ack 不 nack', async () => {
         const { cap } = makeCap();

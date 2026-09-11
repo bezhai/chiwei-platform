@@ -121,6 +121,23 @@ def to_cst_dated(raw: str | None, *, now: datetime, seconds: bool = True) -> str
     return f"{dt.strftime('%m-%d')} {clock} CST"
 
 
+def dated_clock(moment: datetime, *, now: datetime) -> str:
+    """一个 ``datetime`` 摆到她眼前的样子 —— :func:`to_cst_dated` 的 datetime 入口。
+
+    喂给她的每一条历史记录（快照里她做过的事和感知到的动静、手机信封上的时刻、日记
+    材料里的每一行）都走这里，所以"哪些行需要标日子"这件事只判一次。**不能给裸时分**：
+    那几处的条目都没有时间窗（按条数取、按游标取、按整整一天取），昨晚的行会原样留在
+    眼前，而 ``23:41`` 昨晚和今晚长得一模一样。线上炸过一次（2026-08-03：中午 13:18
+    往群里发「大半夜的发什么疯、赶紧滚去睡觉」）。
+
+    ``now`` 一律从调用方传进来，**不在这里现取**：一轮一个 now 是这套引擎的地基
+    （:mod:`app.living.anchor`），渲染层自己读钟会让同一轮的输入跟它的身份对不上。
+
+    秒一律不给：秒对读一条记录没有意义，只是噪声。
+    """
+    return to_cst_dated(moment.isoformat(), now=now, seconds=False)
+
+
 # 中文星期（周一=0 … 周日=6，对齐 ``datetime.weekday()``），给完整时间口径用。
 _WEEKDAYS_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 

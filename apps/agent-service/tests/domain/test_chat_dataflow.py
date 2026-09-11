@@ -1,53 +1,13 @@
-"""ChatTrigger / ChatRequest / ChatResponseSegment Data 类字段合约。"""
+"""ChatResponseSegment Data 类字段合约。
+
+ChatTrigger / ChatRequest 随 chat_request 队列一起删了：她不从队列拿消息，
+每次醒来直接查 ``common_message``、自己决定要不要开口（见 ``app.living``）。
+这个模块现在只剩她开口那一侧的契约。
+"""
 import pytest
 from pydantic import ValidationError
 
 from app.runtime.data import key_fields
-
-
-def test_chat_trigger_has_message_id_key_and_is_transient():
-    from app.domain.chat_dataflow import ChatTrigger
-    assert "message_id" in key_fields(ChatTrigger)
-    assert ChatTrigger.Meta.transient is True
-
-
-def test_chat_trigger_optional_fields_default_none():
-    from app.domain.chat_dataflow import ChatTrigger
-    t = ChatTrigger(message_id="m1", channel="lark")
-    assert t.session_id is None
-    assert t.chat_id is None
-    assert t.is_p2p is False
-    assert t.user_id is None
-    assert t.lane is None
-    assert t.is_proactive is False
-    assert t.bot_name is None
-    assert t.persona_ids == []
-    assert t.enqueued_at is None
-
-
-def test_chat_trigger_message_id_can_be_none_for_validation_resilience():
-    """channel-server 偶尔不带 message_id；Data 反序列化要能成功。"""
-    from app.domain.chat_dataflow import ChatTrigger
-    t = ChatTrigger(channel="lark")
-    assert t.message_id is None
-
-
-def test_chat_request_has_message_id_persona_id_keys_not_transient():
-    from app.domain.chat_dataflow import ChatRequest
-    keys = key_fields(ChatRequest)
-    assert "message_id" in keys
-    assert "persona_id" in keys
-    assert getattr(ChatRequest.Meta, "transient", False) is False
-
-
-def test_chat_request_has_lane_field():
-    from app.domain.chat_dataflow import ChatRequest
-    r = ChatRequest(message_id="m1", persona_id="p1", channel="lark")
-    assert r.lane is None
-    r2 = ChatRequest(
-        message_id="m1", persona_id="p1", channel="lark", lane="dev"
-    )
-    assert r2.lane == "dev"
 
 
 def test_chat_response_segment_dedup_keys_and_lane():
@@ -70,43 +30,42 @@ def test_chat_response_segment_is_transient():
     assert ChatResponseSegment.Meta.transient is True
 
 
+# ---- 图：结构化字段，值是永久句柄 ----
+# 投递侧只按 picture_file_names 上传图，正文里的 markdown 图片引用一个都不会变成图
+# （lark-service 的 src/lark/outbound/render.test.ts 钉着这条）——写进正文的引用要么
+# 原样当文字发出去、要么让渠道拒收整条消息。图只能有自己的字段。而字段里存的是对象
+# 存储的**永久句柄**（file_name），不是地址：预签名地址 1.5 小时就死，队列却可能隔
+# 很久才投到（泳道队列 TTL 降级、DLQ 重投），签名必须在最靠近发送的那一刻由投递侧
+# 现签。
+
+
+def test_chat_response_segment_carries_pictures_as_their_own_field():
+    from app.domain.chat_dataflow import ChatResponseSegment
+    seg = ChatResponseSegment(
+        message_id="m1", persona_id="p1", part_index=0, channel="lark",
+        content="给你看这个",
+        picture_file_names=["temp/tos_cat.jpg"],
+    )
+    assert seg.picture_file_names == ["temp/tos_cat.jpg"]
+    assert "temp/tos_cat.jpg" not in seg.content, "图不该顺手也塞进正文"
+
+
+def test_a_segment_without_pictures_carries_an_empty_list_not_none():
+    """缺省是空列表：消费侧读它时不用先分辨 null 和"没有图"两种缺席。"""
+    from app.domain.chat_dataflow import ChatResponseSegment
+    seg = ChatResponseSegment(
+        message_id="m1", persona_id="p1", part_index=0, channel="lark"
+    )
+    assert seg.picture_file_names == []
+    assert seg.model_dump(mode="json")["picture_file_names"] == []
+
+
 # ---- channel 字段：必填，没有默认值 ----
 # channel 决定出站 routing key（chat_response_{channel}）。给它默认值等于让
 # 「漏传 channel」静默变成飞书：一条 QQ 消息会被记成 lark、回复投进飞书出站
 # 队列，QQ 用户收不到回复，全程不报错。sink dispatch 的 fail-closed 校验跑在
 # pydantic 填完默认值之后，拦不住。所以三个 Data 一律必填，缺就在反序列化处
 # 报 ValidationError（MQ 入口 → 消息进 DLQ，可查），不猜。
-
-
-def test_chat_trigger_channel_is_required():
-    from app.domain.chat_dataflow import ChatTrigger
-    with pytest.raises(ValidationError):
-        ChatTrigger(message_id="m1")
-    assert ChatTrigger(message_id="m1", channel="qq").channel == "qq"
-
-
-def test_chat_trigger_payload_without_channel_fails_validation():
-    """缺 channel 的 chat_request 报文必须炸在反序列化，不能兜底成 lark。"""
-    from app.domain.chat_dataflow import ChatTrigger
-    old = {"message_id": "m1", "chat_id": "c1", "user_id": "u1"}
-    with pytest.raises(ValidationError):
-        ChatTrigger.model_validate(old)
-
-
-def test_chat_request_channel_is_required():
-    from app.domain.chat_dataflow import ChatRequest
-    with pytest.raises(ValidationError):
-        ChatRequest(message_id="m1", persona_id="p1")
-    assert (
-        ChatRequest(message_id="m1", persona_id="p1", channel="qq").channel == "qq"
-    )
-
-
-def test_chat_request_payload_without_channel_fails_validation():
-    from app.domain.chat_dataflow import ChatRequest
-    old = {"message_id": "m1", "persona_id": "p1", "chat_id": "c1"}
-    with pytest.raises(ValidationError):
-        ChatRequest.model_validate(old)
 
 
 def test_chat_response_segment_channel_is_required():
@@ -123,3 +82,17 @@ def test_chat_response_segment_payload_without_channel_fails_validation():
     old = {"message_id": "m1", "persona_id": "p1", "part_index": 0, "content": "hi"}
     with pytest.raises(ValidationError):
         ChatResponseSegment.model_validate(old)
+
+
+def test_the_chat_request_payload_contracts_are_gone():
+    """``chat_request`` 那条队列的报文契约不该再存在。
+
+    ``ChatTrigger`` 是它的入口 body，``ChatRequest`` 是 fan-out 之后的 per-persona
+    请求。队列没了，这两条 Data 也就没有任何生产者和消费者 —— 留着的话，下一个人
+    会以为"接一下就能用"，而那正是「chat 是嘴，没有耳朵」要挡住的东西
+    （见 ``tests/living/test_no_inbound.py``）。
+    """
+    import app.domain.chat_dataflow as chat_dataflow
+
+    assert not hasattr(chat_dataflow, "ChatTrigger")
+    assert not hasattr(chat_dataflow, "ChatRequest")

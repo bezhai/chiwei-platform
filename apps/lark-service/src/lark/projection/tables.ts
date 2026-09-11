@@ -5,8 +5,8 @@
 // （唯一知道 TypeORM 和 SQL 的地方），测试实现是内存里的一组 Map。
 //
 // 绝大多数方法服务于投影（inbound-projection.ts），但端口的范围是整条入站链而不是
-// 投影一步：认领消息归谁处理发生在规则之后（矩阵里的 `common_message update bot_name`
-// 那一行），它同样是一条语句、同样属于这里 —— 让它自己去摸 TypeORM 才是破口。
+// 投影一步：撤回也走这里 —— 它同样是一条语句、同样属于这里，让它自己去摸 TypeORM
+// 才是破口。
 //
 // 字段名刻意用**物理列名**而不是驼峰属性名：这些结构描述的是"库里那一行长什么样"，
 // 用列名之后写入矩阵和测试断言可以逐字对上，不需要在两套命名之间来回翻译。
@@ -82,9 +82,9 @@ export interface LarkChatPermission {
     open_repeat_message?: boolean;
     allow_send_limit_photo?: boolean;
     /**
-     * 按群灰度。**当前没有读取方** —— 拆分前它进 chat.request 的 is_canary，而
-     * agent-service 的 ChatTrigger 上没有这个字段，在反序列化之前就被过滤掉了
-     * （见 rules/chat-request.ts 的注释）。列在这里是因为库里真的存着它。
+     * 按群灰度。**当前没有读取方** —— 它原先进的是入站请求报文的 is_canary，而那条
+     * 报文契约在 agent-service 那侧根本没有这个字段（反序列化前就被过滤掉），后来整条
+     * 入站请求支线也拆了。列在这里是因为库里真的存着它。
      */
     is_canary?: boolean;
 }
@@ -194,18 +194,18 @@ export interface CommonMessageRow {
     content_text?: string;
     common_root_message_id: string;
     common_reply_message_id?: string;
+    /**
+     * 这条消息点了谁的名，按公共层 id。**必填，没点名就是空数组。**
+     *
+     * 可选的话，漏传和"确实没人被点"在库里长得一样（都是 NULL），而读的一侧靠
+     * NULL 区分"没人算过"和"算过没人"—— 那个区分是这一列存在的意义。
+     */
+    mentioned_common_user_ids: string[];
     scope: string;
     message_type: string;
     bot_name: string;
     /** 飞书给的毫秒时间戳字符串，原样落进 bigint 列。 */
     event_time: string;
-}
-
-/** 这条消息归谁处理。发送者一并重写：投影写进去的是同一个值，重写只是让它收敛。 */
-export interface CommonMessageClaim {
-    common_message_id: string;
-    bot_name: string;
-    common_user_id: string;
 }
 
 // ---- 端口 ----
@@ -270,15 +270,24 @@ export interface LarkTables {
      * 有人并发写进来了，这时候必须让整个事务回滚而不是忽略。
      */
     insertLarkMessage(row: LarkMessageRow): Promise<void>;
+
     /**
-     * 把这条消息记成某个 bot 的。同群多个 bot 里，只有抢到去重锁、真的要发
-     * chat.request 的那个才认领（见 rules/inbound-rules.ts 的顺序）。
+     * 把这条公共层消息标成撤回，**首写保留**：已经写着撤回时刻的那些行一个字都不改，
+     * 返回 false。真的写进去了才返回 true。
      *
-     * **一行都没改到就抛。** 那意味着 common_message 里根本没有这条消息，而下游
-     * agent-service 拿到请求后要按 message_id 回查它 —— 读空会直接走"未找到消息记录"
-     * 短路。与其发一个注定失败的请求，不如在这里炸。
+     * 首写保留不是可有可无的：飞书不保证撤回事件只推一次，而这条链上没有任何幂等键
+     * （撤回不走投影，拿不到锁，也没有队列去重）。无条件覆盖的话，同一条消息第二次
+     * 事件到达就会把撤回时刻往后挪 —— 事后"什么时候撤的"没有第二个地方能查。
+     *
+     * 与出站那条撤回链上的 markRecalled 语义不同（那条无条件写）：那边是"我们刚把它
+     * 从飞书上删掉"，写的是刚发生的事实；这边是"别人撤的，我们只是听说了"，先听说的
+     * 那次更接近真相。
+     *
+     * **一行都没改到不抛错。** 这里的 0 行有两种可能 —— 已经撤过了（正常）、或者这条
+     * 消息根本不在 common_message 里（调用方在此之前已经按 om_id 查过映射，所以基本
+     * 排除）。两种都不该让入站链断掉：飞书早已应答，抛出去也没人接得住。
      */
-    claimCommonMessageForBot(claim: CommonMessageClaim): Promise<void>;
+    markCommonMessageRecalled(commonMessageId: string, recalledAt: Date): Promise<boolean>;
 
     /**
      * 建一条新的绑定，建出来就是生效的。

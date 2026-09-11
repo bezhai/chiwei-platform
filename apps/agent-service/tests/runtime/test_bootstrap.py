@@ -43,35 +43,66 @@ def test_load_dataflow_graph_returns_compiled_graph_with_real_wiring():
     import importlib
 
     import app.deployment as d
-    import app.wiring.chat as cw
+    import app.wiring.living as lw
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
 
     clear_wiring()
     clear_bindings()
-    importlib.reload(cw)
+    importlib.reload(lw)
     importlib.reload(d)
 
     g = load_dataflow_graph()
-    # chat ingress nodes ride the production wiring
+    # living 的钟骑在生产 wiring 上
     assert {n.__name__ for n in g.nodes} >= {
-        "route_chat_node",
-        "chat_node",
+        "calendar_tick",
+        "world_round_tick",
+        "life_moment_tick",
     }
 
 
 @pytest.mark.asyncio
-async def test_declare_durable_topology_skips_when_no_durable_wire():
-    """Empty registry must not force a broker connection."""
+async def test_declare_durable_topology_declares_no_route_without_durable_wire():
+    """No durable wire means no route to declare -- but the exchange still
+    has to be there.
+
+    Callers only reach this function through
+    ``prepare_for_run(declare_topology=True)``, and that flag already means
+    "this process is going to publish". Skipping the exchange because no
+    durable *consumer* happens to be registered conflates two unrelated
+    things and leaves ``mq.publish`` raising "must call declare_topology()
+    first" -- see the companion test below for how that bites.
+    """
     with patch("app.infra.rabbitmq.mq") as mock_mq:
         mock_mq.connect = AsyncMock()
         mock_mq.declare_topology = AsyncMock()
         mock_mq.declare_route = AsyncMock()
         await declare_durable_topology()
 
-    mock_mq.connect.assert_not_called()
-    mock_mq.declare_topology.assert_not_called()
     mock_mq.declare_route.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_process_with_only_outbound_mq_can_still_publish():
+    """A process whose every ``Source.mq`` is gone still needs its exchange.
+
+    This is not hypothetical. The living engine registers interval sources
+    and zero MQ consumers, so a process can end up holding no durable wire
+    at all. It still emits ``ChatResponseSegment`` to the channel worker,
+    and without the exchange every one of those publishes died with
+    ``RuntimeError: must call declare_topology() first``: she could hear
+    but not speak.
+    """
+    with patch("app.infra.rabbitmq.mq") as mock_mq:
+        mock_mq.connect = AsyncMock()
+        mock_mq.declare_topology = AsyncMock()
+        mock_mq.declare_route = AsyncMock()
+        await declare_durable_topology()
+
+    mock_mq.connect.assert_awaited(), "没连 broker，出站无从谈起"
+    mock_mq.declare_topology.assert_awaited(), (
+        "exchange 没准备好 —— publish 会抛 must call declare_topology() first"
+    )
 
 
 @pytest.mark.asyncio

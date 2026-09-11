@@ -13,6 +13,7 @@ from datetime import datetime
 from uuid import UUID as PyUUID
 
 from sqlalchemy import (
+    ARRAY,
     JSON,
     UUID,
     BigInteger,
@@ -103,6 +104,45 @@ class CommonMessage(Base):
     common_reply_message_id: Mapped[PyUUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
+    # 这条消息点了谁的名，按公共层 id（由飞书投影在落账时算好写入）。
+    #
+    # NULL 和 [] 是两件事：NULL = 没人算过（加列前的存量行、QQ 的行、飞书新写入方
+    # 上线前的行），[] = 算过、确实谁都没点。读的一侧把 NULL 当"不知道"，也就是不
+    # 算被点名。所以这一列既不能 NOT NULL 也不能给默认值 —— 给了就把"没算过"和
+    # "算过没人"合并了，而且合并之后再也分不开。
+    mentioned_common_user_ids: Mapped[list[PyUUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=True
+    )
+    # 这一行是赤尾**哪一次主动开口**的产物。
+    #
+    # 她在生活引擎里自己发起说话时先派生一个稳定唯一的 id，再以 ``proactive:<uuid>``
+    # 的形式放在出站信封的 message_id 上；渠道服务落这条 assistant 行时把**前缀之后
+    # 那个 uuid** 记在这里（前缀是线格式的命名空间标记，列是 uuid 类型，整串进不来）。
+    # 引擎按这一列把"她那次开口"和"库里这一行"对上账（``app.living.landing``）。
+    #
+    # NULL 和"确实不是主动发的"是两件事：NULL = 没记过（加列前的存量行、QQ 的行、
+    # 飞书新写入方上线前的行）。所以这一列既不能 NOT NULL 也不能给默认值 —— 给了就
+    # 把两者合并了，而且合并之后再也分不开。这张表三个服务共写，TS 侧那一列的注释
+    # （packages/ts-shared/src/entities/common-message.ts）是同一条契约的另一半。
+    agent_outbound_id: Mapped[PyUUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    # 这一行在渠道上被撤掉的时刻。**撤成功才填，撤失败不填。**
+    #
+    # 撤回不删这一行：公共层是消息记录，删行会把历史打断。所以"这条还在不在会话
+    # 里"是这一列说了算 —— 非空 = 渠道上它已经不在了，读的一侧（
+    # ``app.living.phone``）据此把它从她眼前拿掉。
+    #
+    # 引擎这边没有入站边，撤成功了没人来通知，所以撤回的结果也是**事后按
+    # ``agent_outbound_id`` 反查这一列**对回台账的（``app.living.landing``）。
+    #
+    # 可空、无默认值，跟上面那一列同一个理由：NULL = 没撤过或者还没撤掉，跟"撤掉
+    # 了"是两件事，给了默认值就再也分不开。写入方在投递侧（lark-service），TS 侧那
+    # 一列（packages/ts-shared/src/entities/common-message.ts）是同一条契约的另一半，
+    # **两边列名必须都是 recalled_at**。
+    recalled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     scope: Mapped[str] = mapped_column(String(16), nullable=False)
     message_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     bot_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -162,6 +202,10 @@ class ModelProvider(Base):
     client_type: Mapped[str] = mapped_column(String(50), default="openai")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     use_proxy: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Pins the API version segment the google-genai SDK appends to base_url;
+    # only client_type='google' reads it (text and image alike). NULL keeps
+    # that SDK's own default.
+    api_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
 

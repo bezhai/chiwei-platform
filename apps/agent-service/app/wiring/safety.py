@@ -1,38 +1,19 @@
-"""Phase 2 safety wiring.
+"""Wiring: 撤回出 graph。
 
-Pre-check 控制面进 graph：chat pipeline ``run_pre_safety_check`` 通过
-``emit_and_wait`` emit(PreSafetyRequest) → run_pre_safety →
-PreSafetyVerdict（auto-emit）；verdict 由 ``emit_and_wait`` 的
-notify hook 直接 set future，不需要专门的 reply-side node。
+  Recall -> Sink.mq("recall")
 
-Post-check 数据面走进程内 graph：chat pipeline emit(PostSafetyRequest) →
-run_post_safety → blocked 时 return Recall → Sink.mq("recall") →
-``recall_{channel}`` → 拥有该 channel 的渠道服务（飞书是 lark-service）。
-PostSafetyRequest 本身是瞬态触发器，持久状态在 common_agent_response。
+实际投的是 ``recall_{channel}``（sink dispatch 按 payload 的 ``channel`` 现算
+routing key），飞书那条由 lark-service 消费。emit 它的是 ``app.living.takeback``
+—— 她把已经说出去的话收回来。
 
-所有节点都跑在 agent-service 主进程；post 复用 agent-service 而不是新开
-safety-worker，因为单条审计的工作量小（一次 banned word + 一次 guard LLM）。
+原先这个模块还挂着 pre / post 安全检查那两条边（``PreSafetyRequest`` ->
+``run_pre_safety``、``PostSafetyRequest`` -> ``run_post_safety``）。它们唯一的
+emitter 在旧 chat pipeline 里，旧实现删掉后这两条边没有生产者了，跟着一起清掉。
+她自己开口那条链**在发出去之前**就判同一件事，直接调
+``app.capabilities.output_safety.audit_output``（``app.living.mouth``），不经过
+graph。
 """
-from app.domain.safety import (
-    PostSafetyRequest,
-    PreSafetyRequest,
-    Recall,
-)
-from app.nodes.safety import (
-    run_post_safety,
-    run_pre_safety,
-)
-from app.runtime import Sink, bind, wire
+from app.domain.safety import Recall
+from app.runtime import Sink, wire
 
-# Pre-check：单 wire — verdict 由 emit_and_wait 的 notify() 直接消费
-wire(PreSafetyRequest).to(run_pre_safety)
-
-# Post-check：transient trigger; persisted state is common_agent_response.
-wire(PostSafetyRequest).to(run_post_safety)
-
-# Recall 出 graph 给拥有该 channel 的渠道服务（rk 按 payload.channel 现算）
 wire(Recall).to(Sink.mq("recall"))
-
-# Placement — agent-service 主进程
-bind(run_pre_safety).to_app("agent-service")
-bind(run_post_safety).to_app("agent-service")

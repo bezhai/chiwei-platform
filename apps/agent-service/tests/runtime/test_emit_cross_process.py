@@ -140,7 +140,7 @@ async def test_emit_mq_publish_injects_trace_and_lane_headers(monkeypatch):
     async def chat_handler(r: _ChatReqProbe) -> None:
         pass
 
-    wire(_ChatReqProbe).to(chat_handler).from_(Source.mq("chat_request"))
+    wire(_ChatReqProbe).to(chat_handler).from_(Source.mq("runtime_delayed_trigger_agent-service"))
     bind(chat_handler).to_app("vectorize-worker")
 
     monkeypatch.setenv("APP_NAME", "agent-service")
@@ -157,7 +157,7 @@ async def test_emit_mq_publish_injects_trace_and_lane_headers(monkeypatch):
 
     fake_publish.assert_awaited_once()
     args, kwargs = fake_publish.await_args
-    assert args[0].queue == "chat_request"
+    assert args[0].queue == "runtime_delayed_trigger_agent-service"
     assert args[1]["chat_id"] == "c9"
     headers = kwargs.get("headers")
     assert headers is not None, (
@@ -178,7 +178,7 @@ async def test_emit_mq_publish_writes_empty_lane_header_outside_a_lane(monkeypat
     async def chat_handler(r: _ChatReqProbe) -> None:
         pass
 
-    wire(_ChatReqProbe).to(chat_handler).from_(Source.mq("chat_request"))
+    wire(_ChatReqProbe).to(chat_handler).from_(Source.mq("runtime_delayed_trigger_agent-service"))
     bind(chat_handler).to_app("vectorize-worker")
 
     monkeypatch.setenv("APP_NAME", "agent-service")

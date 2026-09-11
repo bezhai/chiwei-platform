@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
 from prometheus_client import Counter, Histogram
 
@@ -17,6 +17,9 @@ from app.capabilities._errors import (
     CapabilityInvalidArg,
     CapabilityNotFound,
 )
+
+if TYPE_CHECKING:
+    from app.infra.image import StoredImage
 
 logger = logging.getLogger(__name__)
 
@@ -137,25 +140,27 @@ def tool_error(error_message: str):
     return decorator
 
 
-async def upload_and_register(
-    source_type: str,
-    data: str,
-    registry: Any,
-) -> tuple[str, str | None]:
-    """Upload an image to TOS and optionally register in ImageRegistry.
+async def upload_image(source_type: str, data: str) -> StoredImage | None:
+    """Put an image into object storage; hand back its **permanent handle**.
 
-    Returns ``(tos_url, filename)`` on success, ``(data, None)`` on failure.
+    ``source_type`` is ``"base64"`` or ``"url"``; ``data`` is the base64
+    payload or the source url.
+
+    Returns the :class:`~app.infra.image.StoredImage` (``file_name`` +
+    a pre-signed ``url`` that expires in 1.5 hours), or ``None`` when the
+    upload did not land — for any reason, transport included. Tools go
+    through here rather than calling the client directly so a failure is one
+    value, not three shapes.
+
+    **Failure is ``None``, never the input echoed back.** The previous
+    contract returned ``(data, None)`` on failure, so a base64 blob travelled
+    onward wearing the shape of a storage handle: persisted into her record,
+    later handed to the re-signing endpoint as if it were a TOS key.
     """
     from app.infra.image import image_client
 
     try:
-        tos_url = await image_client.upload_to_tos(source_type, data)
-        if not tos_url:
-            return data, None
-        filename: str | None = None
-        if registry:
-            filename = await registry.register(tos_url)
-        return tos_url, filename
+        return await image_client.upload_to_tos(source_type, data)
     except Exception:
-        logger.warning("upload_and_register failed", exc_info=True)
-        return data, None
+        logger.warning("upload_image failed", exc_info=True)
+        return None

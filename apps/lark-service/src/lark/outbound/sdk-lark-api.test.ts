@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { LarkClient } from '@inner/lark-utils';
+import { LARK_MESSAGE_ALREADY_RECALLED, LarkClient, larkErrorCode } from '@inner/lark-utils';
 import { Readable } from 'node:stream';
 
 import type { PostContent } from './post-content';
@@ -534,6 +534,30 @@ describe('接在真的 LarkClient 上', () => {
         );
 
         expect(api.recall('om_1')).rejects.toThrow('already gone');
+    });
+
+    // 端口的口径是"一律抛，不解释" —— 但抛出来的东西上要带得住飞书的数字码，撤回那
+    // 一侧就是靠它把「消息已被撤回或删除」跟别的失败分开的（见 recall.ts）。这一层
+    // 什么都不 catch，所以这条验的是"确实什么都没被吃掉"。
+    it('飞书的数字码穿过端口传到调用方，不只剩一句文案', async () => {
+        const api = apiWith(
+            realClientWith({
+                im: {
+                    message: {
+                        delete: async () => ({ code: 99991663, msg: 'already gone' }),
+                    },
+                },
+            }),
+        );
+
+        const error = await api.recall('om_1').then(
+            () => {
+                throw new Error('expected recall to throw, but it resolved');
+            },
+            (e: unknown) => e,
+        );
+
+        expect(larkErrorCode(error)).toBe(LARK_MESSAGE_ALREADY_RECALLED);
     });
 
     it('上传走到真 LarkClient 也能取出 image_key', async () => {

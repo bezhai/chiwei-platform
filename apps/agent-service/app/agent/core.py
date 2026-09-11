@@ -390,9 +390,9 @@ def _tooldefs(tools: list[Tool]) -> list[ToolDef] | None:
 def _normalise_tool_result(result: ToolResult) -> ToolResult:
     """Coerce a tool's raw return into wire-safe neutral content.
 
-    Tools return ``str`` (search_web / sandbox_bash), ``dict`` (recall / notes /
+    Tools return ``str`` (search_web / run_a_script), ``dict`` (recall / notes /
     a ``@tool_error`` outcome), or ``list[dict]`` OpenAI-style content blocks
-    (read_images / generate_image). The model can only be fed ``str`` or
+    (any tool handing back pictures). The model can only be fed ``str`` or
     ``list[ContentBlock]`` (that's what the adapters wire and what
     ``Message.text()`` flattens), mirroring langchain's ToolNode which
     JSON-serialised dict returns and carried block lists as multimodal content:
@@ -464,11 +464,10 @@ async def _complete_turn(
     flow below this call — the caller gets whatever ``Message`` the last
     attempt produced (possibly still empty), exactly as it always has. Only a
     warning log marks the exhaustion, so this never introduces a new exception
-    type or return shape: raising here would let the exception escape into
-    ``app.chat.render.render_chat_turn``'s broad ``except Exception`` (default
-    ``on_error="yield_text"``), which turns ANY non-``RenderFailed`` exception
-    into user-facing error text — exactly the "send something anyway" outcome
-    this fix exists to prevent.
+    type or return shape: raising here would let the exception escape into a
+    caller's broad ``except Exception``, which would turn it into user-facing
+    error text — exactly the "send something anyway" outcome this fix exists
+    to prevent.
     """
     last = await model.complete(convo, tools=tool_defs, **call_kwargs)
     attempts = 1
@@ -797,7 +796,7 @@ class Agent:
         agent short-circuits *before* touching Dynamic Config — the flag read is
         the only blocking bit, wrapped in ``asyncio.to_thread`` because the SDK's
         cache-miss refresh is sync httpx that would otherwise stall the shared
-        event loop (mirrors ``app.life.feed_whitelist``).
+        event loop.
 
         Computed once per run (the model is fixed across retry attempts) so the
         loops stay free of this business judgment.

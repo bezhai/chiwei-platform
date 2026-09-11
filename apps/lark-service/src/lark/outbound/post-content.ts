@@ -2,9 +2,10 @@
 //
 // 这是唯一知道飞书 post 长什么样的地方。产出它的有两条路，各自走到不同的节点：
 //
-//   * **赤尾的回复**（markdownToPostContent，本文件下半段）走 md + img。@ 在渲染管线
-//     的上一步就已经被写成 `<at user_id=...>` 标签留在 markdown 里，飞书会在 md 节点
-//     内部把它渲染成真正的 mention，所以这条路不需要独立的 at 节点。
+//   * **赤尾的回复**（markdownToPostContent，本文件下半段）只走 md。@ 在渲染管线的
+//     上一步就已经被写成 `<at user_id=...>` 标签留在 markdown 里，飞书会在 md 节点
+//     内部把它渲染成真正的 mention，所以这条路不需要独立的 at 节点。她要带的图不从
+//     正文来：img 节点由 pictures.ts 产出、由 render.ts 接在正文后面（理由见下）。
 //   * **复读**（../repeat/echo.ts）走 text + at + emotion。它不能用 md：复读的内容是
 //     用户原话，里面的 `*` `_` `#` 会被 md 节点当成格式吃掉，复读出来就跟原话不一样了。
 //     表情也一样 —— 飞书的表情在 post 里是独立的 emotion 节点，md 里塞不进去。
@@ -18,7 +19,12 @@ export interface MdPostNode {
     text: string;
 }
 
-/** 一张图。image_key 必须是飞书自己发的 key，外链和占位符都进不来（见下）。 */
+/**
+ * 一张图。image_key 必须是飞书自己发的 key —— 飞书认不出它就拒收**整条消息**。
+ *
+ * 唯一的产出方是 pictures.ts（那里的 key 刚从一次真实的上传拿回来）。正文永远变不出
+ * 这个节点，见下面 markdownToPostContent 的注释。
+ */
 export interface ImgPostNode {
     tag: 'img';
     image_key: string;
@@ -56,33 +62,28 @@ export interface PostContent {
 }
 
 /** markdown 的图片语法。alt 用 `.*?` 而不是 `[^\]]*` —— 名字里带 `]` 的 mention 已经被写进 alt 了。 */
-const IMAGE_PATTERN = /!\[.*?\]\(([^)]+)\)/g;
-
-/**
- * 还没被换成飞书 image_key 的注册表占位引用（`1.png` / `@1.png`）。
- *
- * 图片管线降级、或者根本没给注册表 id 时，这种引用会原样留到这一步。它不是飞书
- * image_key，硬发出去飞书会拒收**整条消息** —— 一张图挂掉变成一句话都发不出。
- */
-const UNRESOLVED_REGISTRY_REF = /^@?\d+\.png$/;
-
-function isExternalUrl(imageKey: string): boolean {
-    return imageKey.startsWith('http://') || imageKey.startsWith('https://');
-}
+const IMAGE_PATTERN = /!\[.*?\]\([^)]*\)/g;
 
 /**
  * 把 markdown 切成飞书的富文本。
  *
- * 图片是切分点：图片之间的文本各成一个 md 节点（首尾空白 trim 掉，空的不产出），
- * 图片各成一个 img 节点。
+ * 图片语法是切分点：它之间的文本各成一个 md 节点（首尾空白 trim 掉，空的不产出）。
  *
- * **两类图片引用会被静默跳过**，跳过之后周围的文字照发：
- *   - 外链（http/https）—— 模型经常编造图片链接，飞书拿它渲染不出东西
- *   - 未解析的注册表占位符 —— 见 UNRESOLVED_REGISTRY_REF
+ * ## 正文里的图片引用**一律丢掉**，一个都不变成 img 节点
  *
- * 全篇没有产出任何节点时补一个 md 节点，因为飞书不收空 content。补什么取决于**有没有
- * 匹配到过图片**：匹配到了却全被跳过，说明原文里全是图片语法，回退成原文等于把
- * `![...](https://...)` 这串源码直接摆给用户看，所以补空串。
+ * 飞书的 image_key 只可能来自我们自己那次上传（见 pictures.ts）—— 而这一步的输入是
+ * 赤尾说的那段话，由一个对话模型自由生成，里面出现的任何 `![x](y)` 都是它自己写的：
+ * 编的外链、编的文件名、编的一串看着像 key 的字符。把这种东西当 image_key 发出去，
+ * 飞书**拒收整条消息**，症状不是少一张图，是她那句话一个字都发不出去。
+ *
+ * 从"挡掉几种已知的坏写法"改成"一个都不认"，是因为前者是可枚举白名单的反面：认不出
+ * 的新写法默认放行，而放行一次的代价是整条消息。图有自己的结构化通道
+ * （`picture_file_names` → pictures.ts → 附在正文之后的 img 行），正文这条路不需要
+ * 存在。
+ *
+ * 丢掉之后周围的文字照发。全篇没有产出任何节点时补一个 md 节点，因为飞书不收空
+ * content。补什么取决于**有没有匹配到过图片**：匹配到了却全被丢掉，说明原文里全是
+ * 图片语法，回退成原文等于把 `![...](...)` 这串源码直接摆给用户看，所以补空串。
  */
 export function markdownToPostContent(markdown: string): PostContent {
     const content: PostNode[][] = [];
@@ -96,11 +97,6 @@ export function markdownToPostContent(markdown: string): PostContent {
             if (text) content.push([{ tag: 'md', text }]);
         }
         lastIndex = match.index + match[0].length;
-
-        const imageKey = match[1];
-        if (isExternalUrl(imageKey)) continue;
-        if (UNRESOLVED_REGISTRY_REF.test(imageKey)) continue;
-        content.push([{ tag: 'img', image_key: imageKey }]);
     }
 
     if (lastIndex < markdown.length) {

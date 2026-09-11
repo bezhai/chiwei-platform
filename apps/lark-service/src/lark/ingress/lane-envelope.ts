@@ -130,6 +130,11 @@ export function larkEventOf(envelope: InboundLaneEnvelope): LarkEvent {
         type: envelope.event_type,
         payload: envelope.params,
         botName: envelope.bot_name,
+        // 本进程收下这次交接的时刻，不是飞书推给 prod 的那一刻。信封里没有这一项，
+        // 而且不打算加：唯一会用到它的是撤回事件的撤回时刻兜底，而撤回不走交接
+        // （spec 决策 5）。加一个永远不上路的字段只会让这份跨服务的线格式多一条要跟
+        // channel-server 对齐的约定。
+        receivedAt: new Date(),
         traceId: envelope.trace_id,
         lane: envelope.lane,
         handedOff: true,

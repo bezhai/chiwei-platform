@@ -8,6 +8,7 @@ function anEvent(overrides: Partial<LarkEvent> = {}): LarkEvent {
         type: 'im.message.receive_v1',
         payload: { message: { message_id: 'om_1' } },
         botName: 'chiwei',
+        receivedAt: new Date('2026-09-04T06:50:54.000Z'),
         ...overrides,
     };
 }

@@ -5,7 +5,6 @@ import {
     createLarkBotLookup,
     larkAppIdOf,
     larkDisplayNameOf,
-    larkPersonaIdOf,
     type LarkBotRoster,
 } from './bot-lookup';
 
@@ -100,31 +99,6 @@ describe('larkAppIdOf', () => {
     // 猜一个 app_id 会把这个人记到别的应用名下 —— 同一个人从此在公共层有两份身份。
     it('refuses to guess when the bot is unknown', () => {
         expect(() => larkAppIdOf(roster([bot()]), 'nobody')).toThrow(/nobody/);
-    });
-});
-
-// chat.request 的 persona_ids 走这一跳：被 @ 的人已经是 common_user_id 了，还要
-// 知道其中哪些是我们的 bot、各自穿的是哪个人设。
-describe('larkPersonaIdOf', () => {
-    it('answers with the persona a bot of ours wears', () => {
-        expect(larkPersonaIdOf(roster([bot()]), 'cu_chiwei')).toBe('p_chiwei');
-    });
-
-    it('says nothing about a common user that is not one of our bots', () => {
-        expect(larkPersonaIdOf(roster([bot()]), 'cu_some_human')).toBeUndefined();
-    });
-
-    // 工具 bot 没绑人设。它被 @ 到不该让任何人设开口。
-    it('says nothing for one of our bots that wears no persona', () => {
-        expect(larkPersonaIdOf(roster([bot({ persona_id: undefined })]), 'cu_chiwei')).toBeUndefined();
-    });
-
-    it('ignores bots from other channels', () => {
-        const bots = [
-            { bot_name: 'qq-bot', channel: 'qq', common_user_id: 'cu_qq', persona_id: 'p_qq' } as BotConfig,
-            bot(),
-        ];
-        expect(larkPersonaIdOf(roster(bots), 'cu_qq')).toBeUndefined();
     });
 });
 

@@ -7,10 +7,7 @@ Carried through LangGraph runtime, accessible to tools via
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from app.infra.image import ImageRegistry
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +22,6 @@ class AgentContext:
     message_id: str = ""
     chat_id: str = ""
     persona_id: str = ""
-    image_registry: ImageRegistry | None = None
     features: dict[str, Any] = field(default_factory=dict)
     # Optional langfuse session: when set, this run's trace is grouped into the
     # named session so several traces (e.g. a persona's whole day of thinking)

@@ -74,13 +74,33 @@ def load_dataflow_graph() -> CompiledGraph:
 
 
 async def declare_durable_topology() -> None:
-    """Idempotently declare every durable wire's route on the broker.
+    """Idempotently prepare the exchange, then declare every durable wire's route.
 
-    Skips entirely when no durable wire exists (avoids forcing an MQ
-    connection on processes that don't need one).
+    Two separate things, and they used to be fused: an empty route list
+    returned early, so the exchange was never declared either.
+
+    They are not the same question. Callers only get here through
+    ``prepare_for_run(declare_topology=True)``, and that flag already says
+    "this process is going to publish". Whether some durable *consumer*
+    happens to be registered says nothing about that. Fusing them meant a
+    process with outbound-only MQ — every ``Source.mq`` gated off, nothing
+    durable left in the registry — got no exchange, and every publish died
+    on ``RuntimeError: must call declare_topology() first``.
+
+    That is exactly what the living-engine experiment lane looks like: four
+    interval sources, zero MQ consumers, and it still speaks to the channel
+    worker through ``ChatResponseSegment``. It could hear and not speak.
+
+    Processes that genuinely have no use for MQ are filtered one level up,
+    by not passing the flag at all (``main.py`` gates it on
+    ``settings.rabbitmq_url``).
     """
+    from app.infra.rabbitmq import mq
     from app.runtime.durable import _route_for
     from app.runtime.wire import WIRING_REGISTRY
+
+    await mq.connect()
+    await mq.declare_topology()
 
     routes = [
         _route_for(w, c)
@@ -88,13 +108,6 @@ async def declare_durable_topology() -> None:
         if w.durable
         for c in w.consumers
     ]
-    if not routes:
-        return
-
-    from app.infra.rabbitmq import mq
-
-    await mq.connect()
-    await mq.declare_topology()
     for route in routes:
         await mq.declare_route(route)
     logger.info("durable topology declared: %d route(s)", len(routes))

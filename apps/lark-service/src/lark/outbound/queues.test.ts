@@ -120,6 +120,8 @@ describe('lark-outbound 订的就是这两条队列', () => {
         const payload: LarkRecallPayload = {
             channel: 'lark',
             session_id: 'sess-1',
+            // 两种定位方式恰好用一种，这一条走会话那边。
+            outbound_id: null,
             reason: 'unsafe',
         };
 

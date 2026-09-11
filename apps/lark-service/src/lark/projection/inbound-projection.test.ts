@@ -19,7 +19,6 @@ import type { LarkMessageEvent } from '../message/wire';
 import { projectLarkInbound, type LarkInboundDeps, type LarkInboundOutcome } from './inbound-projection';
 import type {
     CommonConversationRow,
-    CommonMessageClaim,
     CommonMessageRow,
     CommonUserRow,
     LarkChatKey,
@@ -256,15 +255,13 @@ class MemoryLarkTables implements LarkStore {
         this.larkMessages.set(row.om_id, { ...row });
     }
 
-    // 投影不认领 —— 那是规则段抢到去重锁之后的事（见 rules/inbound-rules.ts）。
-    // 这里实现它只是为了让这份替身完整地满足端口。
-    async claimCommonMessageForBot(claim: CommonMessageClaim): Promise<void> {
-        const row = this.commonMessages.get(claim.common_message_id);
-        if (!row || row.role !== 'user') {
-            throw new Error(`no user message ${claim.common_message_id} to claim`);
-        }
-        row.bot_name = claim.bot_name;
-        row.common_user_id = claim.common_user_id;
+    // 投影也不撤回 —— 那是入站撤回事件那条路的事（见 lark/recall-message.ts）。这里
+    // 实现它同样只是为了让这份替身完整地满足端口，语义照真身：首写保留。
+    async markCommonMessageRecalled(commonMessageId: string, recalledAt: Date): Promise<boolean> {
+        const row = this.commonMessages.get(commonMessageId);
+        if (!row || row.recalled_at) return false;
+        row.recalled_at = recalledAt;
+        return true;
     }
 
     async markBotPresent(
@@ -323,7 +320,13 @@ function reading(event: LarkMessageEvent) {
 }
 
 function larkEvent(payload: LarkMessageEvent): LarkEvent {
-    return { type: 'im.message.receive_v1', payload, botName: BOT_NAME, traceId: 'trace-1' };
+    return {
+        type: 'im.message.receive_v1',
+        payload,
+        botName: BOT_NAME,
+        receivedAt: new Date('2026-09-04T06:50:54.000Z'),
+        traceId: 'trace-1',
+    };
 }
 
 function deps(
@@ -863,6 +866,7 @@ describe('落账：common_message + lark_message', () => {
             content_text: 'hi',
             common_root_message_id: 'id_3',
             common_reply_message_id: undefined,
+            mentioned_common_user_ids: [],
             scope: 'group',
             message_type: 'text',
             bot_name: BOT_NAME,
@@ -927,6 +931,56 @@ describe('落账：common_message + lark_message', () => {
         await project(tables, larkMessageEvent({ content: '{"text":"  "}' }));
 
         expect(tables.commonMessages.get('id_3')?.content_text).toBeUndefined();
+    });
+
+    // 「这条消息点了谁的名」必须**跟着消息一起落库**，不能只交给规则引擎。
+    // 公共层的内容契约里没有 mention 这种片段，@ 在投影时被内联回了正文，出了这一次
+    // 请求就再也认不出来 —— 而 agent-service 判断"群里叫的是不是我"是异步的、晚得多。
+    const BOT_MENTION = {
+        key: '@_user_1',
+        id: { union_id: 'on_bot_chiwei' },
+        name: 'chiwei-raw',
+        mentioned_type: 'bot',
+        bot_info: { app_id: APP_ID },
+    };
+    const HUMAN_MENTION = {
+        key: '@_user_2',
+        id: { union_id: 'on_li', open_id: 'ou_li' },
+        name: '李四',
+        mentioned_type: 'user',
+    };
+
+    it('点了她的名，记下的是她在公共层的 id', async () => {
+        const tables = new MemoryLarkTables();
+        await project(
+            tables,
+            larkMessageEvent({ content: '{"text":"@_user_1 在吗"}', mentions: [BOT_MENTION] }),
+        );
+
+        expect(tables.commonMessages.get('id_3')?.mentioned_common_user_ids).toEqual([
+            BOT_COMMON_USER_ID,
+        ]);
+    });
+
+    it('点的是别人，记下的就只有别人', async () => {
+        const tables = new MemoryLarkTables();
+        const { outcome } = await project(
+            tables,
+            larkMessageEvent({ content: '{"text":"@_user_2 帮个忙"}', mentions: [HUMAN_MENTION] }),
+        );
+
+        const stored = tables.commonMessages.get(recorded(outcome).commonMessageId);
+        expect(stored?.mentioned_common_user_ids).toEqual(['id_2']);
+        expect(stored?.mentioned_common_user_ids).not.toContain(BOT_COMMON_USER_ID);
+    });
+
+    // 空数组和留空在读的一侧是两件事：空数组 = 算过、确实谁都没点；留空（库里的
+    // NULL）= 没人算过这条消息。后者绝不能被当成"确认没人被点"。
+    it('谁都没点时记空数组，不是留空', async () => {
+        const tables = new MemoryLarkTables();
+        await project(tables);
+
+        expect(tables.commonMessages.get('id_3')?.mentioned_common_user_ids).toEqual([]);
     });
 });
 
@@ -1072,6 +1126,7 @@ describe('两张表同事务', () => {
                     role: 'user',
                     content: [],
                     content_text: undefined,
+                    mentioned_common_user_ids: [],
                     common_root_message_id: 'cm_x',
                     common_reply_message_id: undefined,
                     scope: 'group',

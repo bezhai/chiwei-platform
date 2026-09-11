@@ -51,6 +51,31 @@ export interface LarkMessageBody {
     user_agent?: string;
 }
 
+/**
+ * `im.message.recalled_v1` 的事件体。
+ *
+ * **每个字段都是可选的**（飞书文档如此，SDK 的类型也如此），所以拿到手的第一件事永远
+ * 是"这次给了消息标识没有"。
+ *
+ * **报文里没有撤回者的身份**，只有 recall_type 这个角色枚举。谁按的撤回这件事在这条
+ * 链上根本拿不到，所以库里只记得下"这条被撤了"，记不下"谁撤的"。
+ */
+export interface LarkRecallEvent {
+    event_id?: string;
+    create_time?: string;
+    event_type?: string;
+    app_id?: string;
+    message_id?: string;
+    chat_id?: string;
+    /**
+     * 撤回时刻的时间戳字符串。**单位未经实证**：飞书文档的示例值是 13 位（毫秒形态），
+     * 但仓里没有任何真实样本能裁决。所以谁都不要拿它的数值算时刻 —— recall-message.ts
+     * 只把原值原样记进日志，落库的撤回时刻用的是收到事件那一刻（理由见那个文件的头）。
+     */
+    recall_time?: string;
+    recall_type?: 'message_owner' | 'group_owner' | 'group_manager' | 'enterprise_manager';
+}
+
 /** `im.message.receive_v1` 的事件体。 */
 export interface LarkMessageEvent {
     event_id?: string;

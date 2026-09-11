@@ -12,6 +12,8 @@ import { describe, expect, it } from 'bun:test';
 
 import type { LarkChatResponse } from './chat-response';
 import { deliverLarkChatResponse, type LarkDeliveryDeps } from './deliver';
+import type { LarkPictureDeps } from './pictures';
+import { createLarkPostRenderer } from './render';
 import type {
     LarkAgentResponseRow,
     LarkResponseLedger,
@@ -292,15 +294,33 @@ describe('发送分支 — part 0 的被动回复', () => {
         expect(dm.rendered[0]!.ctx.mentionChatId).toBeUndefined();
     });
 
-    it('图片注册表用全局 message_id，不是反查出来的飞书裸 id', async () => {
+    it('把这一段带的图片句柄原样交给渲染，一个都不改', async () => {
+        // 队列里传的是对象存储的永久句柄（签名只活 1.5 小时，现签在渲染那一步）。
+        // 这里动过它的话，症状是图签不出来 —— 而那一路的失败是降级，不会红。
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ picture_file_names: ['pictures/a.png', 'pictures/b.png'] }),
+        );
+
+        expect(h.rendered[0]!.ctx.pictureFileNames).toEqual([
+            'pictures/a.png',
+            'pictures/b.png',
+        ]);
+    });
+
+    it('老消息没有 picture_file_names：渲染那一步一个句柄都收不到', async () => {
+        // DLQ 里躺着的、旧版 agent-service 发的消息就是这种。缺字段 = 这一段不带图，
+        // 照常发正文。
         const h = harness();
         seedRefs(h.store);
 
         await deliverLarkChatResponse(h.deps, reply());
 
-        // 用裸 om_id 查注册表必 miss，图片被静默吞掉（全程无报错）。
-        expect(h.rendered[0]!.ctx.imageRegistryId).toBe('cm_trigger');
-        expect(h.rendered[0]!.ctx.imageRegistryId).not.toBe('om_trigger');
+        expect(h.rendered[0]!.ctx.pictureFileNames).toBeUndefined();
+        expect(h.api.replied).toHaveLength(1);
     });
 
     it('第一段之前不等待', async () => {
@@ -458,6 +478,8 @@ describe('落库 — assistant 行的字段口径', () => {
             bot_name: 'chiwei',
             event_time: String(NOW),
             response_id: 'sess-1',
+            // 被动回复不是任何一次"她自己开口"的产物。
+            agent_outbound_id: undefined,
         });
         expect(h.store.larkMessages.get('om_sent')).toEqual({
             om_id: 'om_sent',
@@ -493,6 +515,72 @@ describe('落库 — assistant 行的字段口径', () => {
         // 没有台账行可挂。
         expect(row.response_id).toBeUndefined();
         expect(row.scope).toBe('direct');
+    });
+
+    it('主动发：记下这行是哪一次开口的产物 —— 剥掉前缀，只留 uuid', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, proactive());
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        // 列是 uuid 类型，`proactive:` 是线格式的命名空间标记，不进列。
+        expect(row.agent_outbound_id).toBe('550e8400-e29b-41d4-a716-446655440000');
+    });
+
+    it('被动回复：这一列留空 —— 它不是任何一次"她自己开口"的产物', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, reply());
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        expect(row.agent_outbound_id).toBeUndefined();
+    });
+
+    it('主动发的续段也记同一个 id —— 一次开口切成几段，段段指回同一次', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(h.deps, proactive({ part_index: 1, is_last: true }));
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        expect(row.agent_outbound_id).toBe('550e8400-e29b-41d4-a716-446655440000');
+    });
+
+    it('伪 id 形状不对：留空，但消息照发 —— 这里在飞书 API 之后，抛错等于真人收两条', async () => {
+        // 形状不对的几种：前缀在但后半截不是 uuid、整串就没有前缀、空串。
+        for (const messageId of [
+            'proactive:not-a-uuid',
+            'proactive:',
+            '550e8400-e29b-41d4-a716-446655440000',
+            '',
+        ]) {
+            const h = harness();
+            seedRefs(h.store);
+
+            await deliverLarkChatResponse(h.deps, proactive({ message_id: messageId }));
+
+            // 发出去了，而且落了库 —— 记不下"是哪次开口"不该让真人收不到这句话。
+            expect(h.api.sent).toHaveLength(1);
+            const row = [...h.store.commonMessages.values()][0]!;
+            expect(row.agent_outbound_id).toBeUndefined();
+            // 伪 id 一个字都不许进这一行。
+            expect(JSON.stringify(row)).not.toContain('proactive:');
+        }
+    });
+
+    it('大写 uuid 照收，落库统一成小写 —— pg 的 uuid 本来就不分大小写', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(
+            h.deps,
+            proactive({ message_id: 'proactive:550E8400-E29B-41D4-A716-446655440000' }),
+        );
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        expect(row.agent_outbound_id).toBe('550e8400-e29b-41d4-a716-446655440000');
     });
 
     it('同一个 om_id 已经落过库：复用旧的 common_message_id，不铸新的', async () => {
@@ -536,18 +624,68 @@ describe('落库 — 平台没返回 message_id', () => {
         expect([...h.store.larkMessages.keys()]).toEqual(['om_trigger_part1']);
     });
 
-    it('主动发合成出来的是 `_part0` —— 长得很怪，而且会撞', async () => {
-        // 主动发没有来源消息，反查出来的 om_id 是空串，于是合成结果里前半截也是空的。
-        // 两条都没拿到 message_id 的主动发会撞上同一个键 —— insertLarkMessage 的
-        // or-ignore 让第二条静默不落库。这是拆分前就有的形态，照搬并在此认掉：改它
-        // 要重新定义"没拿到 id 时用什么当主键"，是另一个议题。
+    it('主动发：合成 `{这次开口的 id}_part{段序}` —— 没有来源消息可当锚点，用开口本身', async () => {
         const h = harness();
         seedRefs(h.store);
         h.api.nextMessageId = undefined;
 
         await deliverLarkChatResponse(h.deps, proactive());
 
-        expect([...h.store.larkMessages.keys()]).toEqual(['_part0']);
+        expect([...h.store.larkMessages.keys()]).toEqual([
+            '550e8400-e29b-41d4-a716-446655440000_part0',
+        ]);
+    });
+
+    it('同一个会话里连着两次"发成功但没返回 id"的主动发：各落各的行，各带自己的开口 id', async () => {
+        // 合成键只由会话和段序决定的话，这两次算出来的键一模一样：第二次会反查到
+        // 第一次的 common_message_id 并复用它，而两条 insert 都是 or-ignore ——
+        // 第二句话在公共层根本没有行，那次开口永久停在"未落地"，全程零报错。
+        const h = harness();
+        seedRefs(h.store);
+        h.api.nextMessageId = undefined;
+
+        await deliverLarkChatResponse(
+            h.deps,
+            proactive({
+                message_id: 'proactive:11111111-1111-4111-8111-111111111111',
+                content: '刚做完饭',
+            }),
+        );
+        await deliverLarkChatResponse(
+            h.deps,
+            proactive({
+                message_id: 'proactive:22222222-2222-4222-8222-222222222222',
+                content: '锅还泡着',
+            }),
+        );
+
+        expect(h.api.sent).toHaveLength(2);
+        const rows = [...h.store.commonMessages.values()];
+        expect(rows.map((row) => row.content_text)).toEqual(['刚做完饭', '锅还泡着']);
+        expect(rows.map((row) => row.agent_outbound_id)).toEqual([
+            '11111111-1111-4111-8111-111111111111',
+            '22222222-2222-4222-8222-222222222222',
+        ]);
+        // 两条飞书映射也各占一个键，没有一条被 or-ignore 吃掉。
+        expect([...h.store.larkMessages.keys()]).toEqual([
+            '11111111-1111-4111-8111-111111111111_part0',
+            '22222222-2222-4222-8222-222222222222_part0',
+        ]);
+    });
+
+    it('同一次开口的两段：段序把它们分开，谁也不吃掉谁', async () => {
+        const h = harness();
+        seedRefs(h.store);
+        h.api.nextMessageId = undefined;
+
+        await deliverLarkChatResponse(h.deps, proactive({ part_index: 0, is_last: false }));
+        await deliverLarkChatResponse(h.deps, proactive({ part_index: 1, is_last: true }));
+
+        expect([...h.store.larkMessages.keys()]).toEqual([
+            '550e8400-e29b-41d4-a716-446655440000_part0',
+            '550e8400-e29b-41d4-a716-446655440000_part1',
+        ]);
+        expect(h.store.commonMessages.size).toBe(2);
     });
 });
 
@@ -1007,5 +1145,117 @@ describe('内存实现的事务语义（测试替身自检）', () => {
             });
         });
         expect([...store.larkMessages.keys()]).toEqual(['om_1']);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 图片这一路的降级，接的是**真的渲染器**
+// ---------------------------------------------------------------------------
+
+// 上面所有用例的 render 都是替身。这一组反过来：把真的 createLarkPostRenderer 接进
+// 来，只让图片那三个协作者依次失败，然后看飞书那边到底收到了什么。
+//
+// 判据不是"渲染没抛"，是**她那句话真的送到了飞书**：一张图发不出去不能让整条消息
+// 发不出去。抛出去的结果是整条消息进重试，真人什么都收不到，而且重试大概率还是同样
+// 的失败。
+describe('图片每一步失败时：她那句话照常送到飞书', () => {
+    function withRealRender(pictures: Partial<LarkPictureDeps> = {}): Harness {
+        const h = harness();
+        h.deps.render = createLarkPostRenderer({
+            mentions: async (text) => text,
+            pictures: {
+                sign: async (fileName) => `https://tos.example/${fileName}`,
+                download: async () => Buffer.from('bytes'),
+                uploader: { uploadImage: async () => 'img_v3_uploaded' },
+                ...pictures,
+            },
+        });
+        seedRefs(h.store);
+        return h;
+    }
+
+    const carrying = { content: '看这张', picture_file_names: ['pictures/cat.png'] };
+
+    it('现签失败：正文照发，图降级成一行文字', async () => {
+        const h = withRealRender({ sign: async () => null });
+
+        await deliverLarkChatResponse(h.deps, reply(carrying));
+
+        expect(h.api.replied).toHaveLength(1);
+        const content = h.api.replied[0]!.content.content;
+        expect(content[0]).toEqual([{ tag: 'md', text: '看这张' }]);
+        expect(content.flat().some((node) => node.tag === 'img')).toBe(false);
+    });
+
+    it('下载失败：正文照发', async () => {
+        const h = withRealRender({
+            download: async () => {
+                throw new Error('HTTP 502');
+            },
+        });
+
+        await deliverLarkChatResponse(h.deps, reply(carrying));
+
+        expect(h.api.replied).toHaveLength(1);
+        expect(h.api.replied[0]!.content.content[0]).toEqual([{ tag: 'md', text: '看这张' }]);
+    });
+
+    it('上传飞书失败：正文照发', async () => {
+        const h = withRealRender({ uploader: { uploadImage: async () => null } });
+
+        await deliverLarkChatResponse(h.deps, reply(carrying));
+
+        expect(h.api.replied).toHaveLength(1);
+        expect(h.api.replied[0]!.content.content[0]).toEqual([{ tag: 'md', text: '看这张' }]);
+    });
+
+    it('三张图全挂：整条消息照样发出去，台账照样收口', async () => {
+        const h = withRealRender({ sign: async () => null });
+        h.ledger.rows.set('sess-1', { session_id: 'sess-1', bot_name: 'chiwei' });
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({
+                content: '看这几张',
+                full_content: '看这几张',
+                picture_file_names: ['a.png', 'b.png', 'c.png'],
+            }),
+        );
+
+        expect(h.api.replied).toHaveLength(1);
+        expect(h.ledger.settled).toEqual([
+            { sessionId: 'sess-1', outcome: { status: 'completed', responseText: '看这几张' } },
+        ]);
+    });
+
+    it('顺利的时候：正文一行、图一行，都送到飞书', async () => {
+        const h = withRealRender();
+
+        await deliverLarkChatResponse(h.deps, reply(carrying));
+
+        expect(h.api.replied[0]!.content.content).toEqual([
+            [{ tag: 'md', text: '看这张' }],
+            [{ tag: 'img', image_key: 'img_v3_uploaded' }],
+        ]);
+    });
+
+    it('正文里带一个非法图片引用时，整条消息里唯一的 img 是结构化那张', async () => {
+        // 飞书认不出的 image_key 会让它拒收**整条消息**。赤尾在正文里随手写出的
+        // 图片引用一个都不能变成 image_key。
+        const h = withRealRender();
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({
+                content: '先看这个 ![我编的](img_v3_totally_made_up) 再看那个',
+                picture_file_names: ['pictures/real.png'],
+            }),
+        );
+
+        expect(h.api.replied[0]!.content.content).toEqual([
+            [{ tag: 'md', text: '先看这个' }],
+            [{ tag: 'md', text: '再看那个' }],
+            [{ tag: 'img', image_key: 'img_v3_uploaded' }],
+        ]);
     });
 });

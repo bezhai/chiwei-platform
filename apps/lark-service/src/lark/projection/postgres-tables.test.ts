@@ -524,39 +524,41 @@ describe('认领：自然键首写者成为 canonical', () => {
         expect(update.params).toEqual(['cu_canonical', 'cli_a', 'ou_1']);
     });
 
-    // 认领：抢到去重锁的那个 bot 才把这条消息记成自己的（见 rules/inbound-rules.ts）。
-    it('认领消息时只改 bot_name 与发送者，且只认 user 那一行', async () => {
-        h.reply([{ affected: 1 }]);
+    // 真人在飞书撤回一条消息之后要写的那一列。这条语句写错的后果不会有任何报错：
+    // 她照样读得到一条对面已经撤掉的消息。
+    describe('标记撤回', () => {
+        it('只碰 recalled_at 一列，而且带着首写保留的条件', async () => {
+            h.reply([{ affected: 1 }]);
+            const at = new Date('2026-09-04T06:50:54.000Z');
 
-        await h.store.claimCommonMessageForBot({
-            common_message_id: 'cm_1',
-            bot_name: 'chiwei',
-            common_user_id: 'cu_sender',
+            expect(await h.store.markCommonMessageRecalled('cm_1', at)).toBe(true);
+
+            const update = h.sqlOf('UPDATE "common_message"');
+            expect(update.sql).toContain('"recalled_at" =');
+            // 这张表三个服务共写，多写一列就是覆盖别人写下的结论。
+            expect(update.sql).not.toContain('"bot_name" =');
+            expect(update.sql).not.toContain('"content" =');
+            // 首写保留就在这个条件上。少了它，重复到达的撤回事件会把撤回时刻往后挪。
+            expect(update.sql).toContain('"recalled_at" IS NULL');
+            expect(update.params).toEqual([at, 'cm_1']);
         });
 
-        const update = h.sqlOf('UPDATE "common_message"');
-        expect(update.sql).toContain('"bot_name" =');
-        expect(update.sql).toContain('"common_user_id" =');
-        expect(update.sql).toContain('"role" =');
-        expect(update.params).toEqual(['chiwei', 'cu_sender', 'cm_1', 'user']);
-    });
-
-    // 认领不到 = 这条消息根本没落进 common_message。继续往下发请求的话，下游按
-    // message_id 回查会读空、直接走"未找到消息记录"短路 —— 必须在这里炸。
-    it('认领不到任何一行时直接炸', async () => {
-        h.reply([]);
-
-        await expect(
-            h.store.claimCommonMessageForBot({
-                common_message_id: 'cm_missing',
-                bot_name: 'chiwei',
-                common_user_id: 'cu_sender',
-            }),
-        ).rejects.toThrow(/cm_missing/);
+        // 已经撤过了（或者那一行压根不在）都是 0 行。两种都不该让入站链断掉 ——
+        // 飞书早已应答，抛出去也没人接得住。
+        it('一行都没改到时返回 false，不炸', async () => {
+            h.reply([]);
+            expect(
+                await h.store.markCommonMessageRecalled('cm_1', new Date()),
+            ).toBe(false);
+        });
     });
 
     // 重放的地基：同一条消息第二次进来时这条语句必须是静默的 no-op。
-    it('common_message 是 insert-or-ignore', async () => {
+    //
+    // 顺带把 mentioned_common_user_ids 钉进这条语句：它要是没进 INSERT，投影层算好
+    // 的"谁被点了名"就在这一层悄悄掉了 —— 上游 tests 全绿、下游只看见一列 NULL，
+    // 表现成"群里 @ 她不管用"，跟这次要修的 bug 一模一样。
+    it('common_message 是 insert-or-ignore，被点名的人一起落', async () => {
         await h.store.insertCommonMessage({
             common_message_id: 'cm_1',
             channel: 'lark',
@@ -568,6 +570,7 @@ describe('认领：自然键首写者成为 canonical', () => {
             content_text: 'hi',
             common_root_message_id: 'cm_1',
             common_reply_message_id: undefined,
+            mentioned_common_user_ids: ['cu_bot', 'cu_2'],
             scope: 'group',
             message_type: 'text',
             bot_name: 'chiwei',
@@ -576,6 +579,7 @@ describe('认领：自然键首写者成为 canonical', () => {
 
         const insert = h.sqlOf('INSERT INTO "common_message"');
         expect(insert.sql).toContain('ON CONFLICT DO NOTHING');
+        expect(insert.sql).toContain('"mentioned_common_user_ids"');
         expect(insert.params).toEqual([
             'cm_1',
             'lark',
@@ -586,11 +590,35 @@ describe('认领：自然键首写者成为 canonical', () => {
             '[{"kind":"text","text":"hi"}]',
             'hi',
             'cm_1',
+            ['cu_bot', 'cu_2'],
             'group',
             'text',
             'chiwei',
             '1700000000000',
         ]);
+    });
+
+    // 没人被点名时落的是空数组，不是留空。库里那一列的 NULL 有专门的含义（"没人
+    // 算过这条消息"），漏写和"确实谁都没点"必须长得不一样。
+    it('谁都没点名时落空数组，不是把这一列留空', async () => {
+        await h.store.insertCommonMessage({
+            common_message_id: 'cm_2',
+            channel: 'lark',
+            common_conversation_id: 'cc_1',
+            common_user_id: 'cu_1',
+            role: 'user',
+            content: [],
+            common_root_message_id: 'cm_2',
+            mentioned_common_user_ids: [],
+            scope: 'group',
+            message_type: 'text',
+            bot_name: 'chiwei',
+            event_time: '1700000000000',
+        });
+
+        const insert = h.sqlOf('INSERT INTO "common_message"');
+        expect(insert.sql).toContain('"mentioned_common_user_ids"');
+        expect(insert.params).toContainEqual([]);
     });
 
     // 反过来：lark_message 撞主键必须炸。忽略掉就等于让一条飞书消息映射到两个
@@ -642,6 +670,7 @@ describe('事务', () => {
                 role: 'user',
                 content: [],
                 common_root_message_id: 'cm_1',
+                mentioned_common_user_ids: [],
                 scope: 'group',
                 message_type: 'text',
                 bot_name: 'chiwei',
@@ -674,6 +703,7 @@ describe('事务', () => {
                     role: 'user',
                     content: [],
                     common_root_message_id: 'cm_1',
+                    mentioned_common_user_ids: [],
                     scope: 'group',
                     message_type: 'text',
                     bot_name: 'chiwei',

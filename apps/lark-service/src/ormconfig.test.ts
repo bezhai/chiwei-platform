@@ -83,8 +83,8 @@ describe('lark-service entity registration', () => {
     });
 });
 
-// 共享包里的通用能力（bot 身份目录 / 黑名单规则 / chat.request 的 pending 行落库 /
-// 泳道绑定解析）读写的是**本服务组装的这个 DataSource**，靠 bindDataSource 递进去。
+// 共享包里的通用能力（bot 身份目录 / 黑名单规则 / 泳道绑定解析）读写的是**本服务
+// 组装的这个 DataSource**，靠 bindDataSource 递进去。
 // 漏了这一步单测照样全绿（没人碰真库），生产上第一条消息进 runRules 才炸。
 describe('lark-service binds its DataSource for shared capabilities', () => {
     it('binds this service DataSource into the shared package', () => {
@@ -102,7 +102,7 @@ describe('lark-service binds its DataSource for shared capabilities', () => {
         expect(tables).toContain('common_user');
         // NotBlocked 规则
         expect(tables).toContain('user_blacklist');
-        // chat.request 的 pending 行
+        // 出站台账
         expect(tables).toContain('common_agent_response');
         // 投影链路 + 在场状态
         expect(tables).toContain('common_message');

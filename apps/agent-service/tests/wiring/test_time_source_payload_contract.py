@@ -2,17 +2,17 @@
 
 框架硬约定（runtime/engine.py ``_build_payload``）：cron / interval 源每次 tick
 **只用 ``w.data_type(ts=<iso>)`` 构造** payload —— 时间源的 Data 必须是带
-``ts: str`` 字段的单字段 tick（正例见 ``app/world/engine.py`` 的
-``WorldHeartbeatTick(ts: Annotated[str, Key])``）。
+``ts: str`` 字段的单字段 tick（正例见 ``app/living/clock.py`` 的
+``CalendarTick(ts: Annotated[str, Key])``）。
 
 ``compile_graph()`` 不跑源循环，所以一条时间源的 Data 形态不对（缺 ts / 有其他
-必填字段）编译期检测不到——49 wires 照样编译过、集成测试照样过，但生产源循环
-第一次 tick 就 ``_build_payload`` raise → ``_record_source_error`` → watchdog
+必填字段）编译期检测不到——整张图照样编译过、集成测试照样过，但生产源循环第一次
+tick 就 ``_build_payload`` raise → ``_record_source_error`` → watchdog
 ``os._exit(1)`` → Pod 被杀重启 → 该源驱动的整条链路在生产里永远起不来。
 
 这个文件对生产图里**每一条带 cron/interval 源的 wire** 断言其 ``data_type``
 满足这条契约（直接复用 ``Runtime._build_payload`` 真实构造，不另起炉灶）。它能抓
-住这一整类 bug，不只这一次 WorldTick。
+住这一整类 bug，不针对某一条具体的钟。
 """
 
 from __future__ import annotations
@@ -37,15 +37,7 @@ def _rebuild_production_graph():
     clear_wiring()
     clear_bindings()
     # 先 reload 各子模块（@node / bind 注册），再 reload 包（触发 wire(...)）。
-    for sub in (
-        "admin",
-        "chat",
-        "fetch_dataflow",
-        "life_dataflow",
-        "persona_review_dataflow",
-        "review_dataflow",
-        "safety",
-    ):
+    for sub in ("admin", "living", "safety"):
         importlib.reload(importlib.import_module(f"app.wiring.{sub}"))
     importlib.reload(wiring_pkg)
 
@@ -94,36 +86,3 @@ def test_time_source_data_type_satisfies_single_field_ts_contract(wire_name):
     # 不 raise == 满足单字段 ts 约定（生产源循环能正常 tick）。
     payload = runtime._build_payload(wire, datetime.now(tz=UTC))
     assert payload is not None
-
-
-def test_world_heartbeat_wire_payload_buildable():
-    """复现 bug（TDD red）：world 心跳那条 interval 源的 data_type 必须能被
-    _build_payload 构造。
-
-    修前：心跳源接 ``WorldTick``（无 ts、且缺必填 ``lane`` Key）→ _build_payload
-    raise → 生产源循环杀 Pod → world 永远起不来。这条测试在修前必 fail。
-    修后：心跳源接单字段 ``WorldHeartbeatTick(ts=...)`` → 构造成功 → 转绿。
-    """
-    from app.runtime.engine import Runtime
-
-    graph = _rebuild_production_graph()
-    # world_tick 由心跳驱动 —— 找到那条 interval 源 wire（它的 data_type 是
-    # 真正被时间源喂的 tick）。心跳现在经翻译节点 heartbeat_to_world_tick 接到
-    # world_tick；这里只认 interval 源那条 wire 的 data_type 能否被构造。
-    heartbeat_wires = [
-        w
-        for w in _time_source_wires(graph)
-        if any(s.kind == "interval" for s in w.sources)
-        and any(
-            getattr(c, "__name__", "")
-            in ("world_tick", "heartbeat_to_world_tick")
-            for c in w.consumers
-        )
-    ]
-    assert heartbeat_wires, "找不到驱动 world 心跳的 interval 源 wire"
-
-    runtime = Runtime(migrate_schema_on_run=False)
-    for w in heartbeat_wires:
-        # 修前这里对 WorldTick raise；修后对 WorldHeartbeatTick 通过。
-        payload = runtime._build_payload(w, datetime.now(tz=UTC))
-        assert payload is not None

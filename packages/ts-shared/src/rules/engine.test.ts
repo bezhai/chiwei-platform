@@ -340,3 +340,73 @@ describe('runRules botRole/category filtering收敛到终态', () => {
         expect(handled).toBe(true);
     });
 });
+
+// fallthrough 链的终态收敛。
+//
+// 从 engine.pending-scope.test.ts 搬过来的那一条：那个文件整体是待发 ChatTrigger 的
+// 用例，随那条支线一起删掉，但它顺带钉住的这条不变量与那条支线无关、今天仍然成立 ——
+// **终态由最后一个成功响应的 handler 收敛**，不是第一个、也不是"链上任何一个响应过
+// 的"。链上靠前的 handler 有副作用不影响这一点。
+describe('fallthrough 链收敛到最后一次成功响应', () => {
+    it('两条 fallthrough 都命中时，终态记的是后一条', async () => {
+        const ran: string[] = [];
+        const rules: RuleConfig[] = [
+            {
+                rules: [alwaysPass],
+                handler: async () => {
+                    ran.push('A');
+                },
+                comment: 'A',
+                fallthrough: true,
+            },
+            {
+                rules: [alwaysPass],
+                handler: async () => {
+                    ran.push('B');
+                },
+                comment: 'B',
+                fallthrough: true,
+            },
+        ];
+
+        const st = await runRulesWith(msg(), {
+            chatRules: rules,
+            botRole: undefined,
+            notBlocked: async () => true,
+        });
+
+        expect(ran).toEqual(['A', 'B']);
+        expect(st.kind).toBe('responded');
+        expect(st.matchedRule).toBe('B');
+    });
+
+    // 非 fallthrough 的规则命中即终态，后面的规则一条都不试。
+    it('非 fallthrough 命中即收敛，后面的规则不再试', async () => {
+        const ran: string[] = [];
+        const rules: RuleConfig[] = [
+            {
+                rules: [alwaysPass],
+                handler: async () => {
+                    ran.push('A');
+                },
+                comment: 'A',
+            },
+            {
+                rules: [alwaysPass],
+                handler: async () => {
+                    ran.push('B');
+                },
+                comment: 'B',
+            },
+        ];
+
+        const st = await runRulesWith(msg(), {
+            chatRules: rules,
+            botRole: undefined,
+            notBlocked: async () => true,
+        });
+
+        expect(ran).toEqual(['A']);
+        expect(st.matchedRule).toBe('A');
+    });
+});

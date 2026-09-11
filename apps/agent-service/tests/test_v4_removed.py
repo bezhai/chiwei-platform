@@ -3,6 +3,9 @@
 旧 v4 自转机器（afterthought 碎片生成 / light+heavy reviewer cron /
 recall+commit_abstract 工具 / fragment+abstract 向量化 / qdrant 基建）
 全部删除。本文件断言模块不存在 + 源码零残留，防止任何形式的复活。
+
+被 living 重写取代、同样物理删除的旧工具模块也收在这里 —— 负向断言是同一个形状：
+留一个别名或者 re-export 就等于两份实现同时在，而她读到的会是工程口吻那一份。
 """
 from __future__ import annotations
 
@@ -52,6 +55,11 @@ REMOVED_MODULES = [
     "app.data.queries.memory",
     "app.data.queries.memory_edges",
     "app.data.queries.memory_search",
+    # 被 living 重写取代的两个旧工具（都是零调用方的工程口吻工具；她那侧的两只手在
+    # ``app.living.guides``，底层的 ``app.skills`` / ``app.capabilities.sandbox``
+    # 保留不动 —— 那是机制不是工具）。
+    "app.agent.tools.skill",
+    "app.agent.tools.sandbox",
 ]
 
 

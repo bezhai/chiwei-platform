@@ -7,10 +7,19 @@ name: dataflow grep gate
 # must stay at zero occurrences in business code; new violations
 # block the PR.
 #
-# Open gaps (Gap 19 — slated for 7e) carry a baseline count in
-# .github/grep-baselines.json. PRs that increase the count block;
-# reductions are allowed (and the baseline gets rewritten in the PR
-# that closes the gap).
+# Open gaps carry a baseline count in .github/grep-baselines.json.
+# PRs that increase the count block; reductions are allowed (and the
+# baseline gets rewritten in the PR that closes the gap).
+#
+# **业务目录清单**（每个 step 里那份 BUSINESS）是 app/ 下真实存在的业务包：
+#
+#     agent  life  living  memory  nodes  skills
+#
+# 不在里面的是框架和基建：runtime / data / infra / api / capabilities /
+# domain / wiring / workers。加一个业务包就要把它加进每一处清单 —— 漏一处等于
+# 那个包不受任何一条 gap 管，这正是 app/living/ 建起来之后发生过的事（22 个
+# 文件、一条 gap 都没扫到）。删一个包同理要从每一处摘掉，否则清单会慢慢变成
+# 一份指向空目录的名单，每条断言都因为扫不到东西而通过。
 
 on:
   pull_request:
@@ -24,20 +33,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Gap 7 — no business retry loops, no insert_idempotent call sites
+      - name: Gap 7 — no business retry loops
         shell: bash
         run: |
           set -e
+          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
+                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
+                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/)
           # business code must not implement its own retry / sleep loops
-          c=$(grep -rn -E "while.*retry|for.*range.*retry" \
-              apps/agent-service/app/{chat,life,memory,nodes}/ \
+          c=$(grep -rn -E "while.*retry|for.*range.*retry" "${BUSINESS[@]}" \
               2>/dev/null | grep -v "__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 7 violation: $c business retry loops"; exit 1; }
-          # business code must not call insert_idempotent — runtime owns dedup.
-          # Match call sites only (excludes docstrings + comments referring to it).
-          c=$(grep -rn -E '\binsert_idempotent\(' apps/agent-service/app/ \
-              2>/dev/null | grep -v "runtime/persist.py\|runtime/durable.py\|__pycache__\|/test_" | wc -l || true)
-          [ "$c" -eq 0 ] || { echo "Gap 7 violation: $c insert_idempotent call sites"; exit 1; }
+          # The insert_idempotent half of Gap 7 moved to the open-gap baseline
+          # (gap_7_insert_idempotent). Reason recorded there: the check as
+          # written contradicts app/runtime/persist.py's own public API.
       - name: Gap 11 — no direct contextvar / header reads in dataflow business code
         shell: bash
         run: |
@@ -54,20 +63,23 @@ jobs:
           c=$(grep -rn 'headers\["trace_id"\]\|headers\["lane"\]' apps/agent-service/app/ \
               2>/dev/null | grep -v "runtime/propagation.py\|__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c raw header reads"; exit 1; }
-      - name: Gap 8 — business `await emit(` count == 10 reviewed call sites
+      - name: Gap 8 — business `await emit(` count == 3 reviewed call sites
         shell: bash
         run: |
           set -e
-          # The 7 category-A mutation sites migrated to transactional_emit
-          # in Task 10. Anyone adding a new category-A site MUST register
-          # it (spec §4.5.1) and update this count; otherwise the gate
-          # catches the regression.
+          # 出站 emit 一律经 wire 的 durable 边；裸 `await emit(` 每一处都要有
+          # 独立理由，并且数在这里钉死。当前 3 处全在 app/living/，各自的
+          # docstring 写明为什么不能进事务（takeback / reading / mouth：都是
+          # "交给外面之后才知道下场"的那一跳）。旧的 10 处随上一版实现删除，
+          # 它们所在的 nodes/agent/life/memory 现在是 0。
+          #
+          # 加一处新的就要更新这个数，否则 gate 抓回归。
           c=$(grep -rn '\bawait emit(' \
-              apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
-              apps/agent-service/app/chat/ apps/agent-service/app/life/ \
-              apps/agent-service/app/memory/ \
+              apps/agent-service/app/agent/ apps/agent-service/app/life/ \
+              apps/agent-service/app/living/ apps/agent-service/app/memory/ \
+              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
               --include='*.py' 2>/dev/null | wc -l || true)
-          [ "$c" -eq 10 ] || { echo "Gap 8 violation: business await emit count=$c, expected 10"; exit 1; }
+          [ "$c" -eq 3 ] || { echo "Gap 8 violation: business await emit count=$c, expected 3"; exit 1; }
       - name: Gap 15 — no arq imports, no arq dependency
         shell: bash
         run: |
@@ -105,18 +117,20 @@ jobs:
           # No more "不要 catch" / "don't catch" warnings: the wire DSL
           # expresses error policy via .on_error("dlq") explicitly.
           c=$(grep -rn "# 不要 catch\|# 不要 try/except\|# don't catch" \
-              apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
-              apps/agent-service/app/chat/ apps/agent-service/app/life/ \
-              apps/agent-service/app/memory/ 2>/dev/null | wc -l || true)
+              apps/agent-service/app/agent/ apps/agent-service/app/life/ \
+              apps/agent-service/app/living/ apps/agent-service/app/memory/ \
+              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+              2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c don't-catch comments in business code"; exit 1; }
           # Manual ack/nack/requeue=False belongs to the framework
           # (runtime/* + workers/common). The DLQ admin tooling at
           # nodes/dlq_admin.py is the only business-facing exception
           # (the 6-step requeue protocol). Scan business dirs only.
           c=$(grep -rn "requeue=False\|\.nack(" \
-              apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
-              apps/agent-service/app/chat/ apps/agent-service/app/life/ \
-              apps/agent-service/app/memory/ 2>/dev/null \
+              apps/agent-service/app/agent/ apps/agent-service/app/life/ \
+              apps/agent-service/app/living/ apps/agent-service/app/memory/ \
+              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+              2>/dev/null \
               | grep -v "nodes/dlq_admin.py\|__pycache__\|/test_" \
               | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c nack/requeue=False call sites in business code"; exit 1; }
@@ -124,32 +138,43 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
-                    apps/agent-service/app/chat/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/memory/ apps/agent-service/app/skills/)
-          # No `from app.data.session import …` in business
+          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
+                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
+                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/)
+          # 拿 session 那三条只对**不拥有自己 Data 表**的业务包 exact-zero。
+          # app/life/ 和 app/living/ 自己声明 Data 表、并且用裸 SQL 读它们
+          # （MAX(seq) 取号、DISTINCT ON 取最新一版这类 runtime 四个原语
+          # 没覆盖的形状），所以它们在 gap_13_business_owns_data_tables
+          # 这条 baseline 上计数、不在这里判零。**公共层怎么读仍然 exact-zero
+          # 地由 queries 层管**：living 读 common_* 的那批查询已经全部收进
+          # app/data/queries/，这条 baseline 只兜自己那几张表。
+          NO_OWN_TABLES=(apps/agent-service/app/agent/ apps/agent-service/app/memory/ \
+                         apps/agent-service/app/nodes/ apps/agent-service/app/skills/)
+          # No `from app.data.session import …`
           c=$(grep -rnE "from app\.data\.session import|from app\.data import session" \
-              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+              "${NO_OWN_TABLES[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c data.session imports in business"; exit 1; }
+          # No session-factory call sites
+          c=$(grep -rnE "get_session\(|async_session\(|AsyncSessionLocal|current_session\(" \
+              "${NO_OWN_TABLES[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c session factory call sites in business"; exit 1; }
+          # No direct session.<op> (session.execute / .commit / ...)
+          c1=$(grep -rnE "\bsession\.(execute|commit|add|merge|flush|rollback)\(" \
+              "${NO_OWN_TABLES[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          c2=$(grep -rnE "\bs\.(execute|commit|add|merge|flush|rollback)\(" \
+              "${NO_OWN_TABLES[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
+          c=$((c1 + c2))
+          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c direct session.* in business"; exit 1; }
+          # 下面这几条对**全部**业务包 exact-zero —— 它们说的是"别绕开 queries 层
+          # 和 outbox"，跟拥不拥有自己的表无关。
           # No `current_session` import in business (queries layer is internal)
           c=$(grep -rnE "from app\.runtime\.db import.*current_session|from app\.runtime import.*current_session" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c current_session imports in business"; exit 1; }
-          # No session-factory call sites in business
-          c=$(grep -rnE "get_session\(|async_session\(|AsyncSessionLocal|current_session\(" \
-              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c session factory call sites in business"; exit 1; }
           # No AsyncSession type references in business (queries own the type)
           c=$(grep -rn "AsyncSession" "${BUSINESS[@]}" 2>/dev/null \
               | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c AsyncSession references in business"; exit 1; }
-          # No direct session.<op> in business (session.execute / .commit / ...)
-          c1=$(grep -rnE "\bsession\.(execute|commit|add|merge|flush|rollback)\(" \
-              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
-          c2=$(grep -rnE "\bs\.(execute|commit|add|merge|flush|rollback)\(" \
-              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
-          c=$((c1 + c2))
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c direct session.* in business"; exit 1; }
           # transactional_emit was renamed; emit_tx via app.runtime is the public surface
           c=$(grep -rn "transactional_emit" "${BUSINESS[@]}" 2>/dev/null \
               | grep -v "__pycache__\|/test_" | wc -l) || true
@@ -162,9 +187,9 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
-                    apps/agent-service/app/chat/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/memory/ apps/agent-service/app/skills/)
+          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
+                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
+                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/)
           c=$(grep -rnE "from app\.infra\.redis import|from app\.infra import redis" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 14 violation: $c infra.redis imports in business"; exit 1; }
@@ -175,18 +200,29 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/nodes/ apps/agent-service/app/agent/ \
-                    apps/agent-service/app/chat/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/memory/ apps/agent-service/app/skills/)
+          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
+                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
+                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/)
+          # app/agent/adapters/ 排除在外，永久：它们**就是**跟外部 HTTP 讲话的
+          # 那一层（openai / gemini 的 ModelClient 实现），跟 app/capabilities/
+          # 同级。Gap 11 已经按同样理由豁免了 capabilities/。要求适配层不碰
+          # httpx 等于要求它别干自己的活。
+          #
+          # app/agent/tools/external_sources.py 排除在外，临时：那是业务代码，
+          # 每个查询自己 new 一个 AsyncClient，确实绕开了 capability 层。它现在
+          # 零调用方（工具带随上一版实现整批摘掉，等重写"每日底料"时接回），
+          # 改了没有任何调用路径能验证。所以它进 gap_16_business_owns_http
+          # baseline 盯着不许变多，接回来的那次一起改成走 capability。
           c=$(grep -rnE "import httpx|from httpx" "${BUSINESS[@]}" 2>/dev/null \
-              | grep -v "__pycache__\|/test_" | wc -l) || true
+              | grep -v "__pycache__\|/test_" \
+              | grep -v "agent/adapters/\|agent/tools/external_sources.py" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c httpx imports in business"; exit 1; }
           c=$(grep -rnE "from app\.capabilities\.http import|from app\.capabilities import http" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c HTTPClient direct imports in business"; exit 1; }
 
   open-gap-baseline:
-    name: Open-gap baseline no-new (Gap 19)
+    name: Open-gap baseline no-new (Gap 7 insert_idempotent / 13 own-tables / 19)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -197,24 +233,71 @@ jobs:
           import json, subprocess, sys
 
           baselines = json.load(open(".github/grep-baselines.json"))
+          BUSINESS = [
+              "apps/agent-service/app/agent/", "apps/agent-service/app/life/",
+              "apps/agent-service/app/living/", "apps/agent-service/app/memory/",
+              "apps/agent-service/app/nodes/", "apps/agent-service/app/skills/",
+          ]
+          # app/life/ 和 app/living/ 自己声明 Data 表并用裸 SQL 读它们。
+          OWN_TABLES = [
+              "apps/agent-service/app/life/", "apps/agent-service/app/living/",
+          ]
           patterns = {
+              # 业务不该自己做消息去重 —— 那是 wire 的 .durable() 边的事。但
+              # insert_idempotent 同时也是 app/runtime/persist.py 四个公开原语之一
+              # （insert_append / select_latest / select_all_versions 是另外三个，
+              # 谁都没被 gate 管），业务写自己那张 Data 表时调它是正当用法。
+              # 现存 5 处（app/living/ 4 处 + app/domain/thinking_cost.py 1 处）
+              # 全是后者，所以这条从 exact-zero 降成 baseline：加新调用点仍然会
+              # 被挡下、需要显式抬基线 + reviewer 签字，但不再断言一个代码库本身
+              # 就不成立的零。运行时那两个实现自己排除在外。
+              "gap_7_insert_idempotent": (
+                  r"\binsert_idempotent\(",
+                  ["apps/agent-service/app/"],
+                  ["runtime/persist.py", "runtime/durable.py"],
+              ),
+              # 业务包自己拿 session 读写**自己那几张 Data 表**的残留。读公共层
+              # （common_*）已经全部收进 app/data/queries/，由 Gap 13 的 exact-zero
+              # 那半边管；这里兜的是 MAX(seq) 取号、DISTINCT ON 取最新一版这类
+              # runtime 四个原语没覆盖的形状。数只准降不准升。
+              "gap_13_business_owns_data_tables": (
+                  r"from app\.data\.session import|from app\.data import session|"
+                  r"get_session\(|async_session\(|AsyncSessionLocal|current_session\(|"
+                  r"\bsession\.(execute|commit|add|merge|flush|rollback)\(|"
+                  r"\bs\.(execute|commit|add|merge|flush|rollback)\(",
+                  OWN_TABLES,
+                  [],
+              ),
+              # 业务代码自己 new httpx client 的残留。app/agent/adapters/ 不在
+              # 这里数（它们是适配层本身，理由写在 Gap 16 那个 step 里）；剩下
+              # 的 1 处是 external_sources.py，零调用方、等接回工具带时改成走
+              # capability 层。在那之前这个数不许变多 —— 新工具一律走 capability。
+              "gap_16_business_owns_http": (
+                  r"import httpx|from httpx",
+                  BUSINESS,
+                  ["agent/adapters/"],
+              ),
+              # 现在是 0，但留在 baseline 里而不是升成 exact-zero：归零是上一版
+              # 实现被删掉的副产物，没有人做过迁移。app/agent/ 那批工具重新接
+              # 回来时它可能又不是 0，那时候该是一次显式的判断，不是一次"CI 突然
+              # 红了"。
               "gap_19_create_task_business": (
                   r"asyncio\.create_task|asyncio\.ensure_future",
-                  ["apps/agent-service/app/nodes/", "apps/agent-service/app/agent/",
-                   "apps/agent-service/app/chat/", "apps/agent-service/app/life/",
-                   "apps/agent-service/app/memory/"],
+                  BUSINESS,
+                  [],
               ),
           }
           fail = False
-          for key, (pat, dirs) in patterns.items():
+          for key, (pat, dirs, exclude) in patterns.items():
               try:
                   out = subprocess.check_output(
-                      ["grep", "-rn", "-E", pat, *dirs],
+                      ["grep", "-rn", "-E", pat, "--include=*.py", *dirs],
                       text=True, stderr=subprocess.DEVNULL,
                   )
                   count = len([
                       ln for ln in out.splitlines()
                       if "__pycache__" not in ln and "/test_" not in ln
+                      and not any(x in ln for x in exclude)
                   ])
               except subprocess.CalledProcessError:
                   count = 0

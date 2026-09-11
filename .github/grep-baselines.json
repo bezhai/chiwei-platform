@@ -1,3 +1,6 @@
 {
-  "gap_19_create_task_business": 5
+  "gap_7_insert_idempotent": 5,
+  "gap_13_business_owns_data_tables": 58,
+  "gap_16_business_owns_http": 1,
+  "gap_19_create_task_business": 0
 }

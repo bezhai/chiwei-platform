@@ -372,12 +372,14 @@ async def test_dispatch_preserves_list_content_blocks():
     ]
 
     @tool
-    async def read_images(filenames: list[str]) -> Any:
+    async def look_at_pictures(filenames: list[str]) -> Any:
         """Read."""
         return blocks
 
-    call = ToolCall(id="c1", name="read_images", arguments={"filenames": ["3.png"]})
-    result = await dispatch([read_images], call)
+    call = ToolCall(
+        id="c1", name="look_at_pictures", arguments={"filenames": ["3.png"]}
+    )
+    result = await dispatch([look_at_pictures], call)
     assert result.content == blocks
 
 

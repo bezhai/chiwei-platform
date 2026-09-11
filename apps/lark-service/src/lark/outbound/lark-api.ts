@@ -185,7 +185,9 @@ export interface LarkOutboundApi {
      * 撤回一条消息。
      *
      * 消息已经被撤过、或者超出飞书允许撤回的时限时，飞书返回非 0 code，这里**抛**。
-     * 「已经撤过了」在业务上往往等价于成功，但那是业务的判断，不是这一层的。
+     * 「已经撤过了」在业务上往往等价于成功，但那是业务的判断，不是这一层的 ——
+     * 飞书那个数字码挂在抛出的 Error 上（@inner/lark-utils 的 larkErrorCode 读），
+     * 业务层自己按码分支。recall.ts 认的就是「消息已被撤回或删除」那一个。
      */
     recall(messageId: string): Promise<void>;
 

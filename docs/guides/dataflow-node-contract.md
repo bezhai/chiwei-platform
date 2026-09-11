@@ -207,7 +207,7 @@ contract 违反 → `GraphError`，启动失败。运行时无 wire 层异常。
 | `app/infra/qdrant.py:create_hybrid_collection` | False | 同上 | 同上 |
 | `app/infra/rabbitmq.py:current_lane` | None | "无 lane = prod" 是正常值 | 无（永久例外） |
 | `app/infra/rabbitmq.py:publish_with_confirm` | False | 显式的"caller-decision"语义：retry 走 dlq-fallback，emit_delayed 走 raise；docstring 已写明 | 无（永久例外） |
-| `app/infra/image.py:_post` | None | 历史遗留：4 个内部 + 3 个外部调用方都靠 `if data:` 分支；外层 `upload_and_register` 等已经 `except Exception` 兜底 | L1：image_client typed-error 迁移（单 commit 改 raise + 逐调用方验证） |
+| `app/infra/image.py:_post` | None | 历史遗留：4 个内部 + 3 个外部调用方都靠 `if data:` 分支；外层 `upload_image` 等已经 `except Exception` 兜底 | L1：image_client typed-error 迁移（单 commit 改 raise + 逐调用方验证） |
 | `app/infra/image.py:download_image_as_base64` | None | 同上：`vectorize.py` 用 `gather(return_exceptions=True)` 过滤 | 同上 |
 
 **非例外**（不在清单上、不允许新增 `return None` / `return False`）：

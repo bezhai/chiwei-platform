@@ -147,6 +147,27 @@ async def test_build_model_client_resolves_and_dispatches_to_adapter(
     assert client.base_url == "https://fake.local"
 
 
+async def test_build_model_client_hands_api_version_to_the_adapter(monkeypatch):
+    """A provider pinned to one API version must reach the adapter that dials it."""
+    register_adapter("fake", _FakeAdapter)
+
+    async def _resolve(model_id, *, required_fields=()):
+        return {
+            "model_name": "fake-model",
+            "api_key": "sk-fake",
+            "base_url": "https://gw/prefix",
+            "is_active": True,
+            "client_type": "fake",
+            "use_proxy": False,
+            "api_version": "v1",
+        }
+
+    monkeypatch.setattr("app.agent.client.resolve_model_info", _resolve)
+
+    client = await build_model_client("whatever")
+    assert client.extra.get("api_version") == "v1"
+
+
 async def test_complete_returns_neutral_assistant_message(_fake_provider):
     client = await build_model_client("whatever")
     out = await client.complete([Message(role=Role.USER, content="ping")])

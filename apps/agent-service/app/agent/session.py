@@ -128,8 +128,8 @@ async def replace_session(
 ) -> bool:
     """Overwrite the transcript wholesale as a new version (折叠写回用).
 
-    Unlike ``append_session`` this does NOT read-modify-write: the caller
-    (``app.agent.session_fold``) has already computed the full replacement.
+    Unlike ``append_session`` this does NOT read-modify-write: the caller has
+    already computed the full replacement.
     A wholesale overwrite computed from a *stale* read would silently swallow
     whatever was appended in between, so the caller passes ``expected_ver`` —
     the version it loaded the transcript at (:func:`load_session_versioned`).

@@ -1,0 +1,18 @@
+{
+  "$comment": "一条撤回请求怎么说清楚要撤哪一条。两种定位方式，恰好用一种；两侧的字段名各写一份，没有任何东西保证它们同名，所以两侧测试读这同一份向量。读它的是测试、不是生产代码 —— 两个镜像的 Dockerfile 都不 COPY contracts/。跟 mq-channel-routes.json / proactive-message-id.json 是同一套做法。",
+  "by_session": {
+    "what": "真人问她、她答的那条链。撤的是一次会话落下的全部回复，投递侧按会话标识查台账拿到那几条。",
+    "payload": {
+      "session_id": "sess-0f3a1c",
+      "outbound_id": null
+    }
+  },
+  "by_outbound": {
+    "what": "她自己开口那条链。她没有会话，只有一次开口；投递侧按这个 id 等值反查公共层那条消息行（common_message.agent_outbound_id），不碰台账 —— 主动消息在台账上一行都没有。",
+    "payload": {
+      "session_id": null,
+      "outbound_id": "55f3469bd46c5384a9ce22cb4944b77a"
+    },
+    "$note": "outbound_id 是 uuid 的 hex 写法（32 个字符、没有短横），跟她那条出站台账上的 outbound_id 逐字一致。公共层那一列是 uuid 类型，投递侧查询时按 uuid 传参。"
+  }
+}

@@ -24,6 +24,14 @@ function columnNames(target: Function): string[] {
         .map((c) => (c.options.name as string | undefined) ?? c.propertyName);
 }
 
+function columnOptions(target: Function, name: string) {
+    return getMetadataArgsStorage().columns.find(
+        (c) =>
+            c.target === target &&
+            ((c.options.name as string | undefined) ?? c.propertyName) === name,
+    )?.options;
+}
+
 describe('common layer entity metadata', () => {
     it('registers common layer tables', () => {
         expect(tableName(CommonUser)).toBe('common_user');
@@ -58,5 +66,72 @@ describe('common layer entity metadata', () => {
         expect(commonMessageColumns).not.toContain('om_id');
         expect(commonMessageColumns).not.toContain('chat_id');
         expect(commonMessageColumns).not.toContain('open_id');
+    });
+
+    it('common_message keeps "who did this message name" as nullable common ids', () => {
+        const options = columnOptions(CommonMessage, 'mentioned_common_user_ids');
+        expect(options).toBeDefined();
+
+        // 被 @ 的人存公共层 id。渠道 id（union_id / open_id）不许进这一列 ——
+        // 那正是上一条用例守着的边界。
+        expect(options?.type).toBe('uuid');
+        expect(options?.array).toBe(true);
+
+        // NULL 和 [] 不是一回事：NULL = 没人算过（改动前的存量行、QQ 行、
+        // 新写入方上线前的飞书行），[] = 算过、确实没人被 @。读的一侧把 NULL
+        // 当"不知道"。加上 NOT NULL 或者给个默认值，这两件事就被合并了，
+        // 而且合并之后再也分不开 —— 存量行会凭空变成"确认没人被 @"。
+        expect(options?.nullable).toBe(true);
+        expect(options?.default).toBeUndefined();
+    });
+
+    it('common_message keeps "which time she opened her mouth" as a nullable uuid', () => {
+        const options = columnOptions(CommonMessage, 'agent_outbound_id');
+        expect(options).toBeDefined();
+
+        // 存的是 agent-service 那次开口的派生 id 本身（uuid），不是带
+        // `proactive:` 前缀的整串 —— 前缀是线格式的命名空间标记，不进列。
+        expect(options?.type).toBe('uuid');
+        expect(options?.array).toBeFalsy();
+
+        // NULL = 没记过这行是哪次开口的产物：加列之前的存量行、QQ 渠道的行、
+        // 以及所有被动回复的行，全是 NULL。给 NOT NULL 或者默认值，就把"没记过"
+        // 和"确实不是主动发的"合并了，合并之后再也分不开。
+        expect(options?.nullable).toBe(true);
+        expect(options?.default).toBeUndefined();
+    });
+
+    it('common_message keeps "this message got recalled" as a nullable timestamptz', () => {
+        const options = columnOptions(CommonMessage, 'recalled_at');
+        expect(options).toBeDefined();
+
+        // 记的是撤回发生的时刻，不是一个布尔 —— "什么时候撤的"事后没有别的地方能查。
+        expect(options?.type).toBe('timestamptz');
+
+        // NULL = 没被撤回：加列之前的存量行、QQ 渠道的行、别人发的消息，以及所有
+        // 撤回失败的行。给 NOT NULL 或者默认值就得替这些行编一个时刻出来，而这一列
+        // 的读法正是"有值即被撤回"。
+        expect(options?.nullable).toBe(true);
+        expect(options?.default).toBeUndefined();
+    });
+
+    it('common_message indexes agent_outbound_id — 它会被按等值反查', () => {
+        const indices = getMetadataArgsStorage()
+            .indices.filter((i) => i.target === CommonMessage)
+            .map((i) => ({ name: i.name, columns: i.columns }));
+
+        // 名字必须是 `ix_` 前缀那个：物理表上已经存在的索引由 agent-service 侧的
+        // SQLAlchemy `index=True` 建出来，默认命名就是 `ix_<表>_<列>`。这里如果写
+        // 成别的名字，TypeORM 哪天跑迁移就会在同一列上再建第二个索引 —— 同一列、
+        // 两个索引、两份写放大，而且谁都看不出它们是同一件事。
+        expect(indices).toContainEqual({
+            name: 'ix_common_message_agent_outbound_id',
+            columns: ['agent_outbound_id'],
+        });
+
+        // 反过来也钉住：旧名字不能再出现，否则就是两个名字并存。
+        expect(indices.map((i) => i.name)).not.toContain(
+            'idx_common_message_agent_outbound_id',
+        );
     });
 });

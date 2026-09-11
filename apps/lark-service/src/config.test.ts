@@ -22,9 +22,8 @@ const COMPLETE_ENV = {
     AI_PROVIDER_ADMIN_KEY: 'provider-admin',
 };
 
-/** 上面那批里属于飞书业务的，出站进程一个都不该要。 */
-const LARK_BUSINESS_KEYS = [
-    'INNER_HTTP_SECRET',
+/** 上面那批里只有入口进程用得上的。出站进程一个都不该要。 */
+const INGRESS_ONLY_KEYS = [
     'MINIO_ENDPOINT',
     'MINIO_ACCESS_KEY',
     'MINIO_SECRET_KEY',
@@ -82,53 +81,64 @@ describe('loadConfig', () => {
 // 出站进程要的 env 比入口少一项：它不写 lark_event 审计（原始报文在入口那一侧第一次
 // 进来时就记过了），所以不该因为 MONGO_HOST 没配就起不来。
 describe('loadOutboundConfig', () => {
-    const BACKENDS = {
+    const OUTBOUND = {
         POSTGRES_HOST: 'pg.internal',
         POSTGRES_USER: 'chiwei',
         POSTGRES_PASSWORD: 'secret',
         POSTGRES_DB: 'chiwei',
         REDIS_HOST: 'redis.internal',
         RABBITMQ_URL: 'amqp://mq.internal',
+        // 出站也打 tool-service：她带的图在队列里是对象存储的永久句柄，发之前要向
+        // tool-service 现签一个可下载地址（见 lark/outbound/fetch-picture.ts）。
+        INNER_HTTP_SECRET: 'inner-secret',
     };
 
     it('does not require MONGO_HOST', () => {
-        expect(() => loadOutboundConfig(BACKENDS)).not.toThrow();
+        expect(() => loadOutboundConfig(OUTBOUND)).not.toThrow();
     });
 
-    // 飞书业务全挂在入站那一侧：指令、附件管线、定时任务、卡片回调。出站只把赤尾的
-    // 动作送到飞书，多要一个 key 只是多一个起不来的理由。
-    it('does not require any of the lark business credentials', () => {
-        expect(() => loadOutboundConfig(BACKENDS)).not.toThrow();
+    // 指令、附件管线、定时任务、卡片回调全挂在入站那一侧。出站只把赤尾的动作送到
+    // 飞书，多要一个 key 只是多一个起不来的理由。
+    it('does not require the ingress-only credentials', () => {
+        expect(() => loadOutboundConfig(OUTBOUND)).not.toThrow();
 
-        // 一个 env 都没配时报的那份清单里也不该有它们 —— 否则就是有人把业务凭据加进了
-        // 两个进程共用的那份 BACKEND_ENV。
+        // 一个 env 都没配时报的那份清单里也不该有它们 —— 否则就是有人把入口专属的
+        // 凭据加进了两个进程共用的那份清单。
         let message = '';
         try {
             loadOutboundConfig({});
         } catch (error) {
             message = (error as Error).message;
         }
-        for (const key of LARK_BUSINESS_KEYS) {
+        for (const key of INGRESS_ONLY_KEYS) {
             expect(message).not.toContain(key);
         }
     });
 
-    it.each(Object.keys(BACKENDS))('fails closed when %s is missing', (key) => {
-        const env: Record<string, string | undefined> = { ...BACKENDS };
+    // 缺了它，现签那一跳发出的是 `Bearer undefined`，tool-service 401 —— 而这一路的
+    // 失败是降级：她的话照常发出去，只是图永远发不出来，全程没有任何东西变红。
+    it('fails closed when INNER_HTTP_SECRET is missing', () => {
+        const env: Record<string, string | undefined> = { ...OUTBOUND };
+        delete env.INNER_HTTP_SECRET;
+        expect(() => loadOutboundConfig(env)).toThrow(/INNER_HTTP_SECRET/);
+    });
+
+    it.each(Object.keys(OUTBOUND))('fails closed when %s is missing', (key) => {
+        const env: Record<string, string | undefined> = { ...OUTBOUND };
         delete env[key];
         expect(() => loadOutboundConfig(env)).toThrow(new RegExp(key));
     });
 
     it('defaults the metrics port to 9091', () => {
-        expect(loadOutboundConfig(BACKENDS).metricsPort).toBe(9091);
+        expect(loadOutboundConfig(OUTBOUND).metricsPort).toBe(9091);
     });
 
     it('honours METRICS_PORT', () => {
-        expect(loadOutboundConfig({ ...BACKENDS, METRICS_PORT: '9200' }).metricsPort).toBe(9200);
+        expect(loadOutboundConfig({ ...OUTBOUND, METRICS_PORT: '9200' }).metricsPort).toBe(9200);
     });
 
     it('rejects a METRICS_PORT that is not a number', () => {
-        expect(() => loadOutboundConfig({ ...BACKENDS, METRICS_PORT: 'nine' })).toThrow(
+        expect(() => loadOutboundConfig({ ...OUTBOUND, METRICS_PORT: 'nine' })).toThrow(
             /METRICS_PORT/,
         );
     });

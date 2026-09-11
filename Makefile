@@ -407,7 +407,7 @@ configs=json.load(sys.stdin).get('data',[]); \
 [print(f\"  {c['lane']:20s} | {c['branch']:30s} | {','.join(c.get('services',[]))}\") for c in configs] if configs else print('  (无活跃 CI 配置)')"
 
 ## DLQ 巡检：QUEUE=<队列名> [LIMIT=20] [KIND=dlq|review]
-## 用法: make dlq-inspect QUEUE=durable_chat_request_chat_node-dlx
+## 用法: make dlq-inspect QUEUE=durable_file_picked_up_read_a_round-dlx
 dlq-inspect:
 	$(if $(QUEUE),,$(error QUEUE 未指定。用法: make $@ QUEUE=<队列名>))
 	@curl -sf -X POST "$(PAAS_API)/admin/dlq/inspect" \
@@ -417,7 +417,7 @@ dlq-inspect:
 	  | python3 -m json.tool
 
 ## DLQ 重放：QUEUE=<队列名> [LIMIT=20] [CLEAR=true|false] [KIND=dlq|review]
-## 用法: make dlq-replay QUEUE=durable_chat_request_chat_node-dlx CLEAR=true LIMIT=10
+## 用法: make dlq-replay QUEUE=durable_file_picked_up_read_a_round-dlx CLEAR=true LIMIT=10
 dlq-replay:
 	$(if $(QUEUE),,$(error QUEUE 未指定。用法: make $@ QUEUE=<队列名>))
 	@curl -sf -X POST "$(PAAS_API)/admin/dlq/requeue" \
@@ -428,7 +428,7 @@ dlq-replay:
 	  | python3 -m json.tool
 
 ## DLQ 重放预演（不修改任何状态）：QUEUE=<队列名> [LIMIT=20] [KIND=dlq|review]
-## 用法: make dlq-dry-run QUEUE=durable_chat_request_chat_node-dlx
+## 用法: make dlq-dry-run QUEUE=durable_file_picked_up_read_a_round-dlx
 dlq-dry-run:
 	$(if $(QUEUE),,$(error QUEUE 未指定。用法: make $@ QUEUE=<队列名>))
 	@curl -sf -X POST "$(PAAS_API)/admin/dlq/dry-run" \

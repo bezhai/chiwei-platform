@@ -25,6 +25,7 @@
 import { createServer } from 'node:http';
 import type { ConsumeMessage } from 'amqplib';
 import { Histogram, Registry, collectDefaultMetrics } from 'prom-client';
+import { LaneRouter } from '@inner/shared';
 import { botDirectory } from '@inner/shared/bot';
 import { getRedisClient, resetRedisClient } from '@inner/shared/cache';
 import { getLane, rabbitmqClient, type Route } from '@inner/shared/mq';
@@ -35,9 +36,12 @@ import { LARK_CHANNEL } from './lark/channel';
 import { larkCredentials } from './lark/credentials';
 import { larkSpeakAs } from './lark/outbound/bot-context';
 import { deliverLarkChatResponse, type LarkDeliveryDeps } from './lark/outbound/deliver';
+import {
+    httpPictureDownload,
+    toolServicePictureUrl,
+} from './lark/outbound/fetch-picture';
 import { larkOutboundQueues } from './lark/outbound/queues';
 import { recallLarkResponse, type LarkRecallDeps } from './lark/outbound/recall';
-import { redisImageRegistry } from './lark/outbound/redis-image-registry';
 import { postgresLarkResponseLedger } from './lark/outbound/postgres-ledger';
 import { postgresLarkOutboundTables } from './lark/outbound/postgres-tables';
 import { postgresLarkGroupRoster } from './lark/outbound/postgres-roster';
@@ -93,6 +97,24 @@ const queueDelay = new Histogram({
     registers: [metrics],
 });
 
+/**
+ * 打 tool-service 的那个路由器（她要带的图，句柄在这里现签成可下载地址）。
+ *
+ * **整个进程一个**：它自带 30s 的注册表轮询，每处各建一个就是每处多一个永不停的
+ * 定时器。走 LaneRouter 而不是裸 fetch/axios，是为了拿到它按请求上下文注入
+ * `x-ctx-lane` 的那一层 —— 泳道里发出的图要打同泳道的 tool-service（没部署就
+ * fallback prod）。
+ */
+let router: LaneRouter | undefined;
+function laneRouter(): LaneRouter {
+    router ??= new LaneRouter(
+        process.env.REGISTRY_URL || 'http://lite-registry:8080',
+        30_000,
+        metrics,
+    );
+    return router;
+}
+
 function backends(): LarkBackends {
     return {
         database: larkDataSource(),
@@ -138,6 +160,10 @@ async function realOutbound(): Promise<LarkOutbound> {
     const store = postgresLarkOutboundTables(dataSource);
     const ledger = postgresLarkResponseLedger(dataSource);
 
+    // 现签那一跳的客户端。建一次：每次请求各建一个 axios 实例等于每次都重装一遍
+    // 拦截器（入口进程那侧的 tool-service 客户端也是这个形状，见 index.ts）。
+    const toolService = laneRouter().createClient('tool-service');
+
     return {
         delivery: {
             store,
@@ -150,10 +176,15 @@ async function realOutbound(): Promise<LarkOutbound> {
                     // 快照会把回填之前的空值一直留着。目录规模是个位数。
                     aliases: () => larkBotAliases(botDirectory, personaName),
                 }),
-                images: {
-                    registry: redisImageRegistry({
-                        hgetall: (key) => getRedisClient().hgetall(key),
+                pictures: {
+                    // 队列里传的是对象存储的永久句柄，签名只活 1.5 小时 —— 所以在
+                    // 发送前的这一刻才向 tool-service 现签（见 fetch-picture.ts）。
+                    // INNER_HTTP_SECRET 由 loadOutboundConfig 在启动期保证存在。
+                    sign: toolServicePictureUrl({
+                        post: (path, body, headers) => toolService.post(path, body, { headers }),
+                        innerSecret: process.env.INNER_HTTP_SECRET,
                     }),
+                    download: httpPictureDownload(),
                     uploader: api,
                 },
             }),

@@ -127,10 +127,91 @@ def test_recall_serialization_carries_channel_for_pluginized_worker():
     )
     body = r.model_dump(mode="json")
     assert set(body.keys()) == {
-        "session_id", "channel", "chat_id", "trigger_message_id",
-        "reason", "detail", "lane",
+        "session_id", "outbound_id", "channel", "chat_id",
+        "trigger_message_id", "reason", "detail", "lane",
     }
     assert body["channel"] == "qq"
+
+
+# --------------------------------------------------------------------------
+# 撤回怎么说清楚要撤哪一条 —— 两种定位方式，恰好用一种
+# --------------------------------------------------------------------------
+
+
+def test_recall_can_point_at_one_of_her_own_sends():
+    """她自己开口那条链没有会话标识，只能按那次开口的 id 指。
+
+    硬填一个假会话标识的后果是静默的：投递侧拿它去查台账、查不到、退避重投三次、
+    写一行影响 0 行的失败、进死信 —— **一个渠道接口都不会调**，消息安安静静留在
+    群里，全程不抛一个异常。
+    """
+    r = Recall(
+        outbound_id="55f3469bd46c5384a9ce22cb4944b77a",
+        chat_id="c1",
+        reason="she_took_it_back",
+        channel="lark",
+    )
+    assert r.session_id is None
+    assert r.trigger_message_id is None, (
+        "她主动开口没有触发它的那条来源消息，不许伪造一个"
+    )
+    assert r.outbound_id == "55f3469bd46c5384a9ce22cb4944b77a"
+
+
+def test_recall_refuses_to_point_at_two_things_at_once():
+    # match 不能省：不 match 的话 extra=forbid 或者缺必填字段报的错也会让它绿，
+    # 而那两种红跟"两个定位方式一起给"没有半点关系。
+    with pytest.raises(ValidationError, match="恰好一个"):
+        Recall(
+            session_id="s1",
+            outbound_id="55f3469bd46c5384a9ce22cb4944b77a",
+            chat_id="c1",
+            reason="banned_word",
+            channel="lark",
+        )
+
+
+def test_recall_refuses_to_point_at_nothing():
+    """一个定位方式都不给 = 一条撤不掉的撤回请求。当场炸，别让它走到队列上。"""
+    with pytest.raises(ValidationError, match="恰好一个"):
+        Recall(chat_id="c1", reason="banned_word", channel="lark")
+
+
+def test_recall_by_outbound_id_matches_the_shared_contract():
+    """两侧对"怎么指"的理解必须一致 —— 字段名各写一份，没有东西保证它们同名。"""
+    import json
+    from pathlib import Path
+
+    vectors = json.loads(
+        (
+            Path(__file__).resolve().parents[4]
+            / "contracts"
+            / "recall-locators.json"
+        ).read_text("utf-8")
+    )
+
+    by_outbound = vectors["by_outbound"]["payload"]
+    r = Recall(
+        outbound_id=by_outbound["outbound_id"],
+        chat_id="c1",
+        reason="she_took_it_back",
+        channel="lark",
+    )
+    body = r.model_dump(mode="json")
+    assert body["outbound_id"] == by_outbound["outbound_id"]
+    assert body["session_id"] is None
+
+    by_session = vectors["by_session"]["payload"]
+    r2 = Recall(
+        session_id=by_session["session_id"],
+        chat_id="c1",
+        trigger_message_id="m1",
+        reason="output_unsafe",
+        channel="lark",
+    )
+    body2 = r2.model_dump(mode="json")
+    assert body2["session_id"] == by_session["session_id"]
+    assert body2["outbound_id"] is None
 
 
 def test_data_class_extra_forbid():

@@ -497,3 +497,61 @@ class TestGenerateImageGemini:
                 )
 
         mock_aio.close.assert_called_once()
+
+    @staticmethod
+    def _one_image_response():
+        """A minimal successful response carrying a single inline image."""
+        part = SimpleNamespace(
+            inline_data=SimpleNamespace(data=b"png-bytes", mime_type="image/png")
+        )
+        return SimpleNamespace(
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))]
+        )
+
+    async def test_api_version_reaches_the_image_client(self):
+        """A provider pinned to one API version must dial it for images too.
+
+        This path builds its own HttpOptions instead of going through
+        GeminiAdapter, so a missing field fails silently: text calls on the
+        provider reach the configured version while image calls land on the
+        SDK default and the gateway answers 404.
+        """
+        mock_genai, _ = self._make_gemini_mocks(self._one_image_response())
+        mock_types = MagicMock()
+
+        mock_settings = MagicMock()
+        mock_settings.forward_proxy_url = ""
+
+        with (
+            self._patch_genai(mock_genai, mock_types),
+            patch("app.infra.config.settings", mock_settings),
+        ):
+            await mod._generate_image_gemini(
+                _fake_info(client_type="google", api_version="v1"),
+                "a bird",
+                "1024x1024",
+                None,
+            )
+
+        assert mock_types.HttpOptions.call_args.kwargs["api_version"] == "v1"
+
+    async def test_no_api_version_leaves_the_sdk_default(self):
+        """Providers that don't set one keep whatever version the SDK picks."""
+        mock_genai, _ = self._make_gemini_mocks(self._one_image_response())
+        mock_types = MagicMock()
+
+        mock_settings = MagicMock()
+        mock_settings.forward_proxy_url = ""
+
+        with (
+            self._patch_genai(mock_genai, mock_types),
+            patch("app.infra.config.settings", mock_settings),
+        ):
+            await mod._generate_image_gemini(
+                _fake_info(client_type="google"),
+                "a bird",
+                "1024x1024",
+                None,
+            )
+
+        assert "api_version" not in mock_types.HttpOptions.call_args.kwargs

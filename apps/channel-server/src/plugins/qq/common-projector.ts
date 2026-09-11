@@ -361,23 +361,6 @@ export async function storeQqInboundMessage(
     });
 }
 
-export async function claimQqInboundMessageForBot(input: {
-    commonMessageId: string;
-    botName: string;
-    commonUserId: string;
-}): Promise<void> {
-    const result = await AppDataSource.getRepository(CommonMessage).update(
-        { common_message_id: input.commonMessageId, role: 'user' },
-        { bot_name: input.botName, common_user_id: input.commonUserId },
-    );
-    if (!result.affected) {
-        throw new Error(
-            `common user message ${input.commonMessageId} not found; ` +
-                `cannot claim bot_name=${input.botName}`,
-        );
-    }
-}
-
 export interface StoreQqOutboundMessageInput {
     qqMessageId: string;
     conversationId: string;

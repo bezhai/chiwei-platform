@@ -14,7 +14,6 @@ import dayjs from 'dayjs';
 import { context } from '@middleware/context';
 import { laneFromMessage } from '@inner/shared/mq-context';
 import type { OutboundCapabilities } from '@inner/shared/channel';
-import { imageRegistryLookupId } from './image-registry-key';
 import { dispatchChatResponseOutbound } from './chat-response-outbound';
 import { resolveChatResponseOutboundRefs } from './chat-response-resolve';
 
@@ -37,6 +36,14 @@ export interface ChatResponsePayload {
     user_id?: string;
     content: string;
     full_content?: string;
+    /**
+     * agent-service 带出来的图，值是对象存储的永久句柄（file_name）。
+     *
+     * **QQ 忽略它。** QQ 出站只发纯文本（CustomOutboundMessage 只有 text），本来就
+     * 没有图片路径。声明在这里是因为线上真的有这个字段：不写下来的话，下一个人读
+     * payload 会以为 agent-service 没发图，然后去上游找一个不存在的 bug。
+     */
+    picture_file_names?: string[];
     status: 'success' | 'failed';
     error?: string;
     // agent-service 仍在 body 里回填 lane（它自己按 body 字段做别的事），但
@@ -235,7 +242,10 @@ export async function handleChatResponse(
 
             // ---- 出站走渠道能力端口 ----
             // content 是 AI 原始 markdown（平台无关）；平台富文本渲染由当前 channel
-            // 插件做。imageRegistryId 必须用【全局 message_id】（见 image-registry-key.ts）。
+            // 插件做。sourceCommonMessageId 必须用 payload.message_id 这个【全局 id】，
+            // 绝不是上面刚反查出来的 channelMessageId —— 插件拿它再去反查自己的私有
+            // 映射（QQ 续段的回复锚点、出站幂等键），喂裸 id 进去必 miss，消息被静默
+            // 吞掉。这条钉在 chat-response-worker.source-common-id.test.ts。
             // dispatch 据 part_index/proactive 选 reply(回复触发/root) 还是
             // sendText(新发)，返回新消息的渠道裸 id。
             //
@@ -259,7 +269,7 @@ export async function handleChatResponse(
                 channelMessageId,
                 channelConversationId,
                 channelRootMessageId,
-                imageRegistryId: imageRegistryLookupId(payload),
+                sourceCommonMessageId: message_id,
                 isP2p: is_p2p,
                 partIndex: part_index,
                 isProactive: is_proactive,
