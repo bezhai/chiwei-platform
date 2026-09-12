@@ -102,7 +102,10 @@ from app.living.clock import living_lane
 from app.living.continuity import (
     commit_moment_transcript,
     load_moment_transcript,
+    load_trim_policy,
     moment_transcript_id,
+    next_transcript,
+    trim_for_round,
 )
 
 # 她手边那几份写好的说明：两只手，外加"有哪些可读"那一份清单（清单只能从 prompt
@@ -802,6 +805,11 @@ async def run_moment(
     （:mod:`app.living.continuity`）。所以收尾崩掉时上下文里也没有这一轮，重放读到的历史
     跟上一次一模一样；写不进去就是这一轮失败，不静默降级。
 
+    **这一轮跨过清理点时先裁一遍再喂**（:func:`app.living.continuity.trim_for_round`）：
+    素材换成短语、过了 4 小时的整组删掉、她此刻的状态作为新起点插进去。裁在模型调用
+    之前，所以喂进去的和存下去的是同一份前缀；收尾那一步只剩 token 硬顶兜底
+    （:func:`app.living.continuity.next_transcript`）。
+
     ``max_retries=1``：core 的 ``run`` 把整轮 ReAct 包在 ``@retry`` 里，一次模型
     瞬时失败会整轮重放、重放已经执行过的 durable 写。派生 id 让重放无害，但重放
     仍然是白花的一次钱，而且下一拍再来就行。
@@ -840,6 +848,9 @@ async def run_moment(
             lane=lane, persona_id=persona_id, now=began_at
         )
         history, transcript_ver = await load_moment_transcript(transcript_id)
+        # 这一轮按哪套阈值裁。读在模型调用之前：它是一次带缓存的 HTTP，不该发生在
+        # 收尾那个事务里。
+        trim_policy = await load_trim_policy()
         snapshot = await read_snapshot(
             lane=lane, persona_id=persona_id, after_seq=after_seq, now=began_at
         )
@@ -877,8 +888,14 @@ async def run_moment(
                 lane=lane, persona_id=persona_id, now=began_at
             )
         # 这一轮新摆到她眼前的那条，接在连续上下文后面 —— 所以它永远是最后一条。
-        stimulus = Message(
-            role=Role.USER, content=f"{snapshot.render()}\n\n{envelope}"
+        # 快照那段文本单独留一份：跨过清理点时它同时是重铺给她的那个新起点
+        # （:func:`app.living.continuity.trim_for_round`）。
+        state = snapshot.render()
+        stimulus = Message(role=Role.USER, content=f"{state}\n\n{envelope}")
+        # 裁在这里，不在收尾：喂进去的和存下去的是同一份前缀，而且一段带着过期图片
+        # 地址的历史不会在模型调用那一步先炸掉、永远轮不到被裁。
+        history = trim_for_round(
+            history, now=began_at, state=state, policy=trim_policy
         )
         # 这一轮模型产出的每一条（她的每次发言、每次工具调用和工具返回）都收在这里，
         # 收尾时连同历史和这条刺激一起写成下一版上下文。
@@ -944,7 +961,9 @@ async def run_moment(
             )
             await commit_moment_transcript(
                 transcript_id,
-                [*history, stimulus, *produced],
+                next_transcript(
+                    history, [stimulus, *produced], policy=trim_policy
+                ),
                 expected_ver=transcript_ver,
                 session=s,
             )

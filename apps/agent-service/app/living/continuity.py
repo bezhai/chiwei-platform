@@ -4,7 +4,7 @@
 返回，原样存下来；下一个 moment 把它们接在这一轮的输入前面。她因此不是每十分钟从头
 开始，而是接着上次往下说。
 
-这份契约是 T3（唤醒与暂停）、T4（分层裁剪）、T5（手机三层）共同的地基，五条：
+这份契约是 T3（唤醒与暂停）、T4（分层裁剪）、T5（手机三层）共同的地基，六条：
 
 一 · 粒度与日界
 ---------------
@@ -76,12 +76,14 @@ tick 本身是 interval 时间源、fire-and-forget，没有重投也没有 DLQ�
 **存储层不做任何截断**（:mod:`app.agent.session`）。它原来有两条上限（200 条消息 /
 256 KiB），行为是丢最老的 + 记一行警告、不影响返回值。本设计的硬顶是 200k token，
 比那两条大一个数量级；两套同时生效的话她的话会被另一套规则先砍掉，而调用方拿到的
-返回值一切正常，排查时看不出来。所以那两条连同实现一起删了，裁剪只留这一处。
+返回值一切正常，排查时看不出来。所以那两条连同实现一起删了，裁剪只留这一处
+（:func:`next_transcript`，规则见下面第六条）。
 
-**T4 之前这里没有任何上限。** 现在存多少就是多少，一天下来一个 persona 的上下文会
-一直长。这条在 coe 泳道跑一天就会撞到模型的 context 上限——那时 ``Agent.run`` 抛错、
-收尾不提交、下一拍原样重放，一直卡在同一个 moment 上。**所以 T4 的硬顶不是优化，是这
-条线能跑起来的前提**，它落地之前不要让这条线连续跑一整天。
+**硬顶不是优化，是这条线能连续跑的前提。** 没有它的时候上下文只增不减：到了模型的
+context 上限，``Agent.run`` 抛错、收尾不提交、下一拍读到同样的历史再抛一次。日界一
+到（04:00）上下文清空才自己恢复，所以症状是"这一天剩下的每一拍都在同一个地方炸"，
+不是卡死在某一个 moment 上。撞顶要多久是条件估算：可用容量 ``C``、每轮固定输入
+``P``、每轮新增 ``g``，一小时六轮，约 ``(C - P) / (6g)`` 小时。
 
 五 · 多副本
 -----------
@@ -97,17 +99,76 @@ tick 本身是 interval 时间源、fire-and-forget，没有重投也没有 DLQ�
 中间写过就抛 :class:`TranscriptConflict`，而不是默默盖掉。它把"看不见的互相覆盖"变
 成"看得见的一轮失败"，但它**不是**多副本的许可证——前两条仍然没有解。真要上多副本，
 先给时间源做 leader election。
+
+六 · 裁剪规则
+-------------
+
+**两档时长，固定时刻清理。** 外部素材（她读到的东西）留 ``material_minutes``，她自
+己的话和动作留 ``own_minutes``，清理只发生在 ``cleanup_minutes`` 的整点上
+（:func:`_cleanup_instant`，按生活日 04:00 起算）。滑动窗口每轮都改上下文开头、前缀
+缓存每轮失效；固定时刻清理让两次清理之间的前缀一个字节都不动。
+
+**"保留 1 小时"在整点清理下实际是 1–2 小时，这是设计不是 bug。** 刚过清理点写下的
+东西要等到下一个清理点才可能被裁：13:05 读到的网页在 15:00 那次清理才走（1 小时
+55 分），13:59 读到的同样在 15:00 走（1 小时 1 分）。验收按明确的截止线判断——
+"到 14:59 还在、过了 15:00 就没了"，不说"大概一小时左右"。
+
+**以一次完整的工具调用为单位裁，不是以单条消息。** 一个没有结果的工具调用会被
+provider 拒掉整个请求，而且同一轮里多个调用和多个结果必须逐个对上，不是"开头没有孤
+儿"就行。所以：调用还在保留期内时只把过期的**载荷**换成一句写死的短语
+（:data:`MATERIAL_TRIMMED`），消息结构一条不动；整组过期时调用和它的全部结果一起删。
+
+**哪些返回是素材、哪些要留着，逐只手列在** :data:`MATERIAL_TOOLS` / :data:`KEPT_TOOLS`
+**上**，两份合起来必须正好覆盖 ``MOMENT_TOOLS``（有用例钉住）。分不清的那一档是留着：
+留错了只是多占 token，裁错了是她拿着一个失效的句柄去发图。
+
+**"素材"只指工具返回的载荷。** 每轮喂进去的那条 USER（状态快照 + 手机信封）和她自
+己说的每一句都算她这一侧，走 ``own_minutes``：它们是她那段经历读得懂的骨架，先于她
+的话消失的话，剩下的对白就没有了由头。
+
+**图片块比文本先走。** 图片的地址是 TOS 预签名 URL，:data:`PICTURE_URL_MINUTES` 分钟
+就死；gemini adapter 回放历史时会把 http(s) 地址重新下载成 inline bytes，下载失败直接
+抛，而且抛在模型请求之前——历史里留着一张过期的图，她连"再调一次工具取一张"的机会都
+没有。所以图片块不跟素材同一档：**只要它不在最新那一代里就换成**
+:data:`PICTURE_TRIMMED`，同一条返回里的 ``pic=`` 句柄照留。这样一张图最长活
+``cleanup_minutes`` 加一个 moment 间隔，:data:`MAX_CLEANUP_MINUTES` 把这个和
+:data:`PICTURE_URL_MINUTES` 之间的余量守住。
+
+**每次清理重铺一次状态**（:func:`_checkpoint`）：4 小时前的话被裁掉之后那段经历只剩
+库里还有，所以清理时把她当前的状态（在哪、在做什么、挂着什么事）作为新起点插进去。
+它同时是**分代的界桩**——每条消息的"年龄下界"就是它右边第一个界桩的时刻，不需要给
+每条消息单独存一个时刻。界桩之前那一代（一天里第一个界桩立起来之前写下的东西）没有
+上界，一律留着，等下一个界桩立起来再算。
+
+**裁在模型调用之前**（:func:`trim_for_round`），收尾那一步只做硬顶兜底
+（:func:`next_transcript`）。只在收尾裁的话，一段带着过期图片地址的历史永远轮不到被
+裁——每一轮都在 adapter 下载那一步抛错，收尾走不到；而且一次清理会连着换两次前缀，
+白丢一次缓存命中。
+
+**硬顶是兜底，不是主路。** 每次写入前估一次 token（:func:`estimate_tokens`），超过
+``hard_cap_tokens`` 就从最老的组开始整组丢到 ``trim_target_tokens`` 以下，并记一行
+日志；**这一轮的消息一条都不丢**，它们自己就超了的话记 ERROR 后原样写下去。估算只算
+这份上下文，不含 SYSTEM 和工具定义（它们不在这里，是每次请求的固定开销，设硬顶时要
+留出余量）。
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+import json
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
-from app.agent.neutral import Message
+from inner_shared.dynamic_config import dynamic_config
+
+from app.agent.neutral import ContentBlock, Message, Role
 from app.agent.session import load_session, replace_session
 from app.agent.trace import make_session_id
-from app.living.day_page import living_day_of
+from app.living.day_page import living_day_bounds, living_day_of
+
+logger = logging.getLogger(__name__)
 
 
 class TranscriptConflict(RuntimeError):
@@ -170,3 +231,458 @@ async def commit_moment_transcript(
             f"（读到的是 ver={expected_ver}）—— 同一个人有两个 moment 在并发跑，"
             f"进程内排他占用的前提破了"
         )
+
+
+# ---------------------------------------------------------------------------
+# 分层裁剪
+# ---------------------------------------------------------------------------
+
+# 她读到的素材：读完就该沉淀成她自己的东西，过了保留期换成一句短语。
+#
+#   * ``look_around``      够得着的地方现在什么样 —— 快照每轮重发一份
+#   * ``look_at_phone``    别人的聊天内容。里面那串 ``take_back_id`` 不是孤本：她自己
+#     发出去的每条消息，快照的"你刚做过、说过"那段照印同一个编号
+#     （:func:`app.living.happening.own_line`），所以裁掉正文不会让她撤不了消息
+#   * ``search_online`` / ``browse_online``  搜索结果和信息流，没有任何工具吃它们的 URL
+#   * ``read_a_guide``     说明书全文，想再看就再读一遍
+#   * ``run_a_script``     命令的输出。上限 4000 字（``app.capabilities.sandbox``），
+#     而且已经带着"还有多少字没给你"那句实话，这里不做第二次截断，只整块换掉
+MATERIAL_TOOLS = frozenset(
+    {
+        "look_around",
+        "look_at_phone",
+        "search_online",
+        "browse_online",
+        "read_a_guide",
+        "run_a_script",
+    }
+)
+
+# 留着的那一档，两类东西：
+#
+# **一 · 长期标识** —— 不是她读到的内容，是她后面还要原样抄回去的凭据：
+#
+#   * ``draw_a_picture`` / ``find_a_picture_online`` / ``look_at_a_picture`` /
+#     ``look_through_your_pictures``  返回里的 ``pic=<32 位十六进制>``，被
+#     ``send_message(pictures=[...])`` / ``look_at_a_picture(which=...)`` /
+#     ``look_through_your_pictures(before=...)`` 吃。翻页那只手的最后一串还是往前翻
+#     的游标
+#   * ``look_for_something_to_read``  ``file=<attachment_id>``，被 ``read_a_bit(which=...)``
+#     吃。``read_a_bit`` 自己指代不明时抛的那句话里也逐个印着候选的 ``file=``，
+#     所以它也在这一档
+#   * ``look_up_contact``  ``channel_id=<id>``，被 ``look_at_phone`` / ``send_message``
+#     吃。安静下来的会话不在手机信封上，这只手是找回它的唯一一条路
+#
+# **二 · 她自己动作的回执** —— ``switch_to`` / ``move_to`` / ``keep_in_mind`` /
+# ``say`` / ``act`` / ``send_message`` / ``take_back_message``。这几条是"这件事到底
+# 做成了没有"的唯一记录：``send_message`` 明确区分发出去了、已经说过了、交出去但没等
+# 到确认三种结局，裁掉她就会照着一个不知道有没有成功的动作再来一遍。
+#
+# **新加一只手落进哪一档必须显式写下来**（用例 ``test_every_tool_she_has_is_classified``
+# 会因为漏掉而失败）。分不清就放这一档：留错了只是多占 token。
+KEPT_TOOLS = frozenset(
+    {
+        "switch_to",
+        "move_to",
+        "keep_in_mind",
+        "say",
+        "act",
+        "send_message",
+        "take_back_message",
+        "look_up_contact",
+        "look_for_something_to_read",
+        "read_a_bit",
+        "draw_a_picture",
+        "find_a_picture_online",
+        "look_through_your_pictures",
+        "look_at_a_picture",
+    }
+)
+
+# 过期载荷换成的那句话。**代码写死，不是概括**：概括会留下一个可能已经错了的版本，
+# 而原文没了，错了没人知道（宪法原则 6：宁可不记，不可记错）。
+MATERIAL_TRIMMED = "（这一段你当时读过，现在不在眼前了。还要就再去看一次。）"
+PICTURE_TRIMMED = "（这张图不在你眼前了。还要看就再拿出来一次。）"
+
+# 图片地址的寿命：``tos_client.get_file_url`` 的签名 90 分钟就过期
+# （:mod:`app.living.pictures` 的 docstring 记着同一个数）。
+PICTURE_URL_MINUTES = 90
+
+# 清理周期的上限。一张图最长活一个清理周期加一个 moment 间隔（10 分钟），
+# 60 + 10 = 70 < 90，留 20 分钟余量。要把周期配得更长，得先解决"回放时地址已经死了"
+# 这件事本身，不能只调这个数。
+#
+# **另一头也得看着**：moment 间隔自己也走动态配置
+# （``living_life_moment_minutes``）。把它调到 30 分钟以上，这条余量就没了 ——
+# 那时候要一起把清理周期调下来。
+MAX_CLEANUP_MINUTES = 60
+
+# Dynamic Config key：五个阈值运行时都能改，不用重新部署。
+MATERIAL_MINUTES_KEY = "living_context_material_minutes"
+OWN_MINUTES_KEY = "living_context_own_minutes"
+CLEANUP_MINUTES_KEY = "living_context_cleanup_minutes"
+HARD_CAP_TOKENS_KEY = "living_context_hard_cap_tokens"
+TRIM_TARGET_TOKENS_KEY = "living_context_trim_target_tokens"
+
+# token 估算。没有能离线跑的 tokenizer（gemini 的 count_tokens 是一次网络调用，不能
+# 放在每轮写库的路上），所以按字节估，而且**一律往高了估**——估低了才会真的撞上模型
+# 的上限，那时是整轮抛错。
+#
+#   * 每 3 个 UTF-8 字节算 1 个 token。中日文一个字 3 字节 ≈ 1 token，而 SentencePiece
+#     常把常用词并成一个，所以这是高估；ASCII 实测约 4 字符 1 token，按 3 字节算同样高估
+#   * 一张图按 2600 算：gemini 每 768×768 一块 258 token，2048×2048 是 9 块 ≈ 2322
+#   * 每条消息再加 8，算角色、id 这些框架开销
+_BYTES_PER_TOKEN = 3
+_PICTURE_TOKENS = 2600
+_FRAME_TOKENS = 8
+
+# 界桩那条消息的开头。她读得懂，而且认得出来：只有这里写 USER 消息，她自己写不出
+# 这个开头。
+CHECKPOINT_HEAD = "【上下文清理 "
+_CHECKPOINT_TAIL = "】"
+
+
+@dataclass(frozen=True)
+class TrimPolicy:
+    """裁剪的五个阈值。运行时从 Dynamic Config 读（:func:`load_trim_policy`）。"""
+
+    material_minutes: int
+    own_minutes: int
+    cleanup_minutes: int
+    hard_cap_tokens: int
+    trim_target_tokens: int
+
+
+DEFAULT_TRIM_POLICY = TrimPolicy(
+    material_minutes=60,
+    own_minutes=240,
+    cleanup_minutes=60,
+    hard_cap_tokens=200_000,
+    trim_target_tokens=100_000,
+)
+
+
+def _holds_together(policy: TrimPolicy) -> str | None:
+    """这套阈值自相矛盾在哪；没矛盾返回 ``None``。"""
+    if policy.material_minutes <= 0 or policy.own_minutes <= 0:
+        return "两档时长都得是正数"
+    if policy.own_minutes < policy.material_minutes:
+        return "她自己的话不能比素材留得还短 —— 那会留下没有结果的调用"
+    if not 0 < policy.cleanup_minutes <= MAX_CLEANUP_MINUTES:
+        return (
+            f"清理周期得在 1..{MAX_CLEANUP_MINUTES} 分钟之间 —— "
+            f"再长图片就会比它的地址（{PICTURE_URL_MINUTES} 分钟）活得久"
+        )
+    if policy.hard_cap_tokens <= 0 or policy.trim_target_tokens <= 0:
+        return "硬顶和裁剪目标都得是正数"
+    if policy.trim_target_tokens >= policy.hard_cap_tokens:
+        return "裁剪目标得小于硬顶，不然撞顶之后裁不下去"
+    return None
+
+
+async def load_trim_policy() -> TrimPolicy:
+    """这一轮按哪套阈值裁；配脏了整套退回 :data:`DEFAULT_TRIM_POLICY` 并记一行。
+
+    **退回是整套，不是逐项。** 几个阈值之间有约束（她自己的话不能比素材短、目标得小
+    于硬顶），逐项修补会拼出一套谁也没设计过的策略，而它会静默地裁错东西。
+
+    Dynamic Config 的拉取是同步 httpx（10s 缓存），走 ``asyncio.to_thread`` 避免缓存
+    刷新那一次阻塞事件循环（与 :func:`app.living.moment.life_moment_minutes` 同口径）。
+    """
+
+    def read() -> TrimPolicy:
+        return TrimPolicy(
+            material_minutes=dynamic_config.get_int(
+                MATERIAL_MINUTES_KEY, default=DEFAULT_TRIM_POLICY.material_minutes
+            ),
+            own_minutes=dynamic_config.get_int(
+                OWN_MINUTES_KEY, default=DEFAULT_TRIM_POLICY.own_minutes
+            ),
+            cleanup_minutes=dynamic_config.get_int(
+                CLEANUP_MINUTES_KEY, default=DEFAULT_TRIM_POLICY.cleanup_minutes
+            ),
+            hard_cap_tokens=dynamic_config.get_int(
+                HARD_CAP_TOKENS_KEY, default=DEFAULT_TRIM_POLICY.hard_cap_tokens
+            ),
+            trim_target_tokens=dynamic_config.get_int(
+                TRIM_TARGET_TOKENS_KEY,
+                default=DEFAULT_TRIM_POLICY.trim_target_tokens,
+            ),
+        )
+
+    policy = await asyncio.to_thread(read)
+    broken = _holds_together(policy)
+    if broken is not None:
+        logger.warning(
+            "上下文裁剪的动态配置不成立（%s）：%r；本次整套退回默认值 %r",
+            broken,
+            policy,
+            DEFAULT_TRIM_POLICY,
+        )
+        return DEFAULT_TRIM_POLICY
+    return policy
+
+
+def estimate_tokens(messages: list[Message]) -> int:
+    """这一份上下文大概多少 token —— 往高了估，理由见本模块的估算常量。
+
+    只算上下文本身：SYSTEM 正文和工具定义不在这份列表里，它们是每次请求的固定开销
+    （工具定义这一份 2026-09 实测约 26 KB，按同一口径约 8.7k token），设硬顶时要在
+    模型的 context 上限之外给它们和这一轮的新增留出余量。
+    """
+    return sum(_message_tokens(m) for m in messages)
+
+
+def _text_tokens(text: str) -> int:
+    return -(-len(text.encode("utf-8")) // _BYTES_PER_TOKEN)
+
+
+def _message_tokens(message: Message) -> int:
+    total = _FRAME_TOKENS
+    content = message.content
+    if isinstance(content, str):
+        total += _text_tokens(content)
+    else:
+        for block in content:
+            if block.type == "text":
+                total += _text_tokens(block.text or "")
+            else:
+                total += _PICTURE_TOKENS
+    if message.reasoning_content:
+        total += _text_tokens(message.reasoning_content)
+    for call in message.tool_calls:
+        total += _text_tokens(call.name)
+        total += _text_tokens(json.dumps(call.arguments, ensure_ascii=False))
+    return total
+
+
+def _cleanup_instant(now: datetime, minutes: int) -> datetime:
+    """``now`` 之前最近的那个清理点，按生活日 04:00 起算。
+
+    按生活日而不是按 Unix 纪元取整，是为了让周期跟她那一天对齐：04:00 是整点，所以
+    60 分钟的周期落在每个整点上。取整让两次清理之间的截止线完全不动 —— 前缀因此逐字节
+    稳定，前缀缓存才有得命中。
+    """
+    start, _end = living_day_bounds(living_day_of(now))
+    step = timedelta(minutes=minutes)
+    return start + (now - start) // step * step
+
+
+def _checkpoint(at: datetime, state: str) -> Message:
+    """界桩：这次清理的时刻 + 她此刻的状态，作为往后那一段的新起点。"""
+    return Message(
+        role=Role.USER,
+        content=(
+            f"{CHECKPOINT_HEAD}{at.isoformat()}{_CHECKPOINT_TAIL}\n"
+            f"再往前的那一段不在你眼前了，只剩你自己记下来的。你现在：\n\n{state}"
+        ),
+    )
+
+
+def _checkpoint_at(message: Message) -> datetime | None:
+    """这条是界桩吗；是就给出它的时刻。"""
+    if message.role is not Role.USER or not isinstance(message.content, str):
+        return None
+    if not message.content.startswith(CHECKPOINT_HEAD):
+        return None
+    end = message.content.find(_CHECKPOINT_TAIL, len(CHECKPOINT_HEAD))
+    if end < 0:
+        return None
+    try:
+        return datetime.fromisoformat(message.content[len(CHECKPOINT_HEAD) : end])
+    except ValueError:
+        return None
+
+
+def _groups(messages: list[Message]) -> list[list[int]]:
+    """把消息切成"一次完整的工具调用"：带调用的那条 ASSISTANT + 紧跟的全部 TOOL。
+
+    其余每条自成一组。切好之后整组留、整组删，就不会出现没有结果的调用。
+    """
+    groups: list[list[int]] = []
+    i = 0
+    while i < len(messages):
+        group = [i]
+        if messages[i].role is Role.ASSISTANT and messages[i].tool_calls:
+            j = i + 1
+            while j < len(messages) and messages[j].role is Role.TOOL:
+                group.append(j)
+                j += 1
+            i = j
+        else:
+            i += 1
+        groups.append(group)
+    return groups
+
+
+def _bounds(messages: list[Message]) -> list[datetime | None]:
+    """每条消息的"最晚写于"：它右边第一个界桩的时刻，没有就是 ``None``。
+
+    ``None`` = 它在最新那一代里，年龄无从判断，一律留着。
+    """
+    nearest: datetime | None = None
+    out: list[datetime | None] = [None] * len(messages)
+    for i in range(len(messages) - 1, -1, -1):
+        out[i] = nearest
+        at = _checkpoint_at(messages[i])
+        if at is not None:
+            nearest = at
+    return out
+
+
+def _call_names(messages: list[Message]) -> dict[str, str]:
+    return {
+        call.id: call.name for m in messages for call in m.tool_calls
+    }
+
+
+def _without_pictures(message: Message) -> Message:
+    """图片块换成一句话，别的一个字不动。
+
+    换成**文本块**而不是整个丢掉：``look_at_phone`` 的正文里逐张写着 ``[图片N]``，
+    块数一少就跟那些编号对不上了。
+    """
+    content = message.content
+    if not isinstance(content, list) or all(b.type == "text" for b in content):
+        return message
+    return Message(
+        role=message.role,
+        content=[
+            b if b.type == "text" else ContentBlock.from_text(PICTURE_TRIMMED)
+            for b in content
+        ],
+        reasoning_content=message.reasoning_content,
+        tool_calls=message.tool_calls,
+        tool_call_id=message.tool_call_id,
+    )
+
+
+def _faded(message: Message, *, name: str | None) -> Message:
+    """过期的素材载荷换成一句写死的短语；消息结构一条不动。"""
+    if message.role is not Role.TOOL or name not in MATERIAL_TOOLS:
+        return _without_pictures(message)
+    return Message(
+        role=Role.TOOL,
+        content=MATERIAL_TRIMMED,
+        tool_call_id=message.tool_call_id,
+    )
+
+
+def _clean(
+    messages: list[Message], *, at: datetime, policy: TrimPolicy
+) -> list[Message]:
+    """按两档时长裁一遍历史。整组过期整组删，没过期只换过期的载荷。"""
+    bounds = _bounds(messages)
+    names = _call_names(messages)
+    own = timedelta(minutes=policy.own_minutes)
+    material = timedelta(minutes=policy.material_minutes)
+
+    kept: list[Message] = []
+    for group in _groups(messages):
+        bound = bounds[group[0]]
+        if bound is None:
+            kept.extend(messages[i] for i in group)
+            continue
+        age = at - bound
+        if age >= own:
+            continue
+        if age >= material:
+            kept.extend(
+                _faded(messages[i], name=names.get(messages[i].tool_call_id or ""))
+                for i in group
+            )
+        else:
+            kept.extend(_without_pictures(messages[i]) for i in group)
+    return kept
+
+
+def _under_cap(
+    messages: list[Message], *, floor: int, policy: TrimPolicy
+) -> list[Message]:
+    """撞上硬顶就从最老的组开始整组丢，丢到裁剪目标以下，并且一定留下一行日志。
+
+    ``floor`` 是这一轮自己的消息条数，它们一条都不丢：丢掉刚发生的事等于这一轮白跑。
+    """
+    total = estimate_tokens(messages)
+    if total <= policy.hard_cap_tokens:
+        return messages
+
+    tail_from = len(messages) - floor
+    dropped: set[int] = set()
+    running = total
+    for group in _groups(messages):
+        if running <= policy.trim_target_tokens or group[-1] >= tail_from:
+            break
+        dropped.update(group)
+        running -= sum(_message_tokens(messages[i]) for i in group)
+
+    kept = [m for i, m in enumerate(messages) if i not in dropped]
+    line = (
+        "上下文撞到硬顶：估 %d token > %d，裁到 %d token（%d 条 → %d 条）"
+    )
+    args = (total, policy.hard_cap_tokens, running, len(messages), len(kept))
+    if running > policy.hard_cap_tokens:
+        logger.error(
+            line + "；这一轮自己就超了，只能原样写下去",
+            *args,
+        )
+    else:
+        logger.warning(line, *args)
+    return kept
+
+
+def trim_for_round(
+    history: list[Message],
+    *,
+    now: datetime,
+    state: str,
+    policy: TrimPolicy,
+) -> list[Message]:
+    """这一轮该喂给模型的那份历史：跨过清理点就裁一遍并立一根界桩。
+
+    没跨过就把 ``history`` 原样还回来，一个字节都不动。
+
+    **裁在模型调用之前，不是之后。** 两个理由，都是硬的：
+
+      * *过期的图片地址会让这一轮抛错，而且抛在模型请求之前。* 只在收尾裁的话，一段
+        带着死地址的历史永远轮不到被裁——每一轮都在 adapter 下载那一步炸掉，收尾根本
+        走不到。停机超过签名寿命再起来就是这个形状。
+      * *前缀缓存。* 这一轮喂进去的前缀和这一轮存下去的前缀因此是同一份，下一轮接着
+        命中；裁在收尾的话一次清理会连着换两次前缀，白丢一次命中。
+    """
+    at = _cleanup_instant(now, policy.cleanup_minutes)
+    # 界桩先立起来再裁：它同时是这一代的上界，立完再裁，这一代的图片当场就走。
+    # 反过来（先裁后立）的话图片要等到下一轮才走，白多活一个 moment 间隔。
+    staged = list(history)
+    if history and _due(history, at):
+        staged.append(_checkpoint(at, state))
+    return _clean(staged, at=at, policy=policy)
+
+
+def next_transcript(
+    history: list[Message],
+    produced: list[Message],
+    *,
+    policy: TrimPolicy,
+) -> list[Message]:
+    """这一轮结束后该存下来的完整上下文，直接交给 :func:`commit_moment_transcript`。
+
+    ``history`` 是 :func:`trim_for_round` 裁过、这一轮真的喂给了模型的那一份，
+    ``produced`` 是这一轮的输入和模型产出的每一条。两档时长在上一步已经裁完，这里
+    只剩硬顶兜底。
+    """
+    if not produced:
+        raise ValueError("这一轮一条消息都没有 —— 没有可写下去的上下文")
+    return _under_cap([*history, *produced], floor=len(produced), policy=policy)
+
+
+def _due(history: list[Message], at: datetime) -> bool:
+    """这一轮跨过清理点了吗 —— 上一根界桩比这个清理点早就是跨过了。
+
+    一根都没有（一天的头几轮）也算跨过：那一下把第一根界桩立起来，往后的年龄才有得算。
+    """
+    for message in reversed(history):
+        last = _checkpoint_at(message)
+        if last is not None:
+            return last < at
+    return True
