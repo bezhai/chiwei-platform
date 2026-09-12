@@ -142,6 +142,15 @@ provider 拒掉整个请求，而且同一轮里多个调用和多个结果必�
 **上**，两份合起来必须正好覆盖 ``MOMENT_TOOLS``（有用例钉住）。分不清的那一档是留着：
 留错了只是多占 token，裁错了是她拿着一个失效的句柄去发图。
 
+**``look_at_phone`` 在"留着"那一档，它是唯一一只返回别人内容却留 4 小时的手。** 判据
+不是"这是不是她读到的东西"，而是"这次返回里有没有别处找不到的凭据"：那一页上每条她
+自己发的消息带着 ``take_back_id``，头上那串 ``before=`` 是往前翻唯一的入口。前者在状
+态快照"你刚做过、说过"那段有副本，但那段只有最近 12 条；后者根本没有第二份。只留句
+柄、换掉正文更精确，代价是裁剪这一层要解析手机那边的渲染格式 —— 那边改一个字，句柄
+就静默地留不住，而症状是几小时后她拿着一个不存在的编号去撤消息。别人的正文因此多留
+3 小时；一页十几条文本跟那个风险不是一个量级，而且图片块不跟着多留（它走下面那条独立
+的线）。
+
 **"素材"只指工具返回的载荷。** 每轮喂进去的那条 USER（状态快照 + 手机信封）和她自
 己说的每一句都算她这一侧，走 ``own_minutes``：它们是她那段经历读得懂的骨架，先于她
 的话消失的话，剩下的对白就没有了由头。
@@ -267,9 +276,6 @@ async def commit_moment_transcript(
 # 她读到的素材：读完就该沉淀成她自己的东西，过了保留期换成一句短语。
 #
 #   * ``look_around``      够得着的地方现在什么样 —— 快照每轮重发一份
-#   * ``look_at_phone``    别人的聊天内容。里面那串 ``take_back_id`` 不是孤本：她自己
-#     发出去的每条消息，快照的"你刚做过、说过"那段照印同一个编号
-#     （:func:`app.living.happening.own_line`），所以裁掉正文不会让她撤不了消息
 #   * ``search_online`` / ``browse_online``  搜索结果和信息流，没有任何工具吃它们的 URL
 #   * ``read_a_guide``     说明书全文，想再看就再读一遍
 #   * ``run_a_script``     命令的输出。上限 4000 字（``app.capabilities.sandbox``），
@@ -277,7 +283,6 @@ async def commit_moment_transcript(
 MATERIAL_TOOLS = frozenset(
     {
         "look_around",
-        "look_at_phone",
         "search_online",
         "browse_online",
         "read_a_guide",
@@ -300,6 +305,15 @@ MATERIAL_TOOLS = frozenset(
 #   * ``look_up_contact`` / ``look_through_your_phone``  ``channel_id=<id>``，被
 #     ``look_at_phone`` / ``send_message`` 吃（翻页那只手的最后一串还是往下翻的游标）。
 #     安静下来的会话不在手机通知上，这两只手是找回它的仅有的两条路
+#   * ``look_at_phone``  **这一档里唯一一只返回是别人内容的手，破例在这里说清楚。**
+#     它那一页上有两样凭据：每条她自己发的消息带的 ``take_back_id``，和头上那串
+#     ``before=``。前者在快照的"你刚做过、说过"那段有副本，但那段只有最近 12 条，滚
+#     出去的旧消息就没有第二份了；后者是往前翻**唯一**的入口，从头到尾只出现在这一
+#     次返回里，换掉正文她就再也翻不回这条会话更早的地方。
+#     只保留句柄、把正文换掉更精确，但那要在裁剪这一层解析手机那边渲染出来的标签 ——
+#     渲染改一个字，句柄就静默地留不住了，而症状是几小时后她拿着一个不存在的编号去
+#     撤消息。别人的正文因此多留 3 小时：一页十几条文本，跟这个风险不是一个量级
+#     （图片块**不**跟着多留，它走 :data:`PICTURE_TRIMMED` 那条独立的线）
 #
 # **二 · 她自己动作的回执** —— ``switch_to`` / ``move_to`` / ``keep_in_mind`` /
 # ``say`` / ``act`` / ``send_message`` / ``take_back_message`` / ``stop_for_now``。
@@ -320,6 +334,7 @@ KEPT_TOOLS = frozenset(
         "stop_for_now",
         "send_message",
         "take_back_message",
+        "look_at_phone",
         "look_up_contact",
         "look_through_your_phone",
         "look_for_something_to_read",

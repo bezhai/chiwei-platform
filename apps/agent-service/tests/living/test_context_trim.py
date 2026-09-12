@@ -186,6 +186,9 @@ def test_the_tools_that_hand_her_a_handle_are_all_kept():
         "look_up_contact",
         "send_message",
         "take_back_message",
+        # 这一页上两样：每条她自己发的消息带的 ``take_back_id``，和头上那串
+        # ``before=``（往前翻唯一的入口）。
+        "look_at_phone",
     ):
         assert name in KEPT_TOOLS, f"{name} 的返回里有她后面还要用的东西"
 
@@ -344,6 +347,35 @@ def test_a_handle_outlives_the_material_window():
 
     assert "pic=abc123" not in "".join(
         _texts(_play(start=_at(13, 0), until=_at(18, 0), events=listed))
+    )
+
+
+def test_the_phone_page_keeps_its_handles_past_the_material_window():
+    """「看手机」那一页带的两串凭据跟着她自己的话走 4 小时，不是 1 小时。
+
+    ``take_back_id`` 在状态快照"你刚做过、说过"那段确实有副本，但那段只有最近 12
+    条 —— 滚出去的旧消息就没有第二份了；``before=`` 更是从头到尾只出现在这一次返回
+    里，换掉整段载荷之后她就再也翻不回这条会话更早的地方。
+    """
+    looked = {
+        "13:30": [
+            _call("look_at_phone", "c1", channel_id="g1"),
+            _result(
+                "c1",
+                "「宅居研究所」（其中 1 条是新的；前面还有 30 条，想往前翻就带上 "
+                "before=b3ad23ff-0e3e-443a-8fcb-e2a6c73169bf）\n"
+                '<msg from="你" time="13:29 CST" take_back_id="deadbeef">我在</msg>',
+            ),
+            _said("看完了"),
+        ]
+    }
+
+    joined = "".join(
+        _texts(_play(start=_at(13, 0), until=_at(16, 0), events=looked))
+    )
+    assert 'take_back_id="deadbeef"' in joined, "3 小时后她撤不回自己刚说的那句了"
+    assert "before=b3ad23ff-0e3e-443a-8fcb-e2a6c73169bf" in joined, (
+        "往前翻那串只有这一次返回里有，换掉就再也翻不回去了"
     )
 
 
