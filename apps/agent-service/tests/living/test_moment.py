@@ -24,7 +24,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.neutral import Message, Role
+from app.agent.core import _normalise_tool_result
+from app.agent.neutral import Message, Role, ToolCall, ToolResult
 from app.agent.runtime_context import agent_context
 from app.living.happening import read_perceived_by
 from app.living.loose_ends import LooseEnd, list_open_loose_ends
@@ -73,6 +74,10 @@ class FakeMoment:
     """替身 life：这个 moment 她调了哪些工具是写死的，只有模型那一步是假的。
 
     走真工具 + 真 context 绑定，所以写库、派生 id、lane 隔离都是被真的验到的。
+
+    ``transcript_sink`` 按真 ReAct 循环的口径填：每个工具一条带 tool_call 的
+    ASSISTANT + 一条 TOOL 返回，最后是她那句话。连续上下文存的就是这个列表，填得
+    不像真的，验上下文的用例就是在验一个不存在的形状。
     """
 
     def __init__(self, *calls: tuple[str, dict], said: str = "继续") -> None:
@@ -83,10 +88,32 @@ class FakeMoment:
 
     async def run(self, messages, **kwargs):
         self.runs.append((messages, kwargs))
+        sink = kwargs.get("transcript_sink")
         with agent_context(kwargs["context"]):
-            for name, args in self.calls:
-                self.results.append(await _TOOLS[name].invoke(args))
-        return Message(role=Role.ASSISTANT, content=self.said)
+            for i, (name, args) in enumerate(self.calls):
+                result = await _TOOLS[name].invoke(args)
+                self.results.append(result)
+                if sink is None:
+                    continue
+                call_id = f"call-{i}"
+                sink.append(
+                    Message(
+                        role=Role.ASSISTANT,
+                        content="",
+                        tool_calls=[
+                            ToolCall(id=call_id, name=name, arguments=args)
+                        ],
+                    )
+                )
+                sink.append(
+                    _normalise_tool_result(
+                        ToolResult(tool_call_id=call_id, content=result)
+                    ).to_message()
+                )
+        reply = Message(role=Role.ASSISTANT, content=self.said)
+        if sink is not None:
+            sink.append(reply)
+        return reply
 
 
 @pytest.fixture
@@ -506,9 +533,7 @@ async def test_what_a_sister_said_can_be_kept_in_a_moment_that_carries_on(
     for step in (1, 2, 3):
         await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP * step)
 
-    snapshot = "\n".join(
-        m.content for m in quiet.runs[-1][0] if m.role is Role.USER
-    )
+    snapshot = _what_she_read(quiet.runs[-1])
     assert "绫奈问我周末陪不陪她去祭典" in snapshot, (
         "隔了三个「继续」她就忘了绫奈跟她说过什么 —— 这正是上一代的死法"
     )
@@ -576,8 +601,15 @@ async def test_keeping_nothing_in_mind_is_a_thing_she_can_say(moment_db, stub_mo
 
 
 def _what_she_read(run) -> str:
-    """她这个 moment 真正读到的 USER 消息（快照 + 手机信封）。"""
-    return "\n".join(m.content for m in run[0] if m.role is Role.USER)
+    """这个 moment 新摆到她眼前的那条 USER 消息（快照 + 手机信封）。
+
+    喂给模型的列表是"连续上下文 + 这一轮的刺激"，刺激永远是最后一条
+    （:func:`app.living.moment.run_moment`）。把整个列表里的 USER 连起来读就会把她
+    前几个 moment 的快照也算进来，"这个 moment 有没有看到 X"从此永远是 yes。
+    """
+    stimulus = run[0][-1]
+    assert stimulus.role is Role.USER, f"最后一条不是这一轮的刺激：{stimulus!r}"
+    return stimulus.content
 
 
 @pytest.mark.integration
@@ -706,10 +738,8 @@ async def test_a_moment_only_sees_what_happened_since_the_last_one(
     second = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
     third = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP * 2)
 
-    second_input = "\n".join(
-        m.content for m in runner.runs[1][0] if m.role is Role.USER
-    )
-    third_input = "\n".join(m.content for m in runner.runs[2][0] if m.role is Role.USER)
+    second_input = _what_she_read(runner.runs[1])
+    third_input = _what_she_read(runner.runs[2])
     assert "你在看什么" in second_input
     assert "你在看什么" not in third_input, "游标没推进 —— 同一句话每次重读一遍"
     assert third.after_seq == second.next_seq
@@ -1081,7 +1111,7 @@ async def test_the_cursor_only_advances_when_the_record_lands(
     again = await run_moment(lane=LANE, persona_id="akao", now=_at(14, 1))
 
     assert again.after_seq == 0
-    retried_input = "\n".join(m.content for m in runner.runs[-1][0] if m.role is Role.USER)
+    retried_input = _what_she_read(runner.runs[-1])
     assert "你在看什么" in retried_input, "崩掉那个 moment 的感知被静默吞了"
 
 

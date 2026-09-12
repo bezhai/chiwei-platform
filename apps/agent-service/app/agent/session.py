@@ -1,95 +1,59 @@
-"""Agent session续接 store — a replay-able conversation transcript in PG.
+"""Transcript store — a replay-able ``Message`` sequence in durable PG.
 
-An ``Agent.run(..., session_id=...)`` call is *stateful*: the run reads the
-transcript stored under ``session_id``, prepends it so the model continues from
-where it left off, and on completion appends this round's new messages back. The
-transcript is a *durable* PG store (Data ``SessionTranscript``): a missing /
-cleared row just means "记不太清刚才聊啥" — a cold start, never an error. Durable
-PG (not Redis) so it survives pod restarts (意识流不丢), can be wiped with ops-db
-for a clean cold-start verification, and can be SQL-queried to read back exactly
-how she thought through a day.
+Two operations over Data :class:`~app.domain.session_transcript.SessionTranscript`:
+:func:`load_session` reads the newest stored version, :func:`replace_session`
+writes a new one. Nothing else — the store holds what it is handed, in the order
+it was handed, and hands it back verbatim.
 
-What makes this correct is *losslessness* (decision 4): a stored message must
-feed back to the model verbatim, including tool calls, tool results, and each
-provider's private blobs (gemini ``thought_signature``). That is why we go
-through ``Message.to_replay_dict`` / ``from_replay_dict`` rather than the
-langfuse-facing ``to_dict`` (which drops the signature). The whole transcript is
-serialised to a single JSON-text column (``transcript_json``) — the framework
-persist layer cannot store list/dict fields, and a transcript is naturally one
-opaque blob, so a TEXT column is the clean fit.
+**Losslessness is the whole point.** A stored message must feed back to the model
+byte-for-byte, tool calls, tool results and each provider's private blobs (gemini
+``thought_signature``) included, so serialisation goes through
+``Message.to_replay_dict`` / ``from_replay_dict`` rather than the langfuse-facing
+``to_dict`` (which drops the signature). The whole transcript is one JSON text
+column (``transcript_json``): a transcript is naturally one opaque blob and a TEXT
+column is the clean fit.
 
-Storage: each ``append_session`` writes a new ``SessionTranscript`` version via
-``insert_append`` (Version auto-increment, advisory-lock serialised per key);
-``load_session`` reads the newest version via ``select_latest``. Old versions are
-retained as durable history.
+**No trimming here.** Trimming is a policy decision about what she keeps and for
+how long, and it lives in exactly one place — :mod:`app.living.continuity`. A
+second regime in this layer would silently drop messages the policy meant to keep,
+and it would do so behind the caller's back (the returned value would look fine).
+So the caps this module used to apply are gone; the caller decides what the full
+new transcript is and writes that.
 
-Concurrency: this module does NOT add its own lock. The read-modify-write is
-correct only under the caller's "same session_id is called serially" guarantee
-(world/life串行化 is the engines' job, not here).
+**Every write is a CAS.** :func:`replace_session` takes the ``expected_ver``
+returned by :func:`load_session` and only lands when the stored version is still
+that one. Under the caller's serialisation guarantee the check never fires; when it
+does fire, the guarantee is broken (a second process, a bypassed lock) and the
+caller must treat it as a failure rather than let one writer's whole transcript be
+overwritten by another's.
 
-Safety valve: a single transcript is capped on TWO axes that fire
-whichever-first — ``TRANSCRIPT_MAX_MESSAGES`` (turn count) and
-``TRANSCRIPT_MAX_BYTES`` (serialised size). Count alone is not enough: a single
-long tool result or instruction can pin a huge value / blow the replay context
-while the message count stays tiny. Past either cap we drop the oldest messages
-(never silently — log.warning) so one runaway session can't pin a huge row or
-blow the model's context.
+Old versions are retained as durable history — every round leaves a full copy, so a
+day's thinking can be read back with SQL.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
-from app.agent.neutral import Message, Role
+from app.agent.neutral import Message
 from app.domain.session_transcript import SessionTranscript
 from app.runtime.persist import insert_append, select_latest
 
 logger = logging.getLogger(__name__)
 
-# Safety valve (decision 2 "别炸"), axis 1 — message count. The model context
-# budget is partly a function of how many turns it must re-read, and "drop the
-# oldest few rounds" is naturally expressed in messages. world/life rounds are
-# short (~user stimulus + assistant + a tool call/result pair ≈ a few messages),
-# so 200 messages ≈ ~50 recent rounds — comfortably inside a one-hour session's
-# "几百轮" while bounding the stored row and replay context. First刀不压缩;
-# this only stops失控.
-TRANSCRIPT_MAX_MESSAGES = 200
 
-# Safety valve axis 2 — serialised bytes. Message count alone doesn't bound size:
-# one long tool result (a big recall dump, a multi-KB sandbox stdout) or a long
-# instruction can pin a multi-MB row and bloat the replay context while the
-# message count stays tiny. We cap the serialised transcript at 256 KiB —
-# generous next to a normal world/life round (a few KB), so it never trips on
-# healthy traffic, yet small relative to the model's context budget, so a runaway
-# long-result session is bounded. Like the count cap it drops oldest + logs; it
-# never silently truncates. (Measured against the JSON we actually write —
-# ``to_replay_dict`` + ``json.dumps`` UTF-8.)
-TRANSCRIPT_MAX_BYTES = 256 * 1024
+async def load_session(session_id: str) -> tuple[list[Message], int]:
+    """The newest stored transcript plus the version it was read at.
 
+    A missing row (first wake / cleared db) is a cold start: ``([], 0)``, never an
+    error. Version ``0`` is the base ``insert_append`` compares against, so a cold
+    start's write lands as version 1.
 
-async def load_session(session_id: str) -> list[Message]:
-    """Read the stored transcript, deserialised losslessly.
-
-    A missing row (first唤醒 / cleared db) is a cold start: return ``[]`` so the
-    caller continues from PG hard facts (decision 6), never an error. A corrupt
-    value (should not happen — we write it) is treated the same way, logged,
-    rather than crashing the run.
-    """
-    messages, _ver = await load_session_versioned(session_id)
-    return messages
-
-
-async def load_session_versioned(session_id: str) -> tuple[list[Message], int]:
-    """Like :func:`load_session`, but also return the stored version it read.
-
-    The version is the optimistic-concurrency token for
-    :func:`replace_session`'s ``expected_ver``: a fold loads ``(messages,
-    ver)``, spends a long LLM call, then replaces only if the transcript is
-    still at that ver (nobody appended meanwhile). Missing row → ``([], 0)``
-    (cold start; ver 0 matches ``insert_append``'s ``COALESCE(MAX(ver), 0)``
-    base). A corrupt value still reports the row's real ver — the caller is
-    looking at *that* version, however unreadable its payload.
+    A corrupt value (should not happen — we write it) is logged and also read as a
+    cold start, but reports the row's real version: the caller is looking at *that*
+    version, however unreadable its payload, and must CAS against it.
     """
     row = await select_latest(SessionTranscript, {"session_id": session_id})
     if row is None:
@@ -106,125 +70,38 @@ async def load_session_versioned(session_id: str) -> tuple[list[Message], int]:
         return [], row.ver
 
 
-async def append_session(session_id: str, new_messages: list[Message]) -> None:
-    """Append this round's new messages and write the transcript back.
-
-    Read-modify-write under the caller's serialisation guarantee. The combined
-    transcript is capped (see ``_cap_transcript``), serialised losslessly, and
-    appended as a new ``SessionTranscript`` version (``insert_append`` assigns the
-    next ver and serialises concurrent writers per key with an advisory lock).
-    """
-    if not new_messages:
-        return
-    existing = await load_session(session_id)
-    await _store_transcript(session_id, existing + new_messages)
-
-
 async def replace_session(
     session_id: str,
     messages: list[Message],
     *,
-    expected_ver: int | None = None,
+    expected_ver: int,
+    session: Any = None,
 ) -> bool:
-    """Overwrite the transcript wholesale as a new version (折叠写回用).
+    """Write ``messages`` as the next version; report whether it landed.
 
-    Unlike ``append_session`` this does NOT read-modify-write: the caller has
-    already computed the full replacement.
-    A wholesale overwrite computed from a *stale* read would silently swallow
-    whatever was appended in between, so the caller passes ``expected_ver`` —
-    the version it loaded the transcript at (:func:`load_session_versioned`).
-    The write only lands if the stored version is still exactly that
-    (``insert_append``'s atomic check-and-insert); returns whether it landed.
-    ``False`` = somebody appended meanwhile (e.g. the serialisation lock
-    expired mid-LLM and a new round slipped in) — nothing was written, the
-    caller decides what losing the race means. ``expected_ver=None`` keeps
-    the unconditional overwrite (still under the caller's serialisation
-    guarantee). Old versions stay as durable history. Empty ``messages`` is
-    a no-op (never wipe a transcript by accident) and reports ``False`` —
-    nothing was written.
+    The caller has already computed the full replacement (this is not a
+    read-modify-write). ``expected_ver`` is the version :func:`load_session`
+    returned: the write only lands if the stored version is still exactly that,
+    judged inside the INSERT itself. ``False`` means somebody wrote in between —
+    nothing was written, and what that means is the caller's call.
+
+    ``session`` runs the write on the caller's ``AsyncSession`` so it commits
+    atomically with whatever else that transaction did.
+
+    Empty ``messages`` is rejected: it would store an empty transcript, i.e. wipe
+    her context, and no caller ever means that.
     """
     if not messages:
-        return False
-    return await _store_transcript(session_id, messages, expected_ver=expected_ver)
-
-
-async def _store_transcript(
-    session_id: str,
-    messages: list[Message],
-    *,
-    expected_ver: int | None = None,
-) -> bool:
-    """Cap, serialise losslessly, and write one new ``SessionTranscript`` version.
-
-    With ``expected_ver`` the write is the CAS variant (see
-    :func:`replace_session`); returns whether a row was actually written.
-    """
-    combined = _cap_transcript(messages, session_id)
+        raise ValueError(
+            f"session {session_id}: refusing to store an empty transcript — "
+            f"that erases her context, and no caller means it"
+        )
     transcript_json = json.dumps(
-        [m.to_replay_dict() for m in combined], ensure_ascii=False
+        [m.to_replay_dict() for m in messages], ensure_ascii=False
     )
     written = await insert_append(
         SessionTranscript(session_id=session_id, transcript_json=transcript_json),
         expected_current_ver=expected_ver,
+        session=session,
     )
     return written == 1
-
-
-def _replay_bytes(messages: list[Message]) -> int:
-    """Serialised UTF-8 byte size of the transcript, exactly as it lands in PG.
-
-    Measures the same ``to_replay_dict`` + ``json.dumps`` form ``append_session``
-    writes, so the byte cap bounds the *actual* stored value, not an approximation.
-    """
-    return len(
-        json.dumps(
-            [m.to_replay_dict() for m in messages], ensure_ascii=False
-        ).encode("utf-8")
-    )
-
-
-def _cap_transcript(messages: list[Message], session_id: str) -> list[Message]:
-    """Trim to fit BOTH the message-count and byte caps, dropping oldest.
-
-    Two caps fire whichever-first (spec safety valve):
-      * ``TRANSCRIPT_MAX_MESSAGES`` — at most this many turns,
-      * ``TRANSCRIPT_MAX_BYTES`` — the serialised value stays under this size.
-
-    Three rules on the trim:
-      * keep the newest messages (recency matters for续接),
-      * never start the kept transcript on an orphaned TOOL result — a tool
-        message whose ASSISTANT tool-call request was dropped is rejected by
-        providers. Advance the cut forward to the next non-TOOL boundary,
-      * never trim to empty: if a single (newest) message already exceeds the
-        byte cap we keep it rather than lose this whole round — the cap bounds
-        runaway *accumulation*, it is not a guillotine on one legitimately large
-        turn.
-
-    Dropping is logged (never silent) so an oversized session is observable.
-    """
-    over_count = len(messages) > TRANSCRIPT_MAX_MESSAGES
-    over_bytes = _replay_bytes(messages) > TRANSCRIPT_MAX_BYTES
-    if not over_count and not over_bytes:
-        return messages
-
-    # Start from the count-driven cut, then advance further until the kept tail
-    # also fits the byte cap. Both caps drop from the oldest end.
-    cut = max(0, len(messages) - TRANSCRIPT_MAX_MESSAGES)
-    # never drop the single newest message (that would risk an empty transcript)
-    while cut < len(messages) - 1 and _replay_bytes(messages[cut:]) > TRANSCRIPT_MAX_BYTES:
-        cut += 1
-    # advance past any leading TOOL results so we don't begin on an orphan
-    while cut < len(messages) - 1 and messages[cut].role == Role.TOOL:
-        cut += 1
-    kept = messages[cut:]
-    logger.warning(
-        "agent session %s transcript hit cap (%d msgs / %d bytes); dropped %d "
-        "oldest, kept %d msgs / %d bytes",
-        session_id,
-        len(messages),
-        _replay_bytes(messages),
-        cut,
-        len(kept),
-        _replay_bytes(kept),
-    )
-    return kept
