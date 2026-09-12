@@ -11,9 +11,14 @@
 
 **她的上下文跨 moment 连续。** 一个 moment 结束时，这一轮喂进去的那条 USER 消息、她说的
 每一句、每一次工具调用和工具返回原样存下来，下一个 moment 接在输入前面
-（:mod:`app.living.continuity`：键是 ``lane:persona:生活日``，写入跟这条记录、感知
-游标、手机已读同一个事务，写失败就是这一轮失败）。另外两样记忆照旧：状态快照是四
-层当下事实（:mod:`app.living.snapshot`），"心里挂着没了结的事"那份清单由
+（:mod:`app.living.continuity`：键是 ``lane:persona:生活日``，在这条记录和手机已读提交
+之后单独写，写失败只记一行 ERROR、这一轮照样算数）。
+
+**所以醒来只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、手机上来了
+什么（:meth:`app.living.snapshot.MomentSnapshot.render_new`）。她此刻的样子（在哪、在做
+什么、上一次写下的那天、心里挂着什么、刚做过说过什么）读一百遍字字一样，上一轮读过的
+还在上下文里，所以它只在清理那一下作为新起点重铺一次
+（:func:`app.living.continuity.trim_for_round`）。"心里挂着没了结的事"那份清单由
 :func:`keep_in_mind` 重写（:mod:`app.living.loose_ends`）。
 
 **挂线头是独立的一件事，不绑在 ``switch_to`` 上。** 「是否换事」不等于「是否记住」：
@@ -48,6 +53,7 @@
     "该在几点"，到点了她自己看得见，见 :mod:`app.living.loose_ends`）
   * :func:`say` / :func:`act`  跟姐妹说话 / 做一个她们看得见的动作
   * :func:`look_around`  够得着的地方现在怎么样
+  * :func:`stop_for_now` 这一轮我到此为止（零参数，调完这一轮就结束）
   * ``look_at_phone``    拿起手机看某条会话说了什么（:mod:`app.living.phone`）
   * ``look_up_contact``  找一个她读到过的人（:mod:`app.living.phone`）
   * ``send_message``     给手机上某条会话发一条（:mod:`app.living.mouth`）
@@ -91,7 +97,7 @@ from app.agent.core import AgentConfig
 from app.agent.neutral import Message, Role
 from app.agent.runtime_context import agent_context, get_context
 from app.agent.tooling import tool
-from app.agent.tools._common import tool_error
+from app.agent.tools._common import get_or_create_counter, tool_error
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
 from app.data.session import get_session
@@ -170,13 +176,23 @@ LIFE_MOMENT_PROMPT_ID = "living_life_moment"
 # 用 life-model 而不是 offline-model，是因为**量级不一样**：life 一天 432 个 moment × 三个
 # 人，world 一天二十几轮。life-model 这个别名本来就是给 life 这种高频线选的，world
 # 那条留在 offline-model 上，两条线的档位不该互相牵动。
-# recursion_limit 8：look_around → switch_to → say/act 几步就该收口；她不该在一个 moment
-# 里把一整段生活演完（十分钟里的一小步）。
+# recursion_limit 12 = **她一口气能做几件事**，不是"一次思考多深"。上下文连续之后这两个
+# 问题分开了：一件完整的事要三四次模型调用（搜一下拿到结果 → 读进去 → 说出来 / 做出
+# 来），12 给的是三件的余量。8 只够两件，而 2026-09-11 实测 5 小时 66 个 moment 里，那
+# 12 只需要先拿中间结果才用得上的工具一次都没被调用过。
+#
+# **这个数不是节奏，是兜底。** 什么时候收口由她自己调 :func:`stop_for_now` 决定；撞上
+# 这个数说明她一直没停，那一下不静默截断，而是再调一次模型、这次不给任何工具，让她把
+# 话说完（见 :func:`app.agent.core._run_loop`）。
+#
+# **往上调之前先看它乘在哪里**：每轮新增的 token 跟着它走（实测每轮 5k–10k），而上下文
+# 的硬顶是 200k（:data:`app.living.continuity.DEFAULT_TRIM_POLICY`）。翻倍这个数等于把
+# 撞硬顶的时间减半。
 _MOMENT_CFG = AgentConfig(
     LIFE_MOMENT_PROMPT_ID,
     "life-model",
     "living-life-moment",
-    recursion_limit=8,
+    recursion_limit=12,
 )
 
 # Dynamic Config key：两个 moment 之间至少隔多少分钟。改它不用重新部署。
@@ -576,6 +592,26 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
 
 
 @tool
+@tool_error("停下失败")
+async def stop_for_now() -> str:
+    """我这一轮就到这儿了。
+
+    该做的做完了、或者看了一圈没什么要做的，调它，这一轮到此为止。调完不会再有人问
+    你一句，你也不用再说什么。
+
+    **别说多久。** 下次什么时候再回到自己身上不是你定的 —— 时间自己会走，别人也会
+    叫你。你只决定现在停。
+
+    心里还挂着没了结的事，先 keep_in_mind 记下来再调它：这一轮之后你眼前的东西会换
+    一批，没记下来的下次就想不起来了。
+
+    Returns:
+        一句确认文本。
+    """
+    return "就到这儿。"
+
+
+@tool
 @tool_error("看一眼周围失败")
 async def look_around() -> str:
     """看一眼够得着的地方现在什么样。
@@ -630,6 +666,7 @@ MOMENT_TOOLS = [
     say,
     act,
     look_around,
+    stop_for_now,
     *PHONE_TOOLS,
     *MOUTH_TOOLS,
     *TAKEBACK_TOOLS,
@@ -766,6 +803,48 @@ def build_moment_runner() -> AgentRunner:
     return AgentRunner(_MOMENT_CFG, tools=MOMENT_TOOLS)
 
 
+# 上下文写失败的计数。没有对应的库表列：下一个 moment 冷启动本身就在 trace 和日志里看得
+# 见，再加一列只是把同一件事记两遍。
+CONTEXT_WRITE_FAILED = get_or_create_counter(
+    "living_context_write_failed_total",
+    "她这一轮的上下文没写进去的次数（这一轮仍然算数，下一轮冷启动）",
+    ["lane", "persona_id"],
+)
+
+
+async def _remember_this_round(
+    transcript_id: str,
+    messages: list[Message],
+    *,
+    expected_ver: int,
+    lane: str,
+    persona_id: str,
+) -> None:
+    """把这一轮写进她的上下文；写不进去只记一行 ERROR，这一轮仍然算数。
+
+    **这一步在 moment 记录那个事务之后，而且不参与它。** 理由是两种代价不对称
+    （:mod:`app.living.continuity` 第三条）：她已经开过口了，出站的消息、上传的图、
+    换过的 ``switch_to`` 都回滚不掉，让这一轮失败只会让下一拍重放，而发送去重键带着
+    moment_id 和正文，换个措辞或跨一个时间格就对不上 —— 她于是把同一句话对真人再说一
+    遍。丢掉这一轮上下文的代价小得多：下一个 moment 冷启动，而她做过说过的事在快照的
+    "你刚做过、说过"那段里，读的是刚才已经提交的 ``Happening``。
+    """
+    try:
+        async with get_session() as s:
+            await commit_moment_transcript(
+                transcript_id, messages, expected_ver=expected_ver, session=s
+            )
+    except Exception:
+        CONTEXT_WRITE_FAILED.labels(lane=lane, persona_id=persona_id).inc()
+        logger.error(
+            "上下文 %s 没写进去（读到的是 ver=%d）：这一轮算数，下一个 moment 从空"
+            "上下文开始",
+            transcript_id,
+            expected_ver,
+            exc_info=True,
+        )
+
+
 async def run_moment(
     *, lane: str, persona_id: str, now: datetime, nudged_by: str | None = None
 ) -> LifeMoment | None:
@@ -801,9 +880,10 @@ async def run_moment(
     任何"她该不该回"的判断——那是替她做决定。
 
     **上下文接着上一个 moment。** 开头读这个生活日的上下文、结尾把"历史 + 这一轮的刺激 +
-    这一轮模型产出的每一条"写成下一版，写入跟这条记录、感知游标、手机已读同一个事务
-    （:mod:`app.living.continuity`）。所以收尾崩掉时上下文里也没有这一轮，重放读到的历史
-    跟上一次一模一样；写不进去就是这一轮失败，不静默降级。
+    这一轮模型产出的每一条"写成下一版（:mod:`app.living.continuity`）。这一步在
+    moment 记录和手机已读那次提交**之后**单独走：她这时候已经开过口了，让这一轮失败回滚
+    不掉出站的消息，只会让下一拍重放、把同一句话对真人再说一遍。写不进去记一行 ERROR 加
+    一个计数，这一轮照样算数（:func:`_remember_this_round`）。
 
     **这一轮跨过清理点时先裁一遍再喂**（:func:`app.living.continuity.trim_for_round`）：
     素材换成短语、过了 4 小时的整组删掉、她此刻的状态作为新起点插进去。裁在模型调用
@@ -842,6 +922,9 @@ async def run_moment(
         # 游标跨两种 moment 共用一条轴：取"最近一次"，不筛 nudged。
         last = await latest_moment(lane=lane, persona_id=persona_id)
         after_seq = last.next_seq if last is not None else 0
+        # "离上一次过了多久"就摆在她眼前那一行上。取最后落地的那个 moment 的『现在』，
+        # 跟游标同一行 —— 两者问的是同一件事："她上一次回到自己身上是什么时候"。
+        previous_at = last.began_at if last is not None else None
         # 她上一个 moment 说到哪了。键按 ``began_at`` 所属的生活日算一次，读和写共用
         # 同一个；版本号一路带到收尾去做 CAS（:mod:`app.living.continuity`）。
         transcript_id = moment_transcript_id(
@@ -888,10 +971,18 @@ async def run_moment(
                 lane=lane, persona_id=persona_id, now=began_at
             )
         # 这一轮新摆到她眼前的那条，接在连续上下文后面 —— 所以它永远是最后一条。
-        # 快照那段文本单独留一份：跨过清理点时它同时是重铺给她的那个新起点
-        # （:func:`app.living.continuity.trim_for_round`）。
-        state = snapshot.render()
-        stimulus = Message(role=Role.USER, content=f"{state}\n\n{envelope}")
+        #
+        # **只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、手机上来了
+        # 什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里挂着什么、刚做过说
+        # 过什么）不在这里 —— 那份读一百遍字字一样，每轮重发就是把同一段话抄一遍，而她
+        # 上一轮读过的还在上下文里。它由清理那一下作为新起点重铺
+        # （:func:`app.living.continuity.trim_for_round`，默认一小时一次；一天的第一轮
+        # 上下文是空的，那一下也会立一根界桩，所以冷启动她照样知道自己站在哪）。
+        state = snapshot.render_state()
+        stimulus = Message(
+            role=Role.USER,
+            content=f"{snapshot.render_new(previous_at=previous_at)}\n\n{envelope}",
+        )
         # 裁在这里，不在收尾：喂进去的和存下去的是同一份前缀，而且一段带着过期图片
         # 地址的历史不会在模型调用那一步先炸掉、永远轮不到被裁。
         history = trim_for_round(
@@ -948,25 +1039,30 @@ async def run_moment(
             said=reply.text().strip(),
             nudged=nudged,
         )
-        # **这个 moment 落地、她看过的手机、她记住的这一段，是同一个事务。** 工具返回
-        # 不等于她看见了——只有这个 moment 跑完，工具结果才真的进过她的上下文。分开写的
-        # 话，崩在两者之间就是"已读了但内容从没到她眼前"，那几条消息永久消失且一句报错
-        # 都没有。上下文同一个道理：游标住在这行记录的 ``next_seq`` 上，跟上下文分开提交
-        # 就会出现"她记得自己处理过，但世界认为她还没看过"。绑在一起之后崩掉的代价只是
-        # 她下一个 moment 原样再来一遍：宁可重看，不可漏看（:mod:`app.living.continuity`）。
+        # **这个 moment 落地和她看过的手机是同一个事务。** 工具返回不等于她看见了——
+        # 只有这个 moment 跑完，工具结果才真的进过她的上下文。分开写的话，崩在两者之间
+        # 就是"已读了但内容从没到她眼前"，那几条消息永久消失且一句报错都没有。绑在一起
+        # 之后崩掉的代价只是她下一个 moment 原样再来一遍：宁可重看，不可漏看。
+        #
+        # **她记住的这一段在这次提交之后单独写**（:func:`_remember_this_round`）：两种
+        # 代价不对称，理由见 :mod:`app.living.continuity` 第二、三条。下一版上下文在提交
+        # 之前就算好：算它是纯函数，但放在提交和写入之间的任何一步出错都会变成"记录落了
+        # 而这一段连试都没试过写"。
+        remembered = next_transcript(
+            history, [stimulus, *produced], policy=trim_policy
+        )
         async with get_session() as s:
             await insert_idempotent(moment, session=s)
             await commit_glances(
                 glances=context.features[FEATURE_GLANCES], session=s
             )
-            await commit_moment_transcript(
-                transcript_id,
-                next_transcript(
-                    history, [stimulus, *produced], policy=trim_policy
-                ),
-                expected_ver=transcript_ver,
-                session=s,
-            )
+        await _remember_this_round(
+            transcript_id,
+            remembered,
+            expected_ver=transcript_ver,
+            lane=lane,
+            persona_id=persona_id,
+        )
         return moment
 
 

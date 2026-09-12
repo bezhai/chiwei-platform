@@ -77,6 +77,148 @@ async def _say(
 
 
 # --------------------------------------------------------------------------
+# 〇 · 两半分工：她此刻的样子 vs 这一轮新发生的
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_the_state_she_stands_in_carries_nothing_that_just_happened(snap_db):
+    """重铺那一半只有当下的事实，不含这一轮新发生的东西。
+
+    上下文连续之后，每轮重发一份全量状态就是把她上一轮读过的东西再抄一遍。全量只在
+    清理那一下重铺一次（:func:`app.living.continuity.trim_for_round`），所以这一半必须
+    不含"这段时间你感知到的"——那是每轮都变的，重铺进去等于把已经推过游标的动静又摆
+    一遍。
+    """
+    await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(14))
+    await _stand("ayana", "家/厨房", "煮东西", _at(13))
+    await _keep("周末陪绫奈去祭典", at=_at(12))
+    await _say("akao", "布丁我吃了。", _at(13, 50), place="家/客厅", to=["ayana"])
+    await _say("ayana", "冰箱里还有布丁", _at(14, 2), place="家/厨房", to=["akao"])
+
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
+    )
+    state = snap.render_state()
+
+    assert "看昨天拍的胶片" in state
+    assert "周末陪绫奈去祭典" in state
+    assert "布丁我吃了。" in state
+    assert "你上一次写下的那一天" in state
+    assert "冰箱里还有布丁" not in state, "重铺那一半带上了这一轮新来的动静"
+    assert "现在 2026-07-25" not in state, (
+        "重铺那一半自己报了一次时刻 —— 界桩头上已经有一个，这里是第二个"
+    )
+
+
+@pytest.mark.integration
+async def test_what_is_new_is_the_clock_the_gap_and_what_others_did(snap_db):
+    """每轮送到她眼前的只有新发生的事：几点了、隔了多久、这期间别人做了什么。"""
+    await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(14))
+    await _stand("ayana", "家/厨房", "煮东西", _at(13))
+    await _keep("周末陪绫奈去祭典", at=_at(12))
+    await _say("akao", "布丁我吃了。", _at(13, 50), place="家/客厅", to=["ayana"])
+    await _say("ayana", "冰箱里还有布丁", _at(14, 2), place="家/厨房", to=["akao"])
+
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
+    )
+    new = snap.render_new(previous_at=_at(14))
+
+    assert "2026-07-25" in new and "周六" in new, "她不知道今天是几号、星期几"
+    assert "10 分钟" in new, f"没告诉她离上一次隔了多久。拿到：\n{new}"
+    assert "冰箱里还有布丁" in new
+    for repeated in ("看昨天拍的胶片", "周末陪绫奈去祭典", "布丁我吃了。"):
+        assert repeated not in new, (
+            f"「{repeated}」每轮都在重发 —— 它在上下文里已经有了"
+        )
+
+
+@pytest.mark.integration
+async def test_the_very_first_moment_says_nothing_about_a_gap(snap_db):
+    """一个 moment 都没跑过时不编一句"隔了多久"，只报时刻。"""
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
+    )
+    new = snap.render_new(previous_at=None)
+
+    assert "2026-07-25" in new
+    assert "上一次" not in new, f"凭空造了一个上一次。拿到：\n{new}"
+
+
+@pytest.mark.integration
+async def test_a_long_gap_reads_in_hours(snap_db):
+    """停机几小时再起来，"隔了多久"不能只报一个三位数的分钟。"""
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
+    )
+    new = snap.render_new(previous_at=_at(9, 40))
+
+    assert "4 小时 30 分钟" in new, f"拿到：\n{new}"
+
+
+@pytest.mark.integration
+async def test_a_moment_that_lands_out_of_order_does_not_report_a_negative_gap(
+    snap_db,
+):
+    """常规 moment 的钟点可能比先落地那个提前来的 moment 还早（见 ``LifeMoment``）。
+
+    那时 ``now - previous_at`` 是负数，照直渲染就是往她眼前塞一句"离上一次过了 -4
+    分钟"。
+    """
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(21, 30)
+    )
+    new = snap.render_new(previous_at=_at(21, 34))
+
+    assert "离上一次过了" not in new, f"报了一个负数的间隔。拿到：\n{new}"
+    assert "刚才" in new, f"拿到：\n{new}"
+
+
+@pytest.mark.integration
+async def test_a_thing_that_just_came_due_is_something_new(snap_db):
+    """挂着的那份清单每轮不重发，但"刚到点"是这一轮真的发生了的事，必须当场送到。
+
+    清单本身跟着状态走、清理时才重铺一次（默认一小时）。一件 15:30 该做的事要是也等
+    重铺，她会在 16:00 才看见"到点了" —— ``keep_in_mind`` 的文案对她的承诺就落空了。
+    """
+    await _keep("[2026-07-25 15:00] 家属谈话会", "洗的衣服还在阳台", at=_at(12))
+
+    before = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 50)
+    )
+    assert "家属谈话会" not in before.render_new(previous_at=_at(14, 40)), (
+        "还没到点就先报了"
+    )
+
+    now_due = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(15, 0)
+    )
+    just_due = now_due.render_new(previous_at=_at(14, 50))
+    assert "[2026-07-25 15:00] 家属谈话会" in just_due, f"拿到：\n{just_due}"
+    assert "洗的衣服还在阳台" not in just_due, "没到点的那条也跟着重发了"
+
+    later = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(15, 30)
+    )
+    assert "家属谈话会" not in later.render_new(previous_at=_at(15, 20)), (
+        "到点那一下报过了还在每轮重报"
+    )
+
+
+@pytest.mark.integration
+async def test_nothing_comes_due_on_the_very_first_moment(snap_db):
+    """没有上一次就没有"这期间"，不拿一堆早就过期的事当成刚刚发生。"""
+    await _keep("[2026-07-25 09:00] 早就过去的那件事", at=_at(8))
+
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14)
+    )
+
+    assert "早就过去的那件事" not in snap.render_new(previous_at=None)
+
+
+# --------------------------------------------------------------------------
 # 一 · 手上正在做的事
 # --------------------------------------------------------------------------
 
@@ -91,7 +233,7 @@ async def test_the_snapshot_opens_with_what_is_in_her_hands(snap_db):
 
     assert snap.doing is not None
     assert (snap.doing.place, snap.doing.doing) == ("家/客厅", "看昨天拍的胶片")
-    assert "看昨天拍的胶片" in snap.render()
+    assert "看昨天拍的胶片" in snap.render_state()
 
 
 @pytest.mark.integration
@@ -100,7 +242,7 @@ async def test_she_can_be_nowhere_yet_and_the_snapshot_says_so_plainly(snap_db):
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(8))
 
     assert snap.doing is None
-    assert snap.render().strip() != ""
+    assert snap.render_state().strip() != ""
 
 
 # --------------------------------------------------------------------------
@@ -121,7 +263,7 @@ async def test_things_on_her_mind_ride_into_the_snapshot(snap_db):
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(20))
 
     assert [e.what for e in snap.open_ends] == ["周末陪绫奈去祭典"]
-    text = snap.render()
+    text = snap.render_state()
     assert "周末陪绫奈去祭典" in text
     assert _at(12).isoformat(timespec="minutes") in text, (
         "快照没告诉她这件事是从哪一轮带过来的 —— 光有钟点在跨天之后就分不清是哪一天"
@@ -147,7 +289,7 @@ async def test_a_thing_with_no_hour_reads_exactly_as_it_always_did(snap_db):
 
     assert (
         "- 周末陪绫奈去祭典 · 从 2026-07-25T12:00+08:00 那一刻起挂着"
-        in snap.render()
+        in snap.render_state()
     )
 
 
@@ -157,7 +299,7 @@ async def test_a_thing_she_should_do_at_a_certain_hour_shows_that_hour(snap_db):
     await _keep("[2026-07-25 15:00] 家属谈话会", at=_at(12))
 
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14))
-    text = snap.render()
+    text = snap.render_state()
 
     assert (
         "- [2026-07-25 15:00] 家属谈话会 · 还没到 · "
@@ -173,8 +315,8 @@ async def test_when_the_hour_has_come_the_snapshot_says_so(snap_db):
     early = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14))
     due = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(15))
 
-    assert "还没到" in early.render() and "到点了" not in early.render()
-    assert "到点了" in due.render() and "还没到" not in due.render()
+    assert "还没到" in early.render_state() and "到点了" not in early.render_state()
+    assert "到点了" in due.render_state() and "还没到" not in due.render_state()
 
 
 @pytest.mark.integration
@@ -190,14 +332,14 @@ async def test_a_thing_that_came_due_stays_until_she_stops_listing_it(snap_db):
         later = await read_snapshot(
             lane=LANE, persona_id="akao", after_seq=0, now=_at(hour)
         )
-        assert "到点了" in later.render(), f"{hour} 点那一轮它自己消失了"
+        assert "到点了" in later.render_state(), f"{hour} 点那一轮它自己消失了"
 
     await _keep(at=_at(23, 10))
 
     gone = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(23, 20)
     )
-    assert "家属谈话会" not in gone.render()
+    assert "家属谈话会" not in gone.render_state()
 
 
 @pytest.mark.integration
@@ -213,7 +355,7 @@ async def test_another_sisters_mind_never_leaks_into_hers(snap_db):
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(13))
 
     assert snap.open_ends == []
-    assert "绫奈自己的心事" not in snap.render()
+    assert "绫奈自己的心事" not in snap.render_state()
 
 
 # --------------------------------------------------------------------------
@@ -232,7 +374,7 @@ async def test_she_can_see_what_she_herself_just_said(snap_db):
     )
 
     assert [h.content for h in snap.own_recent] == ["周末祭典我陪你去。"]
-    assert "周末祭典我陪你去。" in snap.render()
+    assert "周末祭典我陪你去。" in snap.render_state()
     assert snap.perceived.items == [], "自己说的话不该同时从感知那条路再来一遍"
 
 
@@ -274,7 +416,7 @@ async def test_a_message_she_sent_carries_the_handle_that_takes_it_back(snap_db)
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 40)
     )
-    text = snap.render()
+    text = snap.render_state()
 
     assert (
         f"- 14:32 CST 你对 bezhai 说：「你去过那家抹茶店吗？」［{oid}］" in text
@@ -293,7 +435,7 @@ async def test_what_she_said_face_to_face_carries_no_handle(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
     )
-    text = snap.render()
+    text = snap.render_state()
 
     assert "- 14:05 CST 你对 ayana 说：「布丁我吃了。」" in text
     assert "［" not in text, (
@@ -340,7 +482,7 @@ async def test_what_was_said_to_her_arrives_with_its_words(snap_db):
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 20))
 
     assert [p.content for p in snap.perceived.items] == ["冰箱里还有布丁，你要吗"]
-    assert "冰箱里还有布丁，你要吗" in snap.render()
+    assert "冰箱里还有布丁，你要吗" in snap.render_new(previous_at=_at(14, 10))
 
 
 @pytest.mark.integration
@@ -358,7 +500,7 @@ async def test_a_line_said_to_two_people_shows_that_the_other_was_there_too(snap
 
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 20))
 
-    assert "ayana 对你和 chinagi 说：「冰箱里还有布丁，你们要吗」" in snap.render()
+    assert "ayana 对你和 chinagi 说：「冰箱里还有布丁，你们要吗」" in snap.render_new(previous_at=_at(14, 10))
 
 
 @pytest.mark.integration
@@ -371,7 +513,7 @@ async def test_only_a_noise_renders_as_only_a_noise(snap_db):
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 20))
 
     assert [p.content for p in snap.perceived.items] == [None]
-    assert "我讨厌死这个了" not in snap.render()
+    assert "我讨厌死这个了" not in snap.render_new(previous_at=_at(14, 10))
 
 
 @pytest.mark.integration
@@ -411,7 +553,7 @@ async def test_a_phone_message_beside_her_is_not_something_she_can_overhear(snap
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 5))
 
     assert snap.perceived.items == []
-    assert "发给别人的私聊" not in snap.render()
+    assert "发给别人的私聊" not in snap.render_new(previous_at=_at(14))
 
 
 # --------------------------------------------------------------------------
@@ -471,7 +613,7 @@ async def test_last_nights_line_does_not_read_as_tonight(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(23, 45)
     )
-    text = snap.render()
+    text = snap.render_state()
 
     assert "07-24 23:41" in text, (
         f"昨晚 23:41 那行渲染成了裸时分，跟今晚 23:41 一个形状 —— "
@@ -487,7 +629,7 @@ async def test_todays_own_lines_stay_undated(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
     )
-    text = snap.render()
+    text = snap.render_state()
 
     assert "- 14:05 CST 你 把胶片摊在茶几上" in text
     assert "07-25 14:05" not in text, f"当天的行不该带日期。拿到：\n{text}"
@@ -514,7 +656,7 @@ async def test_what_she_heard_before_midnight_carries_its_day(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(0, 20)
     )
-    text = snap.render()
+    text = snap.render_new(previous_at=_at(23, 40))
 
     assert "07-24 23:50" in text, (
         f"刚过午夜，昨晚那句被渲染成裸时分 —— 她会当成半小时前刚说的。拿到：\n{text}"
@@ -532,7 +674,7 @@ async def test_the_now_line_says_which_calendar_day_it_is(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(23, 45)
     )
-    text = snap.render()
+    text = snap.render_new(previous_at=_at(23, 40))
 
     assert "2026-07-25" in text, f"她不知道今天是几号。拿到：\n{text}"
     assert "周六" in text, f"她不知道今天星期几。拿到：\n{text}"

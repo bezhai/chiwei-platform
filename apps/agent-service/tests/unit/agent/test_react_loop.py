@@ -316,25 +316,113 @@ class TestRunLoop:
         )
         assert tool_msg.text() == "persona=luna;x=v"
 
-    async def test_recursion_limit_stops_runaway_tool_loop(self):
+    async def test_a_terminal_tool_leaves_no_empty_message_in_the_sink(self):
+        """A terminal tool ends the run; the empty assistant message it returns
+        stays out of ``transcript_sink``.
+
+        The sink is what a caller stores as the agent's continuous context. An
+        assistant message with no text and no tool calls carries nothing, and a
+        caller that ends most of its rounds on a terminal tool would accumulate
+        one of them per round forever.
+        """
         _run_loop, _ = _import_loops()
-        # Model always asks for a tool — would loop forever without a guard.
+        call = ToolCall(id="c1", name="no_reply", arguments={})
+        fake = FakeModelClient(
+            complete_script=[
+                Message(role=Role.ASSISTANT, content="", tool_calls=[call])
+            ]
+        )
+        sink: list[Message] = []
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[no_reply, echo_tool],
+            context=None,
+            recursion_limit=12,
+            transcript_sink=sink,
+        )
+
+        assert result.text() == ""
+        assert [m.role for m in sink] == [Role.ASSISTANT, Role.TOOL]
+        assert sink[-1].tool_call_id == "c1"
+
+    async def test_recursion_limit_closes_the_run_with_a_toolless_call(self, caplog):
+        """Hitting the limit hands the dispatched tool results back to the model
+        one last time, with no tools, so the run ends on the assistant's words.
+
+        Returning the tool-call turn instead (what the loop used to do) made the
+        run's result an assistant message whose ``text()`` is usually empty —
+        a caller storing that as "what it said" stored an empty string, with no
+        error and no log, and the tool results of the last turn never reached
+        the model at all.
+        """
+        import logging
+
+        _run_loop, _ = _import_loops()
         looping = Message(
             role=Role.ASSISTANT,
             content="",
             tool_calls=[ToolCall(id="c", name="echo_tool", arguments={"text": "x"})],
         )
-        fake = FakeModelClient(complete_script=[looping] * 100)
+        fake = FakeModelClient(
+            complete_script=[looping] * 3
+            + [Message(role=Role.ASSISTANT, content="先到这儿")]
+        )
+        sink: list[Message] = []
+        with caplog.at_level(logging.WARNING, logger="app.agent.core"):
+            result = await _run_loop(
+                fake,
+                messages=[Message(role=Role.USER, content="go")],
+                tools=[echo_tool],
+                context=None,
+                recursion_limit=3,
+                transcript_sink=sink,
+            )
+
+        assert result.text() == "先到这儿"
+        assert len(fake.complete_calls) == 4
+        closing_msgs, closing_tools = fake.complete_calls[3]
+        assert closing_tools is None, "收口那一次还带着工具 —— 她能接着调下去"
+        assert closing_msgs[-1].role is Role.TOOL, (
+            "上限那一轮的工具返回没有喂回模型"
+        )
+        assert sink[-1] is result
+        assert any("budget" in r.message for r in caplog.records), caplog.text
+
+    async def test_the_closing_call_never_stores_an_unanswered_tool_call(self):
+        """The toolless closing call can still come back asking for a tool (a
+        model that ignores an empty tool list). Storing that call would leave the
+        context with a call nothing ever answered, and the provider rejects the
+        whole next request over it.
+        """
+        _run_loop, _ = _import_loops()
+        looping = Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c", name="echo_tool", arguments={"text": "x"})],
+        )
+        still_calling = Message(
+            role=Role.ASSISTANT,
+            content="还想再查一下",
+            tool_calls=[ToolCall(id="z", name="echo_tool", arguments={"text": "y"})],
+        )
+        fake = FakeModelClient(complete_script=[looping] * 2 + [still_calling])
+        sink: list[Message] = []
         result = await _run_loop(
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
             context=None,
-            recursion_limit=3,
+            recursion_limit=2,
+            transcript_sink=sink,
         )
-        # Stops after the limit; returns the last assistant message it had.
-        assert isinstance(result, Message)
-        assert len(fake.complete_calls) <= 3
+
+        assert result.text() == "还想再查一下"
+        assert result.tool_calls == []
+        answered = {m.tool_call_id for m in sink if m.role is Role.TOOL}
+        assert [
+            c.id for m in sink for c in m.tool_calls if c.id not in answered
+        ] == []
 
     async def test_tools_passed_as_tooldefs(self):
         _run_loop, _ = _import_loops()

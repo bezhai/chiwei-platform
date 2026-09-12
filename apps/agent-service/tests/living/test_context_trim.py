@@ -519,10 +519,19 @@ def test_no_state_is_laid_down_between_two_cleanups():
     assert sum(1 for m in ctx if CHECKPOINT_HEAD in m.text()) == 1
 
 
-def test_the_first_round_of_a_day_lays_down_nothing():
-    """一天的第一轮历史是空的，她眼前本来就只有这一轮的输入。"""
-    ctx = _round([], _at(9, 5), _said("继续"), state="不该出现的状态")
-    assert _texts(ctx) == ["现在 09:05。", "继续"]
+def test_the_first_round_of_a_day_starts_from_her_state():
+    """一天的第一轮历史是空的 —— 那一下也要立一根界桩。
+
+    每轮的刺激只送新发生的事（:func:`app.living.moment.run_moment`），全量状态只从界桩
+    来。历史空的时候不立，她这一轮就不知道自己在哪、在做什么、心里挂着什么 —— 跨过
+    04:00 的第一轮、以及重启之后的第一轮，都是这个形状。
+    """
+    ctx = _round([], _at(9, 5), _said("继续"), state="手上：你在家/浴室，正在洗澡。")
+
+    assert len(ctx) == 3
+    assert CHECKPOINT_HEAD in ctx[0].text()
+    assert "手上：你在家/浴室，正在洗澡。" in ctx[0].text()
+    assert _texts(ctx[1:]) == ["现在 09:05。", "继续"]
 
 
 # ---------------------------------------------------------------------------

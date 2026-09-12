@@ -319,7 +319,7 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
         shown = await read_snapshot(
             lane=LANE, persona_id="akao", after_seq=0, now=_at(21, 30)
         )
-        rendered = shown.render()
+        rendered = shown.render_state()
         handles = re.findall(r"［([^］]+)］", rendered)
         assert len(handles) == 1, (
             f"快照没把她刚发出去那条的编号印出来（或者印了不止一个）—— "

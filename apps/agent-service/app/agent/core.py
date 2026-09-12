@@ -368,7 +368,13 @@ def _record_tool_output(span: Any, result: ToolResult) -> None:
 # Hand-written ReAct loops (module-level so they can be de-risked in isolation)
 # ---------------------------------------------------------------------------
 
-_TERMINAL_TOOL_NAMES = {"no_reply"}
+# Tools whose call means "this run is over" — the loop returns as soon as one is
+# dispatched, without asking the model for another turn. ``no_reply`` is chat's
+# (``app.agent.tools.no_reply``); ``stop_for_now`` is hers
+# (``app.living.moment``), the hand she ends a life moment with. A tool renamed
+# without updating this set fails silently — the loop just keeps going — so each
+# name is pinned by a test next to the tool it belongs to.
+_TERMINAL_TOOL_NAMES = {"no_reply", "stop_for_now"}
 
 # The self-written web-search tool. When an agent that opted into native search
 # runs on a model that supports it (and the flag is on), this tool is dropped
@@ -508,14 +514,19 @@ async def _run_loop(
 
     ``model_kwargs`` (e.g. ``reasoning_effort`` for the safety guard) are
     forwarded to every model call — dropping them silently changes behaviour.
-    ``recursion_limit`` caps the number of model calls so a model that keeps
-    asking for tools can't loop forever.
+    ``recursion_limit`` caps the number of tool-bearing model calls so a model
+    that keeps asking for tools can't loop forever. Spending that budget does not
+    cut the run off mid-thought: the loop makes one more call **without tools**,
+    so the last turn's tool results reach the model and the run returns what the
+    assistant actually says.
 
     ``transcript_sink`` (when given) collects every message *this loop produces*
     — each assistant turn (with tool calls) + each tool result message + the
     final assistant reply — in order, so a caller keeping a continuous context
     can store the round losslessly (the in-memory ``Message`` objects still carry
-    provider blobs like ``ToolCall.signature``).
+    provider blobs like ``ToolCall.signature``). The empty message a terminal
+    tool ends the run with is the one thing left out: it carries nothing, and a
+    caller whose rounds usually end that way would pile up one per round.
 
     Tool calls within one assistant turn are dispatched *sequentially* (langgraph
     ToolNode ran them concurrently). Results are identical; only multi-tool-turn
@@ -554,13 +565,36 @@ async def _run_loop(
             if transcript_sink is not None:
                 transcript_sink.append(tool_msg)
             if _is_terminal_tool_call(call):
-                final = Message(role=Role.ASSISTANT, content="")
-                if transcript_sink is not None:
-                    transcript_sink.append(final)
-                return final
+                # The empty message is the run's *return value* only — it stays
+                # out of the sink. It carries no text and no tool call, so a
+                # caller that stores the sink as its continuous context would
+                # accumulate one empty message per terminated round.
+                return Message(role=Role.ASSISTANT, content="")
 
-    # recursion limit hit: return the last assistant message we have.
-    return last if last is not None else Message(role=Role.ASSISTANT, content="")
+    # Budget spent. Hand the dispatched tool results back one last time with no
+    # tools, so the run ends on what the assistant says rather than on a
+    # tool-call turn whose ``text()`` is usually empty: that message read as
+    # "what it said" is an empty string stored with no error and no log, and the
+    # last turn's tool results would never reach the model at all.
+    logger.warning(
+        "agent spent its budget of %d model calls with tools still pending; "
+        "closing with one toolless call; model=%s",
+        recursion_limit,
+        _model_label(model),
+    )
+    closing = await _complete_turn(model, convo, None, call_kwargs)
+    if closing.tool_calls:
+        # A model handed an empty tool list can still ask for a tool. Keeping
+        # that call would leave the stored context with a call nothing answers,
+        # and the provider rejects the whole next request over it.
+        closing = Message(
+            role=Role.ASSISTANT,
+            content=closing.content,
+            reasoning_content=closing.reasoning_content,
+        )
+    if transcript_sink is not None:
+        transcript_sink.append(closing)
+    return closing
 
 
 async def _stream_loop(

@@ -1104,7 +1104,10 @@ class TestRecursionLimit:
         await Agent(_CFG, tools=[loop_tool]).run(
             messages=[Message(role=Role.USER, content="go")]
         )
-        assert mock_deps["model"].complete.call_count == 6
+        # 6 turns with tools, then one toolless call so the run ends on what the
+        # assistant says instead of on a tool-call turn with no text.
+        assert mock_deps["model"].complete.call_count == 7
+        assert mock_deps["model"].complete.call_args.kwargs["tools"] is None
 
     async def test_custom_recursion_limit(self, mock_deps):
         from app.agent.neutral import ToolCall
@@ -1130,7 +1133,8 @@ class TestRecursionLimit:
         await Agent(cfg, tools=[loop_tool]).run(
             messages=[Message(role=Role.USER, content="go")]
         )
-        assert mock_deps["model"].complete.call_count == 4
+        assert mock_deps["model"].complete.call_count == 5
+        assert mock_deps["model"].complete.call_args.kwargs["tools"] is None
 
 
 # ---------------------------------------------------------------------------

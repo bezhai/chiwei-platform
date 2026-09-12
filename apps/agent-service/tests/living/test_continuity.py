@@ -3,8 +3,8 @@
 这个文件钉的是 :mod:`app.living.continuity` 那份契约的每一条，逐条对应：
 
   1. 一个 persona 一条、键是 ``lane:persona:生活日``，日界在 CST 04:00；
-  2. 写失败让这一轮失败，而不是悄悄冷启动；
-  3. 上下文、moment 记录、感知游标、手机已读是同一次提交；
+  2. 上下文写失败不拖垮这一轮，但留得下一行 ERROR，不是悄悄冷启动；
+  3. moment 记录和手机已读是同一次提交，上下文在它之后单独写；
   4. 裁剪只有一处，存储层一根手指都不伸；
   5. 接回不靠内存 —— 上一个进程写下的上下文，这个进程读得回来。
 """
@@ -13,12 +13,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 import pytest
 
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall
 from app.data.session import get_session
 from app.living.continuity import (
+    CHECKPOINT_HEAD,
     TranscriptConflict,
     commit_moment_transcript,
     load_moment_transcript,
@@ -49,6 +51,35 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
         doing=doing,
         noted_at=at,
     )
+
+
+def _is_checkpoint(message: Message) -> bool:
+    return isinstance(message.content, str) and message.content.startswith(
+        CHECKPOINT_HEAD
+    )
+
+
+def _stimuli(messages: list[Message]) -> list[Message]:
+    """这些消息里属于"某一轮的刺激"的那几条。
+
+    USER 消息现在有两种：每轮新摆到她眼前的那条刺激，和清理时立的那根界桩（一天的第
+    一轮也立一根，因为全量状态只从界桩来）。"这一轮进了几次上下文"问的是前者。
+    """
+    return [
+        m for m in messages if m.role is Role.USER and not _is_checkpoint(m)
+    ]
+
+
+async def _rows(data_cls) -> int:
+    """这张表现在有几行。"""
+    from sqlalchemy import text
+
+    from app.runtime.migrator import _table_name
+
+    async with get_session() as s:
+        return (
+            await s.execute(text(f"SELECT count(*) FROM {_table_name(data_cls)}"))
+        ).scalar_one()
 
 
 async def _write_transcript(
@@ -240,11 +271,15 @@ async def test_the_next_moment_starts_from_the_stored_context(
 
     first_input = runner.runs[0][0]
     second_input = runner.runs[1][0]
-    assert len(first_input) == 1, "第一个 moment 没有历史，只有这一轮的刺激"
-    assert second_input[0].content == first_input[0].content
-    assert second_input[1].text() == "继续"
-    assert second_input[-1] is not first_input[0]
+    assert len(first_input) == 2, "一天的第一个 moment：一根界桩 + 这一轮的刺激"
+    assert _is_checkpoint(first_input[0])
+
+    assert [m.content for m in second_input[:2]] == [
+        m.content for m in first_input
+    ], "第二个 moment 没接着第一个的那两条往下走"
+    assert second_input[2].text() == "继续"
     assert second_input[-1].role is Role.USER
+    assert second_input[-1].content != first_input[-1].content
 
 
 @pytest.mark.integration
@@ -284,16 +319,18 @@ async def test_the_round_lands_in_the_context_exactly_once(moment_db, stub_momen
     tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14))
     stored, ver = await load_moment_transcript(tid)
     assert ver == 1
-    assert stored[0].role is Role.USER
-    assert stored[0].content == runner.runs[0][0][0].content
-    # 工具那一组（调用 + 返回）和最后那句都在，而且只有一份
-    assert [m.role for m in stored[1:]] == [
+    # 一根界桩（一天的头一轮立的）+ 这一轮的刺激 + 工具那一组 + 最后那句
+    assert [m.role for m in stored] == [
+        Role.USER,
+        Role.USER,
         Role.ASSISTANT,
         Role.TOOL,
         Role.ASSISTANT,
     ]
+    assert _is_checkpoint(stored[0])
+    assert stored[1].content == runner.runs[0][0][-1].content
     assert stored[-1].text() == "记下了"
-    assert sum(1 for m in stored if m.role is Role.USER) == 1
+    assert len(_stimuli(stored)) == 1
 
 
 @pytest.mark.integration
@@ -305,24 +342,31 @@ async def test_the_context_starts_over_at_the_living_day_boundary(
     await run_moment(lane=LANE, persona_id="akao", now=_at(3, 50, day=26))
     await run_moment(lane=LANE, persona_id="akao", now=_at(4, 10, day=26))
 
-    assert len(runner.runs[0][0]) == 1
-    assert len(runner.runs[1][0]) == 1, "跨过 04:00 还接着昨天那条"
+    # 每一天的第一个 moment 都是"一根界桩 + 这一轮的刺激"，昨天那一段一条都不带过来
+    assert len(runner.runs[0][0]) == 2
+    assert len(runner.runs[1][0]) == 2, "跨过 04:00 还接着昨天那条"
 
 
 # ---------------------------------------------------------------------------
-# 五 · 写失败 = 这一轮失败，而且什么都没提交
+# 五 · 上下文写失败 = 这一轮照样算数，但留得下痕迹
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_a_failed_context_write_commits_nothing(
-    moment_db, stub_moment, monkeypatch
+async def test_a_failed_context_write_leaves_the_round_standing(
+    moment_db, stub_moment, monkeypatch, caplog
 ):
-    """上下文写不进去时：这一轮报错，moment 记录、游标、上下文一样都没落。
+    """上下文写不进去时：这一轮照样算数，moment 记录和手机已读都落地，只留一行 ERROR。
 
-    这就是"事件已消费但历史没保存"那个故障在本设计里的答案 —— 它不存在，因为
-    消费（游标 + 手机已读）和历史是同一次提交。
+    她这一轮已经开了口 —— 消息出了站、图上了传、手上的事换了。让这一轮失败回滚不掉
+    这些，只会让下一拍重放：发送去重键带着 moment_id 和正文，换个措辞或跨一个时间格就
+    对不上，她于是把同一句话对真人再说一遍。丢掉这一轮的上下文的代价小得多，而且不会
+    静默：这里断言那一行 ERROR。
     """
+    from tests.living.test_phone import _DM, _incoming, _seed_world
+
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(13, 50))
     await _stand("akao", "家/客厅", "待着", _at(13))
     await _stand("ayana", "家/客厅", "看书", _at(13))
     await record_happening(
@@ -343,13 +387,57 @@ async def test_a_failed_context_write_commits_nothing(
 
     monkeypatch.setattr(moment_mod, "commit_moment_transcript", boom)
 
-    stub_moment(said="继续")
-    with pytest.raises(RuntimeError):
-        await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    stub_moment(("look_at_phone", {"channel_id": str(_DM)}), said="继续")
+    with caplog.at_level(logging.ERROR, logger="app.living.moment"):
+        moment = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
-    assert await latest_moment(lane=LANE, persona_id="akao") is None
+    assert moment is not None, "上下文写失败把整轮拖垮了"
+    landed = await latest_moment(lane=LANE, persona_id="akao")
+    assert landed is not None and landed.moment_id == moment.moment_id
+    assert landed.next_seq > 0, "游标没跟着这一轮推进"
+
+    from app.living.phone import PhoneRead
+
+    assert await _rows(PhoneRead) == 1, "手机已读跟着上下文一起被回滚了"
+
     tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14))
     assert await load_moment_transcript(tid) == ([], 0)
+    assert any("上下文" in r.message for r in caplog.records), caplog.text
+
+
+@pytest.mark.integration
+async def test_a_failed_context_write_only_costs_her_this_round(
+    moment_db, stub_moment, monkeypatch
+):
+    """丢掉的只有工具返回和中间过程 —— 她做过说过的事下一轮照样读得到。
+
+    "你刚做过、说过"那段读的是库里的 ``Happening``，跟 ``LifeMoment`` 同一批已经提交，
+    所以下一轮冷启动她仍然知道自己说过什么。
+    """
+    await _stand("akao", "家/客厅", "待着", _at(13))
+    await _stand("ayana", "家/客厅", "看书", _at(13))
+
+    from app.living import moment as moment_mod
+
+    async def boom(*_a, **_kw):
+        raise RuntimeError("上下文写不进去")
+
+    real_commit = moment_mod.commit_moment_transcript
+    monkeypatch.setattr(moment_mod, "commit_moment_transcript", boom)
+    stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="去煮了")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    monkeypatch.setattr(moment_mod, "commit_moment_transcript", real_commit)
+    runner = stub_moment(said="继续")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 10))
+
+    fed = runner.runs[0][0]
+    assert all(m.role is Role.USER for m in fed), (
+        "上一轮没写进去，这一轮的历史里不该有她说过的话和工具返回"
+    )
+    assert "我去煮点抹茶。" in "\n".join(m.text() for m in fed), (
+        "她连自己上一轮说过什么都不知道了 —— 那就不只是丢了工具返回"
+    )
 
 
 @pytest.mark.integration
@@ -392,13 +480,13 @@ async def test_the_replay_after_a_failed_close_stores_the_round_once(
     assert again is not None
     assert again.after_seq == 0, "崩掉那一轮的感知被静默吞了"
     replayed = runner.runs[-1][0]
-    assert len(replayed) == 1, "重放读到的历史不该带上没提交的那一轮"
-    assert "你在看什么" in replayed[0].content
+    assert len(replayed) == 2, "重放读到的历史不该带上没提交的那一轮"
+    assert "你在看什么" in replayed[-1].content
 
     tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14, 1))
     stored, ver = await load_moment_transcript(tid)
     assert ver == 1
-    assert sum(1 for m in stored if m.role is Role.USER) == 1
+    assert len(_stimuli(stored)) == 1
 
 
 @pytest.mark.integration
@@ -419,7 +507,7 @@ async def test_the_same_summons_only_wakes_her_once(moment_db, stub_moment):
     tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14))
     stored, ver = await load_moment_transcript(tid)
     assert ver == 1
-    assert sum(1 for m in stored if m.role is Role.USER) == 1
+    assert len(_stimuli(stored)) == 1
 
 
 @pytest.mark.integration

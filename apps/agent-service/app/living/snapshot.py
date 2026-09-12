@@ -22,6 +22,21 @@
 这里一处压缩都没有。会被遗忘的只有第四层滚出窗口的那些——而第三层正是她把重要的东
 西从滚动窗口里救出来的那只手，救不救是她的决定（见 :mod:`app.living.loose_ends`）。
 
+**这五层分两半送，因为她的上下文是连续的。**
+
+  * :meth:`MomentSnapshot.render_state` —— 前四层，**她此刻的样子**。读一百遍字字一
+    样，所以每轮重发就是把同一段话抄一遍。只在清理那一下作为新起点重铺
+    （:func:`app.living.continuity.trim_for_round`），默认一小时一次。
+  * :meth:`MomentSnapshot.render_new` —— **这一轮新发生的**：几点了、离上一次隔了多
+    久、这期间别人做了什么、有什么到点了。每轮都送，因为每轮都不一样。
+
+第五层（这段时间你感知到的）本来就是增量：它按游标取，读过的不会再来第二遍，所以它
+在新发生的那一半里，重铺那一半一个字都不带它。
+
+"刚到点的"是这条线上唯一一处从状态里**分出来**的东西：那份清单跟着状态走，但"这件事
+到点了"是这一轮真的发生的变化。等下一次重铺的话，一件 15:30 该做的事要到 16:00 她才
+看得见。
+
 **日记那一层是她自己写的，不是折叠出来的。** 这是它跟被否掉的 ``SessionTranscript``
 唯一但决定性的区别：一条原始记录都没被动过，那一页是她另写的一份东西（见
 :mod:`app.living.day_page`）。少了它她跨不过一天——上面四层全是"当下"，滚出窗口的
@@ -97,27 +112,79 @@ class MomentSnapshot:
     own_recent: list[Happening]
     perceived: PerceivedWindow
 
-    def render(self) -> str:
-        """摆成她读得懂的样子。每段空的时候如实说空，不留白洞。"""
+    def render_state(self) -> str:
+        """她此刻的样子：在哪、在做什么、上一次写下的那一天、心里挂着什么、刚做过说过
+        什么。每段空的时候如实说空，不留白洞。
+
+        **这一份不是每轮都送的**，只在清理那一下当作新起点重铺一次
+        （:func:`app.living.continuity.trim_for_round`）。四段读一百遍字字一样，连续
+        上下文里她上一轮已经读过；每轮重发只是把同一段话抄二十四遍。
+
+        **不带时刻。** 界桩自己头上就印着这次清理的时刻，这里再报一次就是同一份输入里
+        两个"现在"，而且两个数还不一样（界桩取整点，这一轮的 ``now`` 不是）。
+        """
         return "\n\n".join(
             (
-                self._render_now(),
                 self._render_hands(),
                 self._render_day_page(),
                 self._render_open_ends(),
                 self._render_own_recent(),
-                self._render_perceived(),
             )
         )
 
+    def render_new(self, *, previous_at: datetime | None) -> str:
+        """这一轮新发生的：几点了、离上一次隔了多久、这期间别人做了什么、有什么到点了。
+
+        ``previous_at`` 是上一个落地的 moment 的『现在』；一个都没跑过传 ``None``。
+
+        **"刚到点的"是事件，不是清单。** 她挂着的那份清单跟着状态走、清理时才重铺一
+        次（默认一小时），但"这件事到点了"是这一轮真的发生的变化 —— 等重铺的话一件
+        15:30 该做的事要到 16:00 她才看得见，而 :func:`app.living.moment.keep_in_mind`
+        的文案对她的承诺是"到点之后你眼前那条会写着「到点了」"。
+        """
+        parts = [self._render_now(previous_at)]
+        just_due = self._render_just_due(previous_at)
+        if just_due is not None:
+            parts.append(just_due)
+        parts.append(self._render_perceived())
+        return "\n\n".join(parts)
+
     # -- 各段 ------------------------------------------------------------
 
-    def _render_now(self) -> str:
+    def _render_now(self, previous_at: datetime | None) -> str:
         # 完整口径（年月日 + 星期），不是裸时分：下面几段跨天的行渲染成 ``07-24 23:41
-        # CST``，而这一轮喂给她的全部输入就是快照 + 信封（``app.living.moment``），
+        # CST``，而这一轮喂给她的全部新东西就是这一段加手机信封（``app.living.moment``），
         # 没有第二个地方说今天几号 —— 不说的话 ``07-24`` 是昨天还是上个月她算不出来，
         # 记日程 / 算 ``remind_at`` 时更是只能瞎填日期分量。
-        return f"现在 {to_cst_full(self.now.isoformat())}。"
+        now = f"现在 {to_cst_full(self.now.isoformat())}"
+        if previous_at is None:
+            return f"{now}。"
+        gap = self.now - previous_at
+        # **不到一分钟（含负数）说"就在刚才"。** 常规 moment 的『现在』是它的格子，可能
+        # 比先落地那个提前来的 moment 的真实时刻还早（见
+        # :class:`app.living.moment.LifeMoment`），那时这个差是负的 —— 照直渲染就是往她
+        # 眼前塞一句"离上一次过了 -4 分钟"。
+        if gap < timedelta(minutes=1):
+            return f"{now}，上一次就在刚才。"
+        return f"{now}，离上一次过了 {_gap(gap)}。"
+
+    def _render_just_due(self, previous_at: datetime | None) -> str | None:
+        """这期间到点的那几件；一件都没有返回 ``None``（不写一行空标题）。
+
+        ``previous_at`` 是 ``None``（一个 moment 都没跑过）时也返回 ``None``：没有
+        "这期间"可言，把一堆早就过期的事当成刚刚发生是往她眼前塞假话。
+        """
+        if previous_at is None:
+            return None
+        came_due = [
+            e
+            for e in self.open_ends
+            if e.due_at is not None and previous_at < e.due_at <= self.now
+        ]
+        if not came_due:
+            return None
+        lines = [f"- {format_entry(e.what, e.due_at)}" for e in came_due]
+        return "刚到点的：\n" + "\n".join(lines)
 
     def _render_hands(self) -> str:
         if self.doing is None:
@@ -165,6 +232,15 @@ class MomentSnapshot:
             for p in self.perceived.items
         ]
         return "这段时间你感知到的：\n" + "\n".join(lines)
+
+
+def _gap(delta: timedelta) -> str:
+    """一段时长摆成她读得懂的样子：``10 分钟`` / ``4 小时`` / ``4 小时 30 分钟``。"""
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes} 分钟"
+    hours, rest = divmod(minutes, 60)
+    return f"{hours} 小时" if rest == 0 else f"{hours} 小时 {rest} 分钟"
 
 
 def _open_end_line(end: LooseEnd, *, now: datetime) -> str:

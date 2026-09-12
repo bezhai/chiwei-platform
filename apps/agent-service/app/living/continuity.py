@@ -29,46 +29,46 @@ lane 在键里，两条泳道天然是两行，不需要额外的隔离字段。
 二 · 写失败的语义
 -----------------
 
-**写失败让这一轮失败，不接受静默降级。** 上下文就是她的记忆，写不进去还照常往前走
-等于静默失忆。:func:`commit_moment_transcript` 不吞任何异常，CAS 没落地也当失败抛
-(:class:`TranscriptConflict`)。
+**写失败不让这一轮失败：记一行 ERROR 加一个计数，下一个 moment 冷启动。**
+:func:`commit_moment_transcript` 自己不吞任何异常（CAS 没落地也当失败抛
+:class:`TranscriptConflict`），接住它的是
+:func:`app.living.moment._remember_this_round`。
 
-**这跟旧实现的取舍反过来了，理由是失败面不一样。** 旧实现把写回当 best-effort，理由
-是"抛出去会让调用方的 durable @node 把已完成的一轮当成失败去重投 / 进 DLQ"。这条论证
-对 chat 那种 MQ 驱动的 @node 成立，对她这条不成立：她的两条唤醒路（
-:func:`app.living.moment.life_moment_tick`、:func:`app.living.nudge.phone_nudge_tick`）
-都用 ``asyncio.gather(..., return_exceptions=True)`` 逐人接住异常并只记一行日志，
-tick 本身是 interval 时间源、fire-and-forget，没有重投也没有 DLQ。所以这里抛出去的
-代价是"这一轮白跑了，下一拍重来"，不是"一轮被无限重投"。
+**两种代价不对称。** 写上下文这一步发生在她已经开过口之后：出站的消息、生成上传的
+图、换过的 ``switch_to``、挂上去的事，一样都回滚不掉。让这一轮失败只会让下一拍重放同
+一件事，而发送去重键带着 moment_id 和正文——换个措辞或者跨一个时间格就对不上，她于是
+把同一句话对真人再说一遍。那是用户直接看得见的错误。
 
-**这一轮失败的代价，是已经发生的副作用可能被重放。** 这个代价本来就在：moment 记录
-一直是副作用之后才落库的，:mod:`app.living.anchor` 写着为什么——moment 的身份落在时
-间格上（提前来的那种落在把她叫来的那条消息上），所以重跑算出的是同一个 moment、所有
-派生 id 原样对上，重放同样的动作写不出新行。残余缺口同样照旧：模型是不确定的，重放
-未必做一样的事，那时两边都会留下。把上下文加进这次提交没有引入新的失败类型，只是多
-了一个触发它的原因。
+**"忘了这一轮"的损失有限。** 状态快照里"你刚做过、说过"那段读的是库里的 ``Happening``，
+跟 moment 记录同一批已经提交，所以下一个 moment 冷启动时她照样知道自己说过什么；丢的
+是这一轮的工具返回和中间过程。
+
+**不为它加库表列。** 一行 ERROR 加 ``living_context_write_failed_total``
+（:data:`app.living.moment.CONTEXT_WRITE_FAILED`）已经够显性，而且下一个 moment 冷启动
+本身就在 trace 和输入里看得见。
 
 三 · 提交顺序
 -------------
 
-**上下文、moment 记录、感知游标、手机已读是同一次提交，不是四次。**
-:func:`commit_moment_transcript` 收一个调用方的 ``AsyncSession``，跟
-``insert_idempotent(moment)`` 和 :func:`app.living.phone.commit_glances` 在同一个事务
-里跑（见 :func:`app.living.moment.run_moment` 的收尾）。游标住在 moment 记录的
-``next_seq`` 列上，所以"她读到哪了"和"她记得什么"由同一个 commit 决定。
+**moment 记录和手机已读是同一次提交；上下文在它提交之后单独写。**
+``insert_idempotent(moment)`` 和 :func:`app.living.phone.commit_glances` 在同一个事务里
+跑（见 :func:`app.living.moment.run_moment` 的收尾）：游标住在 moment 记录的
+``next_seq`` 列上，所以"她读到哪了"和"她看过哪些手机"由同一个 commit 决定。
+:func:`commit_moment_transcript` 随后在自己的事务里写，写不进去不牵动前面那一次。
 
-这直接回答两个故障：
+这个顺序直接回答两个故障：
 
-  * **事件已消费但历史没保存**：不存在。消费（游标推进 + 手机已读）和历史是同一次
-    提交，一起成功或者一起没有。旧形态里它会发生——上下文在模型跑完那一刻就写回了，
-    而游标要等收尾，中间崩掉就是"她记得自己处理过，但世界认为她还没看过"。
-  * **同一输入重复唤醒**：收尾没提交过的那一轮，上下文里也没有它，所以重放读到的历
-    史跟上一次一模一样，它是一次真正的重放，不是"世界往前走了、她的上下文停在原地"。
+  * **上下文写成了、但世界认为这一轮没发生**：不存在。上下文是最后一步，前面那次提交
+    没成功就根本走不到它。
+  * **同一输入重复唤醒**：moment 记录先落地，所以重放读到的是"这个 moment 跑过了"。
     常规 moment 的重放被时间格挡成同一个 moment；被人叫来的那种身份就是把她叫来的那条
     消息，同一条消息只把她叫来一次（:func:`app.living.moment.moment_ran`）。
 
-**模型调用不在这个事务里。** 事务在模型跑完之后才开，只包两三条 INSERT。一次几十秒
-的模型调用占着一条业务连接会把连接池拖垮，:mod:`app.living.serial` 写了这条。
+剩下的那个缺口是**世界往前走了而她的上下文停在上一轮**（上下文写失败）。它不会被静默
+吞掉，代价见上面第二条。
+
+**模型调用不在任何一个事务里。** 事务都在模型跑完之后才开，只包几条 INSERT。一次几十
+秒的模型调用占着一条业务连接会把连接池拖垮，:mod:`app.living.serial` 写了这条。
 
 四 · 裁剪只有一处
 -----------------
@@ -97,7 +97,7 @@ context 上限，``Agent.run`` 抛错、收尾不提交、下一拍读到同样�
 
 第三条有一道真正的门：:func:`commit_moment_transcript` 用读到的版本做 CAS，别人在
 中间写过就抛 :class:`TranscriptConflict`，而不是默默盖掉。它把"看不见的互相覆盖"变
-成"看得见的一轮失败"，但它**不是**多副本的许可证——前两条仍然没有解。真要上多副本，
+成"一行看得见的 ERROR"，但它**不是**多副本的许可证——前两条仍然没有解。真要上多副本，
 先给时间源做 leader election。
 
 六 · 裁剪规则
@@ -134,8 +134,12 @@ provider 拒掉整个请求，而且同一轮里多个调用和多个结果必�
 ``cleanup_minutes`` 加一个 moment 间隔，:data:`MAX_CLEANUP_MINUTES` 把这个和
 :data:`PICTURE_URL_MINUTES` 之间的余量守住。
 
-**每次清理重铺一次状态**（:func:`_checkpoint`）：4 小时前的话被裁掉之后那段经历只剩
-库里还有，所以清理时把她当前的状态（在哪、在做什么、挂着什么事）作为新起点插进去。
+**每次清理重铺一次状态**（:func:`_checkpoint`，内容是
+:meth:`app.living.snapshot.MomentSnapshot.render_state`）：4 小时前的话被裁掉之后那段
+经历只剩库里还有，所以清理时把她当前的状态（在哪、在做什么、上一次写下的那天、挂着什
+么事、刚做过说过什么）作为新起点插进去。**全量状态只在这里给**——每轮送到她眼前的只
+有新发生的事，她此刻的样子读一百遍字字一样，每轮重发就是把同一段话抄一遍。一天的第一
+轮上下文是空的，那一下同样立一根，所以冷启动她照样知道自己站在哪。
 它同时是**分代的界桩**——每条消息的"年龄下界"就是它右边第一个界桩的时刻，不需要给
 每条消息单独存一个时刻。界桩之前那一代（一天里第一个界桩立起来之前写下的东西）没有
 上界，一律留着，等下一个界桩立起来再算。
@@ -175,8 +179,10 @@ class TranscriptConflict(RuntimeError):
     """她的上下文在这一轮跑的时候被别人改过了。
 
     进程内的排他占用保证同一个人不会有两个 moment 同时跑，所以正常永远撞不上。撞上
-    就说明那个前提破了（多副本、或者有人绕开了占用），这一轮必须当失败处理：默默覆盖
-    等于把另一个进程刚写下的一整段丢掉，而且没有任何痕迹。
+    就说明那个前提破了（多副本、或者有人绕开了占用）。这时候必须抛：默默覆盖等于把
+    另一个进程刚写下的一整段丢掉，而且没有任何痕迹。接住它的是
+    :func:`app.living.moment._remember_this_round` —— 这一轮仍然算数，只是她的上下文
+    停在别人写下的那一版上，而这件事留了一行 ERROR。
     """
 
 
@@ -217,10 +223,11 @@ async def commit_moment_transcript(
     每一条），不是增量。``expected_ver`` 是 :func:`load_moment_transcript` 读到的那一
     版；库里已经不是它了就抛 :class:`TranscriptConflict`。
 
-    ``session`` 是必填的：这次写入必须跟 moment 记录、感知游标、手机已读同一个事务
-    （模块 docstring 第三条）。单独开一个事务就会重新造出"事件已消费但历史没保存"。
+    ``session`` 是必填的：这次写入跑在调用方的事务里，而那个事务只包这一件事 ——
+    moment 记录和手机已读在它之前已经单独提交过了（模块 docstring 第三条）。
 
-    写失败（CAS 没落地、或者 PG 抛错）一律往外抛，调用方这一轮失败。不吞。
+    写失败（CAS 没落地、或者 PG 抛错）一律往外抛，这里不吞。怎么处理由调用方定：
+    :func:`app.living.moment._remember_this_round` 记一行 ERROR 并让这一轮照样算数。
     """
     landed = await replace_session(
         transcript_id, messages, expected_ver=expected_ver, session=session
@@ -274,9 +281,11 @@ MATERIAL_TOOLS = frozenset(
 #     吃。安静下来的会话不在手机信封上，这只手是找回它的唯一一条路
 #
 # **二 · 她自己动作的回执** —— ``switch_to`` / ``move_to`` / ``keep_in_mind`` /
-# ``say`` / ``act`` / ``send_message`` / ``take_back_message``。这几条是"这件事到底
-# 做成了没有"的唯一记录：``send_message`` 明确区分发出去了、已经说过了、交出去但没等
-# 到确认三种结局，裁掉她就会照着一个不知道有没有成功的动作再来一遍。
+# ``say`` / ``act`` / ``send_message`` / ``take_back_message`` / ``stop_for_now``。
+# 这几条是"这件事到底做成了没有"的唯一记录：``send_message`` 明确区分发出去了、已经说
+# 过了、交出去但没等到确认三种结局，裁掉她就会照着一个不知道有没有成功的动作再来一遍。
+# ``stop_for_now`` 那句确认是她上一轮怎么收尾的唯一痕迹（它结束这一轮，后面没有她的话
+# 跟着），而且整条就几个字，换成短语省不下任何东西。
 #
 # **新加一只手落进哪一档必须显式写下来**（用例 ``test_every_tool_she_has_is_classified``
 # 会因为漏掉而失败）。分不清就放这一档：留错了只是多占 token。
@@ -287,6 +296,7 @@ KEPT_TOOLS = frozenset(
         "keep_in_mind",
         "say",
         "act",
+        "stop_for_now",
         "send_message",
         "take_back_message",
         "look_up_contact",
@@ -642,6 +652,11 @@ def trim_for_round(
 
     没跨过就把 ``history`` 原样还回来，一个字节都不动。
 
+    **``history`` 是空的时候也立一根。** 空上下文就是一天的开头或者刚重启，那时她眼前
+    只有这一轮的增量刺激（:func:`app.living.moment.run_moment` 只送新发生的事），没有
+    这根界桩她就不知道自己在哪、在做什么、心里挂着什么。界桩说的那句"再往前的那一段不
+    在你眼前了"在这两种情形下都是实话。
+
     **裁在模型调用之前，不是之后。** 两个理由，都是硬的：
 
       * *过期的图片地址会让这一轮抛错，而且抛在模型请求之前。* 只在收尾裁的话，一段
@@ -654,7 +669,7 @@ def trim_for_round(
     # 界桩先立起来再裁：它同时是这一代的上界，立完再裁，这一代的图片当场就走。
     # 反过来（先裁后立）的话图片要等到下一轮才走，白多活一个 moment 间隔。
     staged = list(history)
-    if history and _due(history, at):
+    if _due(history, at):
         staged.append(_checkpoint(at, state))
     return _clean(staged, at=at, policy=policy)
 
