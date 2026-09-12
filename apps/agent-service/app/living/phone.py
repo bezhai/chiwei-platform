@@ -1,16 +1,31 @@
-"""手机 —— 信封可感，内容要她去看。
+"""手机 —— 三层：通知、会话列表、会话详情。
 
-**她每一轮拿到的只有信封**：有没有动静、谁在说、多密多快、跟她刚才干的事有没有牵连。
+真人手机就是这三层，每一层默认只给该给的那点：
+
+  * **通知**（本模块里的"信封"）：她每一轮被动扫一眼就看见的。谁给她发消息了、几条、
+    什么时候，**正文一个字都没有**。按时间排，最新的在前，一次只给
+    :data:`ENVELOPE_LIMIT` 条。
+  * **会话列表**（:func:`look_through_your_phone`）：她主动翻手机才看到。按**这条会话
+    最后一条消息**的时刻倒序，零未读的那些也在里面，一屏 :data:`CONVERSATION_LIST_LIMIT`
+    条，想往下自己翻。
+  * **会话详情**（:func:`look_at_phone`）：点进某一条。默认落在把她叫来的那条附近，
+    往前翻得回去。
+
+**"不给几个月前的人发消息"靠的是这个形态，不是过滤规则。** 按时间倒序 + 一屏就那么
+多 + 想看更多自己翻，她自然翻不到那么远。加一条"超过 N 天不活跃就不显示"是用工程替
+她遗忘 —— 那条消息她其实还能找到，只是眼前没有。
+
+**她每一轮拿到的只有通知**：有没有动静、谁在说、多密多快、跟她刚才干的事有没有牵连。
 **内容要她调「看手机」才有。** 这不是省 token，是这个设计的骨头：拿起手机是一个动作，
 有动作才有"已读"这回事；把内容白送进每一轮，"看手机"就成了摆设，而"她没看见"这个真
 人每天都在经历的状态就再也不会发生。
 
-**「看手机」是「打开这条会话」，不是「看未读」。** 她看到最近若干条**往来**：双向、
+**「看手机」是「打开这条会话」，不是「看未读」。** 她看到的是一段**往来**：双向、
 含她自己发的、含上一轮已经读过的上文。改之前那条查询同时带着三个条件（不是她发的、
 没撤掉的、游标之后的），于是她眼前只有对方那一半 —— 决定说什么的那个模型从来没见过
 一段完整的对话。实证（coe-living，2026-09-04）：她自己撤回了一句话，8 分钟后还在问
 主人"你刚才到底发了啥"，因为那一轮她眼前只有孤零零一句未读，前面的来回全在游标之前，
-而读过的消息不进任何持久记忆。真人点开一个会话看到的正是双向的最近若干条。
+而读过的消息不进任何持久记忆。真人点开一个会话看到的正是双向的一段。
 
 **别人发来的图真的进她眼里。** 「看手机」交回的不是一段文字，是一串内容块：先是那段
 会话，后面每张图跟着一句说明和图本身（:func:`_shown_picture`）。正文里那张图的位置留
@@ -42,6 +57,20 @@
 原样再看到。**宁可重看，不可漏看。** 代价只有一条：同一轮里看两次得自己记着刚看过什么，
 所以有效水位是"库里的"和"本轮攒的"取大。
 
+**"看过"推到哪：这一页里真摆到她眼前、而且之前没看过的那些中最新的一条。** 三件事一起
+定死：
+
+  * **翻页只算看过这一页。** 改之前推的是 ``max(U)``（未读里最新那条），在"每次只给最近
+    十条"时是有意的取舍，分页之后照搬就是"翻一页 = 几千条算看过"。
+  * **通知层的瞥见不算看过。** 通知一个字正文都没有，她只知道有人说了话；水位只有"打开
+    会话"这个动作推得动。
+  * **翻页期间新到的仍然是未读。** 它比这一页最新那条还新，落在水位之上。往前翻那一页
+    里每一条都比水位老，所以往前翻永远不推水位。
+
+**剩下那半如实说**：比这一页最早那条还早、又没摆到她眼前的未读，落到水位之下就此过去。
+水位是一条单调的线，不是一张"看过哪几条"的清单 —— 真人也不会回头把 @ 他之前那三百条
+闲聊补看完。她往前翻还找得到它们，只是不再算"没看过"。
+
 **同毫秒不能被跳过：游标是复合的。** 只按 ``event_time > 水位`` 开窗的话，**整个那一
 毫秒**都被排除——一条跟她刚读那条同毫秒、但晚一步落库的消息就此永久消失。所以水位是
 ``(event_time, common_message_id)``，按字典序推进；``common_message_id`` 在生产里是
@@ -51,24 +80,28 @@ uuidv7（按生成时刻单调），同毫秒里谁先谁后有确定答案。
 造了 ``seq`` 才解掉同类问题，这张表的写入方不是我们）。一条**晚落库、而 ``event_time``
 比水位更早**的消息仍然会被永久跳过。复合游标只覆盖了"同毫秒"这一段边界，不是全部。
 
-**窗口、未读、游标是三件事**（改之前它们是同一个查询条件的三个身份）：
+**这一页、未读、游标是三件事**（改之前它们是同一个查询条件的三个身份）：
 
   * **未读集合 U**：游标之后的、别人发的、没撤掉的那些。判据跟改之前逐字相同，
-    信封和"谁在叫她"用的也是它。
-  * **展示窗口 W**：这条会话上最近 :data:`PHONE_GLANCE_LIMIT` 条，**不看游标、不分谁
-    发的**，含她自己撤掉的那条（留痕迹，见
-    :data:`app.data.queries.messages._VISIBLE_WHEN_SHE_OPENS_IT`），不含
-    别人撤掉的。
-  * 「其中 N 条是新的」＝ ``|U ∩ W|``；「前面还有 K 条你没往回翻」＝ ``|U − W|``，也
-    就是被挤出窗口的未读。
-  * **游标推到 ``max(U)``，不是 ``max(W)``。** W 里最新那条可能是她自己发的、晚于任何
-    未读；推到它身上会让之后乱序到达、时刻更早的消息被永久跳过 —— 她一个字都没看过，
-    那几条却已经被算成读过了。一条未读都没有时游标不动。
+    通知和"谁在叫她"用的也是它。
+  * **这一页**：锚点往后 :data:`PHONE_PAGE_AFTER` 条、剩下的位置往前补满
+    :data:`PHONE_PAGE` 条，**不看游标、不分谁发的**，含她自己撤掉的那条（留痕迹，见
+    :data:`app.data.queries.messages._VISIBLE_WHEN_SHE_OPENS_IT`），不含别人撤掉的。
+  * 「其中 N 条是新的」＝ ``|U ∩ 这一页|``；「后面还有 N 条你还没看到」是比这一页最新
+    那条还新的未读；「前面还有 N 条」是比这一页最早那条还早、她翻得回去的消息。
+  * **游标推到 ``max(U ∩ 这一页)``。** 推到这一页最新那条（不管是不是未读）会出事：
+    那条可能是她自己发的、晚于任何未读，之后乱序到达、时刻更早的消息就被永久跳过了。
+    一页里一条未读都没有时游标不动。
 
-**挤出窗口的那些永久丢失。** 她一眼只看最后十来条，前面的不会补看，游标照样推到未读
-里最新那条。这是设计不是 bug——真人"未读 47 条"就是先看最后五到十条，能自洽就到此为
-止。给她做"补看队列"是替她做决定，而且真人根本没有那个东西。**但窗口里的东西不会
-消失**：下一轮再点开还是那十条，跟真人再点一次看到同样的消息一致。
+**锚点：默认落在把她叫来的那条上。** 改之前锚点永远是"现在"（``ORDER BY event_time
+DESC LIMIT 10``），半小时前群里 @ 她那条早被后面几十条闲聊挤掉了。现在这一页落在**在
+叫她的未读里最早那条**上（判据是 :data:`app.data.queries.messages._CALLING_HER`，跟把
+她提前叫来那条钟共用一份），没有谁在叫她时落在最新那条上 —— 那时这一页就是最后几条，
+跟真人点开一个群一样。
+
+**取最早不取最新**，因为它和"看过"的口径是一件事：取最新的话第一页就落在未读堆顶，游标
+一下推到顶，中间那些一个字没看过却已经算读过了。落在最早那条上，她每打开一次就往前推进
+一页，一屏一屏读完，一条都不跳。
 
 **看到读过的上文不配任何"防重复回应"的规则。** 不加计数器、不加去重、不加"这条你回过
 了"的标记：每条消息都带着时刻，而且「其中 N 条是新的」直接告诉她哪些是新到的。她读得
@@ -100,10 +133,10 @@ presence 而不是"聊过天就算"，是因为 bot 被移出群之后历史还�
 （``bot_config`` 里 bot → persona 的映射），判据写在
 :data:`app.data.queries.messages._SAID_BY_HER` 上。
 
-**姐姐的群聊发言进未读，但一个字的召唤力都不多。** 群里不点名就是背景音，条数上限
-照样管得着它（:meth:`Envelope.is_calling_you` 一个字没动）。同一个屋檐下的姐妹在群里
-聊天，不该比陌生人更有召唤力 —— 真按"姐姐一说话就召唤"来，两个 agent 会在一个群里
-互相把对方叫醒，永远停不下来。
+**姐姐的群聊发言进未读，但一个字的召唤力都不多。** 群里不点名就是背景音，通知的条数
+上限照样管得着它（判据在 :func:`newest_unread_summons` 上，一个字没动）。同一个屋檐下
+的姐妹在群里聊天，不该比陌生人更有召唤力 —— 真按"姐姐一说话就召唤"来，两个 agent 会
+在一个群里互相把对方叫醒，永远停不下来。
 
 **撤掉的那条不在会话里了。** 撤回不删 ``common_message`` 那一行（公共层是消息记录，
 删行会打断历史），撤成功只在 ``recalled_at`` 上留个时刻。查询层每一处读那张表的地方
@@ -146,7 +179,8 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities.concurrency import fan_out_wait
 from app.data.queries.messages import (
-    find_conversation_window,
+    find_conversation_page,
+    find_conversations_by_last_message,
     find_newest_unread_summons,
     find_unread_senders,
     find_unread_summary,
@@ -178,21 +212,41 @@ logger = logging.getLogger(__name__)
 # ``image_client`` / ``image_is_reachable`` 是 module-level 名字，测试从这里换替身
 # —— 真跑那两步要打 tool-service（签名）和对象存储（验对象在不在）。
 
-# 她点开一条会话看到多少条。**这是展示窗口的大小，不是未读的上限**——游标照样推到未读
-# 里最新那条，被挤出窗口的那些是真的丢了，这就是设计本身（见模块 docstring）。十条约
-# 等于真人点开一个会话一屏能看到的量。
-PHONE_GLANCE_LIMIT = 10
+# 她点开一条会话，一页给多少条。约等于真人点开一个会话一屏看得到的量。
+# **这是一页的大小，不是她能看到多少**——往前翻得回去（``before``），后面没看到的
+# 下一次打开接着往下。
+PHONE_PAGE = 13
+
+# 锚点往后最多带几条；这一页剩下的位置往前补。
+#
+# 为什么不是"前后各一半"：锚点落在最新那条时（没有谁在叫她），往后一条都没有，固定
+# 分配会让这一页只剩前面那几条 —— 她点开一个安静的群只看得到五条。往前补满之后，
+# 那种情形下这一页正好是最后 :data:`PHONE_PAGE` 条。
+#
+# 8 的量级依据：她被叫来时要判断的主要是"这件事后来有没有人接"，那在锚点之后；锚点
+# 之前几条只是让她读得懂那句话从哪来的，而且往前翻还有一条路，往后没有。
+PHONE_PAGE_AFTER = 8
+
+# 「前面还有多少 / 后面还有多少」数到这儿就停，显示成 ``200+``。
+#
+# 一条会话上"从头到现在一共多少条"没有便宜的答法（planner 拿不到有效下界只能整表扫，
+# 同 :data:`app.data.queries.messages._OTHERS_SPOKE_AT_LEAST_SQL` 那条论证），而她要
+# 的只是"值不值得往前翻"。**这不是过滤**：数不过来的那些一条没少，翻得到。
+PHONE_COUNT_CAP = 200
 
 # 一次「看手机」最多把别人发来的几张图摆到她眼前。**不是精心算过的数**：真实数据里
-# 最近十条里有好几张图很罕见，它挡的只是有人连发一屏图片时把整个上下文塞满。超出的
+# 一页里有好几张图很罕见，它挡的只是有人连发一屏图片时把整个上下文塞满。超出的
 # 那几张在正文里如实说没给她看，不假装没有过。
 PHONE_PICTURE_LIMIT = 12
 
-# 信封里列多少条会话。手机上会话再多，一屏也就这些；超出的下一轮还在。
+# 通知一次给几条。真人手机的通知栏就这么点地方；被推下去的那些在会话列表上还在。
 ENVELOPE_LIMIT = 8
 
-# 信封里点几个发件人的名字。不是"最重要的几个"——是按最近说话的先后取前几个。
+# 通知里点几个发件人的名字。不是"最重要的几个"——是按最近说话的先后取前几个。
 ENVELOPE_SENDER_LIMIT = 4
+
+# 会话列表一屏列几条。超出的把最后那串 channel_id 抄进 ``before`` 接着往下翻。
+CONVERSATION_LIST_LIMIT = 12
 
 
 class PhoneRead(Data):
@@ -290,7 +344,7 @@ def _who_tag(sender: Sender) -> str:
 
 @dataclass(frozen=True)
 class Envelope:
-    """一条会话的信封。**没有正文，一个字都没有。**
+    """一条会话的通知。**没有正文，一个字都没有。**
 
     ``named_you`` 是"有人点了你的名"这个客观事实（群里 @ 到她自己的 bot）；私聊没有
     这个概念，私聊本身就意味着有人在等她回。
@@ -309,15 +363,6 @@ class Envelope:
     latest: datetime
     named_you: bool
     you_last_spoke_at: datetime | None
-
-    @property
-    def is_calling_you(self) -> bool:
-        """有人在叫她吗 —— 跟 :func:`newest_unread_summons` 同一条判据。
-
-        私聊本身就意味着有人在等她回；群里点名是直接叫她。两条客观事实，没有第三条、
-        没有分级。**这两条会话永远不会被信封的条数上限挤掉。**
-        """
-        return self.scope == "direct" or self.named_you
 
 
 @dataclass(frozen=True)
@@ -522,12 +567,13 @@ def _instant(ms: int) -> datetime:
 async def envelopes_for(
     *, lane: str, persona_id: str, now: datetime
 ) -> list[Envelope]:
-    """她此刻手机上有动静的那些会话。**在叫她的那些一条都不会少。**
+    """她此刻手机上有动静的那些会话，**按时间排、最新的在前**，一次给几条。
 
-    条数上限只管**没在叫她的**那批（群里的背景噪音，本来就无上限）。这个区别不是
-    美观问题：信封截掉的是"她知不知道有这回事"，比"她看多少条内容"严重一个量级——
-    被挤出去的那条会话，她连它存在都不知道，也就永远不会想起去看。一屋子群在刷屏
-    的时候，正在等她回话的那条私聊必须还在眼前，**谁值得先回是她判，不是这里判**。
+    **没有谁被提到前面去。** 改之前在叫她的那些（私聊全部 + 群里点名）无条件排在最前、
+    条数上限只截后半批，理由是"被挤出去的那条她连它存在都不知道"。那条理由现在不成立
+    了：会话列表按这条会话最后一条消息的时刻倒序，翻得到它（:func:`look_through_your_phone`）；
+    而且私聊一到就把她叫醒过一次（:mod:`app.living.nudge`），那一轮的上下文她还带着。
+    留着那个提前，"按时间排"这句话就不成立，而且它是在替她裁决注意力。
 
     会话集合是过了白名单的那份（:func:`reachable_conversations`）：名单外的会话连
     "有动静"都不该露出来。``now`` 是这一轮的时间锚，名单按它算。
@@ -577,9 +623,7 @@ async def envelopes_for(
             )
         )
     out.sort(key=lambda e: e.latest, reverse=True)
-    calling = [e for e in out if e.is_calling_you]
-    rest = [e for e in out if not e.is_calling_you]
-    return calling + rest[: max(0, ENVELOPE_LIMIT - len(calling))]
+    return out[:ENVELOPE_LIMIT]
 
 
 def _clock(moment: datetime, *, now: datetime) -> str:
@@ -604,7 +648,7 @@ def _clock(moment: datetime, *, now: datetime) -> str:
 
 
 def render_envelopes(envelopes: list[Envelope], *, now: datetime) -> str:
-    """把信封摆成她读得懂的样子。**正文一个字都不在这里。**
+    """把通知摆成她读得懂的样子。**正文一个字都不在这里。**
 
     ``channel_id`` 紧跟在会话名后面，不甩到行尾。实测（coe-living，2026-08-31
     20:21）她拿人名去调 :func:`look_at_phone`、被顶了回来：名字在最显眼处、地址挂
@@ -827,7 +871,7 @@ def _body_of(row, *, pictures: Iterator[str]) -> str:
     图文混排更狠：文字非空就直接返回，附件在她眼里整个不存在。
 
     ``pictures`` 是这一眼里每张图占位写什么，按显示顺序排好的一串
-    （:func:`_glance_text` 算的）。每碰到一个图片项取一个 —— 所以这个迭代器的顺序
+    （:func:`_page_text` 算的）。每碰到一个图片项取一个 —— 所以这个迭代器的顺序
     必须跟 :func:`_picture_files_in` 数出来的完全一致，两边共用
     :func:`_content_items` 就是为了钉住这一点。
 
@@ -978,20 +1022,32 @@ def _shown_picture(row, number: int, url: str, *, now: datetime) -> list[dict[st
     ]
 
 
-def _glance_text(
+def _counted(n: int) -> str:
+    """一个数到 :data:`PHONE_COUNT_CAP` 就停的计数，摆出来的样子。"""
+    return f"{PHONE_COUNT_CAP}+" if n >= PHONE_COUNT_CAP else str(n)
+
+
+def _page_text(
     *,
     title: str,
     rows: list,
     fresh: int,
-    older_unread: int,
+    later_unread: int,
+    earlier_total: int,
+    before_id: str,
     now: datetime,
     labels: list[str],
 ) -> str:
     """她点开这条会话看到的那段文本。``rows`` 已经是显示顺序（旧的在前）。
 
-    ``fresh``（``|U ∩ W|``）一定说，**零也说**：窗口里有她上一轮已经读过的上文，哪些
-    是新到的只有这个数说得清。``older_unread``（``|U − W|``）是被挤出窗口的未读，它们
-    不会在别处被补回来。
+    头上那一行是她在这条会话里唯一的方位感，三件事：
+
+      * ``fresh``（``|U ∩ 这一页|``）一定说，**零也说**：这一页里有她上一轮已经读过的
+        上文，哪些是新到的只有这个数说得清；
+      * ``later_unread`` 是比这一页最新那条还新的未读。不说的话她会以为自己追平了，
+        而手机上还有话等着；
+      * ``earlier_total`` 是她翻得回去的那些，跟着一串 ``before=``。**这串是往前翻唯一
+        的入口** —— 消息行上没有编号，头上不印它，"往前翻"对她就不存在。
 
     ``labels`` 是这一眼里每张图在正文里的写法，按显示顺序摊平成一串
     （:func:`_place_pictures` 算的）；一个迭代器从头走到尾，每条消息碰到几个图片项就
@@ -1001,8 +1057,16 @@ def _glance_text(
     lines = [_one_message(r, now=now, pictures=pictures) for r in rows]
     # 会话标题是别人写的（群名），跟消息行摆在同一段文本里 —— 同样转义。
     head = f"「{esc(title)}」（其中 {fresh} 条是新的"
-    if older_unread > 0:
-        head += f"，前面还有 {older_unread} 条你没往回翻，就这么过去了"
+    if later_unread > 0:
+        head += (
+            f"；后面还有 {_counted(later_unread)} 条你还没看到，"
+            f"再打开一次接着往下看"
+        )
+    if earlier_total > 0:
+        head += (
+            f"；前面还有 {_counted(earlier_total)} 条，想往前翻就带上 "
+            f"before={before_id}"
+        )
     return head + "）\n" + "\n".join(lines)
 
 
@@ -1020,8 +1084,10 @@ async def look_up_contact(
 ) -> str:
     """报一个名字，找回他在你手机上的那条会话。
 
-    手机上每一轮给你的信封只列**有动静的**那些。一条会话你读完了、对方没再说话，
-    它就不在信封上了——想主动找回某个人的时候用这只手。
+    每一轮摆在你眼前的通知只有**刚来的那几条动静**。一条会话你读完了、对方没再说话，
+    它就不在通知上了——想主动找回某个人的时候用这只手。
+
+    知道名字就用这只手；不知道找谁、想看看手机上都有谁，那是 look_through_your_phone。
 
     名字对得上的会话都列出来，各带一串 channel_id，拿它调 look_at_phone 或
     send_message。哪一条是你要找的那个人，你自己认。
@@ -1078,19 +1144,141 @@ async def look_up_contact(
 
 
 @tool
+@tool_error("翻手机失败")
+async def look_through_your_phone(
+    before: Annotated[
+        str | None,
+        Field(
+            description="接着哪条会话往下翻：把上一屏最后那串 channel_id 原样抄进来；"
+            "从头看就别填"
+        ),
+    ] = None,
+) -> str:
+    """翻一翻手机上都有哪些会话。
+
+    最近有人说过话的排在最前面，越往下越久没动静。每条带一串 channel_id，拿它调
+    look_at_phone 就能打开那条会话看说了什么，或者调 send_message 在里面开口。
+
+    每一轮摆在你眼前的通知只有刚来的那几条动静；这只手给的是整张名单——你已经读完、
+    对方没再说话的那些也在里面。**想主动找谁说话，从这儿翻。**
+
+    一次只列一屏。还想往下翻就把这一屏最后那串 channel_id 抄进 before 再翻一次。
+    越往下的会话越久没说过话，翻到你自己觉得没意思为止。
+
+    知道名字的话直接 look_up_contact 报名字更快，这只手是给"不知道找谁、先看看都有
+    谁"用的。
+
+    Args:
+        before: 接着哪条会话往下翻（上一屏最后那串 channel_id）；第一屏别填。
+
+    Returns:
+        手机上的会话，最近说过话的在前面，每条带一串 channel_id。
+    """
+    _lane, now, persona_id, _moment_id = moment_scope()
+    edge = (before or "").strip() or None
+
+    # 会话集合从 reachable_conversations 来，跟通知那条路同一个来源 —— 这只手列得出
+    # 的严格等于她看得见的那些。
+    rows = await find_conversations_by_last_message(
+        conversations=[
+            {"channel_id": c.channel_id, "scope": c.scope, "title": c.title}
+            for c in await reachable_conversations(persona_id=persona_id, now=now)
+        ],
+        own_bots=await find_bot_names_for_persona(persona_id),
+    )
+    if not rows:
+        return "手机上一条会话都没有。"
+
+    # 她抄回来那串指的是"翻到这儿了"，落脚点是它在这份名单上的位置。**指不到就顶回去**
+    # （跟 look_at_phone 那只手同一条）：悄悄退回第一屏的话，她以为自己翻到了更下面，
+    # 而眼前是刚看过的同一批会话。
+    start = 0
+    if edge is not None:
+        at = next(
+            (i for i, r in enumerate(rows) if str(r["channel_id"]) == edge), None
+        )
+        if at is None:
+            raise ValueError(
+                f"{before!r} 不是你手机上任何一条会话 —— 抄上一屏最后那串 "
+                f"channel_id，或者不填从头看。"
+            )
+        start = at + 1
+    page = rows[start : start + CONVERSATION_LIST_LIMIT]
+    if not page:
+        return "再往下就没有了 —— 这些就是你手机上全部的会话。"
+
+    lines = ["手机上的会话（最近说过话的在前面）："]
+    for r in page:
+        where = "私聊" if r["scope"] == "direct" else "群"
+        # 私聊多半没有标题（prod 实测 205 条里 158 条是空的），这时用**对面那个人**
+        # 当它的名字，而且是署名标签而不是一串裸名字 —— 同名的主人和冒充者只有那个
+        # 标签分得开。拿"最后一条是谁说的"当名字的话，最后一句是她自己说的那些私聊
+        # 在这儿就叫她自己的名字。
+        other = (
+            _who_tag(
+                Sender(name=r["other_who"], is_owner=bool(r["other_by_owner"]))
+            )
+            if r["other_who"] is not None
+            else None
+        )
+        if r["scope"] == "direct" and not r["title"] and other is not None:
+            head = f"- {where} {other} channel_id={r['channel_id']}"
+        else:
+            # 地址紧跟名字，理由见 render_envelopes。
+            label = r["title"] or (r["other_who"] or "（没名字）")
+            head = f"- {where}「{esc(label)}」channel_id={r['channel_id']}"
+        bits = [head]
+        if r["at_ms"] is None:
+            bits.append("还没人在这儿说过话")
+        else:
+            said_by = (
+                "你"
+                if r["said_by_you"]
+                else _who_tag(
+                    Sender(name=r["who"], is_owner=bool(r["by_owner"]))
+                )
+            )
+            bits.append(
+                f"最后一条 {_clock(_instant(int(r['at_ms'])), now=now)} · "
+                f"{said_by}说的"
+            )
+        lines.append(" · ".join(bits))
+
+    left = len(rows) - (start + len(page))
+    if left > 0:
+        lines.append(
+            f"还有 {left} 条会话没列在这儿 —— 把上面最后那串 channel_id 抄进 "
+            f"before 接着往下翻。"
+        )
+    return "\n".join(lines)
+
+
+@tool
 @tool_error("看手机失败")
 async def look_at_phone(
     channel_id: Annotated[
-        str, Field(description="哪条会话，用信封上那串 channel_id")
+        str, Field(description="哪条会话，用通知或者会话列表上那串 channel_id")
     ],
+    before: Annotated[
+        str | None,
+        Field(
+            description="往前翻：把这一页头上那串 before=… 原样抄进来；"
+            "看这条会话现在说到哪了就别填"
+        ),
+    ] = None,
 ) -> list[dict[str, Any]]:
-    """拿起手机打开一条会话，看最近说了些什么。
+    """拿起手机打开一条会话，看说了些什么。
 
-    信封只告诉你有动静、谁、多少条。**内容要调这个才有。**
+    通知只告诉你有动静、谁、多少条。**内容要调这个才有。**
 
-    你看到的是这条会话上最近的十来条往来——**双向的**，你自己发的也在里面，上一次
-    看过的上文也还在。其中哪几条是新到的会单独告诉你。再往前那些不会再回来，就像你
-    真的划开一个未读很多的会话，扫一眼最后几条，前面的就那么过去了。
+    你看到的是这条会话上的一页往来——**双向的**，你自己发的也在里面，上一次看过的
+    上文也还在。这一页落在**把你叫来的那条**上（群里是点你名字那条，私聊是最早那条
+    你还没看过的），前后各带一段；没人在叫你的会话就落在最新那条上。
+
+    头一行告诉你这一页的位置：其中几条是新的、后面还有几条你没看到（再打开一次接着
+    往下看）、前面还有几条（把那串 before=… 抄进 before 就往前翻一页）。
+
+    **没摆到你眼前的消息不算你看过。** 往前翻不会让后面新到的消息变成"看过了"。
 
     每一条长这样，正文在标签中间：
 
@@ -1114,10 +1302,11 @@ async def look_at_phone(
     你没调它的时候，消息照堆着、一条都不算你看过。
 
     Args:
-        channel_id: 哪条会话（信封上那串）。
+        channel_id: 哪条会话（通知或者会话列表上那串）。
+        before: 往前翻一页（这一页头上那串 before=…）；不填就是这条会话当前这一页。
 
     Returns:
-        这条会话最近的十来条往来、其中几条是新到的，以及别人在里面发过的图。
+        这条会话上的一页往来、其中几条是新到的、前后各还剩多少，以及别人在里面发过的图。
     """
     lane, now, persona_id, moment_id = moment_scope()
     conv = await reachable_conversation(
@@ -1125,32 +1314,44 @@ async def look_at_phone(
     )
     if conv is None:
         raise ValueError(
-            f"{channel_id!r} 不是你手机上的会话 —— 用信封上那串 channel_id，"
-            f"照抄，别自己编。"
+            f"{channel_id!r} 不是你手机上的会话 —— 用通知或者会话列表上那串 "
+            f"channel_id，照抄，别自己编。"
         )
 
+    edge = (before or "").strip() or None
     after_ms, after_id = await effective_cursor(
         lane=lane, persona_id=persona_id, channel_id=conv.channel_id
     )
-    # 一条语句同时给出窗口、未读总数和 ``max(U)``，理由写在
-    # :data:`app.data.queries.messages._OPEN_CONVERSATION_SQL` 上：两条语句就是两个
-    # 快照，中间提交的那条消息会被永久跳过。三列在每一行上都一样，取第一行即可。
-    rows = await find_conversation_window(
+    # 一条语句同时给出锚点、这一页和前后各还剩多少，理由写在
+    # :data:`app.data.queries.messages._CONVERSATION_PAGE_SQL` 上：两条语句就是两个
+    # 快照，中间提交的那条消息会被永久跳过。后两列在每一行上都一样，取第一行即可。
+    rows = await find_conversation_page(
         channel_id=conv.channel_id,
         after_ms=after_ms,
         after_id=after_id,
         own_bots=await find_bot_names_for_persona(persona_id),
-        limit=PHONE_GLANCE_LIMIT,
+        bot_user_ids=await find_bot_user_ids_for_persona(persona_id),
+        is_direct=conv.scope == "direct",
+        before_id=edge,
+        page=PHONE_PAGE,
+        after_n=PHONE_PAGE_AFTER + 1,  # 锚点自己占一个
+        earlier_cap=PHONE_COUNT_CAP,
     )
 
     if not rows:
-        # 窗口为空 ⟹ 未读也为空（推理见
-        # :data:`app.data.queries.messages._OPEN_CONVERSATION_SQL`），所以这里
-        # 直接返回、游标不动是完备的，不是漏了一种情况。
+        if edge is not None:
+            # 抄错的那串**当场顶回去**，不悄悄退回当前这一页：那样她以为自己翻到了更
+            # 早的地方，而眼前是刚看过的同一批消息。
+            raise ValueError(
+                f"{before!r} 不是这条会话上的一条消息 —— 抄这一页头上那串 "
+                f"before=…，或者不填、看这条会话现在说到哪了。"
+            )
+        # 这一页为空 ⟹ 未读也为空：U 里每一行都满足"没撤掉"，所以 U 是这一页候选集的
+        # 子集；候选集非空时锚点必然取得到、这一页至少一行。所以直接返回、游标不动是
+        # 完备的，不是漏了一种情况。
         return [{"type": "text", "text": f"「{esc(conv.title)}」上一条消息都没有。"}]
 
     fresh = sum(1 for r in rows if r["is_unread"])
-    unread_total = int(rows[0]["unread_total"])
     # 显示顺序（旧的在前）在这儿定一次，正文和取图都按它数 —— 两边各自 reverse 的话，
     # 编号和图错位是静默的：她照着编号说的每一句都指错了图。
     ordered = list(reversed(rows))
@@ -1159,34 +1360,40 @@ async def look_at_phone(
     labels, pictures = _place_pictures(
         by_row, await _open_pictures(files[:PHONE_PICTURE_LIMIT])
     )
-    seen = _glance_text(
+    seen = _page_text(
         title=conv.title,
         rows=ordered,
         fresh=fresh,
-        older_unread=unread_total - fresh,
+        later_unread=int(rows[0]["later_unread"]),
+        earlier_total=int(rows[0]["earlier_total"]),
+        before_id=str(rows[-1]["message_id"]),
         now=now,
         labels=labels,
     )
 
-    # 水位推到**未读里最新的那条**（``max(U)``），不是窗口里最新那条：窗口里最新那条
-    # 可能是她自己发的、晚于任何未读，推到它身上会让之后乱序到达、时刻更早的消息被
-    # 永久跳过 —— 她一个字都没看过，那几条却已经被算成读过了。被挤出窗口的未读就此
-    # 丢了 —— 这正是这条设计要的行为，不是漏。一条未读都没有时游标不动。
+    # 水位推到**这一页里真摆到她眼前、而且之前没看过的那些**中最新的一条
+    # （``max(U ∩ 这一页)``，``rows`` 是倒序所以就是第一条 ``is_unread``）。三件事因此
+    # 成立：翻页只算看过这一页、往前翻永远不推水位（那一页每条都比水位老）、她翻着的
+    # 时候到的那条仍然是未读。
+    #
+    # **不推到这一页最新那条**（不管是不是未读）：那条可能是她自己发的、晚于任何未读，
+    # 推到它身上会让之后乱序到达、时刻更早的消息被永久跳过。一页里一条未读都没有时
+    # 游标不动。
     #
     # **但不在这儿落库。** 工具返回不等于她看见了——结果还要进模型的上下文，这一轮才
     # 算真的把内容送到她眼前。当场提交的话，崩在中间就是"已读了但内容从没进过她的
     # 上下文"，那几条永久消失且一句报错都没有。所以攒进本轮状态，由 ``run_moment``
     # 的收尾跟 ``LifeMoment`` 一个事务落库（:func:`commit_glances`）。
-    newest_unread_id = rows[0]["newest_unread_id"]
-    if newest_unread_id is not None:
+    newest_shown_unread = next((r for r in rows if r["is_unread"]), None)
+    if newest_shown_unread is not None:
         get_context().features.setdefault(FEATURE_GLANCES, []).append(
             {
                 "lane": lane,
                 "persona_id": persona_id,
                 "channel_id": conv.channel_id,
-                "read_through_message_id": str(newest_unread_id),
+                "read_through_message_id": str(newest_shown_unread["message_id"]),
                 "moment_id": moment_id,
-                "read_through_ms": int(rows[0]["newest_unread_ms"]),
+                "read_through_ms": int(newest_shown_unread["at_ms"]),
                 "read_at": now,
             }
         )
@@ -1198,7 +1405,7 @@ async def look_at_phone(
     return blocks
 
 
-PHONE_TOOLS = [look_at_phone, look_up_contact]
+PHONE_TOOLS = [look_at_phone, look_through_your_phone, look_up_contact]
 
 
 # medium 由会话本身决定：私聊是手机上一对一，群是群里说话。两者都隔着设备，所以坐在

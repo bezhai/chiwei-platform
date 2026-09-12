@@ -32,6 +32,7 @@ from sqlalchemy import text
 from app.data import session as session_mod
 from app.living.phone import (
     look_at_phone,
+    look_through_your_phone,
     look_up_contact,
     phone_envelope,
 )
@@ -169,6 +170,48 @@ async def test_a_display_name_cannot_carry_markup_into_anything_she_reads(
     assert_only_our_own_markup(seen, where="打开会话")
     assert_only_our_own_markup(envelope, where="信封")
     assert_only_our_own_markup(found, where="按名字找人")
+
+
+@pytest.mark.integration
+async def test_a_display_name_cannot_carry_markup_into_the_conversation_list(
+    living_db, in_a_moment
+):
+    """会话列表上那个名字也是第三方写的 —— 私聊没有标题时它直接就是对面的昵称。"""
+    await _seed_world()
+    await _incoming(
+        _DM, text_body="在吗", at=_at(21, 30), sender=_SOMEONE, sender_name=POISON
+    )
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        listed = await look_through_your_phone.invoke({})
+
+    assert_only_our_own_markup(listed, where="会话列表")
+
+
+@pytest.mark.integration
+async def test_a_group_name_cannot_carry_markup_into_the_conversation_list(
+    living_db, in_a_moment, pinned
+):
+    """群名同理 —— 它在列表上待在 ``「」`` 里，不转义就能自己起一行。"""
+    await _seed_world()
+    async with session_mod.get_session() as s:
+        await s.execute(
+            text(
+                "UPDATE common_conversation SET display_name = :t "
+                "WHERE common_conversation_id = CAST(:c AS uuid)"
+            ),
+            {"t": POISON, "c": str(_GROUP)},
+        )
+    pinned(str(_GROUP))
+    await _incoming(
+        _GROUP, text_body="有人吗", at=_at(21, 30), sender=_SOMEONE,
+        sender_name="路人",
+    )
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        listed = await look_through_your_phone.invoke({})
+
+    assert_only_our_own_markup(listed, where="会话列表")
 
 
 @pytest.mark.integration

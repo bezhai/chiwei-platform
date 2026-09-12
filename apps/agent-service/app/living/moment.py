@@ -54,8 +54,10 @@
   * :func:`say` / :func:`act`  跟姐妹说话 / 做一个她们看得见的动作
   * :func:`look_around`  够得着的地方现在怎么样
   * :func:`stop_for_now` 这一轮我到此为止（零参数，调完这一轮就结束）
-  * ``look_at_phone``    拿起手机看某条会话说了什么（:mod:`app.living.phone`）
-  * ``look_up_contact``  找一个她读到过的人（:mod:`app.living.phone`）
+  * ``look_at_phone``    拿起手机打开某条会话，看说了什么（:mod:`app.living.phone`）
+  * ``look_through_your_phone`` 翻一翻手机上都有哪些会话（同上，三层里的第二层：
+    通知只给刚来的那几条动静，这只手给整张名单）
+  * ``look_up_contact``  按名字找回一条会话（:mod:`app.living.phone`）
   * ``send_message``     给手机上某条会话发一条（:mod:`app.living.mouth`）
   * ``search_online`` / ``browse_online``  带着问题上网查 / 没事逛一圈刷一批
     （:mod:`app.living.web`，跟 ``look_at_phone`` 是两件事：那只手看别人发给她的
@@ -959,10 +961,11 @@ async def run_moment(
                 FEATURE_GLANCES: [],
             },
         )
-        # 手机上只给信封（谁、多少条、多密、你上次在那儿开口是什么时候）。内容要她
-        # 自己调 look_at_phone —— 白送进来的话，"她没看见"这个状态就再也不会发生。
+        # 手机上只给通知（谁、多少条、多密、你上次在那儿开口是什么时候），按时间排、
+        # 只给最新那几条。内容要她自己调 look_at_phone，整张会话名单要她自己调
+        # look_through_your_phone —— 白送进来的话，"她没看见"这个状态就再也不会发生。
         #
-        # **信封在这个 moment 的 context 里算**，所以"她看得见哪些会话"这份名单在她看到第
+        # **通知在这个 moment 的 context 里算**，所以"她看得见哪些会话"这份名单在她看到第
         # 一眼时就定下来，之后整个 moment（看手机、找人、发消息、找可读文件）用的都是那一份
         # （:mod:`app.living.whitelist`）。摆在 context 外面算的话名单会被算两遍，
         # 而两遍之间到达的消息会让一条会话半路出现在她眼前。

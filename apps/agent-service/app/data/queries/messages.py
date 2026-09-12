@@ -28,7 +28,8 @@ __all__ = [
     "find_unread_summary",
     "find_unread_senders",
     "find_newest_unread_summons",
-    "find_conversation_window",
+    "find_conversation_page",
+    "find_conversations_by_last_message",
     "search_conversations_by_name",
     "find_file_items_in_conversations",
     "count_summons_since",
@@ -96,7 +97,7 @@ _NAMED_HER = (
 # 四个地方用它，其中三个拿它当 ``WHERE``：信封的未读计数
 # （:func:`find_unread_summary`）、信封上点谁的名（:func:`find_unread_senders`）、
 # 谁在叫她（:func:`find_newest_unread_summons`，那边再 ``AND`` 上一条额外条件）。
-# 第四处是打开会话那条查询，它拿这个集合去标窗口里哪几行是新的。
+# 第四处是打开会话那条查询，它拿这个集合去标这一页里哪几行是新的。
 #
 # **必须是同一份。** 四处各写一遍同样的三个条件，抄漏一个就是"信封说三条、翻开却数
 # 出两条"——她只会以为自己漏看了，而库里没有任何东西对不上。
@@ -305,13 +306,19 @@ async def find_unread_senders(
 # **别的 bot 在群里说话不在这里面。** 它的话进未读、进信封（同一个群里的动静她本该
 # 感知到），但群里不点名就是背景音 —— 不点名却算召唤的话，两个 agent 在一个群里会
 # 互相把对方叫醒，永远停不下来。点名了就跟真人点名一样算，同一条判据，不多不少。
+#
+# **两处用它，共一份定义**：把她提前叫来那一轮（:func:`find_newest_unread_summons`，
+# 取最新那条）和她打开会话时这一页落在哪（:data:`_CONVERSATION_PAGE_SQL` 的锚点，取
+# **最早**那条）。各写一遍的话，把她叫来的那件事和她点进去看到的那一段就会指向两条
+# 不同的消息。
+_CALLING_HER = f"({_STILL_UNREAD} AND (:is_direct OR {_NAMED_HER}))"
+
 _SUMMONS_SQL = f"""
 SELECT cm.common_message_id AS message_id,
        cm.event_time        AS at_ms
   FROM common_message cm
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
-   AND {_STILL_UNREAD}
-   AND (:is_direct OR {_NAMED_HER})
+   AND {_CALLING_HER}
  ORDER BY cm.event_time DESC, cm.common_message_id DESC
  LIMIT 1
 """
@@ -348,35 +355,44 @@ async def find_newest_unread_summons(
 # 打开一条会话
 # ---------------------------------------------------------------------------
 
-# 打开会话那一眼。展示窗口 W、未读总数 ``|U|``、``max(U)`` 由**同一条语句**一次给出。
+# 打开一条会话那一页。锚点、这一页是哪几行、前后各还剩多少，由**同一条语句**一次给出。
 #
 # **为什么必须是一条。** ``app/data/session.py`` 没配更强的隔离级别，PostgreSQL 默认
 # ``READ COMMITTED`` 下同一个事务里连续两条 ``SELECT`` 各取各的快照。分成两条时，一条
-# 在两次查询之间提交的新消息不在窗口里、却可能成为未读里最新那条 —— 游标推到它身上，
-# 这条她从没见过的消息就被永久跳过了，一句报错都没有。并发撤回同样会让「其中 N 条是
-# 新的」跟未读总数互相对不上。单条语句只取一个快照，三个答案必然出自同一份事实。
+# 在两次查询之间提交的新消息不在这一页里、却可能被算成"她看到的最新那条" —— 游标推到
+# 它身上，这条她从没见过的消息就被永久跳过了，一句报错都没有。并发撤回同样会让「其中
+# N 条是新的」跟前后那两个数互相对不上。单条语句只取一个快照，几个答案必然出自同一份
+# 事实。
 #
-# ``unread`` 是未读集合 U，判据是 :data:`_STILL_UNREAD`（全模块唯一那份）。窗口那侧
+# **锚点三选一，按优先级：**
+#
+#   1. ``asked`` —— 她抄回来那串（往前翻）。不在这条会话上就是零行，调用方据此顶回去；
+#   2. ``calling`` —— 在叫她的未读里**最早**那条（判据是 :data:`_CALLING_HER`，跟把她
+#      提前叫来那条钟共用一份）。**取最早不取最新**：游标只推到"这一页里真摆出来的未
+#      读"上，取最新的话第一页就落在未读堆顶，中间那些一个字没看过却已经算读过了；
+#   3. ``latest`` —— 这条会话上最新那条。没有谁在叫她时就是它，于是这一页正是最后几条。
+#
+# **这一页 = 锚点往后 ``after_n`` 条，剩下的位置往前补满 ``page`` 条。** 往前补而不是
+# 固定"前几条后几条"，是为了让锚点落在最新那条时这一页仍然是满的 —— 否则没人叫她的
+# 会话她一次只看得到几条。往前翻时（``before_id`` 给了）``after_n`` 强制成 1：这一页
+# 以她抄回来那条结尾，往前一整页，跟上一页首尾相接。
+#
+# ``unread`` 是未读集合 U，判据是 :data:`_STILL_UNREAD`（全模块唯一那份）。这一页那侧
 # 不重写一遍判据，而是 ``LEFT JOIN`` 回这个集合：``is_unread`` 于是**字面上就是**
-# "这一行在 U 里"，「其中 N 条是新的」＝ ``|U ∩ W|`` 由此成为结构上的事实，不再靠两处
-# 判据长得一样来维持。``common_message_id`` 是主键，join 不会把窗口里的行放大。
+# "这一行在 U 里"，「其中 N 条是新的」＝ ``|U ∩ 这一页|`` 由此成为结构上的事实，不再靠
+# 两处判据长得一样来维持。``common_message_id`` 是主键，join 不会把这一页的行放大。
 #
-# 窗口 W 收游标参数但**不按游标过滤**：一行都不会因为"读过了"而被挡在窗口外。窗口
-# 回答"这条会话最近说了些什么"，未读回答"其中哪些是新的"。
+# 这一页收游标参数但**不按游标过滤**：一行都不会因为"读过了"而被挡在外面。
 #
 # 多带的几列各有各的用处，缺一个她就少知道一件事：``said_by_you`` 决定这一行署"你"
 # 还是署那个人的名字（认 ``bot_name``，不认 ``role``）；``recalled_at`` 决定要不要写
 # 明这条已经撤回；``agent_outbound_id`` 是她能拿去撤回的那个编号，只有她主动发起的
 # 行才有。
 #
-# ``unread_total`` / ``newest_unread_*`` 三列在每一行上都一样（标量子查询）。窗口一行
-# 都没有时整条语句返回零行，这三个答案也就无从读起 —— **而那恰好是对的**：U 里每一行
-# 都满足 ``recalled_at IS NULL``，也就必然满足 ``recalled_at IS NULL OR 是她说的``，
-# 所以 U 是窗口候选集的子集；候选集非空时 ``LIMIT``（≥1）取出的窗口也非空。反过来推：
-# 窗口为空 ⟹ 候选集为空 ⟹ U 为空。**"窗口为空但未读非空"在同一个快照里不可能发生。**
-# 万一这个推理哪天被破坏（比如 limit 变成 0），零行的后果是"什么都没看到、游标不动"
-# —— 宁可重看、不可漏看那一侧，不会静默跳过任何一条。
-_OPEN_CONVERSATION_SQL = f"""
+# ``earlier_total`` / ``later_unread`` 两列在每一行上都一样（标量子查询），**都数到
+# ``:earlier_cap`` 就停**：一条会话上"从头到现在一共多少条"没有便宜的答法（planner
+# 拿不到有效下界只能整表扫），而她要的只是"值不值得往前翻"。
+_CONVERSATION_PAGE_SQL = f"""
 WITH unread AS (
   SELECT cm.common_message_id AS message_id,
          cm.event_time        AS at_ms
@@ -384,67 +400,232 @@ WITH unread AS (
    WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
      AND {_STILL_UNREAD}
 ),
-newest_unread AS (
-  SELECT message_id, at_ms
-    FROM unread
-   ORDER BY at_ms DESC, message_id DESC
+asked AS (
+  SELECT 1 AS pick, cm.event_time AS at_ms, cm.common_message_id AS message_id
+    FROM common_message cm
+   WHERE CAST(:before_id AS text) IS NOT NULL
+     AND cm.common_conversation_id = CAST(:channel_id AS uuid)
+     AND CAST(cm.common_message_id AS text) = CAST(:before_id AS text)
+     AND {_VISIBLE_WHEN_SHE_OPENS_IT}
+),
+calling AS (
+  SELECT 2 AS pick, cm.event_time AS at_ms, cm.common_message_id AS message_id
+    FROM common_message cm
+   WHERE CAST(:before_id AS text) IS NULL
+     AND cm.common_conversation_id = CAST(:channel_id AS uuid)
+     AND {_CALLING_HER}
+   ORDER BY cm.event_time ASC, cm.common_message_id ASC
    LIMIT 1
 ),
-recent AS (
-  SELECT cm.common_message_id AS message_id,
-         {_WHO_AND_OWNER},
-         {_SAID_BY_HER}       AS said_by_you,
-         cm.content           AS content,
-         cm.content_text      AS content_text,
-         cm.event_time        AS at_ms,
-         cm.recalled_at       AS recalled_at,
-         cm.agent_outbound_id AS outbound_id,
-         (u.message_id IS NOT NULL) AS is_unread
+latest AS (
+  SELECT 3 AS pick, cm.event_time AS at_ms, cm.common_message_id AS message_id
     FROM common_message cm
-    LEFT JOIN unread u ON u.message_id = cm.common_message_id
-    {_JOIN_SPEAKER}
-   WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+   WHERE CAST(:before_id AS text) IS NULL
+     AND cm.common_conversation_id = CAST(:channel_id AS uuid)
      AND {_VISIBLE_WHEN_SHE_OPENS_IT}
    ORDER BY cm.event_time DESC, cm.common_message_id DESC
-   LIMIT :limit
+   LIMIT 1
+),
+anchor AS (
+  SELECT at_ms, message_id
+    FROM (      SELECT * FROM asked
+          UNION ALL SELECT * FROM calling
+          UNION ALL SELECT * FROM latest) c
+   ORDER BY pick
+   LIMIT 1
+),
+at_or_after AS (
+  SELECT cm.event_time AS at_ms, cm.common_message_id AS message_id
+    FROM common_message cm, anchor a
+   WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+     AND {_VISIBLE_WHEN_SHE_OPENS_IT}
+     AND (cm.event_time, CAST(cm.common_message_id AS text))
+         >= (a.at_ms, CAST(a.message_id AS text))
+   ORDER BY cm.event_time ASC, cm.common_message_id ASC
+   LIMIT (CASE WHEN CAST(:before_id AS text) IS NULL
+               THEN CAST(:after_n AS bigint) ELSE 1 END)
+),
+before_that AS (
+  SELECT cm.event_time AS at_ms, cm.common_message_id AS message_id
+    FROM common_message cm, anchor a
+   WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+     AND {_VISIBLE_WHEN_SHE_OPENS_IT}
+     AND (cm.event_time, CAST(cm.common_message_id AS text))
+         < (a.at_ms, CAST(a.message_id AS text))
+   ORDER BY cm.event_time DESC, cm.common_message_id DESC
+   LIMIT GREATEST(CAST(:page AS bigint) - (SELECT COUNT(*) FROM at_or_after), 0)
+),
+page AS (
+  SELECT at_ms, message_id FROM at_or_after
+  UNION ALL
+  SELECT at_ms, message_id FROM before_that
+),
+oldest_shown AS (
+  SELECT at_ms, message_id FROM page ORDER BY at_ms ASC, message_id ASC LIMIT 1
+),
+newest_shown AS (
+  SELECT at_ms, message_id FROM page ORDER BY at_ms DESC, message_id DESC LIMIT 1
+),
+earlier AS (
+  SELECT 1 AS counted
+    FROM common_message cm, oldest_shown e
+   WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
+     AND {_VISIBLE_WHEN_SHE_OPENS_IT}
+     AND (cm.event_time, CAST(cm.common_message_id AS text))
+         < (e.at_ms, CAST(e.message_id AS text))
+   LIMIT :earlier_cap
+),
+later AS (
+  SELECT 1 AS counted
+    FROM unread u, newest_shown n
+   WHERE (u.at_ms, CAST(u.message_id AS text))
+         > (n.at_ms, CAST(n.message_id AS text))
+   LIMIT :earlier_cap
 )
-SELECT r.*,
-       (SELECT COUNT(*) FROM unread)          AS unread_total,
-       (SELECT message_id FROM newest_unread) AS newest_unread_id,
-       (SELECT at_ms FROM newest_unread)      AS newest_unread_ms
-  FROM recent r
- ORDER BY r.at_ms DESC, r.message_id DESC
+SELECT CAST(p.message_id AS text)     AS message_id,
+       {_WHO_AND_OWNER},
+       {_SAID_BY_HER}                 AS said_by_you,
+       cm.content                     AS content,
+       cm.content_text                AS content_text,
+       cm.event_time                  AS at_ms,
+       cm.recalled_at                 AS recalled_at,
+       cm.agent_outbound_id           AS outbound_id,
+       (u.message_id IS NOT NULL)     AS is_unread,
+       (SELECT COUNT(*) FROM earlier) AS earlier_total,
+       (SELECT COUNT(*) FROM later)   AS later_unread
+  FROM page p
+  JOIN common_message cm ON cm.common_message_id = p.message_id
+  LEFT JOIN unread u ON u.message_id = cm.common_message_id
+  {_JOIN_SPEAKER}
+ ORDER BY cm.event_time DESC, cm.common_message_id DESC
 """
 
 
-async def find_conversation_window(
+async def find_conversation_page(
     *,
     channel_id: str,
     after_ms: int,
     after_id: str,
     own_bots: list[str],
-    limit: int,
+    bot_user_ids: list[str],
+    is_direct: bool,
+    before_id: str | None,
+    page: int,
+    after_n: int,
+    earlier_cap: int,
 ) -> list[dict]:
-    """打开一条会话那一眼：最近 ``limit`` 条往来 + 未读总数 + 未读里最新那条。
+    """她打开这条会话时眼前那一页：锚点前后的若干条往来 + 前后各还剩多少。
 
-    一条语句给出三个答案，理由写在 :data:`_OPEN_CONVERSATION_SQL` 上：两条语句就是
-    两个快照，中间提交的那条消息会被永久跳过。``unread_total`` /
-    ``newest_unread_id`` / ``newest_unread_ms`` 在每一行上都一样，取第一行即可。
+    一条语句给出全部答案，理由写在 :data:`_CONVERSATION_PAGE_SQL` 上：两条语句就是
+    两个快照，中间提交的那条消息会被永久跳过。``earlier_total`` / ``later_unread``
+    在每一行上都一样，取第一行即可。
 
-    窗口按 ``at_ms`` 降序（最近的在前），**含她自己撤掉的那条**（带 ``recalled_at``
+    ``before_id`` 是 ``None`` 时锚点由库里算（在叫她的未读里最早那条，没有就是最新那
+    条）；给了就是从那条往前翻，**不在这条会话上就返回零行** —— 调用方据此把抄错的那
+    串顶回去，不悄悄退回第一页。
+
+    这一页按 ``at_ms`` 降序（最近的在前），**含她自己撤掉的那条**（带 ``recalled_at``
     留痕迹）、不含别人撤掉的。``content`` 是 jsonb 原样，没有解析。
     """
     async with auto_tx():
         rows = (
             await current_session().execute(
-                text(_OPEN_CONVERSATION_SQL),
+                text(_CONVERSATION_PAGE_SQL),
                 {
                     "channel_id": channel_id,
                     "after_ms": after_ms,
                     "after_id": after_id,
                     "own_bots": own_bots,
-                    "limit": limit,
+                    "bot_user_ids": bot_user_ids,
+                    "is_direct": is_direct,
+                    "before_id": before_id,
+                    "page": page,
+                    "after_n": after_n,
+                    "earlier_cap": earlier_cap,
                 },
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 会话列表：每条会话最后一条消息是什么时候
+# ---------------------------------------------------------------------------
+
+# 未读那批查询答不出这个数 —— 它们全带着游标（:data:`_STILL_UNREAD`），她自己刚回的
+# 那句、她已经读过的那些都不参与。会话列表按"这条会话最后一条消息"的时刻倒序，所以
+# 这一列必须是真的最后一条：按未读里最新那条排的话，她刚回完话的那条会话根本不出现，
+# 而一个从不回复的人攒着一堆未读长期占前排。
+#
+# 判据用 :data:`_VISIBLE_WHEN_SHE_OPENS_IT` 而不是 :data:`_STILL_IN_THE_CONVERSATION`：
+# 列表上写的"最后一条"就是她点进去会看到的最后一条（她自己撤掉的那条在那儿留着痕迹）。
+# 两处不一样的话，列表说 21:40，她点进去最后一条是 21:30。
+#
+# **两次 lateral，各答一个问题**：``last`` 是最后一条（谁说的、什么时候），``other``
+# 是最近一条**不是她说的**。后者是私聊的名字来源 —— 私聊多半没有标题（prod 实测 205
+# 条里 158 条是空的），拿 ``last`` 当名字的话，最后一句是她自己说的那些私聊在列表上
+# 就叫她自己的名字。
+#
+# 一条消息都没有的会话照样出现（``LEFT JOIN LATERAL``），排在最后：她的 bot 确实在
+# 里面，不给她看等于这条会话在她手机上不存在。
+_CONVERSATION_LIST_SQL = f"""
+WITH mine AS (
+{_GIVEN_CONVERSATIONS_CTE}
+)
+SELECT m.channel_id       AS channel_id,
+       m.scope            AS scope,
+       m.title            AS title,
+       last.at_ms         AS at_ms,
+       last.who           AS who,
+       last.by_owner      AS by_owner,
+       last.said_by_you   AS said_by_you,
+       other.who          AS other_who,
+       other.by_owner     AS other_by_owner
+  FROM mine m
+  LEFT JOIN LATERAL (
+    SELECT cm.event_time AS at_ms,
+           {_WHO_AND_OWNER},
+           {_SAID_BY_HER} AS said_by_you
+      FROM common_message cm
+      {_JOIN_SPEAKER}
+     WHERE cm.common_conversation_id = m.channel_id
+       AND {_VISIBLE_WHEN_SHE_OPENS_IT}
+     ORDER BY cm.event_time DESC, cm.common_message_id DESC
+     LIMIT 1
+  ) last ON true
+  LEFT JOIN LATERAL (
+    SELECT {_WHO_AND_OWNER}
+      FROM common_message cm
+      {_JOIN_SPEAKER}
+     WHERE cm.common_conversation_id = m.channel_id
+       AND NOT {_SAID_BY_HER}
+       AND {_STILL_IN_THE_CONVERSATION}
+     ORDER BY cm.event_time DESC, cm.common_message_id DESC
+     LIMIT 1
+  ) other ON true
+ ORDER BY last.at_ms DESC NULLS LAST, m.channel_id
+"""
+
+
+async def find_conversations_by_last_message(
+    *, conversations: list[dict], own_bots: list[str]
+) -> list[dict]:
+    """``conversations`` 里每一条最后一条消息是什么时候、谁说的，最近的在前。
+
+    集合由调用方给定（形状同
+    :func:`app.data.queries.persona.find_conversations_with_persona_bot` 的出参），
+    这条查询**不自己算她有哪些会话** —— 理由见 :data:`_GIVEN_CONVERSATIONS_CTE`。
+    集合为空就返回空。
+
+    ``at_ms`` 是 ``None`` 表示这条会话上一条消息都没有（排在最后）。``who`` /
+    ``by_owner`` / ``said_by_you`` 说的是**最后那一条**；``other_who`` /
+    ``other_by_owner`` 是最近一条**不是她说的**，私聊的名字从这儿来。
+    """
+    async with auto_tx():
+        rows = (
+            await current_session().execute(
+                text(_CONVERSATION_LIST_SQL),
+                {**_unzip_conversations(conversations), "own_bots": own_bots},
             )
         ).mappings().all()
     return [dict(r) for r in rows]

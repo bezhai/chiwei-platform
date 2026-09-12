@@ -277,8 +277,9 @@ MATERIAL_TOOLS = frozenset(
 #   * ``look_for_something_to_read``  ``file=<attachment_id>``，被 ``read_a_bit(which=...)``
 #     吃。``read_a_bit`` 自己指代不明时抛的那句话里也逐个印着候选的 ``file=``，
 #     所以它也在这一档
-#   * ``look_up_contact``  ``channel_id=<id>``，被 ``look_at_phone`` / ``send_message``
-#     吃。安静下来的会话不在手机信封上，这只手是找回它的唯一一条路
+#   * ``look_up_contact`` / ``look_through_your_phone``  ``channel_id=<id>``，被
+#     ``look_at_phone`` / ``send_message`` 吃（翻页那只手的最后一串还是往下翻的游标）。
+#     安静下来的会话不在手机通知上，这两只手是找回它的仅有的两条路
 #
 # **二 · 她自己动作的回执** —— ``switch_to`` / ``move_to`` / ``keep_in_mind`` /
 # ``say`` / ``act`` / ``send_message`` / ``take_back_message`` / ``stop_for_now``。
@@ -300,6 +301,7 @@ KEPT_TOOLS = frozenset(
         "send_message",
         "take_back_message",
         "look_up_contact",
+        "look_through_your_phone",
         "look_for_something_to_read",
         "read_a_bit",
         "draw_a_picture",
