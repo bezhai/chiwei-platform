@@ -146,7 +146,12 @@ async def _incoming(
 
 
 class FakeLife:
-    """替身 life：她这一轮调了哪些工具、最后说了什么，由用例写死。"""
+    """替身 life：她这一轮调了哪些工具、最后说了什么，由用例写死。
+
+    ``prompts`` 收的是**这一轮新摆到她眼前那条**，也就是最后一条：喂给模型的列表是
+    "连续上下文 + 这一轮的刺激"（:func:`app.living.moment.run_moment`），取第一条会
+    取到几个 moment 之前的快照。
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
@@ -154,7 +159,7 @@ class FakeLife:
         self.prompts: list[str] = []
 
     async def run(self, messages, **kwargs):
-        self.prompts.append(messages[0].content)
+        self.prompts.append(messages[-1].content)
         with agent_context(kwargs["context"]):
             from app.living.moment import MOMENT_TOOLS
 

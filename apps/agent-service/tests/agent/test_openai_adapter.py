@@ -11,7 +11,8 @@ Coverage (spec §T2 Verification, adapted to mocked transport):
   - plain text round-trip neutral→wire→neutral,
   - tool_calls round-trip,
   - multimodal image content block survives the wire build,
-  - deepseek reasoning_content both directions (extract out / re-inject in +
+  - deepseek reasoning_content both directions (taken down as a thought part /
+    re-injected on the wire +
     string normalisation),
   - structured output → dict,
   - streaming chunks (text / reasoning / finish_reason / tool boundary),
@@ -28,7 +29,14 @@ from typing import Any
 import pytest
 
 from app.agent.adapters.openai import OpenAIAdapter
-from app.agent.neutral import ContentBlock, Message, Role, ToolCall, ToolDef
+from app.agent.neutral import (
+    ContentBlock,
+    Message,
+    Role,
+    ToolCall,
+    ToolDef,
+    TurnPart,
+)
 
 # ---------------------------------------------------------------------------
 # Canned SDK response builders (mimic openai SDK object shapes)
@@ -466,7 +474,8 @@ async def test_deepseek_extracts_reasoning_content_from_response(mock_sdk):
     out = await adapter.complete([Message(role=Role.USER, content="q")])
 
     assert out.content == "the answer is 42"
-    assert out.reasoning_content == "let me think..."
+    assert out.thought_text() == "let me think..."
+    assert [str(p.kind) for p in out.turn_parts] == ["thought", "text"]
 
 
 async def test_deepseek_reinjects_reasoning_and_normalises_content(mock_sdk):
@@ -491,10 +500,9 @@ async def test_deepseek_reinjects_reasoning_and_normalises_content(mock_sdk):
                 ContentBlock.from_text("there"),
             ],
         ),
-        Message(
-            role=Role.ASSISTANT,
-            content="hi",
-            reasoning_content="prior thinking",
+        Message.from_model_turn(
+            [TurnPart.from_thought("prior thinking"), TurnPart.from_text("hi")],
+            [],
         ),
         Message(role=Role.USER, content="continue"),
     ]
@@ -517,7 +525,11 @@ async def test_non_deepseek_does_not_inject_reasoning(mock_sdk):
     mock_sdk.instance.set_result(_completion(content="ok"))
 
     await adapter.complete(
-        [Message(role=Role.ASSISTANT, content="hi", reasoning_content="thinking")]
+        [
+            Message.from_model_turn(
+                [TurnPart.from_thought("thinking"), TurnPart.from_text("hi")], []
+            )
+        ]
     )
 
     sent = mock_sdk.instance.last_create_kwargs["messages"][-1]

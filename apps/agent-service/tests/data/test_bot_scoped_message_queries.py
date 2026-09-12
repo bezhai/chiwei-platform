@@ -22,7 +22,8 @@ import app.data.session as session_mod
 from app.data.models import Base, CommonConversation, CommonMessage, CommonUser
 from app.data.queries.messages import (
     count_summons_since,
-    find_conversation_window,
+    find_conversation_page,
+    find_conversations_by_last_message,
     find_conversations_others_spoke_in,
     find_file_items_in_conversations,
     find_messages_by_outbound_ids,
@@ -500,34 +501,116 @@ async def test_the_newest_summons_wins(bot_db):
 
 
 # ---------------------------------------------------------------------------
-# 打开一条会话：窗口 W、未读总数 |U|、max(U) 一条语句给全
+# 打开一条会话：锚点、这一页、前后各还剩多少，一条语句给全
 # ---------------------------------------------------------------------------
+#
+# 锚点三选一，按优先级：她抄回来的那条（往前翻）→ 在叫她的未读里**最早**那条 → 这条
+# 会话上最新那条。取最早不取最新，是因为游标只推到"这一页里真摆出来的未读"上：取最新
+# 的话第一页就落在未读堆顶，中间那些一个字没看过却已经算读过了。
 
 
-async def test_the_window_is_two_way_and_ignores_the_cursor(bot_db):
-    """窗口回答"这条会话最近说了些什么"，一行都不会因为读过了被挡在外面。"""
+def _page_args(
+    conv: uuid.UUID,
+    *,
+    after_ms: int = 0,
+    after_id: str = "",
+    before_id: str | None = None,
+    page: int = 13,
+    after_n: int = 9,
+    earlier_cap: int = 200,
+) -> dict:
+    return {
+        **_unread_args(conv, after_ms=after_ms, after_id=after_id),
+        "bot_user_ids": [str(_AKAO_BOT_UID)],
+        "is_direct": True,
+        "before_id": before_id,
+        "page": page,
+        "after_n": after_n,
+        "earlier_cap": earlier_cap,
+    }
+
+
+async def test_the_page_is_two_way_and_ignores_the_cursor(bot_db):
+    """这一页回答"这一段说了些什么"，一行都不会因为读过了被挡在外面。"""
     await _seed_her_phone()
     await _message(_DM, at=_at(9), body="早")
     await _message(
         _DM, at=_at(9, 30), role="assistant", bot_name="chiwei", body="早啊"
     )
     await _message(_DM, at=_at(10), body="在吗")
-    rows = await find_conversation_window(
-        **_unread_args(_DM, after_ms=_ms(_at(9, 30)), after_id="z"), limit=10
+    rows = await find_conversation_page(
+        **_page_args(_DM, after_ms=_ms(_at(9, 30)), after_id="z")
     )
     assert len(rows) == 3
     assert [r["is_unread"] for r in rows] == [True, False, False]
 
 
-async def test_the_window_marks_which_rows_are_still_unread(bot_db):
+async def test_the_page_starts_at_the_earliest_thing_calling_her(bot_db):
+    """锚点是在叫她的未读里最早那条，往后带 ``after_n`` 条、往前补满一页。"""
     await _seed_her_phone()
-    await _message(_DM, at=_at(9))
-    await _message(_DM, at=_at(10))
-    rows = await find_conversation_window(
-        **_unread_args(_DM, after_ms=_ms(_at(9)), after_id="z"), limit=10
+    for i in range(10):
+        await _message(_DM, at=_at(9, i), body=f"第{i}条")
+    rows = await find_conversation_page(
+        **_page_args(_DM, after_ms=_ms(_at(9, 2)), after_id="z", page=5, after_n=3)
     )
-    assert rows[0]["unread_total"] == 1
-    assert rows[0]["newest_unread_ms"] == _ms(_at(10))
+    # 锚点 = 第3条（第0..第2 在游标之前），往后到第5条，往前补到第1条。
+    assert [r["at_ms"] for r in rows] == [
+        _ms(_at(9, i)) for i in (5, 4, 3, 2, 1)
+    ]
+    assert rows[0]["later_unread"] == 4, f"第6..第9 还没摆出来：{rows[0]}"
+    assert rows[0]["earlier_total"] == 1, f"第0条在前面：{rows[0]}"
+
+
+async def test_a_group_page_starts_at_the_earliest_message_naming_her(bot_db):
+    """群里"在叫她"只认点名 —— 背景音再多也不是锚点。"""
+    await _seed_her_phone()
+    for i in range(6):
+        await _message(_GROUP, at=_at(9, i), body=f"闲聊{i}", scope="group")
+    named = await _message(
+        _GROUP, at=_at(9, 6), body="你说呢", scope="group",
+        mentions=[_AKAO_BOT_UID],
+    )
+    for i in range(7, 12):
+        await _message(_GROUP, at=_at(9, i), body=f"之后{i}", scope="group")
+    rows = await find_conversation_page(
+        **{**_page_args(_GROUP, page=5, after_n=3), "is_direct": False}
+    )
+    assert [str(r["message_id"]) for r in rows][-3] == str(named), (
+        f"锚点没落在点名那条上：{[r['at_ms'] for r in rows]}"
+    )
+
+
+async def test_a_conversation_nobody_is_calling_her_in_ends_at_the_latest(bot_db):
+    """没有谁在叫她时锚点是最新那条，所以这一页就是最后几条。"""
+    await _seed_her_phone()
+    for i in range(6):
+        await _message(_GROUP, at=_at(9, i), body=f"闲聊{i}", scope="group")
+    rows = await find_conversation_page(
+        **{**_page_args(_GROUP, page=3, after_n=3), "is_direct": False}
+    )
+    assert [r["at_ms"] for r in rows] == [_ms(_at(9, i)) for i in (5, 4, 3)]
+    assert rows[0]["earlier_total"] == 3
+
+
+async def test_paging_back_ends_at_the_line_she_copied(bot_db):
+    """给了 ``before_id``：这一页以那条结尾，往前一整页。"""
+    await _seed_her_phone()
+    ids = [await _message(_DM, at=_at(9, i), body=f"第{i}条") for i in range(10)]
+    rows = await find_conversation_page(
+        **_page_args(_DM, before_id=str(ids[5]), page=3)
+    )
+    assert [r["at_ms"] for r in rows] == [_ms(_at(9, i)) for i in (5, 4, 3)]
+    assert rows[0]["earlier_total"] == 3
+
+
+async def test_a_page_handle_from_another_conversation_yields_nothing(bot_db):
+    """抄来的那串不在这条会话上 —— 零行，调用方据此顶回去。"""
+    await _seed_her_phone()
+    elsewhere = await _message(_GROUP, at=_at(9), body="别处", scope="group")
+    await _message(_DM, at=_at(9, 1), body="这儿")
+    assert await find_conversation_page(
+        **_page_args(_DM, before_id=str(elsewhere))
+    ) == []
 
 
 async def test_her_own_recalled_line_stays_visible_when_she_opens_it(bot_db):
@@ -542,37 +625,116 @@ async def test_her_own_recalled_line_stays_visible_when_she_opens_it(bot_db):
         recalled_at=_at(9, 1),
     )
     await _message(_DM, at=_at(10), recalled_at=_at(10, 1))
-    rows = await find_conversation_window(**_unread_args(_DM), limit=10)
+    rows = await find_conversation_page(**_page_args(_DM))
     assert len(rows) == 1
     assert rows[0]["said_by_you"] is True
     assert rows[0]["recalled_at"] is not None
 
 
-async def test_the_window_keeps_the_most_recent_n(bot_db):
-    await _seed_her_phone()
-    for i in range(5):
-        await _message(_DM, at=_at(9, i), body=f"第{i}条")
-    rows = await find_conversation_window(**_unread_args(_DM), limit=3)
-    assert [r["at_ms"] for r in rows] == [
-        _ms(_at(9, 4)),
-        _ms(_at(9, 3)),
-        _ms(_at(9, 2)),
-    ]
-
-
-async def test_the_window_carries_the_handle_she_can_take_a_line_back_with(bot_db):
+async def test_the_page_carries_the_handle_she_can_take_a_line_back_with(bot_db):
     await _seed_her_phone()
     oid = uuid.uuid4()
     await _message(
         _DM, at=_at(9), role="assistant", bot_name="chiwei", outbound_id=oid
     )
-    rows = await find_conversation_window(**_unread_args(_DM), limit=10)
+    rows = await find_conversation_page(**_page_args(_DM))
     assert str(rows[0]["outbound_id"]) == str(oid)
 
 
-async def test_an_empty_conversation_yields_no_window_rows(bot_db):
+async def test_an_empty_conversation_yields_no_page_rows(bot_db):
     await _seed_her_phone()
-    assert await find_conversation_window(**_unread_args(_DM), limit=10) == []
+    assert await find_conversation_page(**_page_args(_DM)) == []
+
+
+async def test_how_much_is_around_this_page_stops_at_the_cap(bot_db):
+    """前后那两个数都数到上限就停 —— 一条会话上全部历史没有便宜的数法。"""
+    await _seed_her_phone()
+    ids = [await _message(_DM, at=_at(9, i), body=f"第{i}条") for i in range(10)]
+    rows = await find_conversation_page(
+        **_page_args(_DM, before_id=str(ids[5]), page=2, earlier_cap=3)
+    )
+    # 这一页是第4、第5；前面真有 4 条（第0..第3）、后面真有 4 条未读（第6..第9）。
+    assert (rows[0]["earlier_total"], rows[0]["later_unread"]) == (3, 3), (
+        f"没在上限上停住：{rows[0]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 会话列表：每条会话最后一条消息是什么时候
+# ---------------------------------------------------------------------------
+#
+# 未读那批查询答不出这个数 —— 它们全带着游标过滤，她自己刚回的那句、读过的那些都不
+# 参与。会话列表按这一列倒序，所以它必须是"最后一条"，不是"未读里最新那条"。
+
+
+async def test_the_list_carries_the_last_message_of_each_conversation(bot_db):
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), body="早")
+    await _message(
+        _DM, at=_at(10), role="assistant", bot_name="chiwei", who="赤尾", body="早啊"
+    )
+    await _message(_GROUP, at=_at(8), body="昨天的事", scope="group")
+
+    rows = await find_conversations_by_last_message(
+        conversations=await _her_conversations(), own_bots=["chiwei", "chiwei-dev"]
+    )
+
+    assert [str(r["channel_id"]) for r in rows] == [str(_DM), str(_GROUP)], (
+        f"没按最后一条消息的时刻倒序。拿到：{rows}"
+    )
+    assert rows[0]["at_ms"] == _ms(_at(10))
+    assert rows[0]["said_by_you"] is True, (
+        f"最后一条是她自己说的，这件事说不出来。拿到：{rows[0]}"
+    )
+
+
+async def test_a_conversation_nobody_has_spoken_in_is_last_not_missing(bot_db):
+    """一条消息都没有的会话排在最后，不是不出现 —— 她的 bot 确实在里面。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), body="早")
+
+    rows = await find_conversations_by_last_message(
+        conversations=await _her_conversations(), own_bots=["chiwei", "chiwei-dev"]
+    )
+
+    assert [str(r["channel_id"]) for r in rows] == [str(_DM), str(_GROUP)]
+    assert rows[1]["at_ms"] is None
+
+
+async def test_the_list_does_not_end_at_a_line_someone_took_back(bot_db):
+    """别人撤掉的那条不算"最后一条" —— 她点进去也看不到它。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), body="早")
+    await _message(_DM, at=_at(10), body="说漏了", recalled_at=_at(10, 1))
+
+    rows = await find_conversations_by_last_message(
+        conversations=await _her_conversations(), own_bots=["chiwei", "chiwei-dev"]
+    )
+
+    assert rows[0]["at_ms"] == _ms(_at(9)), f"拿到：{rows[0]}"
+
+
+async def test_the_list_marks_the_owner_on_the_last_line(bot_db):
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), sender=_OWNER, who="bezhai")
+    await _message(_DM, at=_at(10), sender=_TWIN, who="bezhai")
+
+    rows = await find_conversations_by_last_message(
+        conversations=await _her_conversations(), own_bots=["chiwei", "chiwei-dev"]
+    )
+
+    assert (rows[0]["who"], rows[0]["by_owner"]) == ("bezhai", False), (
+        f"同名的冒充者被标成了主人。拿到：{rows[0]}"
+    )
+
+
+async def test_an_empty_conversation_set_lists_nothing(bot_db):
+    """集合为空就是空结果，不是"不加限制"（同别处那条 fail-closed）。"""
+    await _seed_her_phone()
+    await _message(_DM, at=_at(9), body="早")
+    assert await find_conversations_by_last_message(
+        conversations=[], own_bots=["chiwei", "chiwei-dev"]
+    ) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1108,7 +1270,7 @@ async def test_the_owner_is_marked_on_every_place_she_reads_a_name(bot_db):
     await _message(_DM, at=_at(9), sender=_OWNER, who="bezhai", content=_FILE_CONTENT)
 
     senders = await find_unread_senders(**_unread_args(_DM), limit=4)
-    window = await find_conversation_window(**_unread_args(_DM), limit=10)
+    page = await find_conversation_page(**_page_args(_DM))
     looked_up = await search_conversations_by_name(
         conversations=await _her_conversations(),
         name_like="%bezhai%",
@@ -1117,7 +1279,7 @@ async def test_the_owner_is_marked_on_every_place_she_reads_a_name(bot_db):
     files = await find_file_items_in_conversations(await _her_conversations())
 
     assert [r["by_owner"] for r in senders] == [True], f"信封那侧：{senders}"
-    assert [r["by_owner"] for r in window] == [True], f"打开会话：{window}"
+    assert [r["by_owner"] for r in page] == [True], f"打开会话：{page}"
     assert list(looked_up[0]["matched_owner"]) == ["bezhai"], (
         f"按名字找会话：{looked_up}"
     )
@@ -1129,7 +1291,7 @@ async def test_a_namesake_who_is_not_the_owner_is_not_marked(bot_db):
     await _seed_her_phone()
     await _message(_DM, at=_at(9), sender=_TWIN, who="bezhai", content=_FILE_CONTENT)
 
-    window = await find_conversation_window(**_unread_args(_DM), limit=10)
+    page = await find_conversation_page(**_page_args(_DM))
     files = await find_file_items_in_conversations(await _her_conversations())
     looked_up = await search_conversations_by_name(
         conversations=await _her_conversations(),
@@ -1137,7 +1299,7 @@ async def test_a_namesake_who_is_not_the_owner_is_not_marked(bot_db):
         own_bots=["chiwei", "chiwei-dev"],
     )
 
-    assert [(r["who"], r["by_owner"]) for r in window] == [("bezhai", False)]
+    assert [(r["who"], r["by_owner"]) for r in page] == [("bezhai", False)]
     assert [r["by_owner"] for r in files] == [False]
     assert list(looked_up[0]["matched"]) == ["bezhai"]
     assert looked_up[0]["matched_owner"] is None, (
@@ -1153,9 +1315,9 @@ async def test_a_sender_missing_from_common_user_is_not_the_owner(bot_db):
     await _seed_her_phone()
     await _message(_DM, at=_at(9), sender=_UNREGISTERED, who="bezhai")
 
-    window = await find_conversation_window(**_unread_args(_DM), limit=10)
+    page = await find_conversation_page(**_page_args(_DM))
 
-    assert [(r["who"], r["by_owner"]) for r in window] == [("bezhai", False)]
+    assert [(r["who"], r["by_owner"]) for r in page] == [("bezhai", False)]
 
 
 async def test_a_message_without_a_sender_id_is_not_the_owner(bot_db):
@@ -1163,9 +1325,9 @@ async def test_a_message_without_a_sender_id_is_not_the_owner(bot_db):
     await _seed_her_phone()
     await _message(_DM, at=_at(9), sender=None, who="bezhai")
 
-    window = await find_conversation_window(**_unread_args(_DM), limit=10)
+    page = await find_conversation_page(**_page_args(_DM))
 
-    assert [(r["who"], r["by_owner"]) for r in window] == [("bezhai", False)]
+    assert [(r["who"], r["by_owner"]) for r in page] == [("bezhai", False)]
 
 
 async def test_the_envelope_keeps_the_owner_and_his_namesake_apart(bot_db):

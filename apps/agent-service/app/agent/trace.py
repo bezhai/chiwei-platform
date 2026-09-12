@@ -16,6 +16,12 @@ parent-trace overwrite decision lives one layer up (T3/T4), via langfuse's
 
 Tracing must never break the LLM call. If langfuse is unconfigured or throws,
 the span degrades to a no-op and the call proceeds.
+
+The span is also where **one call's usage is observed**, three ways from the
+same numbers: the per-round accumulator (``collect_usage``, landed in durable
+PG), langfuse's own usage fields, and Prometheus (``record_llm_usage``). The
+last two run on every call, including the degraded path — a langfuse outage must
+not take the token accounting with it.
 """
 
 from __future__ import annotations
@@ -28,7 +34,9 @@ from typing import TYPE_CHECKING, Any
 import opentelemetry.trace as _otel_trace
 from langfuse import Langfuse
 
+from app.agent.tools._common import get_or_create_counter
 from app.infra.config import settings
+from app.runtime.lane_policy import current_deployment_lane
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -195,6 +203,81 @@ def _accumulate_usage(usage_details: dict[str, Any] | None) -> None:
     collector["calls"] += 1
 
 
+# ---------------------------------------------------------------------------
+# Per-call usage metrics: what one LLM call cost, on Prometheus
+# ---------------------------------------------------------------------------
+#
+# The same numbers the accumulator above collects, recorded per call instead of
+# per round, and for EVERY call — chat / guard / extract never enter
+# ``collect_usage``, so this has to sit where all of them pass: the generation
+# span's ``update``, both the langfuse one and the degraded one.
+#
+# Two metrics rather than one, because "how many tokens" and "was there a number
+# at all" are different questions. A provider that stops reporting cache usage
+# and a provider reporting a miss both add 0 to the token counter, and dividing
+# two token counters gives a ratio that hides how many calls had no cache data
+# to begin with. ``llm_usage_reports_total`` is that denominator, split three
+# ways per kind: ``nonzero`` / ``zero`` / ``absent``.
+
+# usage_details key → the ``kind`` label it is counted under. ``total`` is left
+# out on purpose: it is the provider's own sum and counting it next to its parts
+# would double the tokens on any dashboard that sums the metric.
+_USAGE_KINDS: dict[str, str] = {
+    "input": "input",
+    "output": "output",
+    "cache_read_input_tokens": "cached",
+    "thinking_tokens": "thinking",
+}
+
+LLM_TOKENS = get_or_create_counter(
+    "llm_tokens_total",
+    "Tokens one LLM call was billed for, by kind "
+    "(input / output / cached slice of input / thinking)",
+    ["lane", "model", "kind"],
+)
+
+LLM_USAGE_REPORTS = get_or_create_counter(
+    "llm_usage_reports_total",
+    "LLM calls by what the provider reported for each usage kind: "
+    "nonzero / zero / absent (the provider did not report the field)",
+    ["lane", "model", "kind", "report"],
+)
+
+
+def _metrics_lane() -> str:
+    """The lane label, always explicit — prod is written out, never left blank."""
+    return current_deployment_lane() or "prod"
+
+
+def record_llm_usage(model: str, usage_details: dict[str, Any] | None) -> None:
+    """Record one LLM call's usage. Called once per call, right where it lands.
+
+    ``usage_details`` is what the adapter read off the response; ``None`` means
+    the provider reported no usage at all, and every kind is then counted as
+    ``absent`` — a call that cost something unmeasured is still a call.
+
+    Observation only: nothing here decides anything (赤尾设计宪法 — this is the
+    observability layer), and a metrics failure must never break a call that has
+    already succeeded.
+    """
+    lane = _metrics_lane()
+    try:
+        for key, kind in _USAGE_KINDS.items():
+            raw = (usage_details or {}).get(key)
+            if raw is None:
+                report = "absent"
+            elif int(raw):
+                report = "nonzero"
+                LLM_TOKENS.labels(lane=lane, model=model, kind=kind).inc(int(raw))
+            else:
+                report = "zero"
+            LLM_USAGE_REPORTS.labels(
+                lane=lane, model=model, kind=kind, report=report
+            ).inc()
+    except Exception as exc:  # pragma: no cover - metrics must not break the call
+        logger.warning("llm usage metrics failed: %s", exc)
+
+
 @contextmanager
 def collect_usage() -> Iterator[dict[str, int]]:
     """累计本作用域内所有 LLM 调用的 token 用量，yield 一个零初值累加 dict。
@@ -229,13 +312,38 @@ def _get_client() -> Langfuse:
     return _client
 
 
+class _UsageOnce:
+    """Takes one call's usage down exactly once, whatever ``update`` is called.
+
+    A streamed call folds many chunks into one span and reports the running
+    total on the last ``update``; a caller updating twice with usage would then
+    bill the same call twice. The first update carrying a ``usage_details``
+    keyword is the measurement — later ones are ignored.
+    """
+
+    def __init__(self, model: str) -> None:
+        self._model = model
+        self._taken = False
+
+    def take(self, kwargs: dict[str, Any]) -> None:
+        if self._taken or "usage_details" not in kwargs:
+            return
+        self._taken = True
+        usage = kwargs.get("usage_details")
+        _accumulate_usage(usage)
+        record_llm_usage(self._model, usage)
+
+
 class _NoOpSpan:
     """A generation span that does nothing — used when langfuse is unavailable."""
 
-    def update(self, **kwargs: Any) -> None:
-        # langfuse 死了也要累加本轮 token：usage 来自 LLM response，与 langfuse 无关。
+    def __init__(self, model: str) -> None:
+        # langfuse 死了也要记本次调用的用量：它来自 LLM response，与 langfuse 无关。
         # 这正是"不依赖会丢的 langfuse"做成本观测的意义。
-        _accumulate_usage(kwargs.get("usage_details"))
+        self._usage = _UsageOnce(model)
+
+    def update(self, **kwargs: Any) -> None:
+        self._usage.take(kwargs)
 
     def end(self, **_kwargs: Any) -> None:
         pass
@@ -249,13 +357,14 @@ class _SafeSpan:
     the (successful) LLM call. Every delegated call is swallowed and logged.
     """
 
-    def __init__(self, generation: Any) -> None:
+    def __init__(self, generation: Any, model: str) -> None:
         self._gen = generation
+        self._usage = _UsageOnce(model)
 
     def update(self, **kwargs: Any) -> None:
-        # 先累加本轮 token（独立于 langfuse 死活），再喂 langfuse。即使下面 langfuse
-        # update 抛了，token 也已经入账——成本观测不被 langfuse 失败拖累。
-        _accumulate_usage(kwargs.get("usage_details"))
+        # 先记本次调用的用量（独立于 langfuse 死活），再喂 langfuse。即使下面
+        # langfuse update 抛了，用量也已经入账——成本观测不被 langfuse 失败拖累。
+        self._usage.take(kwargs)
         try:
             self._gen.update(**kwargs)
         except Exception as exc:
@@ -301,14 +410,14 @@ def generation_span(
         gen = cm.__enter__()
     except Exception as exc:
         logger.warning("langfuse generation span unavailable: %s", exc)
-        yield _NoOpSpan()
+        yield _NoOpSpan(model)
         return
 
     # Record this generation's span context so a tool span dispatched right after
     # (in the ReAct loop, once this generation has closed) re-parents under it.
     _current_generation_ctx.set(_capture_current_span_context())
 
-    span = _SafeSpan(gen)
+    span = _SafeSpan(gen, model)
     body_exc: BaseException | None = None
     try:
         yield span

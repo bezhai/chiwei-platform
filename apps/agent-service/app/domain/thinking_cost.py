@@ -117,17 +117,13 @@ async def record_round_cost(
     ``try`` 之外，缺键直接抛 ``KeyError`` 让契约错误炸出来（usage 形态漂移 / 少键是
     真 bug，绝不能被当成"落库失败"静默吞掉、成本永远记不上却没人知道）。**只有** PG
     insert（:func:`record_thinking_tokens`）留在 ``try`` 里 best-effort 吞：成本观测是
-    旁路，绝不能因为记成本失败把一轮真实思考 / 推演搞成失败重投（参考
-    ``core._persist_session`` 的语义）。insert 失败只 log warning，调用方的后续收口
-    （标已读 / 推进游标 / 排下次醒）照常进行。
+    旁路，绝不能因为记成本失败把一轮真实思考 / 推演搞成失败。insert 失败只 log warning，
+    调用方的后续收口（标已读 / 推进游标 / 写回上下文）照常进行。
 
-    **已知 limitation（接受的取舍，不修）**：成本落库发生在 ``Agent.run`` 返回**之后**，
-    而 turn 的 round marker 在 ``Agent.run`` 内部就已写进 transcript。usage 是 run 跑完
-    才有的累计值、天然产生在 marker 之后，没法和 marker 塞进同一个幂等提交边界。所以若
-    进程恰好崩在"run 返回后、``record_round_cost`` 调用前"这个窄窗口，重投会命中已写的
-    marker 直接 skip → 那一轮的 ``ThinkingTokensSpent`` 永久漏记。这是 best-effort 观测
-    的接受取舍：漏掉"崩溃恰好落在那个窄窗口"的极少数轮，远优于 langfuse 现在系统性丢
-    durable 工具 trace 的 40-100%。**不要为把它纳入幂等边界改逻辑**——那是过度工程。
+    **成本落库在收尾提交之外，这是刻意的。** 它发生在 ``Agent.run`` 返回之后、这一轮
+    收尾那个事务之前，不在事务里。崩在这中间的话收尾没提交、下一拍重跑同一轮，那时同
+    一个 ``round_id`` 再记一次是 ON CONFLICT DO NOTHING，只留一行。反过来把它塞进收尾
+    事务里，记账失败就会把一轮真实的生活搞成失败——正是上一段要避免的那件事。
     """
     # usage 字典读取在 try 之外：缺键 = 契约错误，必须 fail-fast 抛 KeyError，不被吞。
     input_tokens = usage["input"]

@@ -402,7 +402,7 @@ async def send_message(
         Field(description="你要发出去的那句话，原话"),
     ],
     channel_id: Annotated[
-        str, Field(description="发到哪条会话，用信封 / 看手机时那串 channel_id")
+        str, Field(description="发到哪条会话，用通知 / 会话列表 / 看手机时那串 channel_id")
     ],
     pictures: Annotated[
         list[str] | None,
@@ -414,7 +414,8 @@ async def send_message(
 ) -> str:
     """给手机上的某条会话发一条消息。
 
-    只能发你手机上有的会话（信封上列着的那些），channel_id 照抄，别自己编。
+    只能发你手机上有的会话，channel_id 照抄，别自己编。刚来的动静在通知上，整张
+    名单翻 look_through_your_phone，知道名字就 look_up_contact。
 
     要带图就填 pictures，**别把图写进话里**——你写在话里的图片引用到不了对方那儿。
     只能带你自己做过的图。
@@ -451,8 +452,8 @@ async def send_message(
     if conv is None:
         # fail-loud，绝不伪造一个地址：伪地址的表现是"发出去了"然后石沉大海。
         raise ValueError(
-            f"{channel_id!r} 不是你手机上的会话，发不了 —— 用信封上那串 "
-            f"channel_id，照抄。你能发的严格等于你看得见的那些会话。"
+            f"{channel_id!r} 不是你手机上的会话，发不了 —— 用通知、会话列表或者"
+            f"看手机时那串 channel_id，照抄。你能发的严格等于你看得见的那些会话。"
         )
 
     # 句柄换成永久句柄，就在这里。``lane`` + ``persona_id`` 是**硬条件**：句柄是从

@@ -7,7 +7,8 @@ decisions) is that these types carry, without loss:
 
   - multimodal content blocks (chat-history images + OpenAI-style image_url
     blocks returned by tools),
-  - deepseek ``reasoning_content`` passthrough on assistant messages,
+  - the sequence a model turn came back as (thoughts / text / calls, in order,
+    each with its own signature),
   - string-content normalisation (deepseek rejects arrays / null content),
   - tool_call + tool_result.
 
@@ -24,6 +25,8 @@ from app.agent.neutral import (
     ToolCall,
     ToolDef,
     ToolResult,
+    TurnPart,
+    TurnPartKind,
     normalize_content_to_text,
 )
 
@@ -37,7 +40,7 @@ def test_message_plain_string_content():
     msg = Message(role=Role.USER, content="hello")
     assert msg.role == Role.USER
     assert msg.content == "hello"
-    assert msg.reasoning_content is None
+    assert msg.turn_parts == []
     assert msg.tool_calls == []
 
 
@@ -92,26 +95,6 @@ def test_message_carries_openai_style_tool_image_url_block():
         "detail": "high",
     }
     assert msg.tool_call_id == "call_1"
-
-
-# ---------------------------------------------------------------------------
-# Message: deepseek reasoning_content passthrough
-# ---------------------------------------------------------------------------
-
-
-def test_assistant_message_carries_reasoning_content():
-    msg = Message(
-        role=Role.ASSISTANT,
-        content="final answer",
-        reasoning_content="let me think step by step ...",
-    )
-    assert msg.reasoning_content == "let me think step by step ..."
-    # passthrough survives a serialize / reconstruct round-trip
-    dumped = msg.to_dict()
-    assert dumped["reasoning_content"] == "let me think step by step ..."
-    back = Message.from_dict(dumped)
-    assert back.reasoning_content == "let me think step by step ..."
-    assert back.content == "final answer"
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +285,6 @@ def test_message_replay_roundtrip_preserves_tool_calls_with_signature():
     msg = Message(
         role=Role.ASSISTANT,
         content="thinking out loud",
-        reasoning_content="internal monologue",
         tool_calls=[
             ToolCall(
                 id="c1",
@@ -316,7 +298,6 @@ def test_message_replay_roundtrip_preserves_tool_calls_with_signature():
     restored = Message.from_replay_dict(json.loads(blob))
     assert restored.role == Role.ASSISTANT
     assert restored.content == "thinking out loud"
-    assert restored.reasoning_content == "internal monologue"
     assert len(restored.tool_calls) == 1
     assert restored.tool_calls[0].signature == b"\x01\x02sig"
     assert restored.tool_calls[0].arguments == {"summary": "晚餐进行中"}
@@ -339,3 +320,129 @@ def test_message_replay_roundtrip_preserves_multimodal_content():
     assert restored.content[1].type == "image_url"
     assert restored.content[1].image_url == {"url": "https://x/3.png"}
     assert restored.tool_call_id == "c1"
+
+
+# ---------------------------------------------------------------------------
+# A model turn is a *sequence*, not three piles
+# ---------------------------------------------------------------------------
+#
+# The model can come back with "thought, text, call, another thought, another
+# call", and each segment carries its own opaque signature. Splitting that into
+# a joined text + a list of calls loses both the order and which signature
+# belonged to which segment, and the provider demands the whole turn back
+# verbatim on the next request. ``Message.turn_parts`` is that sequence.
+
+
+def test_a_model_turn_keeps_the_order_it_came_back_in():
+    calls = [
+        ToolCall(id="c1", name="look_around", arguments={}),
+        ToolCall(id="c2", name="say", arguments={"words": "嗯"}),
+    ]
+    parts = [
+        TurnPart.from_thought("先看看四周", signature=b"sig-1"),
+        TurnPart.from_text("好"),
+        TurnPart.from_tool_call(calls[0]),
+        TurnPart.from_thought("再说一句", signature=b"sig-2"),
+        TurnPart.from_tool_call(calls[1]),
+    ]
+
+    msg = Message.from_model_turn(parts, calls)
+
+    assert [p.kind for p in msg.turn_parts] == [
+        TurnPartKind.THOUGHT,
+        TurnPartKind.TEXT,
+        TurnPartKind.TOOL_CALL,
+        TurnPartKind.THOUGHT,
+        TurnPartKind.TOOL_CALL,
+    ]
+    assert [p.call_id for p in msg.turn_parts if p.call_id] == ["c1", "c2"]
+    # the plain-text view everyone else reads is still just the spoken text
+    assert msg.content == "好"
+    assert msg.text() == "好"
+    assert [tc.id for tc in msg.tool_calls] == ["c1", "c2"]
+
+
+def test_each_thought_keeps_its_own_signature():
+    parts = [
+        TurnPart.from_thought("第一段", signature=b"\x00sig-a"),
+        TurnPart.from_thought("第二段", signature=b"\xffsig-b"),
+    ]
+    msg = Message.from_model_turn(parts, [])
+
+    assert [p.signature for p in msg.turn_parts] == [b"\x00sig-a", b"\xffsig-b"]
+    assert msg.thought_text() == "第一段第二段"
+
+
+def test_a_text_part_can_carry_a_signature_too():
+    parts = [TurnPart.from_text("好", signature=b"sig-on-text")]
+    msg = Message.from_model_turn(parts, [])
+
+    assert msg.turn_parts[0].signature == b"sig-on-text"
+    assert msg.content == "好"
+
+
+def test_a_message_nobody_built_from_a_model_turn_has_no_sequence():
+    msg = Message(role=Role.USER, content="hello")
+    assert msg.turn_parts == []
+    assert msg.thought_text() == ""
+
+
+def test_the_model_turn_survives_a_replay_roundtrip_byte_for_byte():
+    import json
+
+    calls = [ToolCall(id="c1", name="say", arguments={"words": "嗯"}, signature=b"s1")]
+    parts = [
+        TurnPart.from_thought("想了想", signature=b"\x00\xffthought-sig"),
+        TurnPart.from_text("嗯"),
+        TurnPart.from_tool_call(calls[0]),
+    ]
+    msg = Message.from_model_turn(parts, calls)
+
+    blob = json.dumps(msg.to_replay_dict())
+    restored = Message.from_replay_dict(json.loads(blob))
+
+    assert [p.kind for p in restored.turn_parts] == [
+        TurnPartKind.THOUGHT,
+        TurnPartKind.TEXT,
+        TurnPartKind.TOOL_CALL,
+    ]
+    assert restored.turn_parts[0].text == "想了想"
+    assert restored.turn_parts[0].signature == b"\x00\xffthought-sig"
+    assert restored.turn_parts[1].text == "嗯"
+    assert restored.turn_parts[2].call_id == "c1"
+    assert restored.tool_calls[0].signature == b"s1"
+    assert restored.content == "嗯"
+
+
+def test_a_signature_with_no_text_still_survives_the_replay_roundtrip():
+    import json
+
+    msg = Message.from_model_turn([TurnPart.from_text("", signature=b"bare")], [])
+    restored = Message.from_replay_dict(json.loads(json.dumps(msg.to_replay_dict())))
+
+    assert restored.turn_parts[0].signature == b"bare"
+    assert restored.turn_parts[0].text == ""
+
+
+def test_the_langfuse_dict_shows_the_thought_and_the_signature_size_only():
+    msg = Message.from_model_turn(
+        [
+            TurnPart.from_thought("想了想", signature=b"\x00\xffsig"),
+            TurnPart.from_text("嗯"),
+        ],
+        [],
+    )
+    dumped = msg.to_dict()
+
+    assert dumped["turn_parts"] == [
+        {"kind": "thought", "text": "想了想", "signature_bytes": 5},
+        {"kind": "text", "text": "嗯"},
+    ]
+    assert Message.from_dict(dumped).turn_parts[0].text == "想了想"
+    assert Message.from_dict(dumped).turn_parts[0].signature is None
+
+
+def test_stream_chunk_carries_the_signature_riding_on_its_part():
+    chunk = StreamChunk(reasoning="想了想", signature=b"sig-1")
+    assert chunk.signature == b"sig-1"
+    assert StreamChunk(text="hi").signature is None

@@ -15,6 +15,7 @@
     "./lane-router": "./src/lane-router/index.ts",
     "./protocols": "./src/protocols/index.ts",
     "./channel": "./src/channel/index.ts",
+    "./media": "./src/media/index.ts",
     "./rules": "./src/rules/index.ts",
     "./bot": "./src/bot/index.ts",
     "./persistence": "./src/persistence/index.ts",

@@ -369,7 +369,7 @@ async def test_the_snapshot_carries_the_page_she_wrote(page_db, stub_page):
     )
 
     assert snap.day_page is not None
-    assert "胶片摊了一茶几，绫奈说要下雨。" in snap.render()
+    assert "胶片摊了一茶几，绫奈说要下雨。" in snap.render_state()
 
 
 @pytest.mark.integration
@@ -410,7 +410,7 @@ async def test_with_no_page_yet_the_snapshot_says_so_plainly(page_db):
     )
 
     assert snap.day_page is None
-    assert snap.render().strip() != ""
+    assert snap.render_state().strip() != ""
 
 
 @pytest.mark.integration
@@ -424,7 +424,7 @@ async def test_a_page_older_than_yesterday_is_labelled_by_its_date(page_db, stub
         lane=LANE, persona_id="akao", after_seq=0, now=_on(29, 14)
     )
 
-    rendered = snap.render()
+    rendered = snap.render_state()
     assert "07-25" in rendered
     assert "昨天" not in rendered, f"三天前那页被说成了昨天：{rendered}"
 

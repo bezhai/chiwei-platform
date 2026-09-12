@@ -244,8 +244,8 @@ async def run_reading_round(
         f"【你此前读这本书的印象】\n{prior_text}\n\n"
         f"【从第几页接着读】第 {start_page} 页（用 read({start_page}) 开始往后读）"
     )
-    # langfuse 归组：把这一程读书的 LLM 调用归进她当天的 session（trace 标签，不续接——
-    # 读书是一次性整篇产出，run 不传 session_id）。
+    # langfuse 归组：把这一程读书的 LLM 调用归进她当天的 session。这只是 trace 标签，
+    # 不是续接——读书是一次性整篇产出，上一程读到哪由 ``FileRead`` 的页号答，不靠上下文。
     session_id = make_session_id(lane, persona_id, now.strftime("%Y-%m-%d"))
     context = AgentContext(persona_id=persona_id, session_id=session_id)
 

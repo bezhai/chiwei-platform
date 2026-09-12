@@ -191,9 +191,17 @@ function harness(overrides: Partial<LarkDeliveryDeps> = {}): Harness {
         store,
         ledger,
         api: api.api,
+        // 替身的默认口径是"给的图全都传上去了"。渲染真身只有在上传成功时才交回那一
+        // 张（见 render.ts），部分失败那条路由单独的用例用自己的 render 摆出来。
         render: async (markdown, ctx) => {
             rendered.push({ markdown, ctx });
-            return [[{ tag: 'text', text: markdown }]] as unknown as PostContent;
+            return {
+                post: [[{ tag: 'text', text: markdown }]] as unknown as PostContent,
+                pictures: (ctx.pictureFileNames ?? []).map((fileName) => ({
+                    fileName,
+                    imageKey: `img_v3_of_${fileName}`,
+                })),
+            };
         },
         botCommonUserId: (botName) => `cu_${botName}`,
         botDisplayName: (botName) => `名字_${botName}`,
@@ -600,6 +608,105 @@ describe('落库 — assistant 行的字段口径', () => {
         expect(h.ledger.appended[0]!.reply).toMatchObject({
             common_message_id: 'cm_already',
         });
+    });
+});
+
+describe('落库 — 她发出去的图', () => {
+    // 她发一条带图的消息，图真的到了真人手上，而落库只有一个文本块：下一轮她翻这条
+    // 会话，看到的是自己发了段文字，看不到自己发过图，也没有任何能把那张图取回来的
+    // 引用。入站方向本来就是完整的，出站得长成同一个样子。
+
+    it('每张真的发出去的图落一个图片块：渠道引用 + 对象位置', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ content: '看这张', picture_file_names: ['pictures/cat.png'] }),
+        );
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        expect(row.content).toEqual([
+            { kind: 'text', text: '看这张' },
+            {
+                kind: 'image',
+                // 渠道内能解析回这张图的引用：飞书这次发送给的 image_key。
+                key: 'img_v3_of_pictures/cat.png',
+                // 对象存储里的位置：她手上那张图的永久句柄，本来就是这条消息带着的。
+                object: 'pictures/cat.png',
+            },
+        ]);
+    });
+
+    it('多张图按发出去的顺序各占一块', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ content: '看这几张', picture_file_names: ['a.png', 'b.png'] }),
+        );
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        expect(row.content.map((item) => (item as { object?: string }).object)).toEqual([
+            undefined,
+            'a.png',
+            'b.png',
+        ]);
+    });
+
+    it('部分失败：只记真的发出去了的那张，挂掉的那张一个块都没有', async () => {
+        // 照着请求里的清单落库，就会记下一张真人根本没收到的图 —— 她下一轮翻到它，
+        // 会以为对方看过。这跟这次要修的问题是同一类错误。
+        const h = harness();
+        h.deps.render = async (markdown, ctx) => ({
+            post: [[{ tag: 'text', text: markdown }]] as unknown as PostContent,
+            pictures: (ctx.pictureFileNames ?? [])
+                .filter((fileName) => fileName !== 'bad.png')
+                .map((fileName) => ({ fileName, imageKey: `img_v3_of_${fileName}` })),
+        });
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ content: '看这两张', picture_file_names: ['bad.png', 'good.png'] }),
+        );
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        expect(row.content).toEqual([
+            { kind: 'text', text: '看这两张' },
+            { kind: 'image', key: 'img_v3_of_good.png', object: 'good.png' },
+        ]);
+    });
+
+    it('一张都没成：落库就是一条纯文字，跟不带图的消息一模一样', async () => {
+        const h = harness();
+        h.deps.render = async (markdown) => ({
+            post: [[{ tag: 'text', text: markdown }]] as unknown as PostContent,
+            pictures: [],
+        });
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ content: '看这张', picture_file_names: ['pictures/cat.png'] }),
+        );
+
+        const row = [...h.store.commonMessages.values()][0]!;
+        expect(row.content).toEqual([{ kind: 'text', text: '看这张' }]);
+        expect(row.content_text).toBe('看这张');
+    });
+
+    it('摘要跟着 content 走：带图的那条摘出 [image]，跟入站同一份口径', async () => {
+        const h = harness();
+        seedRefs(h.store);
+
+        await deliverLarkChatResponse(
+            h.deps,
+            reply({ content: '看这张', picture_file_names: ['pictures/cat.png'] }),
+        );
+
+        expect([...h.store.commonMessages.values()][0]!.content_text).toBe('看这张[image]');
     });
 });
 

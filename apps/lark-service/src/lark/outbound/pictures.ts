@@ -58,34 +58,47 @@ export interface LarkPictureDeps {
  */
 const CONCURRENCY = 5;
 
+/** 一个句柄在飞书那边的下场。 */
+export interface LarkRenderedPicture {
+    /** 它在富文本里占的那一行：成功是 img 节点，失败是一行降级文字。 */
+    nodes: PostNode[];
+    /**
+     * 真的传上去时飞书给的 image_key —— 渠道内能解析回这张图的引用。
+     *
+     * **降级掉的那几张没有这一格**，落库那一步据此只记真的发出去了的图。照着请求里的
+     * 清单落库会记下一张真人根本没收到的图，她下一轮翻到它会以为对方看过。
+     */
+    imageKey?: string;
+}
+
 /**
  * 把这一段要带出去的图变成飞书富文本的若干行（图各自成行）。
  *
- * 每个句柄产出恰好一行，顺序与传进来的一致：成功是 img 节点，失败是一行降级文字。
- * 空清单产出空数组 —— 没有图的那条路一次外部调用都不该发生。
+ * 每个句柄产出恰好一项，顺序与传进来的一致。空清单产出空数组 —— 没有图的那条路一次
+ * 外部调用都不该发生。
  */
-export async function larkPictureRows(
+export async function renderLarkPictures(
     fileNames: readonly string[],
     deps: LarkPictureDeps,
-): Promise<PostNode[][]> {
+): Promise<LarkRenderedPicture[]> {
     if (fileNames.length === 0) return [];
 
-    const rows: PostNode[][] = [];
+    const rendered: LarkRenderedPicture[] = [];
     for (let i = 0; i < fileNames.length; i += CONCURRENCY) {
         const batch = fileNames.slice(i, i + CONCURRENCY);
         const done = await Promise.all(
             batch.map((fileName, offset) => sendOne(fileName, i + offset + 1, deps)),
         );
-        rows.push(...done);
+        rendered.push(...done);
     }
-    return rows;
+    return rendered;
 }
 
 async function sendOne(
     fileName: string,
     position: number,
     deps: LarkPictureDeps,
-): Promise<PostNode[]> {
+): Promise<LarkRenderedPicture> {
     try {
         const url = await deps.sign(fileName);
         if (!url) {
@@ -98,13 +111,13 @@ async function sendOne(
             console.error(`[lark-outbound] upload returned no image_key for ${fileName}`);
             return degraded(position, '上传失败');
         }
-        return [{ tag: 'img', image_key: imageKey }];
+        return { nodes: [{ tag: 'img', image_key: imageKey }], imageKey };
     } catch (error) {
         console.error(`[lark-outbound] error sending picture ${fileName}:`, error);
         return degraded(position, '处理失败');
     }
 }
 
-function degraded(position: number, what: string): PostNode[] {
-    return [{ tag: 'md', text: `(第 ${position} 张图${what})` }];
+function degraded(position: number, what: string): LarkRenderedPicture {
+    return { nodes: [{ tag: 'md', text: `(第 ${position} 张图${what})` }] };
 }

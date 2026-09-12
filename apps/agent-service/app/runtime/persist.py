@@ -147,7 +147,10 @@ def _dedup_hash(obj: Data) -> str:
 
 
 async def insert_append(
-    obj: Data, *, expected_current_ver: int | None = None
+    obj: Data,
+    *,
+    expected_current_ver: int | None = None,
+    session: Any = None,
 ) -> int:
     """Append ``obj`` as a new row; auto-assign ``Version`` if declared.
 
@@ -173,6 +176,14 @@ async def insert_append(
     raised (not swallowed): because the version column is folded into the
     hash, a collision means two writers slipped past the advisory lock — an
     upstream bug worth surfacing loudly.
+
+    ``session`` runs the whole append on a caller-supplied ``AsyncSession``
+    instead of opening a private one, so the new version commits **atomically
+    with whatever else the caller did on that session** (same reason
+    :func:`insert_idempotent` takes one). The advisory lock is
+    transaction-scoped, so on the caller's session it is held until the
+    caller's transaction ends — keep such transactions short. Default ``None``
+    keeps every existing caller on the private-session path unchanged.
     """
     cls = type(obj)
     table = _table_name(cls)
@@ -187,7 +198,7 @@ async def insert_append(
     key_tuple = tuple(getattr(obj, k) for k in keys)
     lock_key = int(hashlib.md5(str(key_tuple).encode()).hexdigest()[:15], 16) % (2**31)
 
-    async with get_session() as s:
+    async def _append_on(s: Any) -> int:
         await s.execute(
             text("SELECT pg_advisory_xact_lock(:k)"),
             {"k": lock_key},
@@ -235,7 +246,12 @@ async def insert_append(
             f"VALUES ({placeholders})"
         )
         await s.execute(text(sql), _encode_params(obj, cols_map, jsonb_cols))
-    return 1
+        return 1
+
+    if session is not None:
+        return await _append_on(session)
+    async with get_session() as s:
+        return await _append_on(s)
 
 
 async def insert_idempotent(obj: Data, *, session: Any = None) -> int:

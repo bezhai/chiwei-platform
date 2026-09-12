@@ -54,7 +54,7 @@
 //   common_message  insert assistant → 出站
 //   common_agent_response            → 出站
 
-import type { ContentItem } from '@inner/shared/channel';
+import { summarizeContent } from '@inner/shared/channel';
 import { context } from '@inner/shared/middleware';
 
 import { LARK_CHANNEL } from '../channel';
@@ -546,7 +546,8 @@ async function recordInboundMessage(
             sender_display_name: known.sender?.name,
             role: 'user',
             content: reading.inbound.content,
-            content_text: summarize(reading.inbound.content),
+            // 空串和"没有正文"在读的人眼里是两回事，所以摘不出东西时这一列不写。
+            content_text: summarizeContent(reading.inbound.content) || undefined,
             common_root_message_id: projection.commonRootMessageId,
             common_reply_message_id: projection.commonReplyMessageId,
             // @ 在投影时被内联回了正文（公共层的内容契约里没有 mention 这种片段），
@@ -582,16 +583,4 @@ async function recordInboundMessage(
             }
         }
     });
-}
-
-/**
- * 给人看的一行摘要（消息列表、日志、后台都读它）。非文字片段折成 `[kind]`，全空
- * 就不写 —— 空串和"没有正文"在读的人眼里是两回事。
- */
-function summarize(content: ContentItem[]): string | undefined {
-    const text = content
-        .map((item) => (item.kind === 'text' || item.kind === 'unsupported' ? item.text : `[${item.kind}]`))
-        .join('')
-        .trim();
-    return text.length > 0 ? text : undefined;
 }

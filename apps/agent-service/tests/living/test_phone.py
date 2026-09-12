@@ -1,21 +1,21 @@
-"""手机 —— 信封可感，内容要她去看。
+"""手机 —— 三层：通知、会话列表、会话详情。
 
-五条硬边界，各有对应的用例：
-
-  * **每一轮拿到的只有信封。** 有没有动静、谁、多密多快、跟她刚才干的事有没有牵连。
-    正文一个字都不在信封里 —— 不然"看手机"就成了摆设，她躺着就把消息读完了。
-  * **打开一条会话看到的是最近若干条往来**，双向、含她自己说过的、含读过的上文。
-    窗口、未读、游标是三件事：窗口不看游标，未读是"游标之后别人发的没撤的"，游标只
-    推到未读里最新那条。
+  * **通知**（信封）是她每一轮被动扫一眼就看见的：谁给她发消息了、几条、什么时候。
+    **正文一个字都没有** —— 不然"看手机"就成了摆设，她躺着就把消息读完了。
+    **按时间排，最新的在前**，没有谁被提到前面去。
+  * **会话列表**要她自己翻手机才看得到：按**这条会话最后一条消息**的时间倒序，零未读
+    的那些也在里面，一屏十来条、想往下自己翻。
+  * **会话详情**是点进某一条：默认落在**把她叫来的那条**（群里是 @ 她那条、私聊是最早
+    那条未读）上下，往前翻得回去。窗口、未读、游标是三件事：窗口不看游标，未读是
+    "游标之后别人发的没撤的"，游标只推到**这一页里真摆到她眼前的那些未读**中最新的一条。
   * **看手机是她的动作，成功返回之后才推游标。** 中途炸掉 = 一条都不算已读。
-  * **挤出窗口的那些永久丢失。** 她只看最后十来条，前面的不会补看：真人"未读 47 条"
-    就是这样。
   * **睡觉时消息照堆、不算已读。** 她没做这个动作，游标就不动。
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import uuid
 from pathlib import Path
 
@@ -24,11 +24,14 @@ from sqlalchemy import text
 
 from app.data import session as session_mod
 from app.living.phone import (
+    CONVERSATION_LIST_LIMIT,
     NEVER_LOOKED,
-    PHONE_GLANCE_LIMIT,
+    PHONE_PAGE,
+    PHONE_PAGE_AFTER,
     conversations_her_bot_is_in,
     envelopes_for,
     look_at_phone,
+    look_through_your_phone,
     look_up_contact,
     newest_unread_summons,
     phone_envelope,
@@ -133,6 +136,17 @@ def _line_with(seen: str, body: str) -> str:
         if body in line:
             return line
     raise AssertionError(f"没有正文带「{body}」的消息行。拿到：\n{seen}")
+
+
+def _page_handle(seen: str) -> str:
+    """这一页头上那串 ``before=…`` —— 她想往前翻时该原样抄回去的东西。
+
+    翻页这条路只有这一个入口：她眼前的消息行上没有编号，唯一指得动"再往前一页"的
+    就是这一串。头上不印它，往前翻对她就不存在。
+    """
+    found = re.search(r"before=([0-9a-f-]{36})", seen)
+    assert found is not None, f"这一页没告诉她怎么往前翻。拿到：\n{seen}"
+    return found.group(1)
 
 
 async def _seed_world() -> None:
@@ -248,8 +262,7 @@ async def _incoming(
 
     ``items`` / ``content_text`` 给了就照原样落库。附件消息上这两列是**两份互不
     等价的事实**：投影层把每个非文本项都拼成字面的 ``[kind]`` 写进 ``content_text``
-    （lark-service ``inbound-projection.ts`` 的 ``summarize``、channel-server
-    ``common-projector.ts`` 的 ``textProjection``），文件名只留在 items 的
+    （两个渠道共用 ``packages/ts-shared`` 的 ``summarizeContent``），文件名只留在 items 的
     ``meta.file_name`` 里。要验她看不看得出发来的是什么，就得能分别摆布这两边。
     """
     if items is None:
@@ -295,6 +308,7 @@ async def _bot_said(
     bot_uid: uuid.UUID,
     display_name: str,
     outbound_id: str | None = None,
+    items: list[dict] | None = None,
 ) -> str:
     """某个 bot 在这条会话里说过的一句（``role='assistant'``）。
 
@@ -309,6 +323,9 @@ async def _bot_said(
     ``proactive:`` 前缀之后落的就是它）。**只有主动发起的那些行有这一列**：她回复
     别人的消息走另一条链，那条链不写这一列，所以那些消息她撤不了。留空正是在摆那种
     行的真实形状。
+
+    ``items`` 给了就照原样落库（她发的带图消息是这个形状：正文一块 + 每张真发出去的
+    图一块），不给就是一条纯文字。
     """
     mid = uuid.uuid4()
     resolved_scope = "direct" if conv in (_DM, _OTHERS_DM) else "group"
@@ -329,7 +346,7 @@ async def _bot_said(
                 "u": str(bot_uid),
                 "sn": display_name,
                 "body": json.dumps(
-                    [{"kind": "text", "text": text_body}], ensure_ascii=False
+                    items or [{"kind": "text", "text": text_body}], ensure_ascii=False
                 ),
                 "txt": text_body,
                 "sc": resolved_scope,
@@ -358,7 +375,13 @@ async def _recalled_on_the_channel(message_id: str, *, at: dt.datetime) -> None:
         )
 
 
-async def _her_own(conv: uuid.UUID, *, text_body: str, at: dt.datetime) -> str:
+async def _her_own(
+    conv: uuid.UUID,
+    *,
+    text_body: str,
+    at: dt.datetime,
+    items: list[dict] | None = None,
+) -> str:
     """她自己在这条会话里说过的一句（她的 bot 是 ``chiwei``）。
 
     **不带 ``agent_outbound_id``** —— 这是她**回复**别人时那条链落下的形状，撤不了。
@@ -371,6 +394,7 @@ async def _her_own(conv: uuid.UUID, *, text_body: str, at: dt.datetime) -> str:
         bot_name="chiwei",
         bot_uid=_AKAO_BOT_UID,
         display_name="赤尾",
+        items=items,
     )
 
 
@@ -539,12 +563,14 @@ async def test_an_empty_phone_says_so_instead_of_leaving_a_hole(living_db):
 # 三件事分开之后：
 #
 #   * **未读集合 U** = 游标之后的、别人发的、没撤掉的。判据跟改之前逐字相同。
-#   * **展示窗口 W** = 这条会话上最近若干条，不看游标、不分谁发的，含她自己撤掉的
-#     那条（留痕迹），不含别人撤掉的。
-#   * 「其中 N 条是新的」= |U ∩ W|；「前面还有 K 条你没往回翻」= |U − W|。
-#   * **游标推到 max(U)，不是 max(W)**：W 里最新那条可能是她自己发的、晚于任何未读，
-#     推到它身上会让之后乱序到达、时刻更早的消息被永久跳过 —— 她一个字都没看过，那
-#     几条却已经被算成读过了。
+#   * **这一页 P** = 锚点前后各一段，不看游标、不分谁发的，含她自己撤掉的那条
+#     （留痕迹），不含别人撤掉的。
+#   * 「其中 N 条是新的」= |U ∩ P|；「后面还有 N 条没看到」= 比这一页最新那条还新的
+#     未读；「前面还有 N 条」= 比这一页最早那条还早、她翻得回去的消息。
+#   * **游标推到 max(U ∩ P)**：只有真摆到她眼前的那些才算她看过。推到 max(U) 是改之前
+#     的做法，分页之后照搬就是"翻一页 = 几千条算看过"；推到这一页最新那条（不看是不是
+#     未读）同样不行 —— 那条可能是她自己发的、晚于任何未读，之后乱序到达、时刻更早的
+#     消息会被永久跳过。
 
 
 @pytest.mark.integration
@@ -674,38 +700,32 @@ async def test_it_says_how_many_of_them_are_new(living_db, in_a_moment):
 
 
 @pytest.mark.integration
-async def test_her_own_words_take_up_room_in_the_window(
-    living_db, in_a_moment, pinned
-):
-    """窗口是"最近若干条"，她自己发的照样占位置，被挤出去的未读因此更多。
+async def test_her_own_words_take_up_room_in_the_page(living_db, in_a_moment):
+    """一页是"锚点前后各一段"，她自己发的照样占位置，后面那几条因此没进这一页。
 
-    这条把三件事同时钉住：窗口不分谁发的（10 条里有她 4 条）、「其中 N 条是新的」只
-    数未读（6 条）、「前面还有 K 条」是被挤出窗口的未读（2 条）。三者用同一条判据算
-    的话，这里必然对不上。
+    这条把三件事同时钉住：这一页不分谁发的（她自己 4 条占掉 4 个位置）、「其中 N 条是
+    新的」只数未读（5 条）、「后面还有 N 条」是这一页之后她还没看到的未读（3 条）。
+    三者用同一条判据算的话，这里必然对不上。
     """
     await _seed_world()
-    pinned(str(_GROUP))
-    for i in range(8):
-        await _incoming(
-            _GROUP,
-            text_body=f"路人第{i}句",
-            at=_at(20, i),
-            sender=_SOMEONE,
-            sender_name="路人",
-        )
     for i in range(4):
-        await _her_own(_GROUP, text_body=f"我第{i}句", at=_at(20, 10 + i))
+        await _incoming(_DM, text_body=f"路人第{i}句", at=_at(20, i))
+    for i in range(4):
+        await _her_own(_DM, text_body=f"我第{i}句", at=_at(20, 10 + i))
+    for i in range(4, 8):
+        await _incoming(_DM, text_body=f"路人第{i}句", at=_at(20, 16 + i))
 
-    async with in_a_moment("akao", now=_at(20, 20)):
-        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
+    async with in_a_moment("akao", now=_at(20, 30)):
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
 
-    assert "其中 6 条是新的" in seen and "还有 2 条" in seen, (
-        f"窗口 10 条 = 她自己 4 条 + 最近 6 条未读，未读一共 8 条。拿到：\n{seen}"
+    assert "其中 5 条是新的" in seen and "后面还有 3 条" in seen, (
+        f"这一页 = 锚点（路人第0句）往后 {PHONE_PAGE_AFTER} 条，她自己那 4 条占了位置，"
+        f"所以只装得下 5 条未读，剩下 3 条在后面。拿到：\n{seen}"
     )
-    assert "路人第0句" not in seen and "路人第1句" not in seen, (
-        f"被挤出窗口的那两条还在眼前。拿到：\n{seen}"
+    assert "路人第5句" not in seen and "路人第7句" not in seen, (
+        f"这一页之后那几条已经摆到她眼前了。拿到：\n{seen}"
     )
-    assert "路人第2句" in seen and "我第3句" in seen, f"拿到：\n{seen}"
+    assert "路人第4句" in seen and "我第3句" in seen, f"拿到：\n{seen}"
 
 
 @pytest.mark.integration
@@ -722,8 +742,8 @@ async def test_the_window_and_the_unread_set_come_from_one_query(
 
     库层面的并发在集成测试里造不出来（要卡在两条查询之间提交一条消息），所以这里钉
     的是**可判定的那件事：这一眼只对库发了一条读 ``common_message`` 的语句**。拆回
-    两条的话这个数立刻变 2。同时把两条查询各自的产出都验一遍，确认那一条语句真的
-    同时回答了三个问题：窗口是哪几行、未读一共几条、未读里最新那条是哪条。
+    两条的话这个数立刻变 2。同时把这一条语句的几个产出都验一遍：锚点落在哪、这一页
+    是哪几行、其中几条是新的、后面还有几条没看到。
     """
     from sqlalchemy import event
 
@@ -734,11 +754,13 @@ async def test_the_window_and_the_unread_set_come_from_one_query(
             read_common_message.append(statement)
 
     await _seed_world()
-    # 12 条未读 + 她自己最后说的一句：窗口（10 条）装不下全部未读，而窗口里最新那条
-    # 是她自己发的 —— 未读总数和 max(U) 都不是窗口自己算得出来的。
-    latest_unread = ""
+    # 12 条未读 + 她自己最后说的一句：一页装不下全部未读，而"后面还有几条没看到"
+    # 和"游标推到哪"都不是这一页自己算得出来的。
+    shown_last = ""
     for i in range(12):
-        latest_unread = await _incoming(_DM, text_body=f"第{i}条", at=_at(20, i))
+        mid = await _incoming(_DM, text_body=f"第{i}条", at=_at(20, i))
+        if i == PHONE_PAGE_AFTER:
+            shown_last = mid
     await _her_own(_DM, text_body="马上回你", at=_at(20, 12))
 
     async with in_a_moment("akao", now=_at(20, 20)):
@@ -754,14 +776,16 @@ async def test_the_window_and_the_unread_set_come_from_one_query(
 
     assert len(read_common_message) == 1, (
         f"这一眼对库发了 {len(read_common_message)} 条读 common_message 的语句 —— "
-        f"窗口和未读来自两个快照，中间提交的那条消息会被永久跳过。"
+        f"这一页和未读来自两个快照，中间提交的那条消息会被永久跳过。"
         f"拿到：\n" + "\n---\n".join(read_common_message)
     )
-    assert "其中 9 条是新的" in seen, f"窗口里的未读数算错了。拿到：\n{seen}"
-    assert "还有 3 条" in seen, f"未读总数算错了。拿到：\n{seen}"
+    assert "其中 9 条是新的" in seen, f"这一页里的未读数算错了。拿到：\n{seen}"
+    assert "后面还有 3 条" in seen, f"这一页之后还没看到几条算错了。拿到：\n{seen}"
     assert (
         await read_through(lane=LANE, persona_id="akao", channel_id=str(_DM))
-    ) == (_ms(_at(20, 11)), latest_unread), "游标没落在未读里最新那条上"
+    ) == (_ms(_at(20, PHONE_PAGE_AFTER)), shown_last), (
+        "游标没落在这一页里真摆到她眼前那些未读中最新的一条上"
+    )
 
 
 @pytest.mark.integration
@@ -895,7 +919,7 @@ async def test_a_glance_that_failed_is_not_counted_as_read(
     def boom(*_a, **_kw):
         raise RuntimeError("渲染这一步炸了")
 
-    monkeypatch.setattr(phone_mod, "_glance_text", boom)
+    monkeypatch.setattr(phone_mod, "_page_text", boom)
 
     async with in_a_moment("akao"):
         outcome = await look_at_phone.invoke({"channel_id": str(_DM)})
@@ -970,42 +994,292 @@ async def test_sleeping_through_it_piles_the_messages_up_unread(living_db):
 
 
 # --------------------------------------------------------------------------
-# 四 · 挤出窗口的那些永久丢失
+# 三之二 · 这一页落在把她叫来的那条附近，往前翻得回去
 # --------------------------------------------------------------------------
+#
+# 改之前这一页的锚点永远是"现在"（``ORDER BY event_time DESC LIMIT 10``）：半小时前
+# 群里 @ 她那条早被后面几十条闲聊挤掉了，她点进去看到的是一堆跟自己无关的话，而把她
+# 叫来的那件事一个字都没有。
+#
+# 锚点复用**已有**那条"谁在叫她"的判据（私聊来的任意一条、群里点了她名字的那条），
+# 不新造一套；取的是**最早**那条还没看过的，不是最新那条 —— 取最新的话游标一下就推
+# 到未读堆顶上，"翻一页只算看过这一页"就成了空话（见下面第四节）。
 
 
 @pytest.mark.integration
-async def test_she_reads_the_last_few_and_the_ones_before_are_gone_for_good(
-    living_db, in_a_moment
+async def test_opening_a_group_lands_on_the_message_that_called_her(
+    living_db, in_a_moment, pinned
 ):
-    """挤出窗口的那些不会补看，游标照样推到未读里最新那条。
+    """半小时前有人 @ 她、之后几十条无关消息 —— 她点进去看到的正是那条和它的上下文。"""
+    await _seed_world()
+    pinned(str(_GROUP))
+    for i in range(20):
+        await _incoming(
+            _GROUP, text_body=f"闲聊第{i}句", at=_at(20, i),
+            sender=_SOMEONE, sender_name="路人",
+        )
+    await _incoming(
+        _GROUP, text_body=" 这个你怎么看", at=_at(20, 20),
+        sender=_SOMEONE, sender_name="路人", names_bot=_AKAO_BOT_UID,
+    )
+    for i in range(30):
+        await _incoming(
+            _GROUP, text_body=f"之后第{i}句", at=_at(20, 21 + i),
+            sender=_SOMEONE, sender_name="路人",
+        )
 
-    这是设计不是 bug —— 真人"未读 47 条"就是先看最后五到十条，能自洽就到此为止。
-    改成"打开会话"之后**窗口里的东西不再消失**（下一轮点开还是那十条），真正丢的是
-    被挤出窗口的那五条：它们既不在窗口里，也已经不算未读了。
+    async with in_a_moment("akao", now=_at(21, 30)):
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
+
+    assert "这个你怎么看" in seen, (
+        f"把她叫来的那条不在她眼前 —— 她点进去只看到一堆跟自己无关的话。拿到：\n{seen}"
+    )
+    assert "闲聊第19句" in seen and "闲聊第17句" in seen, (
+        f"那条 @ 之前的上下文没给 —— 她读不出这句话是从哪来的。拿到：\n{seen}"
+    )
+    assert "之后第0句" in seen and f"之后第{PHONE_PAGE_AFTER - 1}句" in seen, (
+        f"那条 @ 之后的没给 —— 她不知道这件事后来有没有人接。拿到：\n{seen}"
+    )
+    assert f"之后第{PHONE_PAGE_AFTER}句" not in seen, (
+        f"一页给多了，锚点就淹在后面那几十条里了。拿到：\n{seen}"
+    )
+
+
+@pytest.mark.integration
+async def test_opening_a_conversation_nobody_is_calling_her_in_lands_on_the_latest(
+    living_db, in_a_moment, pinned
+):
+    """没有谁在叫她的会话，落脚点就是最新那条 —— 跟真人点开一个群一样。"""
+    await _seed_world()
+    pinned(str(_GROUP))
+    for i in range(20):
+        await _sister_said(_GROUP, text_body=f"姐姐第{i}句", at=_at(20, i))
+
+    async with in_a_moment("akao", now=_at(21, 30)):
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
+
+    assert "姐姐第19句" in seen and f"姐姐第{20 - PHONE_PAGE}句" in seen, (
+        f"这一页该是最后 {PHONE_PAGE} 条。拿到：\n{seen}"
+    )
+    assert f"姐姐第{20 - PHONE_PAGE - 1}句" not in seen, f"拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_she_can_page_back_to_what_came_before(living_db, in_a_moment):
+    """把这一页头上那串 ``before=…`` 抄回去，看得到再往前那一页。
+
+    一共 15 条（第0..第14）。第一眼落在第0条上、给到第8条；第二眼接着往下，锚点是
+    第9条，往后到第14条（6 条）、余下的位置往前补到第2条 —— 这一页是第2..第14。
+    把它头上那串抄回去，翻到的就是第2条和它之前的第0、第1条。
     """
     await _seed_world()
-    total = PHONE_GLANCE_LIMIT + 5
-    for i in range(total):
+    for i in range(15):
         await _incoming(_DM, text_body=f"第{i}条", at=_at(20, i))
 
-    async with in_a_moment("akao"):
-        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
+    async with in_a_moment("akao", now=_at(20, 30)):
+        await look_at_phone.invoke({"channel_id": str(_DM)})
+    async with in_a_moment("akao", now=_at(20, 40)):
+        page = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
+        earlier = glance_text(
+            await look_at_phone.invoke(
+                {"channel_id": str(_DM), "before": _page_handle(page)}
+            )
+        )
 
-    assert f"第{total - 1}条" in seen
-    assert "第0条" not in seen, "她不该一次把 15 条全读完"
-    assert "还有 5 条" in seen, f"被挤出窗口的那几条得说出来。拿到：\n{seen}"
+    assert "第2条" in page and "第14条" in page and "第1条" not in page, (
+        f"第二眼这一页不对。拿到：\n{page}"
+    )
+    assert "第0条" in earlier and "第1条" in earlier and "第2条" in earlier, (
+        f"往前翻没翻回那两条。拿到：\n{earlier}"
+    )
+    assert "第3条" not in earlier, (
+        f"往前翻还带出了这一页之后的消息。拿到：\n{earlier}"
+    )
 
-    # 下一轮再点开：**同样那十条还在**（真人再点一次看到的就是它们），但一条新的
-    # 都没有；被挤出去的那五条不会回来。
-    async with in_a_moment("akao"):
-        again = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
-    assert f"第{total - 1}条" in again and "其中 0 条是新的" in again
-    assert "第0条" not in again, "被挤出窗口的那条又冒出来了"
+
+@pytest.mark.integration
+async def test_paging_back_does_not_swallow_what_arrived_meanwhile(
+    living_db, in_a_moment
+):
+    """往前翻不推水位，所以她翻着的时候新到的那条仍然是未读。"""
+    await _seed_world()
+    for i in range(15):
+        await _incoming(_DM, text_body=f"第{i}条", at=_at(20, i))
+
+    async with in_a_moment("akao", now=_at(20, 30)):
+        await look_at_phone.invoke({"channel_id": str(_DM)})
+    async with in_a_moment("akao", now=_at(20, 40)):
+        page = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
+        await _incoming(_DM, text_body="刚到的", at=_at(20, 41))
+        earlier = glance_text(
+            await look_at_phone.invoke(
+                {"channel_id": str(_DM), "before": _page_handle(page)}
+            )
+        )
+
+    assert "刚到的" not in earlier, f"往前翻翻出了后面刚到的那条。拿到：\n{earlier}"
+    left = [
+        e.unread
+        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(20, 50))
+    ]
+    assert left == [1], f"她翻着的时候到的那条被算成看过了。拿到：{left}"
+
+
+@pytest.mark.integration
+async def test_a_page_handle_that_points_nowhere_is_refused(living_db, in_a_moment):
+    """抄错的那串当场顶回去，不悄悄退回第一页。
+
+    悄悄退回的话她会以为自己翻到了更早的地方，而眼前是刚看过的同一批消息。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(20, 0))
+
+    async with in_a_moment("akao", now=_at(20, 30)):
+        outcome = await look_at_phone.invoke(
+            {"channel_id": str(_DM), "before": str(uuid.uuid4())}
+        )
+
+    assert isinstance(outcome, dict), f"抄错的那串没被顶回去。拿到：{outcome!r}"
+
+
+# --------------------------------------------------------------------------
+# 四 · 一页一页往下读；没摆到她眼前的那些不算她看过
+# --------------------------------------------------------------------------
+#
+# 改之前"看一眼 = 所有未读都算看过"（游标推到 ``max(U)``）。那在"每次只给最近十条"
+# 时是有意的取舍，分页之后照搬就成了"翻一页 = 几千条算看过"。
+#
+# 新契约三条（实现写在 :func:`app.living.phone.look_at_phone` 上）：
+#
+#   * **翻页推到哪**：推到**这一页里真摆到她眼前、而且之前没看过的那些**中最新的一条。
+#   * **通知层的瞥见不算看过**：通知一个字正文都没有，游标只有"打开会话"推得动。
+#   * **翻页期间新到的**：比这一页最新那条还新，落在水位之上，仍然是未读。
+#
+# 剩下那半如实说：比这一页最早那条还早、又没摆出来的未读落到水位之下就此过去 ——
+# 水位是一条单调的线，不是一张"看过哪几条"的清单。她往前翻还找得到它们，只是不再
+# 算未读。
+
+
+@pytest.mark.integration
+async def test_she_catches_up_one_page_at_a_time(living_db, in_a_moment):
+    """一屏读不完的未读，下一次打开接着往下 —— 一条都没被跳过。
+
+    锚点落在**最早那条还没看过的**上，所以每打开一次她就往前推进一页。改之前游标
+    一次就推到 ``max(U)``：她眼前只有最后十条，中间那些一个字没看过却已经算读过了。
+    """
+    await _seed_world()
+    for i in range(15):
+        await _incoming(_DM, text_body=f"第{i}条", at=_at(20, i))
+
+    async with in_a_moment("akao", now=_at(20, 30)):
+        first = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
+
+    assert "第0条" in first and f"第{PHONE_PAGE_AFTER}条" in first, (
+        f"这一页该从最早那条没看过的开始。拿到：\n{first}"
+    )
+    assert f"第{PHONE_PAGE_AFTER + 1}条" not in first, (
+        f"一次就把后面的也读完了。拿到：\n{first}"
+    )
     assert [
         e.unread
-        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 30))
-    ] == []
+        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(20, 31))
+    ] == [15 - PHONE_PAGE_AFTER - 1], "这一页之后那些被算成看过了"
+
+    async with in_a_moment("akao", now=_at(20, 40)):
+        second = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
+
+    assert "第14条" in second and f"第{PHONE_PAGE_AFTER + 1}条" in second, (
+        f"接着往下那一页没接上。拿到：\n{second}"
+    )
+    assert [
+        e.unread
+        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(20, 41))
+    ] == [], "两页读完了还剩未读"
+
+
+@pytest.mark.integration
+async def test_a_group_carries_on_from_where_the_last_page_ended(
+    living_db, in_a_moment, pinned
+):
+    """群里翻过一页之后再打开，接着上一页往下走 —— 不是退回最新那条。
+
+    只有第一句在叫她。第一次打开落在它上面、给到第 8 句；第二次打开时它已经读过、
+    群里没有别的召唤。锚点这时候退回最新那条的话，这一页是最后十几条，中间那二十来
+    句一个字都没摆到她眼前，却已经落到水位之下、不再算未读。
+
+    私聊里遇不到这个分支：那儿每一条未读都在叫她，锚点永远是"最早那条还没看过的"。
+    """
+    await _seed_world()
+    pinned(str(_GROUP))
+    await _incoming(
+        _GROUP, text_body=" 这个你怎么看", at=_at(20, 0),
+        sender=_SOMEONE, sender_name="路人", names_bot=_AKAO_BOT_UID,
+    )
+    for i in range(1, 30):
+        await _incoming(
+            _GROUP, text_body=f"第{i}句", at=_at(20, i),
+            sender=_SOMEONE, sender_name="路人",
+        )
+
+    async with in_a_moment("akao", now=_at(21, 0)):
+        first = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
+    async with in_a_moment("akao", now=_at(21, 10)):
+        second = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
+
+    assert "第8句" in first and "第9句" not in first, (
+        f"用例前提没成立：第一页该落在那条 @ 上、给到第 8 句。拿到：\n{first}"
+    )
+    assert "第9句" in second, (
+        f"第二次打开退回了最新那条 —— 中间那些她一个字都没看到。拿到：\n{second}"
+    )
+    assert "第29句" not in second, (
+        f"第二页一路跳到了最后。拿到：\n{second}"
+    )
+    left = [
+        e.unread
+        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 11))
+    ]
+    assert left == [29 - 17], (
+        f"没摆到她眼前的那些被算成看过了。拿到：{left}"
+    )
+
+
+@pytest.mark.integration
+async def test_the_chatter_before_the_mention_stops_being_unread(
+    living_db, in_a_moment, pinned
+):
+    """群里那条 @ 之前的背景音：没摆到她眼前的那些落到水位之下，不再算未读。
+
+    真人也是这样 —— 有人 @ 你，你点进去看那一句和它前后，前面几十条闲聊没人会补着
+    看完。**但它们不是消失了**：往前翻照样找得到，只是不再算"没看过"。
+    """
+    await _seed_world()
+    pinned(str(_GROUP))
+    for i in range(20):
+        await _incoming(
+            _GROUP, text_body=f"闲聊第{i}句", at=_at(20, i),
+            sender=_SOMEONE, sender_name="路人",
+        )
+    await _incoming(
+        _GROUP, text_body=" 这个你怎么看", at=_at(20, 20),
+        sender=_SOMEONE, sender_name="路人", names_bot=_AKAO_BOT_UID,
+    )
+
+    async with in_a_moment("akao", now=_at(21, 30)):
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
+        earlier = glance_text(
+            await look_at_phone.invoke(
+                {"channel_id": str(_GROUP), "before": _page_handle(seen)}
+            )
+        )
+
+    assert "闲聊第0句" not in seen, f"一页装不下 21 条。拿到：\n{seen}"
+    assert "闲聊第0句" in earlier, (
+        f"往前翻找不回那些闲聊 —— 它们是真的没了，不只是不算未读。拿到：\n{earlier}"
+    )
+    assert await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 31)) == [], (
+        "@ 之前那些没摆出来的闲聊还在通知上算没看过 —— 她会为它们反复拿起手机"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1208,27 +1482,31 @@ async def test_a_message_landing_in_the_same_millisecond_is_not_skipped(
 
 
 # --------------------------------------------------------------------------
-# 七 · 信封不替她裁决注意力
+# 七 · 通知是纯时间序
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_the_conversation_that_is_calling_her_is_always_in_the_envelope(
-    living_db, pinned
+async def test_the_notifications_are_in_plain_time_order(
+    living_db, in_a_moment, pinned
 ):
-    """在叫她的那条会话**一定**在信封里，多少群在刷屏都挤不掉它。
+    """通知按时间排，最新的在前 —— 没有谁被提到前面去。
 
-    信封的条数上限截的是"她知不知道有这回事"，比"她看多少条内容"严重一个量级：
-    被挤出去的那条，她连它存在都不知道，也就永远不会去看。所以上限只管**没在叫她的**
-    那些（群里的背景噪音，本来就无上限），在叫她的一条都不许少。
+    真人手机的通知栏就是这样：一条私聊在那儿躺了半小时，十几个群刷屏刷过去，它就被
+    推下去了。**它没有从她世界里消失**：会话列表那一层按这条会话最后一条消息的时间
+    倒序，翻得到它；而且它到的那一刻就已经把她叫醒过一次（:mod:`app.living.nudge`），
+    那一轮的上下文她还带着。
+
+    把在叫她的那些无条件提到最前面（改之前那样）是在替她裁决注意力，而且那一下就让
+    "按时间排"这句话不成立了。
     """
     from app.living.phone import ENVELOPE_LIMIT
 
     await _seed_world()
-    # 私聊最旧 —— 按"最近有动静"排序它会被排到最后。
+    # 私聊最旧 —— 按时间排它排在最后。
     await _incoming(_DM, text_body="在吗", at=_at(20, 35))
     # 一堆群在刷屏，全都比私聊新。刷屏的群没人点她的名，本来一个都进不了她的视野
-    # —— 这条用例验的是信封的条数上限，所以把它们固定加白按住：**能挤掉她的东西
+    # —— 这条用例验的是通知的条数上限，所以把它们固定加白按住：**能挤掉她的东西
     # 必须真的在**，否则这条用例什么都没证明。
     noisy = await _seed_noisy_groups(ENVELOPE_LIMIT + 3, at_from=_at(21, 0))
     pinned(*noisy)
@@ -1236,9 +1514,18 @@ async def test_the_conversation_that_is_calling_her_is_always_in_the_envelope(
     envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 30))
     channels = [e.channel_id for e in envelopes]
 
-    assert str(_DM) in channels, (
-        f"在等她回话的那条私聊被群里的闲聊挤出了信封 —— 她连有人找过她都不知道。"
-        f"信封里是：{channels}，群一共 {len(noisy)} 个"
+    assert len(channels) == ENVELOPE_LIMIT, f"通知一次只给几条。拿到：{channels}"
+    assert channels == list(reversed(noisy))[:ENVELOPE_LIMIT], (
+        f"通知不是纯时间序。拿到：{channels}"
+    )
+    assert str(_DM) not in channels, (
+        f"最旧那条被提到前面去了 —— 那不是按时间排。拿到：{channels}"
+    )
+
+    async with in_a_moment("akao", now=_at(21, 30)):
+        listed = await look_through_your_phone.invoke({})
+    assert str(_DM) in listed, (
+        f"被挤出通知的那条私聊在会话列表上也找不到 —— 那才是真的消失了。拿到：\n{listed}"
     )
 
 
@@ -1443,8 +1730,8 @@ async def test_a_sister_chatting_in_the_group_does_not_summon_her(living_db, pin
         "姐姐在群里随口一句就把她召唤过去了 —— 两个 agent 会互相叫醒，停不下来"
     )
     envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
-    assert [(e.named_you, e.is_calling_you) for e in envelopes] == [(False, False)], (
-        f"姐姐的群聊发言被当成在叫她 —— 它连信封的条数上限都挤不掉了。拿到：{envelopes}"
+    assert [e.named_you for e in envelopes] == [False], (
+        f"姐姐的群聊发言被当成点了她的名。拿到：{envelopes}"
     )
 
 
@@ -1488,8 +1775,8 @@ async def test_the_envelope_says_someone_named_her(living_db):
 
     envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
 
-    assert [(e.named_you, e.is_calling_you) for e in envelopes] == [(True, True)], (
-        f"群里点了她的名，信封却没认出来。拿到：{envelopes}"
+    assert [e.named_you for e in envelopes] == [True], (
+        f"群里点了她的名，通知却没认出来。拿到：{envelopes}"
     )
     assert "有人点了你的名" in render_envelopes(envelopes, now=_at(21, 31))
 
@@ -1519,8 +1806,8 @@ async def test_the_envelope_does_not_claim_she_was_named_when_nobody_scanned(
 
     envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
 
-    assert [(e.named_you, e.is_calling_you) for e in envelopes] == [(False, False)], (
-        f"没人算过这条消息，信封却说她被点名了。拿到：{envelopes}"
+    assert [e.named_you for e in envelopes] == [False], (
+        f"没人算过这条消息，通知却说她被点名了。拿到：{envelopes}"
     )
 
 
@@ -1549,24 +1836,27 @@ async def test_a_sister_word_is_attributed_to_the_sister_not_to_her(
 
 
 @pytest.mark.integration
-async def test_the_skipped_count_counts_the_sisters_words_too(
+async def test_the_page_counts_the_sisters_words_as_new_too(
     living_db, in_a_moment, pinned
 ):
-    """"前面还有 N 条你没往回翻"这个数也得把姐姐的话算进去。
+    """姐姐在群里说的话同样算"她还没看过"，翻页那个数也把它们算进去。
 
-    未读的口径只有一处才对：信封、看手机那一眼、跳过多少条，三处必须用同一条判据，
-    不然她看到的数跟她读到的东西对不上。
+    未读的口径只有一处才对：通知、这一页里几条是新的、前面还有几条，三处必须用同一
+    条判据，不然她看到的数跟她读到的东西对不上。
     """
     await _seed_world()
     pinned(str(_GROUP))
-    total = PHONE_GLANCE_LIMIT + 3
+    total = PHONE_PAGE + 3
     for i in range(total):
         await _sister_said(_GROUP, text_body=f"姐姐第{i}句", at=_at(20, i))
 
-    async with in_a_moment("akao"):
+    async with in_a_moment("akao", now=_at(20, 30)):
         seen = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
 
-    assert "还有 3 条" in seen, f"跳过多少条算错了。拿到：\n{seen}"
+    assert f"其中 {PHONE_PAGE} 条是新的" in seen, (
+        f"姐姐的话没算进「没看过」里。拿到：\n{seen}"
+    )
+    assert "前面还有 3 条" in seen, f"前面还有几条算错了。拿到：\n{seen}"
 
 
 @pytest.mark.integration
@@ -1720,12 +2010,160 @@ async def test_finding_someone_is_one_of_the_hands_she_actually_has(living_db):
 
 
 # --------------------------------------------------------------------------
+# 九之二 · 会话列表 —— 按这条会话最后一条消息的时间倒序
+# --------------------------------------------------------------------------
+#
+# 通知那一层只列**有动静的**，排序看的是未读里最新那条：她刚回完话的那条会话未读是
+# 零、根本不出现，而一个从不回复的人攒着一堆未读长期占前排。所以那不是会话列表，是
+# 未读摘要。
+#
+# 会话列表是另一层：她主动翻手机才看到，按**这条会话最后一条消息**的时间倒序（她自己
+# 刚说的那句照样算），一屏十来条，想往下自己翻。
+#
+# "不给几个月前的人发消息"靠的就是这个形态，不靠"超过 N 天不活跃就不显示"那种规则 ——
+# 那是用工程替她遗忘。
+
+
+@pytest.mark.integration
+async def test_the_conversation_list_is_ordered_by_the_last_message(
+    living_db, in_a_moment, pinned
+):
+    """排序看的是这条会话最后一条消息，不是未读里最新那条。
+
+    她刚回完话的那条私聊未读是零、最后一条是刚刚；群里一堆没看的、最后一条是一个多
+    小时前。按未读排（通知那条口径）前者根本不出现，而它恰恰是她正在聊的那条。
+    """
+    await _seed_world()
+    pinned(str(_GROUP))
+    await _incoming(_DM, text_body="在吗", at=_at(21, 30))
+    async with in_a_moment("akao", now=_at(21, 35)):
+        await look_at_phone.invoke({"channel_id": str(_DM)})
+    await _her_own(_DM, text_body="在的", at=_at(21, 40))
+    for i in range(5):
+        await _incoming(
+            _GROUP, text_body=f"群里第{i}句", at=_at(20, i),
+            sender=_SOMEONE, sender_name="路人",
+        )
+
+    async with in_a_moment("akao", now=_at(21, 45)):
+        listed = await look_through_your_phone.invoke({})
+
+    assert str(_DM) in listed, (
+        f"她刚回完话的那条会话（零未读）不在列表上 —— 那还是未读摘要。拿到：\n{listed}"
+    )
+    assert listed.index(str(_DM)) < listed.index(str(_GROUP)), (
+        f"排序还是按未读算的：最后一条刚刚才发生的那条排在了后面。拿到：\n{listed}"
+    )
+    assert "21:40" in listed, (
+        f"最后一条是什么时候没说出来 —— 那是这一层排序的全部依据。拿到：\n{listed}"
+    )
+
+
+@pytest.mark.integration
+async def test_the_conversation_list_never_leaks_a_word_of_what_was_said(
+    living_db, in_a_moment
+):
+    """列表跟通知一样，一个字正文都没有 —— 不然"看手机"这个动作就成了摆设。"""
+    await _seed_world()
+    await _incoming(_DM, text_body="周末那家抹茶店你去过没", at=_at(21, 30))
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        listed = await look_through_your_phone.invoke({})
+
+    assert "抹茶店" not in listed, f"列表漏了正文。拿到：\n{listed}"
+    assert "bezhai" in listed, f"最后一条是谁说的该有。拿到：\n{listed}"
+
+
+@pytest.mark.integration
+async def test_the_conversation_list_pages_from_the_last_one_she_saw(
+    living_db, in_a_moment, pinned
+):
+    """一屏列不完，把这一屏最后那串 channel_id 抄进 before 接着往下翻。"""
+    await _seed_world()
+    many = await _seed_noisy_groups(CONVERSATION_LIST_LIMIT + 3, at_from=_at(20, 0))
+    pinned(*many)
+    newest_first = list(reversed(many))
+
+    async with in_a_moment("akao", now=_at(21, 0)):
+        first = await look_through_your_phone.invoke({})
+        rest = await look_through_your_phone.invoke(
+            {"before": newest_first[CONVERSATION_LIST_LIMIT - 1]}
+        )
+
+    on_first = [c for c in newest_first if c in first]
+    assert on_first == newest_first[:CONVERSATION_LIST_LIMIT], (
+        f"第一屏不是最近说过话的那 {CONVERSATION_LIST_LIMIT} 条。拿到：\n{first}"
+    )
+    assert [c for c in newest_first if c in rest] == (
+        newest_first[CONVERSATION_LIST_LIMIT:]
+    ), f"往下翻那一屏不对。拿到：\n{rest}"
+
+
+@pytest.mark.integration
+async def test_a_list_page_handle_that_points_nowhere_is_refused(
+    living_db, in_a_moment
+):
+    """抄错的那串当场顶回去，不悄悄退回第一屏。"""
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(21, 30))
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        outcome = await look_through_your_phone.invoke(
+            {"before": str(uuid.uuid4())}
+        )
+
+    assert isinstance(outcome, dict), f"抄错的那串没被顶回去。拿到：{outcome!r}"
+
+
+@pytest.mark.integration
+async def test_the_conversation_list_only_shows_what_is_in_sight(
+    living_db, in_a_moment
+):
+    """名单外那条会话连名字都不该出现在列表上。"""
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(21, 30))
+    await _incoming(
+        _GROUP, text_body="今天好热", at=_at(21, 30), sender=_SOMEONE,
+        sender_name="路人",
+    )
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        listed = await look_through_your_phone.invoke({})
+
+    assert str(_GROUP) not in listed and "宅居研究所" not in listed, (
+        f"没人叫她的那个群摆到列表上了 —— 不在名单里就是整个不进她视野。拿到：\n{listed}"
+    )
+
+
+@pytest.mark.integration
+async def test_the_listed_address_sits_next_to_the_name(living_db, in_a_moment):
+    """列表上的地址同样要跟名字挨着 —— 跟信封那条是同一个教训。"""
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(21, 30))
+
+    async with in_a_moment("akao", now=_at(21, 35)):
+        listed = await look_through_your_phone.invoke({})
+
+    line = next(ln for ln in listed.splitlines() if str(_DM) in ln)
+    assert line.index(f"channel_id={_DM}") - line.index("bezhai") < 60, (
+        f"地址离名字太远，她会拿名字当地址用。这一行是：\n{line}"
+    )
+
+
+def test_looking_through_her_phone_is_one_of_the_hands_she_has():
+    """这只手要真在她的工具集里 —— 没注册是静默失败（同「找人」那条）。"""
+    from app.living.moment import MOMENT_TOOLS
+
+    assert look_through_your_phone in MOMENT_TOOLS, "她手里没有这只手"
+
+
+# --------------------------------------------------------------------------
 # 十 · 别人发来的东西，她得看得出那是什么
 # --------------------------------------------------------------------------
 #
 # ``content_text`` 不是正文，是**投影层拼给人扫一眼的摘要**：文本项原样，其余每一项
-# 一律拼成字面的 ``[kind]``（lark-service ``inbound-projection.ts`` 的 ``summarize``、
-# channel-server ``common-projector.ts`` 的 ``textProjection``）。所以一条文件消息的
+# 一律拼成字面的 ``[kind]``（两个渠道共用 ``packages/ts-shared`` 的
+# ``summarizeContent``）。所以一条文件消息的
 # ``content_text`` 就是 ``"[file]"`` —— 优先信它，等于永远不看 items 里的
 # ``meta.file_name``。
 #
@@ -1805,7 +2243,7 @@ async def test_a_picture_and_a_sticker_read_as_themselves(
     await _incoming(
         _DM,
         at=_at(22, 20),
-        items=[{"kind": "image", "key": "img_v3_aa"}],
+        items=[{"kind": "image", "key": "img_v3_aa", "object": "temp/img_v3_aa.jpg"}],
         content_text="[image]",
     )
     await _incoming(
@@ -1877,7 +2315,9 @@ async def test_the_older_type_value_shape_still_reads(
     async with in_a_moment("akao", now=_at(22, 30)):
         seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
 
-    assert "旧消息[图片1]" in seen, f"拿到：\n{seen}"
+    # 这条历史行没有 ``object``（那一格是后来才有的），所以那张图取不回来 —— 但它仍然
+    # 在正文里占着自己的位置，她看得出这条消息里有过一张图。
+    assert "旧消息[图片：打不开]" in seen, f"拿到：\n{seen}"
 
 
 # --------------------------------------------------------------------------
@@ -2057,26 +2497,26 @@ async def test_the_envelope_does_not_name_someone_whose_only_word_was_taken_back
 
 
 @pytest.mark.integration
-async def test_the_skipped_count_does_not_count_a_message_taken_back(
+async def test_what_is_earlier_does_not_count_a_message_taken_back(
     living_db, in_a_moment, pinned
 ):
-    """"前面还有 N 条你没往回翻"里不算撤掉的那些。
+    """「前面还有 N 条」里不算撤掉的那些 —— 她往前翻也翻不到它。
 
-    未读的口径只有一处才对：信封、看手机那一眼、跳过多少条，三处一分家，她看到的
-    数就跟她读到的东西对不上。
+    这个数的用处就是让她判断值不值得往前翻。把翻不到的也算进去，她翻过去会发现少一条，
+    而库里没有任何东西对不上。
     """
     await _seed_world()
     pinned(str(_GROUP))
-    for i in range(PHONE_GLANCE_LIMIT + 3):
+    for i in range(PHONE_PAGE + 3):
         mid = await _sister_said(_GROUP, text_body=f"姐姐第{i}句", at=_at(20, i))
         if i == 0:
             await _recalled_on_the_channel(mid, at=_at(21, 0))
 
-    async with in_a_moment("akao"):
+    async with in_a_moment("akao", now=_at(21, 10)):
         seen = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
 
-    assert "还有 2 条" in seen, (
-        f"跳过多少条把撤掉的那条也算进去了 —— 这个数跟她真能翻到的东西对不上。"
+    assert "前面还有 2 条" in seen, (
+        f"前面还有几条把撤掉的那条也算进去了 —— 这个数跟她真能翻到的东西对不上。"
         f"拿到：\n{seen}"
     )
 
@@ -2715,7 +3155,7 @@ async def test_a_window_row_that_lost_the_recall_columns_fails_loudly(
     )
     await _recalled_on_the_channel(took_back, at=_at(21, 31))
 
-    real = phone_mod.find_conversation_window
+    real = phone_mod.find_conversation_page
 
     async def without_recalled_at(**kw):
         return [
@@ -2723,9 +3163,7 @@ async def test_a_window_row_that_lost_the_recall_columns_fails_loudly(
             for row in await real(**kw)
         ]
 
-    monkeypatch.setattr(
-        phone_mod, "find_conversation_window", without_recalled_at
-    )
+    monkeypatch.setattr(phone_mod, "find_conversation_page", without_recalled_at)
 
     async with in_a_moment("akao", now=_at(21, 35)):
         outcome = await look_at_phone.invoke({"channel_id": str(_DM)})
@@ -2751,11 +3189,11 @@ async def test_a_window_row_that_lost_the_recall_columns_fails_loudly(
 # 于是她照着「[图片]」自然接话，接出来的全是编的 —— 跟 9 月 2 号那条文件消息是同一
 # 个形状（第十节），只是文件那条修了、图片这条没修。
 #
-# 入站那一步已经把图存进对象存储了：lark-service 把正文里每个 image_key 交给
-# tool-service 的 ``/api/image-pipeline/process``（``apps/lark-service`` 的
-# ``attachments.ts``），那条管线把压过的图存成 ``temp/<image_key>.jpg``
-# （``apps/tool-service`` 的 ``image_pipeline.process_image``）。命名是确定性的，所以
-# 这边拿库里的 key 就能算出它存在哪儿，不用再记一份映射。
+# 一张图在对象存储的哪儿，**由写入方在那一行上说出来**（图片项的 ``object``）：入站
+# 投影写它、出站落库也写它。这边只读，不按渠道命名去猜 —— 飞书那套（``temp/<image_key>
+# .jpg``）套到 QQ 上当场就错，而算错了不会报错，只会让每张图都永远取不到。
+#
+# 代价是明知的：没有这一格的历史行，图明确显示为取不回来。
 #
 # **签得出地址 ≠ 图在那儿。** 签名是纯计算（``tos_client.pre_signed_url``），对象在不
 # 在它一个字都不知道。所以签完还要真取一次；省掉那一步的下场不是"她看不到这张图"，
@@ -2812,7 +3250,7 @@ async def test_a_picture_someone_sent_actually_reaches_her_eyes(
     await _incoming(
         _DM,
         at=_at(22, 20),
-        items=[{"kind": "image", "key": "img_v3_aa"}],
+        items=[{"kind": "image", "key": "img_v3_aa", "object": "temp/img_v3_aa.jpg"}],
         content_text="[image]",
     )
 
@@ -2825,58 +3263,60 @@ async def test_a_picture_someone_sent_actually_reaches_her_eyes(
 
 
 @pytest.mark.integration
-async def test_the_object_name_is_derived_from_the_key(
+async def test_the_object_name_comes_from_the_row_not_from_the_key(
     living_db, in_a_moment, pictures
 ):
-    """对象存储里的名字按入站那侧的命名派生：``temp/<image_key>.jpg``。
+    """取哪个对象由那一行上写着的位置说了算，**不从 key 派生**。
 
-    这串是**跨服务契约**（tool-service ``image_pipeline.process_image``）。算错了不会
-    报错，只会永远取不到 —— 她每一张图都变成"打不开"，而两边代码各自看着都对。
-    """
-    await _seed_world()
-    await _incoming(
-        _DM, at=_at(22, 20), items=[{"kind": "image", "key": "img_v3_zz"}]
-    )
-
-    async with in_a_moment("akao", now=_at(22, 30)):
-        await look_at_phone.invoke({"channel_id": str(_DM)})
-
-    assert pictures.signed == ["temp/img_v3_zz.jpg"], (
-        f"算出来的对象名跟入站那侧存的对不上。拿到：{pictures.signed!r}"
-    )
-
-
-@pytest.mark.integration
-async def test_the_older_shape_brings_its_own_object_name(
-    living_db, in_a_moment, pictures
-):
-    """``type``/``value`` 那套历史行**自己带着** ``tos_file``，有就直接用，不再派生。
-
-    这里的 ``tos_file`` 故意跟派生结果（``temp/img_v3_0215d_54ab.jpg``）不一样：两者
-    取同一个值的话，把实现里那条优先级整个删掉这条用例照样绿，它就一点回归都挡不住。
+    这里的位置故意跟"按飞书那套命名派生"的结果（``temp/img_v3_zz.jpg``）不一样：两者
+    取同一个值的话，把派生分支加回去这条用例照样绿，它就一点回归都挡不住。
     """
     await _seed_world()
     await _incoming(
         _DM,
         at=_at(22, 20),
         items=[
-            {"type": "text", "value": "这是什么歌"},
             {
-                "type": "image",
-                "value": "img_v3_0215d_54ab",
-                "tos_file": "temp/img_v3_0215d_54ab_compressed.png",
-            },
+                "kind": "image",
+                "key": "img_v3_zz",
+                "object": "temp/img_v3_zz_compressed.png",
+            }
         ],
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        shown = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert pictures.signed == ["temp/img_v3_zz_compressed.png"], (
+        f"取的不是那一行上写着的位置。拿到：{pictures.signed!r}"
+    )
+    assert len(_picture_urls(shown)) == 1, f"拿到：\n{shown!r}"
+
+
+@pytest.mark.integration
+async def test_a_row_without_an_object_is_not_guessed_at(
+    living_db, in_a_moment, pictures
+):
+    """那一行没写位置就是取不回来，**绝不按渠道命名猜一个**。
+
+    猜是渠道知识泄漏到读取侧的产物：飞书那套套到 QQ 上指向的地址根本不存在，而这边
+    一个字的报错都没有。没写就如实说打不开 —— 加这一格之前的历史行都落在这一档。
+    """
+    await _seed_world()
+    await _incoming(
+        _DM,
+        at=_at(22, 20),
+        items=[{"kind": "text", "text": "这是什么歌"}, {"kind": "image", "key": "img_v3_zz"}],
         content_text="这是什么歌[image]",
     )
 
     async with in_a_moment("akao", now=_at(22, 30)):
         shown = await look_at_phone.invoke({"channel_id": str(_DM)})
 
-    assert pictures.signed == ["temp/img_v3_0215d_54ab_compressed.png"], (
-        f"这一行自己带着对象名，不该再派生一个。拿到：{pictures.signed!r}"
-    )
-    assert len(_picture_urls(shown)) == 1, f"拿到：\n{shown!r}"
+    assert pictures.signed == [], f"猜了一个位置出来。拿到：{pictures.signed!r}"
+    seen = glance_text(shown)
+    assert "这是什么歌[图片：打不开]" in seen, f"拿到：\n{seen}"
+    assert _picture_urls(shown) == [], f"拿到：\n{shown!r}"
 
 
 @pytest.mark.integration
@@ -2893,13 +3333,13 @@ async def test_the_body_says_where_each_picture_sat(
         _DM,
         at=_at(22, 20),
         items=[
-            {"kind": "image", "key": "img_a"},
+            {"kind": "image", "key": "img_a", "object": "temp/img_a.jpg"},
             {"kind": "text", "text": "和"},
-            {"kind": "image", "key": "img_b"},
+            {"kind": "image", "key": "img_b", "object": "temp/img_b.jpg"},
             {"kind": "text", "text": "哪个好看"},
         ],
     )
-    await _incoming(_DM, at=_at(22, 21), items=[{"kind": "image", "key": "img_c"}])
+    await _incoming(_DM, at=_at(22, 21), items=[{"kind": "image", "key": "img_c", "object": "temp/img_c.jpg"}])
 
     async with in_a_moment("akao", now=_at(22, 30)):
         shown = await look_at_phone.invoke({"channel_id": str(_DM)})
@@ -2923,7 +3363,7 @@ async def test_each_picture_says_which_message_it_came_from(
     await _incoming(
         _DM,
         at=_at(22, 20),
-        items=[{"kind": "image", "key": "img_a"}],
+        items=[{"kind": "image", "key": "img_a", "object": "temp/img_a.jpg"}],
         sender=_SOMEONE,
         sender_name="路人",
     )
@@ -2949,7 +3389,7 @@ async def test_a_picture_that_cannot_be_signed_says_so_instead_of_pretending(
     """
     await _seed_world()
     pictures.unsignable.add("temp/img_a.jpg")
-    await _incoming(_DM, at=_at(22, 20), items=[{"kind": "image", "key": "img_a"}])
+    await _incoming(_DM, at=_at(22, 20), items=[{"kind": "image", "key": "img_a", "object": "temp/img_a.jpg"}])
 
     async with in_a_moment("akao", now=_at(22, 30)):
         shown = await look_at_phone.invoke({"channel_id": str(_DM)})
@@ -2975,7 +3415,7 @@ async def test_a_signed_address_with_nothing_behind_it_is_not_shown(
     """
     await _seed_world()
     pictures.gone.add("temp/img_old.jpg")
-    await _incoming(_DM, at=_at(22, 20), items=[{"kind": "image", "key": "img_old"}])
+    await _incoming(_DM, at=_at(22, 20), items=[{"kind": "image", "key": "img_old", "object": "temp/img_old.jpg"}])
 
     async with in_a_moment("akao", now=_at(22, 30)):
         shown = await look_at_phone.invoke({"channel_id": str(_DM)})
@@ -2996,9 +3436,9 @@ async def test_one_picture_missing_does_not_take_the_others_down(
         _DM,
         at=_at(22, 20),
         items=[
-            {"kind": "image", "key": "img_a"},
-            {"kind": "image", "key": "img_b"},
-            {"kind": "image", "key": "img_c"},
+            {"kind": "image", "key": "img_a", "object": "temp/img_a.jpg"},
+            {"kind": "image", "key": "img_b", "object": "temp/img_b.jpg"},
+            {"kind": "image", "key": "img_c", "object": "temp/img_c.jpg"},
         ],
     )
 
@@ -3019,29 +3459,28 @@ async def test_one_picture_missing_does_not_take_the_others_down(
 
 
 @pytest.mark.integration
-async def test_a_key_that_is_not_an_image_key_goes_down_the_shut_path(
-    living_db, in_a_moment, pictures
-):
-    """QQ 那侧的 ``key`` 是个公网地址、不是 image_key，派生出来的名字取不到东西。
+async def test_a_qq_picture_is_read_the_same_way(living_db, in_a_moment, pictures):
+    """QQ 那侧的 ``key`` 是个公网地址、不是 image_key —— 而这边一个字都不用知道。
 
-    这次不专门处理 QQ，但派生出奇怪的名字时必须走"打不开"，不能崩在半路把整条会话
-    带走 —— 她那一眼一个字都读不到，而她手机上本来有话等着。
+    位置那一格由 QQ 的入站投影写（它自己知道把图交给了谁、存到哪儿），这边照读。**这
+    正是删掉派生的理由**：派生只有一套公式，而每个渠道的 key 各是各的东西。
     """
     await _seed_world()
     qq_key = "https://multimedia.nt.qq.com.cn/download?fileid=abc"
-    pictures.gone.add(f"temp/{qq_key}.jpg")
     await _incoming(
         _DM,
         at=_at(22, 20),
-        items=[{"kind": "text", "text": "看这个"}, {"kind": "image", "key": qq_key}],
+        items=[
+            {"kind": "text", "text": "看这个"},
+            {"kind": "image", "key": qq_key, "object": f"temp/{qq_key}.jpg"},
+        ],
     )
 
     async with in_a_moment("akao", now=_at(22, 30)):
         shown = await look_at_phone.invoke({"channel_id": str(_DM)})
 
-    seen = glance_text(shown)
-    assert "看这个" in seen and "打不开" in seen, f"拿到：\n{seen}"
-    assert _picture_urls(shown) == [], f"拿到：\n{shown!r}"
+    assert pictures.signed == [f"temp/{qq_key}.jpg"], f"拿到：{pictures.signed!r}"
+    assert "看这个[图片1]" in glance_text(shown), f"拿到：\n{glance_text(shown)}"
 
 
 @pytest.mark.integration
@@ -3095,7 +3534,7 @@ async def test_a_flood_of_pictures_stops_at_a_generous_cap(
         _DM,
         at=_at(22, 20),
         items=[
-            {"kind": "image", "key": f"img_{i}"}
+            {"kind": "image", "key": f"img_{i}", "object": f"temp/img_{i}.jpg"}
             for i in range(PHONE_PICTURE_LIMIT + 3)
         ],
     )
@@ -3112,6 +3551,88 @@ async def test_a_flood_of_pictures_stops_at_a_generous_cap(
 
 
 @pytest.mark.integration
+async def test_a_picture_with_no_object_says_so_even_past_the_cap(
+    living_db, in_a_moment, pictures
+):
+    """那一行没写位置的图：在哪个位置上都说"打不开"，不说"这轮没给你看"。
+
+    两句话说的是两件事。「这轮没给你看」是**关于这一轮**的：这张图在那儿，只是这次
+    没摆出来 —— 她据此可以等下一轮。而一行没有位置的图下一轮、下下轮都一样取不回来，
+    把它说成"没给你看"是假话，她会一直等一个永远不来的东西。
+
+    所以「有没有位置」先判，「排在第几位」后判。这一页两档同时在场：名额之外那两张
+    是真的"这轮没给你看"，最后那张没有位置的不是。
+    """
+    from app.living.phone import PHONE_PICTURE_LIMIT
+
+    await _seed_world()
+    await _incoming(
+        _DM,
+        at=_at(22, 20),
+        items=[
+            # 名额占满还多出两张 —— 那两张才是真正的"这轮没给你看"。
+            *(
+                {"kind": "image", "key": f"img_{i}", "object": f"temp/img_{i}.jpg"}
+                for i in range(PHONE_PICTURE_LIMIT + 2)
+            ),
+            {"kind": "image", "key": "img_old"},
+        ],
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        shown = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    seen = glance_text(shown)
+    assert len(_picture_urls(shown)) == PHONE_PICTURE_LIMIT, f"拿到：\n{shown!r}"
+    # 整串标记的结尾钉死这三张各自是哪一档：末尾那张没有位置的绝不能跟前面两张同档。
+    assert seen.endswith(
+        "[图片：这轮没给你看][图片：这轮没给你看][图片：打不开]</msg>"
+    ), f"一张确定取不回来的图被说成了「这轮没给你看」。拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_a_picture_with_no_object_does_not_take_a_slot(
+    living_db, in_a_moment, pictures
+):
+    """没有位置的图不占展示名额 —— 它挤掉的是一张真能摆出来的图。
+
+    名额的全部意义是"往她眼前塞几张图"。一张没有位置的图根本不会被塞到她眼前，成本是
+    零，占着名额唯一的后果就是把一张真摆得出来的图推到名额之外 —— 她因此看不到本该
+    看到的东西。删掉派生之后取不回来的图变多了（历史行一律没有位置），这个浪费被放大。
+    """
+    from app.living.phone import PHONE_PICTURE_LIMIT
+
+    await _seed_world()
+    await _incoming(
+        _DM,
+        at=_at(22, 20),
+        items=[
+            # 排在最前面的这张没有位置。占名额的话，最后那张就被它推出名额之外。
+            {"kind": "image", "key": "img_old"},
+            *(
+                {"kind": "image", "key": f"img_{i}", "object": f"temp/img_{i}.jpg"}
+                for i in range(PHONE_PICTURE_LIMIT)
+            ),
+        ],
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        shown = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    seen = glance_text(shown)
+    assert len(_picture_urls(shown)) == PHONE_PICTURE_LIMIT, (
+        f"一张摆得出来的图被一张摆不出来的图挤掉了。拿到：\n{shown!r}"
+    )
+    assert "没给你看" not in seen, (
+        f"名额没满，却有一张被说成这轮没给她看。拿到：\n{seen}"
+    )
+    assert seen.count("[图片：打不开]") == 1, f"拿到：\n{seen}"
+    assert f"[图片{PHONE_PICTURE_LIMIT}]" in seen, (
+        f"最后那张有位置的图没拿到编号。拿到：\n{seen}"
+    )
+
+
+@pytest.mark.integration
 async def test_the_conversation_text_still_comes_first(
     living_db, in_a_moment, pictures
 ):
@@ -3122,7 +3643,7 @@ async def test_the_conversation_text_still_comes_first(
     """
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(22, 19))
-    await _incoming(_DM, at=_at(22, 20), items=[{"kind": "image", "key": "img_a"}])
+    await _incoming(_DM, at=_at(22, 20), items=[{"kind": "image", "key": "img_a", "object": "temp/img_a.jpg"}])
 
     async with in_a_moment("akao", now=_at(22, 30)):
         shown = await look_at_phone.invoke({"channel_id": str(_DM)})
@@ -3150,26 +3671,319 @@ async def test_a_conversation_with_no_pictures_touches_nothing(
     assert len(shown) == 1 and "在吗" in shown[0]["text"], f"拿到：\n{shown!r}"
 
 
+# --------------------------------------------------------------------------
+# 十七 · 她自己发过的图：只给标记和句柄，不摆到她眼前
+# --------------------------------------------------------------------------
+#
+# 一页手机最多带十几张图，她自己刷的图会跟真人刚发的图抢名额，抢输的那张真人的图就
+# 变成"这轮没给你看"。而她发的时候刚看过，跨过裁剪线之后需要的是「我发过一张图」这个
+# 事实加一个能取回来的引用，不是图本身 —— 取回来是她自己的决定。
+#
+# 那串引用就是她手上那张图的句柄（``pic=…``，:mod:`app.living.pictures`），从对象位置
+# 派生：她发出去的图本来就是从那张表里取的，两边算的是同一个值。
+#
+# **但印之前要核一次她手上真有这张图。** 发送那一刻"同 lane 同 persona"是成立的，读取
+# 这一刻不是：``find_conversation_page`` 查公共消息没有 lane 条件，而 ppe 泳道跟 prod
+# 共用同一个库 —— 同一个 bot 在泳道上发过的图，切回 prod 之后这一行照样算"她自己发的"，
+# 而句柄那条路是按**当前** lane/persona 查的。印一串取不回来的句柄 = 她看见一个摆在眼
+# 前的引用，抄回去被告知"你手上没有这张图"。
+
+
+def _her_picture_item(file_name: str, key: str = "img_v3_sent") -> dict:
+    """她发出去的一张图在库里的形状：渠道引用 + 她手上那张图的永久句柄。"""
+    return {"kind": "image", "key": key, "object": file_name}
+
+
+async def _in_her_hand(file_name: str, *, what: str = "她做过的一张图") -> str:
+    """把这张图记进**当前泳道、当前 persona** 名下 —— 她手上真有它。"""
+    from app.living.pictures import remember_a_picture
+
+    made = await remember_a_picture(
+        lane=LANE,
+        persona_id="akao",
+        file_name=file_name,
+        what=what,
+        made_at=_at(22, 10),
+    )
+    return made.file_name
+
+
 @pytest.mark.integration
-async def test_her_own_picture_in_the_window_reaches_her_too(
+async def test_her_own_picture_is_a_mark_and_a_handle_not_the_picture(
     living_db, in_a_moment, pictures
 ):
-    """窗口里她自己发过的那张图同样取出来 —— 窗口本来就是双向的。"""
+    """她自己发过的那张图不摆到她眼前，只在正文里留一句"我发过图" ＋ 一串句柄。"""
+    from app.living.pictures import handle_for
+
     await _seed_world()
     await _incoming(_DM, text_body="发张图看看", at=_at(22, 19))
-    mine, _ = await _her_own_proactive(_DM, text_body="", at=_at(22, 20))
-    async with session_mod.get_session() as s:
-        await s.execute(
-            text(
-                "UPDATE common_message SET content = CAST(:c AS jsonb) "
-                "WHERE common_message_id = CAST(:m AS uuid)"
-            ),
-            {"c": json.dumps([{"kind": "image", "key": "img_mine"}]), "m": mine},
-        )
+    await _in_her_hand("temp/tos_cat_0001.jpg")
+    await _her_own(
+        _DM,
+        text_body="给你",
+        at=_at(22, 20),
+        items=[
+            {"kind": "text", "text": "给你"},
+            _her_picture_item("temp/tos_cat_0001.jpg"),
+        ],
+    )
 
     async with in_a_moment("akao", now=_at(22, 30)):
         shown = await look_at_phone.invoke({"channel_id": str(_DM)})
 
-    assert _picture_urls(shown) == [pictures.url_of("temp/img_mine.jpg")], (
-        f"拿到：\n{shown!r}"
+    assert pictures.signed == [], (
+        f"她自己发的图也去取了一遍，这一眼白花了一次往返。拿到：{pictures.signed!r}"
+    )
+    assert _picture_urls(shown) == [], f"她自己的图被摆到眼前了。拿到：\n{shown!r}"
+    seen = glance_text(shown)
+    assert f"pic={handle_for('temp/tos_cat_0001.jpg')}" in seen, (
+        f"没给她一串能把这张图取回来的句柄。拿到：\n{seen}"
+    )
+    assert "给你" in seen, f"正文丢了。拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_the_handle_on_her_own_picture_is_the_one_her_hand_takes(
+    living_db, in_a_moment, pictures
+):
+    """正文里那串句柄，看图那只手认得出来 —— 两边算的是同一个值。
+
+    各算各的话，她照抄回来撞的是死路：系统等于告诉她自己的记录是假的。
+    """
+    from app.living.pictures import (
+        handle_for,
+        her_picture,
+        picture_id_in,
+        remember_a_picture,
+    )
+
+    await _seed_world()
+    # 白名单按"这条会话最近有没有人找她"算，所以先有一句真人的话，这条私聊才在她
+    # 手机上（同 :func:`test_her_own_picture_is_a_mark_and_a_handle_not_the_picture`）。
+    await _incoming(_DM, text_body="发张图看看", at=_at(22, 19))
+    made = await remember_a_picture(
+        lane=LANE,
+        persona_id="akao",
+        file_name="temp/tos_cat_0001.jpg",
+        what="一只在窗台上晒太阳的猫",
+        made_at=_at(22, 10),
+    )
+    await _her_own(
+        _DM,
+        text_body="给你",
+        at=_at(22, 20),
+        items=[_her_picture_item(made.file_name)],
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
+
+    printed = re.search(r"pic=([0-9a-f]{32})", seen)
+    assert printed is not None, f"正文里没有一串句柄。拿到：\n{seen}"
+    found = await her_picture(
+        lane=LANE, persona_id="akao", picture_id=picture_id_in(printed.group(0))
+    )
+    assert found is not None and found.file_name == "temp/tos_cat_0001.jpg", (
+        f"她照抄这串去取图会撞死路。印的是 {printed.group(1)}，"
+        f"她手上那张是 {handle_for('temp/tos_cat_0001.jpg')}"
+    )
+
+
+@pytest.mark.integration
+async def test_her_own_pictures_do_not_take_slots_from_other_peoples(
+    living_db, in_a_moment, pictures
+):
+    """她自己发的图不占展示名额 —— 抢输的那张真人的图会整个看不到。"""
+    from app.living.phone import PHONE_PICTURE_LIMIT
+
+    await _seed_world()
+    await _incoming(_DM, text_body="发几张图看看", at=_at(22, 18))
+    # 三张都在她手上 —— 这是她发过图最常见的那种形状，正文里各印一串句柄。
+    for i in range(3):
+        await _in_her_hand(f"temp/tos_mine_{i}.jpg")
+    await _her_own(
+        _DM,
+        text_body="",
+        at=_at(22, 19),
+        items=[_her_picture_item(f"temp/tos_mine_{i}.jpg", key=f"img_mine_{i}") for i in range(3)],
+    )
+    await _incoming(
+        _DM,
+        at=_at(22, 20),
+        items=[
+            {"kind": "image", "key": f"img_{i}", "object": f"temp/img_{i}.jpg"}
+            for i in range(PHONE_PICTURE_LIMIT)
+        ],
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        shown = await look_at_phone.invoke({"channel_id": str(_DM)})
+
+    assert len(_picture_urls(shown)) == PHONE_PICTURE_LIMIT, (
+        f"真人发来的图被她自己那几张挤掉了。拿到：\n{shown!r}"
+    )
+    assert "没给你看" not in glance_text(shown), f"拿到：\n{glance_text(shown)}"
+
+
+@pytest.mark.integration
+async def test_her_own_picture_with_no_object_says_it_cannot_be_found(
+    living_db, in_a_moment, pictures
+):
+    """她自己发的图、那一行没写位置：说得出"我发过图"，但指不出是哪张。
+
+    加这一格之前她发的每条带图消息都长这样。**不能印一串取不回来的句柄** —— 她照抄
+    回去只会被告知"你手上没有这张图"。
+    """
+    await _seed_world()
+    await _incoming(_DM, text_body="发张图看看", at=_at(22, 19))
+    await _her_own(
+        _DM,
+        text_body="给你",
+        at=_at(22, 20),
+        items=[{"kind": "text", "text": "给你"}, {"kind": "image", "key": "img_old"}],
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
+
+    assert "你发的图" in seen, f"她看不出这条消息里自己发过图。拿到：\n{seen}"
+    assert "pic=" not in seen, f"印了一串她取不回来的句柄。拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_a_picture_she_sent_on_another_lane_gets_no_handle(
+    living_db, in_a_moment, pictures
+):
+    """别条泳道上发出去的那张图：说得出她发过图，**不印句柄**。
+
+    ppe 泳道跟 prod 共用同一个库，而查会话那条 SQL 没有 lane 条件 —— 同一个 bot 在
+    泳道上发过的图，切回 prod 之后这一行照样算"她自己发的"，那一格 ``object`` 也照样
+    在。但她手上那张图的记录按 ``(lane, persona_id)`` 隔离，当前泳道根本没有它。
+
+    印出去的后果是静默的：她看见一个摆在眼前的引用，抄回去被告知"你手上没有这张图" ——
+    系统等于告诉她自己的记录是假的。
+    """
+    from app.living.pictures import remember_a_picture
+
+    await _seed_world()
+    await _incoming(_DM, text_body="发张图看看", at=_at(22, 19))
+    elsewhere = await remember_a_picture(
+        lane="ppe-somewhere-else",
+        persona_id="akao",
+        file_name="temp/tos_from_another_lane.jpg",
+        what="在泳道上画的那张",
+        made_at=_at(22, 10),
+    )
+    await _her_own(
+        _DM,
+        text_body="给你",
+        at=_at(22, 20),
+        items=[
+            {"kind": "text", "text": "给你"},
+            _her_picture_item(elsewhere.file_name),
+        ],
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
+
+    assert "你发的图" in seen, f"她看不出这条消息里自己发过图。拿到：\n{seen}"
+    assert "pic=" not in seen, (
+        f"印了一串当前泳道取不回来的句柄。拿到：\n{seen}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_picture_that_is_a_sisters_record_gets_no_handle(
+    living_db, in_a_moment, pictures
+):
+    """那张图记在姐姐名下：同样不印句柄 —— 隔离的两半都是硬条件，不只 lane。"""
+    from app.living.pictures import remember_a_picture
+
+    await _seed_world()
+    await _incoming(_DM, text_body="发张图看看", at=_at(22, 19))
+    sisters = await remember_a_picture(
+        lane=LANE,
+        persona_id="ayana",
+        file_name="temp/tos_ayana_made_it.jpg",
+        what="姐姐画的那张",
+        made_at=_at(22, 10),
+    )
+    await _her_own(
+        _DM,
+        text_body="给你",
+        at=_at(22, 20),
+        items=[_her_picture_item(sisters.file_name)],
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
+
+    assert "pic=" not in seen, f"印了一串姐姐名下那张图的句柄。拿到：\n{seen}"
+
+
+@pytest.mark.integration
+async def test_the_ones_she_still_has_keep_their_handles(
+    living_db, in_a_moment, pictures
+):
+    """一条消息里几张图有几张不在她手上时，在的那几张句柄照印。
+
+    核验那一步一刀切成"有一张对不上就全不印"的话，代价是她手上明明还在的图也取不回来。
+    """
+    from app.living.pictures import handle_for
+
+    await _seed_world()
+    await _incoming(_DM, text_body="发几张图看看", at=_at(22, 19))
+    await _in_her_hand("temp/tos_still_here.jpg")
+    await _her_own(
+        _DM,
+        text_body="",
+        at=_at(22, 20),
+        items=[
+            _her_picture_item("temp/tos_gone_from_her_hand.jpg", key="img_gone"),
+            _her_picture_item("temp/tos_still_here.jpg", key="img_here"),
+        ],
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
+
+    assert f"pic={handle_for('temp/tos_still_here.jpg')}" in seen, (
+        f"她手上还在的那张也没给句柄。拿到：\n{seen}"
+    )
+    assert handle_for("temp/tos_gone_from_her_hand.jpg") not in seen, (
+        f"印了一串取不回来的句柄。拿到：\n{seen}"
+    )
+    assert seen.count("你发的图") == 2, (
+        f"两张图各该在正文里占一个位置。拿到：\n{seen}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_sisters_picture_is_someone_elses_picture(
+    living_db, in_a_moment, pictures, pinned
+):
+    """姐姐在群里发的图照样摆到她眼前 —— "自己发的"认 bot，不认 ``role``。
+
+    三姐妹的出站在这张表里全是 ``role='assistant'``，长得一模一样。按 role 判的话，
+    姐姐发的每张图在她眼里都退化成一句"你发的图"，而她根本没发过。
+    """
+    await _seed_world()
+    pinned(str(_GROUP))
+    await _sister_said(_GROUP, text_body="看这个", at=_at(22, 19))
+    await _bot_said(
+        _GROUP,
+        text_body="",
+        at=_at(22, 20),
+        bot_name="ayana-bot",
+        bot_uid=_AYANA_BOT_UID,
+        display_name="绫奈",
+        items=[{"kind": "image", "key": "img_sis", "object": "temp/img_sis.jpg"}],
+    )
+
+    async with in_a_moment("akao", now=_at(22, 30)):
+        shown = await look_at_phone.invoke({"channel_id": str(_GROUP)})
+
+    assert _picture_urls(shown) == [pictures.url_of("temp/img_sis.jpg")], (
+        f"姐姐发的图被当成她自己发的了。拿到：\n{shown!r}"
     )

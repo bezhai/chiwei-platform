@@ -12,7 +12,11 @@ interface Harness {
 }
 
 function harness(
-    over: { sign?: (fileName: string) => Promise<string | null> } = {},
+    over: {
+        sign?: (fileName: string) => Promise<string | null>;
+        download?: (url: string) => Promise<Buffer>;
+        upload?: (bytes: Buffer) => Promise<string | null>;
+    } = {},
 ): Harness {
     const h: Harness = {
         deps: undefined as unknown as LarkRenderDeps,
@@ -35,12 +39,12 @@ function harness(
             },
             async download(url) {
                 h.steps.push(`download:${url}`);
-                return Buffer.from('bytes');
+                return over.download ? await over.download(url) : Buffer.from('bytes');
             },
             uploader: {
-                async uploadImage() {
+                async uploadImage(bytes) {
                     h.steps.push('upload');
-                    return 'img_v3_uploaded';
+                    return over.upload ? await over.upload(bytes) : 'img_v3_uploaded';
                 },
             },
         },
@@ -49,10 +53,20 @@ function harness(
     return h;
 }
 
+/**
+ * 这一批字节是哪张图的。
+ *
+ * 替身靠它把"上传上去的是哪张图"表达成一个各不相同的 image_key —— 多图那几条用例的
+ * 判据全部建立在这上面：所有图共用一个 key 的话，把任意两张的 key 互换，断言照样绿。
+ */
+function keyFromBytes(bytes: Buffer): string {
+    return bytes.toString().replace(/^.*\//, '').replace(/\.\w+$/, '');
+}
+
 describe('createLarkPostRenderer', () => {
     it('纯文本：不查群成员、不签图，直接一个 md 节点', async () => {
         const h = harness();
-        const post = await createLarkPostRenderer(h.deps)('你好呀', {});
+        const { post } = await createLarkPostRenderer(h.deps)('你好呀', {});
 
         expect(post).toEqual({ content: [[{ tag: 'md', text: '你好呀' }]] });
         expect(h.steps).toEqual([]);
@@ -60,7 +74,7 @@ describe('createLarkPostRenderer', () => {
 
     it('群聊：@ 用给的 chat id 解析，结果落进 md 节点', async () => {
         const h = harness();
-        const post = await createLarkPostRenderer(h.deps)('喂 @小明 在吗', {
+        const { post } = await createLarkPostRenderer(h.deps)('喂 @小明 在吗', {
             mentionChatId: 'oc_group',
         });
 
@@ -73,7 +87,7 @@ describe('createLarkPostRenderer', () => {
     it('私聊（没给 chat id）：整个不解析 @，一个人都不查', async () => {
         // 私聊里没有第三个人，@ 谁都渲染不成 mention，查一次群成员纯属白花一次查询。
         const h = harness();
-        const post = await createLarkPostRenderer(h.deps)('私聊 @小明', {});
+        const { post } = await createLarkPostRenderer(h.deps)('私聊 @小明', {});
 
         expect(h.steps).toEqual([]);
         expect(post).toEqual({ content: [[{ tag: 'md', text: '私聊 @小明' }]] });
@@ -81,7 +95,7 @@ describe('createLarkPostRenderer', () => {
 
     it('空正文也产出一个节点（飞书不收空 content）', async () => {
         const h = harness();
-        expect(await createLarkPostRenderer(h.deps)('', {})).toEqual({
+        expect((await createLarkPostRenderer(h.deps)('', {})).post).toEqual({
             content: [[{ tag: 'md', text: '' }]],
         });
     });
@@ -90,7 +104,7 @@ describe('createLarkPostRenderer', () => {
 describe('结构化图片：句柄现签之后接在正文后面', () => {
     it('一个句柄 → 正文一行、图一行', async () => {
         const h = harness();
-        const post = await createLarkPostRenderer(h.deps)('看这张', {
+        const { post } = await createLarkPostRenderer(h.deps)('看这张', {
             pictureFileNames: ['pictures/cat.png'],
         });
 
@@ -109,7 +123,7 @@ describe('结构化图片：句柄现签之后接在正文后面', () => {
 
     it('图挂了只降级成一行文字，正文照发', async () => {
         const h = harness({ sign: async () => null });
-        const post = await createLarkPostRenderer(h.deps)('看这张', {
+        const { post } = await createLarkPostRenderer(h.deps)('看这张', {
             pictureFileNames: ['pictures/cat.png'],
         });
 
@@ -124,9 +138,113 @@ describe('结构化图片：句柄现签之后接在正文后面', () => {
         const withoutField = await createLarkPostRenderer(h.deps)('在的', {});
         const withEmpty = await createLarkPostRenderer(h.deps)('在的', { pictureFileNames: [] });
 
-        expect(withoutField).toEqual({ content: [[{ tag: 'md', text: '在的' }]] });
+        expect(withoutField.post).toEqual({ content: [[{ tag: 'md', text: '在的' }]] });
+        expect(withoutField.pictures).toEqual([]);
         expect(withEmpty).toEqual(withoutField);
         expect(h.steps).toEqual([]);
+    });
+});
+
+describe('渲染交回"哪几张真的发出去了"', () => {
+    // 落库那一步照着请求里的清单记的话，会记下一张真人根本没收到的图 —— 她下一轮翻到
+    // 它，会以为对方看过。所以"成了的是哪几张"必须由发送这一步说出来，而 image_key 只
+    // 在这儿拿得到（渲染完就只剩 PostContent 里几个节点，跟句柄对不上号）。
+
+    it('顺利的时候：每张图交回它的句柄和飞书给的 image_key', async () => {
+        // 每张图的字节和 key 各不相同。都返回同一个 key 的话，把两张图的 key 互换这
+        // 条用例照样绿 —— 它测的就只剩"有两项"。
+        const h = harness({
+            download: async (url) => Buffer.from(`bytes:${url}`),
+            upload: async (bytes) => `img_v3_${keyFromBytes(bytes)}`,
+        });
+        const { pictures } = await createLarkPostRenderer(h.deps)('看这两张', {
+            pictureFileNames: ['pictures/a.png', 'pictures/b.png'],
+        });
+
+        expect(pictures).toEqual([
+            { fileName: 'pictures/a.png', imageKey: 'img_v3_a' },
+            { fileName: 'pictures/b.png', imageKey: 'img_v3_b' },
+        ]);
+    });
+
+    it('降级掉的那一张不在里面，成了的那张还在，顺序照旧', async () => {
+        const h = harness({ sign: async (fileName) => (fileName === 'bad.png' ? null : `https://tos.example/${fileName}`) });
+        const { post, pictures } = await createLarkPostRenderer(h.deps)('看这两张', {
+            pictureFileNames: ['bad.png', 'good.png'],
+        });
+
+        // 真人那侧照旧：两行都在，挂掉那张是一行降级文字。
+        expect(post.content).toHaveLength(3);
+        expect(pictures).toEqual([{ fileName: 'good.png', imageKey: 'img_v3_uploaded' }]);
+    });
+
+    it('跨批次、乱序完成、中间夹挂掉的：节点和落库映射都按她给的顺序对得上', async () => {
+        // 四件事同时发生，这条才测得住"按下标把 image_key 配回句柄"：
+        //   * 每张图有**自己的字节、自己的 key** —— 否则任意两张互换 key 照样绿；
+        //   * **乱序完成** —— "按完成先后追加"那种写法在顺序完成时跟正确实现长得
+        //     一模一样，只有先发后到才分得开；
+        //   * **跨批次**（并发上限 5，这里 7 张）—— 第二批每一项的下标和位置都是批内
+        //     偏移加批起点，算错了只有跨过边界才看得出来；
+        //   * **两批里各夹一张挂掉的** —— 位置那个数（"第 N 张"）是全局的，只在第一批
+        //     里挂一张的话，批内偏移和全局下标恰好相等，写错了测不出来。
+        // 挂掉的那些把两侧一起拉进来：真人照样收到 7 行（挂掉的降级成文字），而落库
+        // 只记真的到了的那 5 张。
+        const finished: string[] = [];
+        // 每张图在网络上耗多久（毫秒）。同一批里后发的先到，正是真实网络的样子。
+        const linger: Record<string, number> = { p1: 30, p2: 20, p4: 10, p5: 0, p7: 0 };
+        const broken = new Set(['p3.png', 'p6.png']);
+        const h = harness({
+            sign: async (fileName) =>
+                broken.has(fileName) ? null : `https://tos.example/${fileName}`,
+            download: async (url) => {
+                const bytes = Buffer.from(`bytes:${url}`);
+                const which = keyFromBytes(bytes);
+                await new Promise((resolve) => setTimeout(resolve, linger[which] ?? 0));
+                finished.push(which);
+                return bytes;
+            },
+            upload: async (bytes) => `img_v3_${keyFromBytes(bytes)}`,
+        });
+
+        const { post, pictures } = await createLarkPostRenderer(h.deps)('看这几张', {
+            pictureFileNames: ['p1.png', 'p2.png', 'p3.png', 'p4.png', 'p5.png', 'p6.png', 'p7.png'],
+        });
+
+        // 先确认这条用例真的把自己安排成了"乱序 + 跨批次"，不然下面两个断言证明不了
+        // 它们想证明的东西。
+        expect(finished.indexOf('p5')).toBeLessThan(finished.indexOf('p1'));
+        expect(finished.indexOf('p1')).toBeLessThan(finished.indexOf('p7'));
+
+        // 真人那侧：7 行，顺序就是她给的顺序，挂掉的各自在自己的位置上降级成文字，
+        // 而"第 N 张"的数法跨批次照样是全局的。
+        expect(post.content).toEqual([
+            [{ tag: 'md', text: '看这几张' }],
+            [{ tag: 'img', image_key: 'img_v3_p1' }],
+            [{ tag: 'img', image_key: 'img_v3_p2' }],
+            [{ tag: 'md', text: '(第 3 张图取不到地址)' }],
+            [{ tag: 'img', image_key: 'img_v3_p4' }],
+            [{ tag: 'img', image_key: 'img_v3_p5' }],
+            [{ tag: 'md', text: '(第 6 张图取不到地址)' }],
+            [{ tag: 'img', image_key: 'img_v3_p7' }],
+        ]);
+
+        // 落库那侧：只有真的到了的那 5 张，每张的句柄配的是**它自己**那次上传的 key。
+        expect(pictures).toEqual([
+            { fileName: 'p1.png', imageKey: 'img_v3_p1' },
+            { fileName: 'p2.png', imageKey: 'img_v3_p2' },
+            { fileName: 'p4.png', imageKey: 'img_v3_p4' },
+            { fileName: 'p5.png', imageKey: 'img_v3_p5' },
+            { fileName: 'p7.png', imageKey: 'img_v3_p7' },
+        ]);
+    });
+
+    it('全挂：一张都不交回去，落库那边什么图都不该记', async () => {
+        const h = harness({ sign: async () => null });
+        const { pictures } = await createLarkPostRenderer(h.deps)('看这几张', {
+            pictureFileNames: ['a.png', 'b.png'],
+        });
+
+        expect(pictures).toEqual([]);
     });
 });
 
@@ -139,7 +257,7 @@ describe('护栏：正文里的图片引用毒不倒整条消息', () => {
 
     it('结构化图片有效、同时正文里带一个非法引用：图照发，正文那个引用没变成 image_key', async () => {
         const h = harness();
-        const post = await createLarkPostRenderer(h.deps)(
+        const { post } = await createLarkPostRenderer(h.deps)(
             '先看这个 ![我编的](img_v3_totally_made_up) 再看那个',
             { mentionChatId: 'oc_group', pictureFileNames: ['pictures/real.png'] },
         );
@@ -163,7 +281,7 @@ describe('护栏：正文里的图片引用毒不倒整条消息', () => {
 
     it('正文里几种写法（外链 / 文件名 / 相对路径）全都变不出 img 节点', async () => {
         const h = harness();
-        const post = await createLarkPostRenderer(h.deps)(
+        const { post } = await createLarkPostRenderer(h.deps)(
             '![a](https://x.example/p.png) ![b](1.png) ![c](./d/e.jpg)',
             {},
         );
@@ -210,7 +328,7 @@ describe('渲染顺序不变量：mention 看见的必须是赤尾原话', () =>
 
     it('两步都跑完之后：@ 成了 at 标签，正文那个引用被丢掉，结构化的图成了 img 节点', async () => {
         const h = harness();
-        const post = await createLarkPostRenderer(h.deps)(input, {
+        const { post } = await createLarkPostRenderer(h.deps)(input, {
             mentionChatId: 'oc_group',
             pictureFileNames: ['pictures/cat.png'],
         });

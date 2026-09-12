@@ -70,10 +70,11 @@ from app.agent.neutral import (
     ToolCall,
     ToolDef,
     ToolResult,
+    TurnPart,
+    TurnPartKind,
 )
 from app.agent.prompts import compile_to_messages, get_prompt
 from app.agent.runtime_context import agent_context
-from app.agent.session import append_session, load_session
 from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
     TURN_TRACE_NAME,
@@ -369,7 +370,20 @@ def _record_tool_output(span: Any, result: ToolResult) -> None:
 # Hand-written ReAct loops (module-level so they can be de-risked in isolation)
 # ---------------------------------------------------------------------------
 
-_TERMINAL_TOOL_NAMES = {"no_reply"}
+# Tools whose call means "this run is over" — the loop returns as soon as one is
+# dispatched, without asking the model for another turn. ``no_reply`` is chat's
+# (``app.agent.tools.no_reply``); ``stop_for_now`` is hers
+# (``app.living.moment``), the hand she ends a life moment with. A tool renamed
+# without updating this set fails silently — the loop just keeps going — so each
+# name is pinned by a test next to the tool it belongs to.
+_TERMINAL_TOOL_NAMES = {"no_reply", "stop_for_now"}
+
+# What a call that never ran is answered with. A terminal tool ends the run at
+# the position it holds in the turn, so every call after it is left unexecuted —
+# and an assistant turn whose calls are not all answered makes the provider
+# reject the whole next request. The wording says what happened, so a model
+# reading the stored context does not take it for a tool that failed.
+_NEVER_RAN = "（这一轮在这只手之前就结束了，它没有执行。）"
 
 # The self-written web-search tool. When an agent that opted into native search
 # runs on a model that supports it (and the flag is on), this tool is dropped
@@ -423,16 +437,61 @@ def _is_terminal_tool_call(call: ToolCall) -> bool:
     return call.name in _TERMINAL_TOOL_NAMES
 
 
+def _extend_turn(
+    parts: list[TurnPart], kind: TurnPartKind, chunk: StreamChunk
+) -> None:
+    """Fold one streamed chunk into the sequence the turn is being rebuilt as.
+
+    A stream cuts one wire part into many chunks, so consecutive chunks of the
+    same kind extend the part that is still open. Two things close it: the
+    adapter saying this chunk opens a new one (``starts_part`` — it read the
+    provider's parts and saw the boundary), and a signature arriving, which
+    belongs to the segment it rode in on. A chunk carrying neither text nor a
+    signature adds nothing.
+    """
+    text = (chunk.text if kind is TurnPartKind.TEXT else chunk.reasoning) or ""
+    if not text and chunk.signature is None:
+        return
+    open_part = parts[-1] if parts else None
+    if (
+        not chunk.starts_part
+        and open_part is not None
+        and open_part.kind is kind
+        and open_part.signature is None
+    ):
+        open_part.text += text
+        open_part.signature = chunk.signature
+        return
+    parts.append(TurnPart(kind=kind, text=text, signature=chunk.signature))
+
+
+def _carries_something(message: Message) -> bool:
+    """Whether this message still says anything once it is replayed.
+
+    A message with no tool calls, no turn sequence and no content reaches the
+    provider as an empty turn — the gemini adapter builds ``parts=[]`` for it
+    and the request is rejected before the model sees it. A turn that only
+    thought does carry something: the adapter replays its thought parts, and
+    their signatures are what the model continues its reasoning from.
+    """
+    if message.tool_calls or message.turn_parts:
+        return True
+    content = message.content
+    return bool(content.strip()) if isinstance(content, str) else bool(content)
+
+
 def _is_empty_turn(text: str, tool_calls: list[ToolCall]) -> bool:
     """Whether one model turn produced nothing usable: no tool_calls AND no
     non-whitespace text.
 
     ``text`` should be the turn's plain-text view (``Message.text()`` for
     ``_run_loop``, the joined streamed text parts for ``_stream_loop``) —
-    reasoning is deliberately excluded from both: a turn that only "thought"
-    (``reasoning_content`` set, or streamed ``reasoning`` chunks) without
-    producing text or a tool_call is still empty, because reasoning is never
-    surfaced to the user.
+    thinking is deliberately excluded from both: a turn that only thought
+    (thought parts on the turn, or streamed ``reasoning`` chunks) without
+    producing text or a tool_call is still empty *as an answer*, because
+    thinking is never surfaced to the user. This is a different question from
+    ``_carries_something`` (whether the turn is worth replaying), which counts
+    thoughts because the provider gets them back.
     """
     return not tool_calls and not text.strip()
 
@@ -454,38 +513,52 @@ async def _complete_turn(
     convo: list[Message],
     tool_defs: list[ToolDef] | None,
     call_kwargs: dict[str, Any],
-) -> Message:
-    """Call ``model.complete`` for one ReAct turn, transparently retrying THIS
-    SAME turn (identical ``convo``, nothing appended, no tools dispatched) up
-    to ``_EMPTY_TURN_MAX_ATTEMPTS`` times when the model returns an empty
-    result (see ``_is_empty_turn``).
+) -> list[Message]:
+    """Call ``model.complete`` for one ReAct turn and return every turn the
+    model produced for it, in order — the last one is this turn's result.
 
-    Exhausting the budget changes nothing about the return value or control
-    flow below this call — the caller gets whatever ``Message`` the last
-    attempt produced (possibly still empty), exactly as it always has. Only a
-    warning log marks the exhaustion, so this never introduces a new exception
-    type or return shape: raising here would let the exception escape into a
-    caller's broad ``except Exception``, which would turn it into user-facing
-    error text — exactly the "send something anyway" outcome this fix exists
-    to prevent.
+    A turn that answered nothing (see ``_is_empty_turn``) is retried, up to
+    ``_EMPTY_TURN_MAX_ATTEMPTS`` times, without dispatching tools or appending
+    anything else to the conversation. But an attempt that answered nothing may
+    still have *thought*, and those thoughts carry the signatures the model
+    continues its reasoning from — so the attempt is not thrown away: it is
+    appended to the transcript the retry is issued against, and handed back here
+    for the loop to store. Two different questions, kept apart: "did this turn
+    produce an answer" (retry, and ``_is_empty_turn`` stays blind to thinking on
+    purpose, so a turn that only thought is never handed to her as a reply) and
+    "is this turn worth replaying" (``_carries_something`` — an attempt that
+    came back with nothing at all is dropped, since an empty turn on the wire
+    makes the provider reject the next request).
+
+    Exhausting the budget changes nothing about the result or control flow below
+    this call — the caller gets whatever the last attempt produced (possibly
+    still empty), exactly as it always has. Only a warning log marks the
+    exhaustion, so this never introduces a new exception type or return shape:
+    raising here would let the exception escape into a caller's broad
+    ``except Exception``, which would turn it into user-facing error text —
+    exactly the "send something anyway" outcome this fix exists to prevent.
     """
-    last = await model.complete(convo, tools=tool_defs, **call_kwargs)
-    attempts = 1
-    while (
-        _is_empty_turn(last.text(), last.tool_calls)
-        and attempts < _EMPTY_TURN_MAX_ATTEMPTS
-    ):
+    working = list(convo)
+    kept: list[Message] = []
+    attempts = 0
+    while True:
         attempts += 1
-        last = await model.complete(convo, tools=tool_defs, **call_kwargs)
-    if _is_empty_turn(last.text(), last.tool_calls):
-        logger.warning(
-            "agent turn empty (no text, no tool_calls) after %d/%d attempts; "
-            "model=%s",
-            attempts,
-            _EMPTY_TURN_MAX_ATTEMPTS,
-            _model_label(model),
-        )
-    return last
+        last = await model.complete(working, tools=tool_defs, **call_kwargs)
+        if not _is_empty_turn(last.text(), last.tool_calls):
+            break
+        if attempts >= _EMPTY_TURN_MAX_ATTEMPTS:
+            logger.warning(
+                "agent turn empty (no text, no tool_calls) after %d/%d attempts; "
+                "model=%s",
+                attempts,
+                _EMPTY_TURN_MAX_ATTEMPTS,
+                _model_label(model),
+            )
+            break
+        if _carries_something(last):
+            kept.append(last)
+            working.append(last)
+    return [*kept, last]
 
 
 async def _run_loop(
@@ -509,14 +582,30 @@ async def _run_loop(
 
     ``model_kwargs`` (e.g. ``reasoning_effort`` for the safety guard) are
     forwarded to every model call — dropping them silently changes behaviour.
-    ``recursion_limit`` caps the number of model calls so a model that keeps
-    asking for tools can't loop forever.
+    ``recursion_limit`` caps the number of tool-bearing model calls so a model
+    that keeps asking for tools can't loop forever. Spending that budget does not
+    cut the run off mid-thought: the loop makes one more call **without tools**,
+    so the last turn's tool results reach the model and the run returns what the
+    assistant actually says.
 
     ``transcript_sink`` (when given) collects every message *this loop produces*
-    — each assistant turn (with tool calls) + each tool result message + the
-    final assistant reply — in order, so the session store can persist the round
-    losslessly (the in-memory ``Message`` objects still carry provider blobs like
-    ``ToolCall.signature``). It is left untouched on the stateless path.
+    — each assistant turn (the ones with tool calls, and the ones that only
+    thought before being retried) + each tool result message + the final
+    assistant reply — in order, so a caller keeping a continuous context
+    can store the round losslessly (the in-memory ``Message`` objects still carry
+    provider blobs like ``ToolCall.signature``).
+
+    Two rules keep what lands there replayable, because a caller feeds it back
+    as the next round's history and the provider validates it:
+
+      - **every call is answered.** A terminal tool ends the run where it sits
+        in the turn, so the calls after it never run; each of those gets a
+        result saying so (``_NEVER_RAN``).
+      - **nothing content-free is stored** (``_carries_something``). The empty
+        message a terminal tool returns stays out — it carries nothing, and a
+        caller whose rounds usually end that way would pile up one per round —
+        and so does a closing turn left with nothing after its unanswerable
+        call is stripped.
 
     Tool calls within one assistant turn are dispatched *sequentially* (langgraph
     ToolNode ran them concurrently). Results are identical; only multi-tool-turn
@@ -535,7 +624,16 @@ async def _run_loop(
     last: Message | None = None
 
     for _ in range(max(1, recursion_limit)):
-        last = await _complete_turn(model, convo, tool_defs, call_kwargs)
+        # An answerless attempt that thought comes back in front of the turn it
+        # was retried into; it is part of this round's transcript like any other
+        # model turn, and the next request replays its signatures.
+        *unanswered, last = await _complete_turn(
+            model, convo, tool_defs, call_kwargs
+        )
+        for turn in unanswered:
+            convo.append(turn)
+            if transcript_sink is not None:
+                transcript_sink.append(turn)
         if not last.tool_calls:
             if transcript_sink is not None:
                 transcript_sink.append(last)
@@ -544,7 +642,7 @@ async def _run_loop(
         convo.append(last)
         if transcript_sink is not None:
             transcript_sink.append(last)
-        for call in last.tool_calls:
+        for at, call in enumerate(last.tool_calls):
             with _tool_span(name=call.name, input=call.arguments) as span:
                 with agent_context(context) if context is not None else _nullctx():
                     result = await dispatch(tools, call)
@@ -555,13 +653,61 @@ async def _run_loop(
             if transcript_sink is not None:
                 transcript_sink.append(tool_msg)
             if _is_terminal_tool_call(call):
-                final = Message(role=Role.ASSISTANT, content="")
-                if transcript_sink is not None:
-                    transcript_sink.append(final)
-                return final
+                # The calls after this one never ran, and the assistant turn
+                # carrying them is already stored. Answer each so the stored
+                # round keeps every call paired with a result — a turn with an
+                # unanswered call makes the provider reject the next request.
+                for skipped in last.tool_calls[at + 1 :]:
+                    cancelled = ToolResult(
+                        tool_call_id=skipped.id, content=_NEVER_RAN
+                    ).to_message()
+                    convo.append(cancelled)
+                    if transcript_sink is not None:
+                        transcript_sink.append(cancelled)
+                # The empty message is the run's *return value* only — it stays
+                # out of the sink. It carries no text and no tool call, so a
+                # caller that stores the sink as its continuous context would
+                # accumulate one empty message per terminated round.
+                return Message(role=Role.ASSISTANT, content="")
 
-    # recursion limit hit: return the last assistant message we have.
-    return last if last is not None else Message(role=Role.ASSISTANT, content="")
+    # Budget spent. Hand the dispatched tool results back one last time with no
+    # tools, so the run ends on what the assistant says rather than on a
+    # tool-call turn whose ``text()`` is usually empty: that message read as
+    # "what it said" is an empty string stored with no error and no log, and the
+    # last turn's tool results would never reach the model at all.
+    logger.warning(
+        "agent spent its budget of %d model calls with tools still pending; "
+        "closing with one toolless call; model=%s",
+        recursion_limit,
+        _model_label(model),
+    )
+    *unanswered, closing = await _complete_turn(model, convo, None, call_kwargs)
+    for turn in unanswered:
+        if transcript_sink is not None:
+            transcript_sink.append(turn)
+    if closing.tool_calls:
+        # A model handed an empty tool list can still ask for a tool. Keeping
+        # that call would leave the stored context with a call nothing answers,
+        # and the provider rejects the whole next request over it. The rest of
+        # the turn stays — its thoughts and their signatures are what the next
+        # request replays — minus the parts pointing at the dropped calls.
+        closing = Message(
+            role=Role.ASSISTANT,
+            content=closing.content,
+            turn_parts=[
+                p
+                for p in closing.turn_parts
+                if p.kind is not TurnPartKind.TOOL_CALL
+            ],
+        )
+    # Stripping the call can leave a turn with nothing on it — the closing call
+    # came back with no text and only that call. Storing it would put an empty
+    # turn in the context, which the provider rejects on the next request just
+    # as surely as the unanswered call would have. It is still the run's return
+    # value; only the stored round drops it.
+    if transcript_sink is not None and _carries_something(closing):
+        transcript_sink.append(closing)
+    return closing
 
 
 async def _stream_loop(
@@ -574,7 +720,6 @@ async def _stream_loop(
     session_id: str | None = None,
     native_web_search: bool = False,
     model_kwargs: dict[str, Any] | None = None,
-    transcript_sink: list[Message] | None = None,
 ) -> AsyncIterator[StreamChunk]:
     """Stream neutral chunks; on a tool-call turn, dispatch and loop.
 
@@ -587,12 +732,6 @@ async def _stream_loop(
 
     ``model_kwargs`` are forwarded to every model call. ``recursion_limit`` caps
     the number of streamed turns.
-
-    ``transcript_sink`` (when given) collects every message this loop produces —
-    each assistant tool-call turn + each tool result + the final assistant reply
-    (reconstructed from the accumulated text/reasoning, since the no-tool-call
-    final turn is never appended to ``convo``) — so the session store can persist
-    the round. Untouched on the stateless path.
     """
     convo = list(messages)
     tool_defs = _tooldefs(tools)
@@ -605,14 +744,15 @@ async def _stream_loop(
 
     for _ in range(max(1, recursion_limit)):
         text_parts: list[str] = []
-        reasoning_parts: list[str] = []
+        turn_parts: list[TurnPart] = []
         turn_calls: list[ToolCall] = []
         attempts = 0
 
         # Transparent single-turn retry, mirroring _complete_turn: an empty
         # attempt (no text, no tool_calls — see _is_empty_turn) re-issues
-        # model.stream for the SAME turn (identical convo, nothing appended,
-        # no tools dispatched) instead of being accepted as the final turn.
+        # model.stream for the SAME turn (no tools dispatched) instead of being
+        # accepted as the final turn. What that attempt thought does ride into
+        # the retry — see below.
         # Chunks are still forwarded live as they arrive (yield below) so a
         # normal turn keeps true token-by-token streaming — only once this
         # attempt's stream is fully drained do we know whether it was empty.
@@ -625,16 +765,19 @@ async def _stream_loop(
         while True:
             attempts += 1
             text_parts = []
-            reasoning_parts = []
+            turn_parts = []
             turn_calls = []
 
             async for chunk in model.stream(convo, tools=tool_defs, **call_kwargs):
                 if chunk.text:
                     text_parts.append(chunk.text)
-                if chunk.reasoning:
-                    reasoning_parts.append(chunk.reasoning)
+                if chunk.text is not None:
+                    _extend_turn(turn_parts, TurnPartKind.TEXT, chunk)
+                if chunk.reasoning is not None:
+                    _extend_turn(turn_parts, TurnPartKind.THOUGHT, chunk)
                 if chunk.tool_call is not None:
                     turn_calls.append(chunk.tool_call)
+                    turn_parts.append(TurnPart.from_tool_call(chunk.tool_call))
                 yield chunk
 
             empty_turn = _is_empty_turn("".join(text_parts), turn_calls)
@@ -648,33 +791,24 @@ async def _stream_loop(
                         _model_label(model),
                     )
                 break
+            # This attempt answered nothing, but what it thought is kept: the
+            # retry streams against a transcript that has it, so the signatures
+            # the model was reasoning from go back with it. An attempt that came
+            # back with nothing at all is dropped — on the wire it is an empty
+            # turn, which the provider rejects the whole request over.
+            unanswered = Message.from_model_turn(turn_parts, turn_calls)
+            if _carries_something(unanswered):
+                convo.append(unanswered)
 
         if not turn_calls:
-            # final assistant turn — never appended to convo, so capture it for
-            # the session round explicitly (mirrors _run_loop's final append).
-            if transcript_sink is not None:
-                transcript_sink.append(
-                    Message(
-                        role=Role.ASSISTANT,
-                        content="".join(text_parts),
-                        reasoning_content="".join(reasoning_parts) or None,
-                    )
-                )
             return
 
         # rebuild the assistant turn from what we streamed, then dispatch. The
-        # reasoning is carried back too (mirroring _run_loop, where the Message
-        # returned by model.complete already holds reasoning_content) so the
-        # next turn's context doesn't lose the model's thoughts.
-        assistant_turn = Message(
-            role=Role.ASSISTANT,
-            content="".join(text_parts),
-            reasoning_content="".join(reasoning_parts) or None,
-            tool_calls=list(turn_calls),
-        )
+        # sequence is carried back too (mirroring _run_loop, where the Message
+        # returned by model.complete already holds it) so the next request
+        # replays the thoughts and signatures this turn produced.
+        assistant_turn = Message.from_model_turn(turn_parts, turn_calls)
         convo.append(assistant_turn)
-        if transcript_sink is not None:
-            transcript_sink.append(assistant_turn)
         for call in turn_calls:
             with _tool_span(name=call.name, input=call.arguments) as span:
                 with agent_context(context) if context is not None else _nullctx():
@@ -683,46 +817,14 @@ async def _stream_loop(
                 _record_tool_output(span, result)
             tool_msg = result.to_message()
             convo.append(tool_msg)
-            if transcript_sink is not None:
-                transcript_sink.append(tool_msg)
             yield StreamChunk(tool_result=result)
             if _is_terminal_tool_call(call):
-                if transcript_sink is not None:
-                    transcript_sink.append(Message(role=Role.ASSISTANT, content=""))
                 return
 
 
 @contextmanager
 def _nullctx():
     yield None
-
-
-async def _persist_session(session_id: str, messages: list[Message]) -> None:
-    """Write this round back to the session store, swallowing write failures.
-
-    The transcript store is now durable PG (``SessionTranscript``), but this
-    write-back stays **best-effort continuity**: it runs only *after* the round's
-    model + tool side effects have completed, so a write failure here must never
-    escape. An exception out of ``Agent.run`` makes the caller's durable @node
-    treat an already-completed round as failed → re-deliver / DLQ a round whose
-    effects already happened, and the @node's turn marker never gets written so
-    idempotency is defeated. Logging + swallowing keeps the round successful; the
-    next round simply cold-starts from PG hard facts (symmetric to
-    ``load_session`` returning ``[]`` on a missing row).
-
-    So "durable" means the transcript *survives restarts once written* — not that
-    every round is guaranteed persisted. A failed write-back drops *that* round's
-    continuity (next round cold-starts), by design; the ``log.warning`` makes the
-    drop observable rather than silent.
-    """
-    try:
-        await append_session(session_id, messages)
-    except Exception as exc:  # noqa: BLE001 - cache write-back must not fail a round
-        logger.warning(
-            "agent session %s write-back failed, round kept (cold-start next): %s",
-            session_id,
-            exc,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -822,27 +924,28 @@ class Agent:
         *,
         prompt_vars: dict[str, Any] | None = None,
         context: AgentContext | None = None,
-        session_id: str | None = None,
+        transcript_sink: list[Message] | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> Message:
         """Execute the ReAct loop and return the final assistant ``Message``.
 
-        ``session_id`` (decision 1) turns this into a *stateful* continuation:
-        the stored transcript for that id is read from Redis and prepended after
-        the system prompt, the run continues from there, and this round's new
-        messages are appended back (24h TTL refreshed). ``None`` is the stateless
-        status quo — Redis is never touched and behaviour is byte-for-byte as
-        before. The id also tags the langfuse session (same id, both jobs —
-        decision 3).
+        ``transcript_sink`` (when given) is extended with every message this run
+        produced — each assistant turn with its tool calls, each tool result, and
+        the final reply, in order — so a caller that keeps a continuous context
+        can store the round losslessly. The Agent itself reads and writes no
+        store: a caller that continues a conversation passes the prior messages in
+        ``messages`` and decides when and with what else the round is persisted
+        (:mod:`app.living.continuity`).
+
+        Only the messages of a *successful* attempt reach the sink: a retried
+        attempt starts a fresh collection, so a transient failure never leaves a
+        half-written turn behind.
         """
         model, prompt_messages = await self._prepare(prompt_vars or {})
         tools, native_web_search = await self._resolve_native_web_search(model)
 
-        # Read the stored history ONCE (before retry) so a retried attempt
-        # replays the same prefix and never double-reads. None → stateless.
-        history = await load_session(session_id) if session_id else []
-        full_messages = [*prompt_messages, *history, *messages]
-        trace_session_id = session_id or (context.session_id if context else None)
+        full_messages = [*prompt_messages, *messages]
+        trace_session_id = context.session_id if context else None
 
         @_retry_decorator(
             attempts=max_retries,
@@ -851,7 +954,7 @@ class Agent:
             retry_on=RETRYABLE_EXCEPTIONS,
         )
         async def _invoke() -> tuple[Message, list[Message]]:
-            sink: list[Message] | None = [] if session_id else None
+            sink: list[Message] = []
             with _root_span(
                 name=self._cfg.trace_name,
                 input=[m.to_dict() for m in full_messages],
@@ -869,20 +972,11 @@ class Agent:
                     model_kwargs=self._model_kwargs,
                     transcript_sink=sink,
                 )
-                return result, (sink or [])
+                return result, sink
 
         result, produced = await _invoke()
-        # Append this round only on success (after the loop returns / retries
-        # settle), so a transient failure that retries the whole call doesn't
-        # leave a half-written turn behind. The session store is a *working
-        # cache*: by the time we get here the round's tool side effects
-        # (emit/move/state writes) have already happened, so a cache write-back
-        # failure must NOT bubble out — that would make a durable node treat an
-        # already-completed round as failed and re-deliver / DLQ it. Log and
-        # swallow; next round cold-starts from PG hard facts (symmetric to
-        # load_session's missing-key → cold start).
-        if session_id:
-            await _persist_session(session_id, [*messages, *produced])
+        if transcript_sink is not None:
+            transcript_sink.extend(produced)
         return result
 
     async def stream(
@@ -891,7 +985,6 @@ class Agent:
         *,
         prompt_vars: dict[str, Any] | None = None,
         context: AgentContext | None = None,
-        session_id: str | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream neutral ``StreamChunk``s through the ReAct loop.
@@ -900,23 +993,15 @@ class Agent:
         consumer, replaying would duplicate the prefix. Backoff math matches
         ``app.capabilities.retry`` (exponential ``base * 2^(N-1)`` clamped) so
         streaming and non-streaming paths stay consistent.
-
-        ``session_id`` (decision 1) makes the stream a stateful continuation:
-        the stored transcript is read once up front and prepended after the
-        system prompt; once the stream completes, this round's new messages are
-        appended back (24h TTL refreshed). ``None`` is the stateless status quo —
-        Redis untouched, behaviour byte-for-byte as before.
         """
         model, prompt_messages = await self._prepare(prompt_vars or {})
         tools, native_web_search = await self._resolve_native_web_search(model)
 
-        history = await load_session(session_id) if session_id else []
-        full_messages = [*prompt_messages, *history, *messages]
-        trace_session_id = session_id or (context.session_id if context else None)
+        full_messages = [*prompt_messages, *messages]
+        trace_session_id = context.session_id if context else None
 
         for attempt in range(1, max_retries + 1):
             tokens_yielded = False
-            sink: list[Message] | None = [] if session_id else None
             try:
                 with _root_span(
                     name=self._cfg.trace_name,
@@ -933,16 +1018,9 @@ class Agent:
                         session_id=trace_session_id,
                         native_web_search=native_web_search,
                         model_kwargs=self._model_kwargs,
-                        transcript_sink=sink,
                     ):
                         tokens_yielded = True
                         yield chunk
-                # Stream finished cleanly — persist this round (success only).
-                # Same working-cache rule as run(): a write-back failure here is
-                # logged and swallowed, never propagated, so an already-streamed
-                # round isn't turned into a failed round by a cache miss.
-                if session_id:
-                    await _persist_session(session_id, [*messages, *(sink or [])])
                 return
             except RETRYABLE_EXCEPTIONS as e:
                 if tokens_yielded or attempt >= max_retries:

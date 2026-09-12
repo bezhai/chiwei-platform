@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'bun:test';
 
 import {
+    type ContentItem,
     type InboundMessage,
     type InboundAdapter,
     type AddressingPolicy,
     type AddressingDecision,
     assertValidInboundMessage,
     enforceDecision,
+    summarizeContent,
 } from './contracts';
 
 // 这组测试用一个"假想的纯 HTTP 问答 channel"当验证载体：它跟 IM 形态差别很大
@@ -134,6 +136,69 @@ describe('AddressingPolicy — direct/group 行为与“不静默”契约', () 
             'BOT',
         );
         expect(d.respond).toBe(true);
+    });
+});
+
+describe('图片项：渠道引用和对象位置各占一格', () => {
+    // key 是渠道内能解析回原图的引用（飞书的 image_key、QQ 的来源地址），object 是这张
+    // 图在对象存储里的位置。读取侧只认 object —— 它按渠道口径去猜的那一天，飞书那套
+    // 命名套到 QQ 上当场就错。
+
+    function withImage(image: ContentItem): unknown {
+        return { ...baseMsg, content: [image] };
+    }
+
+    it('图片项带上 object 之后仍然是合法消息', () => {
+        expect(() =>
+            assertValidInboundMessage(
+                withImage({ kind: 'image', key: 'img_v3_aa', object: 'temp/img_v3_aa.jpg' }),
+            ),
+        ).not.toThrow();
+    });
+
+    it('没有 object 的图片项也合法：这张图还没进对象存储，如实缺席', () => {
+        expect(() =>
+            assertValidInboundMessage(withImage({ kind: 'image', key: 'img_v3_aa' })),
+        ).not.toThrow();
+    });
+
+    it('object 是空串就抛：写一格指不到任何对象的位置，比不写更糟', () => {
+        // 空串在读取侧跟"没有这一格"读起来一样，但它会让"写入方说过这张图在哪"这句话
+        // 变成假的 —— 而整条链的前提正是这句话为真。
+        expect(() =>
+            assertValidInboundMessage(withImage({ kind: 'image', key: 'k', object: '  ' })),
+        ).toThrow();
+    });
+
+    it('object 不是字符串也抛', () => {
+        expect(() =>
+            assertValidInboundMessage(
+                withImage({ kind: 'image', key: 'k', object: 42 } as unknown as ContentItem),
+            ),
+        ).toThrow();
+    });
+});
+
+describe('summarizeContent — 给人看的那一行摘要', () => {
+    // 消息列表、日志、后台读的都是它。入站和出站共用这一份：两边各写一遍的话，同一条
+    // 带图的消息在两个方向上摘出来的样子不一样，而它们本该长成同一个样子。
+
+    it('文字原样，别的片段一律折成 [kind]', () => {
+        expect(
+            summarizeContent([
+                { kind: 'text', text: '看这张' },
+                { kind: 'image', key: 'img_1', object: 'temp/img_1.jpg' },
+            ]),
+        ).toBe('看这张[image]');
+    });
+
+    it('unsupported 摘的是给人看的占位串，不是类型名', () => {
+        expect(summarizeContent([{ kind: 'unsupported', text: '[合并转发]' }])).toBe('[合并转发]');
+    });
+
+    it('一个字都没有时给空串，由调用方决定写不写这一列', () => {
+        expect(summarizeContent([{ kind: 'text', text: '  ' }])).toBe('');
+        expect(summarizeContent([])).toBe('');
     });
 });
 

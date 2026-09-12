@@ -11,7 +11,8 @@ response / chunk objects, then assert the adapter's neutral translation.
 Coverage (spec §T3 Verification, adapted to mocked transport):
   - plain text round-trip neutral→wire→neutral,
   - multimodal image content block → Gemini image part,
-  - thinking part (``thought=True``) → Message.reasoning_content / chunk.reasoning,
+  - thinking part (``thought=True``) → a thought part of the turn sequence /
+    chunk.reasoning, with its signature,
   - tool_call (function calling) round-trip,
   - tool_result (function_response) → wire,
   - structured output → dict (response_mime_type json + response_schema),
@@ -24,13 +25,16 @@ Coverage (spec §T3 Verification, adapted to mocked transport):
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from app.agent.adapters.gemini import GeminiAdapter
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, ToolDef
+from app.agent.tooling import tool
 
 # ---------------------------------------------------------------------------
 # Canned google-genai response / chunk builders
@@ -97,16 +101,26 @@ class _MockGenaiClient:
     def __init__(self, **kwargs: Any):
         self.init_kwargs = kwargs
         self.last_generate_kwargs: dict[str, Any] | None = None
+        # every generate call's kwargs, in order — a ReAct loop calls more than
+        # once and what the SECOND request carried is the point of a replay test.
+        self.generate_calls: list[dict[str, Any]] = []
         self._next_result: Any = None
         self._stream_chunks: list[Any] | None = None
+        self._stream_scripts: list[list[Any]] = []
 
         async def _generate_content(**kw: Any) -> Any:
             self.last_generate_kwargs = kw
+            self.generate_calls.append(kw)
             return self._next_result
 
         async def _generate_content_stream(**kw: Any) -> Any:
             self.last_generate_kwargs = kw
-            chunks = self._stream_chunks or []
+            self.generate_calls.append(kw)
+            chunks = (
+                self._stream_scripts.pop(0)
+                if self._stream_scripts
+                else (self._stream_chunks or [])
+            )
 
             async def _gen() -> Any:
                 for c in chunks:
@@ -128,6 +142,11 @@ class _MockGenaiClient:
 
     def set_stream(self, chunks: list[Any]) -> None:
         self._stream_chunks = chunks
+
+    def set_streams(self, scripts: list[list[Any]]) -> None:
+        """One chunk list per ``stream`` call, in order (the ReAct loop streams
+        again after it has dispatched the tools a turn asked for)."""
+        self._stream_scripts = [list(s) for s in scripts]
 
 
 @pytest.fixture
@@ -384,12 +403,329 @@ async def test_complete_data_uri_image_decoded_inline_without_network(
 
 
 # ---------------------------------------------------------------------------
-# thinking — thought parts → reasoning_content / reasoning
+# an image that can't be downloaded — degrades to text, doesn't kill the turn
+# ---------------------------------------------------------------------------
+
+# What a history picture's url looks like: a TOS object plus a signed query.
+_SIGNED_URL = "https://tos.example/im/dog.png?X-Tos-Signature=deadbeef&expires=1"
+_SHUT = "[图片：打不开]"
+
+
+def _serve_http(monkeypatch, answer) -> None:
+    """Route ``_fetch_remote_image``'s httpx client at ``answer(url)``.
+
+    ``answer`` returns an ``httpx.Response`` (which the adapter then runs
+    ``raise_for_status()`` on, so a 403 raises exactly as it would in prod) or
+    raises a transport error itself.
+    """
+
+    class _FakeAsyncClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> bool:
+            return False
+
+        async def get(self, url: str) -> httpx.Response:
+            return answer(url)
+
+    monkeypatch.setattr("httpx.AsyncClient", _FakeAsyncClient)
+
+
+def _forbidden(url: str) -> httpx.Response:
+    """The shape of an expired TOS signature: 403 with an XML error body."""
+    return httpx.Response(
+        403,
+        request=httpx.Request("GET", url),
+        headers={"content-type": "application/xml"},
+        content=b"<Error><Code>AccessDenied</Code></Error>",
+    )
+
+
+def _timed_out(url: str) -> httpx.Response:
+    raise httpx.ReadTimeout("timed out", request=httpx.Request("GET", url))
+
+
+def _image_bytes(url: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        request=httpx.Request("GET", url),
+        headers={"content-type": "image/png"},
+        content=b"ALIVE",
+    )
+
+
+async def test_history_image_that_403s_degrades_to_a_text_placeholder(
+    mock_sdk, monkeypatch
+):
+    """An expired signature costs one picture, not the whole turn.
+
+    The download runs before the model is even called, so a raise here means she
+    never gets to speak — and the history that carries the picture is replayed
+    every wakeup, so the turn would keep dying.
+    """
+    _serve_http(monkeypatch, _forbidden)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="看不到就算了")]))
+
+    msg = Message(
+        role=Role.USER,
+        content=[
+            ContentBlock.from_text("看这张"),
+            ContentBlock.from_image(url=_SIGNED_URL),
+            ContentBlock.from_text("好看吗"),
+        ],
+    )
+    out = await adapter.complete([msg])
+
+    parts = mock_sdk.instance.last_generate_kwargs["contents"][-1].parts
+    # the placeholder sits where the picture was: she is told one was there
+    assert [p.text for p in parts] == ["看这张", _SHUT, "好看吗"]
+    assert all(getattr(p, "inline_data", None) is None for p in parts)
+    assert out.content == "看不到就算了"
+
+
+async def test_history_image_that_times_out_degrades_to_a_text_placeholder(
+    mock_sdk, monkeypatch
+):
+    """A transport timeout reads the same as a 403: one picture is gone."""
+    _serve_http(monkeypatch, _timed_out)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(
+        role=Role.USER,
+        content=[ContentBlock.from_image_url({"url": _SIGNED_URL})],
+    )
+    await adapter.complete([msg])
+
+    parts = mock_sdk.instance.last_generate_kwargs["contents"][-1].parts
+    assert [p.text for p in parts] == [_SHUT]
+
+
+async def test_unreachable_image_is_logged_with_which_one_and_why(
+    mock_sdk, monkeypatch, caplog
+):
+    """The degrade is never silent: the log names the object and the reason."""
+    _serve_http(monkeypatch, _forbidden)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(role=Role.USER, content=[ContentBlock.from_image(url=_SIGNED_URL)])
+    with caplog.at_level(logging.WARNING, logger="app.agent.adapters.gemini"):
+        await adapter.complete([msg])
+
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "app.agent.adapters.gemini" and r.levelno == logging.WARNING
+    ]
+    assert len(lines) == 1
+    assert "https://tos.example/im/dog.png" in lines[0]
+    assert "HTTP 403" in lines[0]
+    # the pre-signature is a credential; the object path alone names the picture
+    assert "X-Tos-Signature" not in lines[0]
+
+
+async def test_timed_out_image_logs_the_transport_reason(mock_sdk, monkeypatch, caplog):
+    _serve_http(monkeypatch, _timed_out)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(role=Role.USER, content=[ContentBlock.from_image(url=_SIGNED_URL)])
+    with caplog.at_level(logging.WARNING, logger="app.agent.adapters.gemini"):
+        await adapter.complete([msg])
+
+    lines = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(lines) == 1
+    assert "ReadTimeout" in lines[0]
+    assert "https://tos.example/im/dog.png" in lines[0]
+
+
+async def test_one_dead_image_leaves_the_rest_of_the_sequence_encodable(
+    mock_sdk, monkeypatch
+):
+    """A whole system+user+assistant+tool sequence still reaches the wire.
+
+    The dead picture becomes a placeholder; the live one beside it is still
+    downloaded, the tool round still answers its call with exactly one part, and
+    the trace still renders.
+    """
+
+    def _answer(url: str) -> httpx.Response:
+        if "dead" in url:
+            raise httpx.ConnectError("no route", request=httpx.Request("GET", url))
+        return _image_bytes(url)
+
+    _serve_http(monkeypatch, _answer)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="嗯")]))
+
+    history = [
+        Message(role=Role.SYSTEM, content="你是赤尾"),
+        Message(
+            role=Role.USER,
+            content=[
+                ContentBlock.from_text("[图片1]"),
+                ContentBlock.from_image(url="https://tos.example/im/dead.png?sig=a"),
+                ContentBlock.from_text("[图片2]"),
+                ContentBlock.from_image(url="https://tos.example/im/alive.png?sig=b"),
+            ],
+        ),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c1", name="look_at_pictures", arguments={})],
+        ),
+        Message(
+            role=Role.TOOL,
+            tool_call_id="c1",
+            content=[
+                ContentBlock.from_text("@old.png:"),
+                ContentBlock.from_image_url(
+                    {"url": "https://tos.example/im/dead2.png?sig=c"}
+                ),
+            ],
+        ),
+    ]
+    out = await adapter.complete(history)
+
+    kwargs = mock_sdk.instance.last_generate_kwargs
+    assert kwargs["config"].system_instruction == "你是赤尾"
+    contents = kwargs["contents"]
+    assert [c.role for c in contents] == ["user", "model", "user"]
+
+    user_parts = contents[0].parts
+    assert user_parts[1].text == _SHUT
+    assert user_parts[3].inline_data.data == b"ALIVE"
+    assert user_parts[3].inline_data.mime_type == "image/png"
+
+    fr = contents[2].parts[0].function_response
+    assert len(contents[2].parts) == 1
+    assert fr.parts is None
+    assert fr.response == {"result": f"@old.png:\n{_SHUT}"}
+
+    assert out.content == "嗯"
+    # the trace renders the whole thing, placeholder included
+    trace_input = _span_calls[-1]["input"]
+    assert {"text": _SHUT} in trace_input[0]["parts"]
+
+
+async def test_tool_result_with_a_dead_picture_says_so_in_its_answer(
+    mock_sdk, monkeypatch
+):
+    """A tool's own picture that won't download is reported, not just dropped.
+
+    ``FunctionResponsePart`` carries only media, so the placeholder rides in the
+    answer's text — the one place inside a function_response that can say it.
+    """
+    _serve_http(monkeypatch, _forbidden)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    history = [
+        Message(role=Role.USER, content="找张图"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c1", name="find_a_picture_online", arguments={})],
+        ),
+        Message(
+            role=Role.TOOL,
+            tool_call_id="c1",
+            content=[
+                ContentBlock.from_text("找到 1 张:"),
+                ContentBlock.from_image_url({"url": _SIGNED_URL}),
+            ],
+        ),
+    ]
+    await adapter.complete(history)
+
+    tool_turn = mock_sdk.instance.last_generate_kwargs["contents"][2]
+    fr = tool_turn.parts[0].function_response
+    assert fr.parts is None
+    assert fr.response == {"result": f"找到 1 张:\n{_SHUT}"}
+
+
+async def test_an_odd_content_type_is_not_treated_as_a_failed_download(
+    mock_sdk, monkeypatch
+):
+    """Object storage serves ``application/octet-stream`` for real pictures.
+
+    Bytes arrived, so this is not a failed download: the mime is guessed from
+    the object name and the picture goes out. Treating the header as the verdict
+    would blind her to images that are perfectly fine.
+    """
+
+    def _octet_stream(url: str) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url),
+            headers={"content-type": "application/octet-stream"},
+            content=b"REALPNG",
+        )
+
+    _serve_http(monkeypatch, _octet_stream)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(role=Role.USER, content=[ContentBlock.from_image(url=_SIGNED_URL)])
+    await adapter.complete([msg])
+
+    img = mock_sdk.instance.last_generate_kwargs["contents"][-1].parts[0]
+    assert img.inline_data.data == b"REALPNG"
+    assert img.inline_data.mime_type == "image/png"
+
+
+async def test_a_corrupt_data_uri_still_raises(mock_sdk):
+    """A ``data:`` URI we built ourselves and can't decode is a defect, not a
+    picture that got away: it fails the same way every time, no tool call
+    recovers it, and degrading it would hide the bug forever.
+    """
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(
+        role=Role.USER,
+        content=[ContentBlock.from_image(url="data:image/png;base64,QQ")],
+    )
+    with pytest.raises(Exception, match="padding"):
+        await adapter.complete([msg])
+
+
+# ---------------------------------------------------------------------------
+# thinking — thought parts land in the turn sequence, out of the spoken text
 # ---------------------------------------------------------------------------
 
 
-async def test_complete_thought_part_becomes_reasoning_content(mock_sdk):
-    """A response part with ``thought=True`` lands in reasoning_content, not content."""
+async def test_complete_thought_part_stays_out_of_the_spoken_text(mock_sdk):
+    """A response part with ``thought=True`` is a thought part of the turn, not content."""
     adapter = GeminiAdapter(
         model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
     )
@@ -405,7 +741,8 @@ async def test_complete_thought_part_becomes_reasoning_content(mock_sdk):
     out = await adapter.complete([Message(role=Role.USER, content="q")])
 
     assert out.content == "the answer is 42"
-    assert out.reasoning_content == "let me think about this"
+    assert out.thought_text() == "let me think about this"
+    assert [str(p.kind) for p in out.turn_parts] == ["thought", "text"]
 
 
 async def test_complete_requests_thinking_with_thoughts(mock_sdk):
@@ -1279,6 +1616,147 @@ async def test_stream_generation_span_records_usage(mock_sdk):
 
 
 # ---------------------------------------------------------------------------
+# prompt cache — Gemini's implicit cache is on by default and reports the hit
+# in ``usage_metadata.cached_content_token_count``. Without it on the span a
+# stable-prefix design has no way to show whether the prefix is actually reused.
+# ---------------------------------------------------------------------------
+
+
+def _usage_with_cache(prompt: int, candidates: int, cached: Any) -> SimpleNamespace:
+    """Gemini usage_metadata carrying the implicit-cache hit counter.
+
+    ``cached_content_token_count`` counts the prompt tokens served from cache;
+    ``prompt_token_count`` already includes them (so cached ⊆ input, same
+    relation as OpenAI's prompt_tokens / cached_tokens).
+    """
+    usage = _usage(prompt=prompt, candidates=candidates)
+    usage.cached_content_token_count = cached
+    return usage
+
+
+async def test_complete_records_cached_content_tokens_in_usage(mock_sdk):
+    """A cache hit surfaces on the span as cache_read_input_tokens."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    response = _response()
+    response.usage_metadata = _usage_with_cache(
+        prompt=62000, candidates=18, cached=60000
+    )
+    mock_sdk.instance.set_result(response)
+
+    await adapter.complete([Message(role=Role.USER, content="hi")])
+
+    span = _MOST_RECENT_SPAN[-1]
+    usage_updates = [u for u in span.updates if "usage_details" in u]
+    assert usage_updates, "complete span never recorded usage_details"
+    details = usage_updates[-1]["usage_details"]
+    assert details["input"] == 62000
+    assert details["cache_read_input_tokens"] == 60000
+
+
+async def test_structured_records_cached_content_tokens_in_usage(mock_sdk):
+    """The structured path reports a cache hit the same way complete() does."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    response = _response(parts=[_part(text='{"ok": true}')])
+    response.usage_metadata = _usage_with_cache(prompt=900, candidates=5, cached=700)
+    mock_sdk.instance.set_result(response)
+
+    await adapter.structured(
+        [Message(role=Role.USER, content="q")],
+        schema={"title": "X", "type": "object"},
+    )
+
+    details = [u for u in _MOST_RECENT_SPAN[-1].updates if "usage_details" in u][-1][
+        "usage_details"
+    ]
+    assert details["cache_read_input_tokens"] == 700
+
+
+async def test_stream_records_cached_content_tokens_in_usage(mock_sdk):
+    """The cumulative usage of the last streamed chunk carries the cache hit."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    last = _response(parts=[], finish_reason="STOP")
+    last.usage_metadata = _usage_with_cache(prompt=62000, candidates=22, cached=60000)
+    mock_sdk.instance.set_stream(
+        [
+            _response(parts=[_part(text="hi")], finish_reason=None),
+            last,
+        ]
+    )
+
+    async for _ in adapter.stream([Message(role=Role.USER, content="hi")]):
+        pass
+
+    details = [u for u in _MOST_RECENT_SPAN[-1].updates if "usage_details" in u][-1][
+        "usage_details"
+    ]
+    assert details["cache_read_input_tokens"] == 60000
+
+
+async def test_usage_without_cached_content_omits_cache_key(mock_sdk):
+    """No cached_content_token_count at all ⇒ no fabricated cache key.
+
+    Gemini leaves the field off entirely when nothing was served from cache, so
+    reporting a 0 would read as "measured, missed" rather than "not reported".
+    """
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response())  # plain usage, no cache field
+
+    await adapter.complete([Message(role=Role.USER, content="hi")])
+
+    details = [u for u in _MOST_RECENT_SPAN[-1].updates if "usage_details" in u][-1][
+        "usage_details"
+    ]
+    assert "cache_read_input_tokens" not in details
+
+
+async def test_usage_with_a_none_cached_content_omits_cache_key(mock_sdk):
+    """``cached_content_token_count`` present but None ⇒ nothing was reported.
+
+    It is Optional in the SDK's UsageMetadata, so "not reported" arrives either
+    as an absent attribute or as an explicit None.
+    """
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    response = _response()
+    response.usage_metadata = _usage_with_cache(prompt=5, candidates=7, cached=None)
+    mock_sdk.instance.set_result(response)
+
+    await adapter.complete([Message(role=Role.USER, content="hi")])
+
+    details = [u for u in _MOST_RECENT_SPAN[-1].updates if "usage_details" in u][-1][
+        "usage_details"
+    ]
+    assert "cache_read_input_tokens" not in details
+    assert details["input"] == 5
+
+
+async def test_a_reported_zero_cache_hit_is_carried_as_a_zero(mock_sdk):
+    """报了 0 就带着 0 —— 它跟"这次没有缓存数据"是两件事，压成一个形状就分不出了。"""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    response = _response()
+    response.usage_metadata = _usage_with_cache(prompt=5, candidates=7, cached=0)
+    mock_sdk.instance.set_result(response)
+
+    await adapter.complete([Message(role=Role.USER, content="hi")])
+
+    details = [u for u in _MOST_RECENT_SPAN[-1].updates if "usage_details" in u][-1][
+        "usage_details"
+    ]
+    assert details["cache_read_input_tokens"] == 0
+
+
+# ---------------------------------------------------------------------------
 # registration seam — build_model_client dispatches client_type "google"
 # ---------------------------------------------------------------------------
 
@@ -1563,3 +2041,448 @@ async def test_stream_drops_grounding_metadata_from_visible_content(mock_sdk):
     assert "example.com" not in text
     assert _SEARCH_ENTRY_HTML not in text
     assert "search-entry" not in text
+
+
+# ---------------------------------------------------------------------------
+# trace rendering — a thought part and a signature must be readable on the trace
+#
+# Without this a thought part renders exactly like a plain text part and a
+# signature renders nowhere at all, so "did the thought block actually go out"
+# can't be answered from langfuse. The signature is reported by size only: the
+# raw bytes are an opaque provider blob and would bury the conversation.
+# ---------------------------------------------------------------------------
+
+
+def test_trace_marks_a_thought_part_apart_from_plain_text():
+    from google.genai import types as genai_types
+
+    from app.agent.adapters.gemini import _contents_for_trace
+
+    rendered = _contents_for_trace(
+        [
+            genai_types.Content(
+                role="model",
+                parts=[
+                    genai_types.Part(text="让我想想", thought=True),
+                    genai_types.Part(text="好的"),
+                ],
+            )
+        ]
+    )
+
+    assert rendered[0]["parts"] == [
+        {"text": "让我想想", "thought": True},
+        {"text": "好的"},
+    ]
+
+
+def test_trace_reports_a_signature_by_size_never_its_bytes():
+    from google.genai import types as genai_types
+
+    from app.agent.adapters.gemini import _contents_for_trace
+
+    rendered = _contents_for_trace(
+        [
+            genai_types.Content(
+                role="model",
+                parts=[
+                    genai_types.Part(
+                        text="让我想想",
+                        thought=True,
+                        thought_signature=b"\x00\xffopaque",
+                    )
+                ],
+            )
+        ]
+    )
+
+    part = rendered[0]["parts"][0]
+    assert part["signature_bytes"] == len(b"\x00\xffopaque")
+    assert "\\x00" not in repr(part)
+    assert "opaque" not in repr(part).replace("signature_bytes", "")
+
+
+def test_trace_marks_a_signature_on_a_function_call_part():
+    from google.genai import types as genai_types
+
+    from app.agent.adapters.gemini import _contents_for_trace
+
+    part = genai_types.Part.from_function_call(name="search", args={"q": "cats"})
+    part.thought_signature = b"sig-abc"
+
+    rendered = _contents_for_trace([genai_types.Content(role="model", parts=[part])])
+
+    assert rendered[0]["parts"][0] == {
+        "function_call": {"name": "search", "args": {"q": "cats"}},
+        "signature_bytes": len(b"sig-abc"),
+    }
+
+
+def test_trace_leaves_an_unsigned_part_unmarked():
+    from google.genai import types as genai_types
+
+    from app.agent.adapters.gemini import _contents_for_trace
+
+    rendered = _contents_for_trace(
+        [genai_types.Content(role="user", parts=[genai_types.Part(text="hi")])]
+    )
+
+    assert rendered[0]["parts"] == [{"text": "hi"}]
+
+
+# ---------------------------------------------------------------------------
+# the model turn is taken down as a sequence and put back as the same sequence
+#
+# Google's stateless contract: every thought block the model returned must come
+# back verbatim on the next request, each with the signature that rode on it.
+# Splitting the response into "all the text" + "all the calls" loses the order
+# and the signature-to-segment mapping, and the model then continues from a
+# turn it never had.
+# ---------------------------------------------------------------------------
+
+
+async def test_complete_keeps_thoughts_text_and_calls_interleaved(mock_sdk):
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(
+        _response(
+            parts=[
+                _part(text="先看看", thought=True, thought_signature=b"sig-t1"),
+                _part(text="好"),
+                _part(
+                    function_call=_function_call("look_around", {}, "call_1"),
+                    thought_signature=b"sig-c1",
+                ),
+                _part(text="再说一句", thought=True, thought_signature=b"sig-t2"),
+                _part(
+                    function_call=_function_call("say", {"words": "嗯"}, "call_2"),
+                    thought_signature=b"sig-c2",
+                ),
+            ]
+        )
+    )
+
+    out = await adapter.complete([Message(role=Role.USER, content="q")])
+
+    assert [str(p.kind) for p in out.turn_parts] == [
+        "thought",
+        "text",
+        "tool_call",
+        "thought",
+        "tool_call",
+    ]
+    assert [p.signature for p in out.turn_parts if p.kind == "thought"] == [
+        b"sig-t1",
+        b"sig-t2",
+    ]
+    assert [p.call_id for p in out.turn_parts if p.call_id] == ["call_1", "call_2"]
+    assert [tc.signature for tc in out.tool_calls] == [b"sig-c1", b"sig-c2"]
+    assert out.content == "好"
+
+
+async def test_complete_keeps_each_thought_segment_apart(mock_sdk):
+    """一轮多段思考：段界和每段自己的签名都不能被拼没。"""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(
+        _response(
+            parts=[
+                _part(text="第一段", thought=True, thought_signature=b"sig-a"),
+                _part(text="第二段", thought=True, thought_signature=b"sig-b"),
+                _part(text="说出来的"),
+            ]
+        )
+    )
+
+    out = await adapter.complete([Message(role=Role.USER, content="q")])
+
+    thoughts = [p for p in out.turn_parts if p.kind == "thought"]
+    assert [p.text for p in thoughts] == ["第一段", "第二段"]
+    assert [p.signature for p in thoughts] == [b"sig-a", b"sig-b"]
+
+
+async def test_a_signature_with_no_text_is_not_dropped(mock_sdk):
+    """带签名但没正文的那一段仍然留着 —— 丢掉它就是丢掉一个签名。"""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(
+        _response(parts=[_part(text="", thought_signature=b"bare-sig")])
+    )
+
+    out = await adapter.complete([Message(role=Role.USER, content="q")])
+
+    assert [p.signature for p in out.turn_parts] == [b"bare-sig"]
+
+
+async def test_the_model_turn_goes_back_on_the_wire_as_it_came_off(mock_sdk):
+    """wire → 中立层 → wire：段数、段序、thought 标记、签名字节逐个对上。"""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    returned = [
+        _part(text="先看看", thought=True, thought_signature=b"sig-t1"),
+        _part(text="好"),
+        _part(
+            function_call=_function_call("look_around", {}, "call_1"),
+            thought_signature=b"sig-c1",
+        ),
+        _part(text="再想想", thought=True, thought_signature=b"sig-t2"),
+    ]
+    mock_sdk.instance.set_result(_response(parts=returned))
+    turn = await adapter.complete([Message(role=Role.USER, content="q")])
+
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+    await adapter.complete(
+        [
+            Message(role=Role.USER, content="q"),
+            turn,
+            Message(role=Role.TOOL, content="看到了", tool_call_id="call_1"),
+        ]
+    )
+
+    sent = mock_sdk.instance.last_generate_kwargs["contents"][1]
+    assert sent.role == "model"
+    assert len(sent.parts) == len(returned)
+    assert [p.text for p in sent.parts] == ["先看看", "好", None, "再想想"]
+    assert [bool(p.thought) for p in sent.parts] == [True, False, False, True]
+    assert [p.thought_signature for p in sent.parts] == [
+        b"sig-t1",
+        None,
+        b"sig-c1",
+        b"sig-t2",
+    ]
+    assert sent.parts[2].function_call.name == "look_around"
+
+
+async def test_a_replayed_thought_shows_up_on_the_trace(mock_sdk):
+    """T1 的渲染 + T3 的回放合起来：trace 上看得见 thought part 真的发出去了。"""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(
+        _response(parts=[_part(text="想了想", thought=True, thought_signature=b"sig")])
+    )
+    turn = await adapter.complete([Message(role=Role.USER, content="q")])
+
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+    await adapter.complete([Message(role=Role.USER, content="q"), turn])
+
+    traced = _span_calls[-1]["input"][1]["parts"]
+    assert traced == [{"text": "想了想", "thought": True, "signature_bytes": 3}]
+
+
+async def test_a_turn_nobody_recorded_a_sequence_for_still_goes_out(mock_sdk):
+    """没有段序的消息（USER、旧转录读回来的那些）照旧按 content + tool_calls 编码。"""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+
+    await adapter.complete(
+        [
+            Message(role=Role.USER, content="q"),
+            Message(
+                role=Role.ASSISTANT,
+                content="我去搜一下",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="search",
+                        arguments={"q": "cats"},
+                        signature=b"sig-old",
+                    )
+                ],
+            ),
+            Message(role=Role.TOOL, content="3 results", tool_call_id="call_1"),
+        ]
+    )
+
+    sent = mock_sdk.instance.last_generate_kwargs["contents"][1]
+    assert [p.text for p in sent.parts] == ["我去搜一下", None]
+    assert sent.parts[1].function_call.name == "search"
+    assert sent.parts[1].thought_signature == b"sig-old"
+
+
+async def test_a_call_stripped_off_the_turn_takes_its_part_with_it(mock_sdk):
+    """调用被剥掉之后，段序里指向它的那一段不能还留在 wire 上。"""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(
+        _response(
+            parts=[
+                _part(text="想了想", thought=True, thought_signature=b"sig-t"),
+                _part(function_call=_function_call("say", {}, "call_1")),
+            ]
+        )
+    )
+    turn = await adapter.complete([Message(role=Role.USER, content="q")])
+    stripped = Message(
+        role=Role.ASSISTANT,
+        content=turn.content,
+        turn_parts=turn.turn_parts,
+    )
+
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+    await adapter.complete([Message(role=Role.USER, content="q"), stripped])
+
+    sent = mock_sdk.instance.last_generate_kwargs["contents"][1]
+    assert [bool(p.thought) for p in sent.parts] == [True]
+    assert sent.parts[0].function_call is None
+
+
+async def test_stream_carries_the_signature_on_a_thought_chunk(mock_sdk):
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_stream(
+        [
+            _response(
+                parts=[_part(text="想", thought=True, thought_signature=b"sig-t")],
+                finish_reason=None,
+            ),
+            _response(
+                parts=[_part(text="好", thought_signature=b"sig-x")],
+                finish_reason="STOP",
+            ),
+        ]
+    )
+
+    chunks = [c async for c in adapter.stream([Message(role=Role.USER, content="hi")])]
+
+    thought = next(c for c in chunks if c.reasoning)
+    assert thought.signature == b"sig-t"
+    spoken = next(c for c in chunks if c.text)
+    assert spoken.signature == b"sig-x"
+
+
+# ---------------------------------------------------------------------------
+# 流式收发一整圈：这一块里回来的是几段，回放出去就还是几段
+#
+# 段边界在 adapter 这一层是知道的（``_chunk_to_neutral`` 正在遍历 parts），到了
+# 上层就只剩下一串 chunk。所以下面这一圈走的是真 adapter + 真 ReAct loop：一块里
+# 两段思考进去，第二次请求的 model turn 里必须还是两段，签名各归各段。
+# ---------------------------------------------------------------------------
+
+
+@tool
+async def look_around() -> str:
+    """Look around and report what is there."""
+    return "空无一人"
+
+
+async def test_two_thought_parts_in_one_chunk_stay_two_parts_on_replay(mock_sdk):
+    """同一块里回来的两段思考不能被并成一段，签名也不能跟着搬家。"""
+    from app.agent.core import _stream_loop
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_streams(
+        [
+            [
+                _response(
+                    parts=[
+                        _part(text="先想一下", thought=True),
+                        _part(
+                            text="再想一下",
+                            thought=True,
+                            thought_signature=b"sig-B",
+                        ),
+                        _part(
+                            function_call=_function_call("look_around", {}, "call_1"),
+                            thought_signature=b"sig-c",
+                        ),
+                    ],
+                    finish_reason="STOP",
+                )
+            ],
+            [_response(parts=[_part(text="好了")], finish_reason="STOP")],
+        ]
+    )
+
+    async for _ in _stream_loop(
+        adapter,
+        messages=[Message(role=Role.USER, content="q")],
+        tools=[look_around],
+        context=None,
+        recursion_limit=4,
+    ):
+        pass
+
+    replayed = mock_sdk.instance.generate_calls[1]["contents"][1]
+    assert replayed.role == "model"
+    assert [p.text for p in replayed.parts] == ["先想一下", "再想一下", None]
+    assert [bool(p.thought) for p in replayed.parts] == [True, True, False]
+    assert [p.thought_signature for p in replayed.parts] == [
+        None,
+        b"sig-B",
+        b"sig-c",
+    ]
+    assert replayed.parts[2].function_call.name == "look_around"
+
+
+async def test_one_part_cut_across_chunks_is_still_one_part_on_replay(mock_sdk):
+    """一段被切成多块传回来的，仍然合成一段——边界未知时照旧顺着签名收口。"""
+    from app.agent.core import _stream_loop
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_streams(
+        [
+            [
+                _response(parts=[_part(text="先想", thought=True)], finish_reason=None),
+                _response(
+                    parts=[
+                        _part(text="一下", thought=True, thought_signature=b"sig-A")
+                    ],
+                    finish_reason=None,
+                ),
+                _response(
+                    parts=[
+                        _part(
+                            function_call=_function_call("look_around", {}, "call_1"),
+                            thought_signature=b"sig-c",
+                        )
+                    ],
+                    finish_reason="STOP",
+                ),
+            ],
+            [_response(parts=[_part(text="好了")], finish_reason="STOP")],
+        ]
+    )
+
+    async for _ in _stream_loop(
+        adapter,
+        messages=[Message(role=Role.USER, content="q")],
+        tools=[look_around],
+        context=None,
+        recursion_limit=4,
+    ):
+        pass
+
+    replayed = mock_sdk.instance.generate_calls[1]["contents"][1]
+    assert [p.text for p in replayed.parts] == ["先想一下", None]
+    assert [p.thought_signature for p in replayed.parts] == [b"sig-A", b"sig-c"]
+
+
+async def test_a_signed_part_with_no_text_keeps_its_signature_on_the_wire(mock_sdk):
+    """Google 文档说流式会回空正文的签名段：它发出去时必须还带着签名。"""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(
+        _response(parts=[_part(text="", thought_signature=b"bare-sig")])
+    )
+    turn = await adapter.complete([Message(role=Role.USER, content="q")])
+
+    mock_sdk.instance.set_result(_response(parts=[_part(text="done")]))
+    await adapter.complete([Message(role=Role.USER, content="q"), turn])
+
+    sent = mock_sdk.instance.last_generate_kwargs["contents"][1]
+    assert len(sent.parts) == 1
+    assert sent.parts[0].thought_signature == b"bare-sig"

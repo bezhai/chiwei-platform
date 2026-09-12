@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Collection
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -294,8 +295,59 @@ def _shown(lead: str, url: str) -> list[dict[str, Any]]:
     ]
 
 
+def printed_handle(file_name: str) -> str:
+    """这张图印给她的那串（``pic=<id>``），从永久句柄算出来。
+
+    **印出去这件事只在这里做一次。** 手机那边印她自己发过的那张图时走的也是它（那儿
+    只有对象位置，没有 :class:`Picture`）—— 各写一遍的话，一边印 ``pic=<id>``、另一边
+    印裸 id，她照抄回来就撞死路（:func:`picture_id_in` 上记着这个坑真的踩过）。
+    """
+    return f"{_HANDLE_PREFIX}{handle_for(file_name)}"
+
+
+async def hers_among(
+    *, lane: str, persona_id: str, file_names: Collection[str]
+) -> set[str]:
+    """这几个对象位置里，哪几个真的是她手上的图 —— 交回其中在的那些。
+
+    手机上印她自己发过的那张图的句柄之前核这一次（:mod:`app.living.phone`）。**"这条
+    消息是她发的"保证不了"这张图在她手上"**：查会话那条 SQL 没有 lane 条件，而 ppe
+    泳道跟 prod 共用同一个库，所以同一个 bot 在泳道上发过的图，切回 prod 之后那一行
+    照样算她自己发的、那一格位置也照样在；而这张表按 ``(lane, persona_id)`` 隔离，
+    :func:`her_picture` 在当前泳道上查它只会交回 ``None``。印出去的后果是静默的：她
+    看见一个摆在眼前的引用，抄回去被告知"你手上没有这张图"。
+
+    **隔离的两半照旧是硬条件，一个都不放宽。** 放宽了就等于让一个从别处拿到的位置
+    取到姐姐画的那张 —— 那正是这两个条件存在的理由。
+
+    一条语句核完整批：一页手机上她自己发过的图有十几张不罕见，一张一次往返的话，
+    她每看一次手机就多十几次查询。
+    """
+    wanted = {name: handle_for(name) for name in file_names if name}
+    if not wanted:
+        return set()
+    sql = text(
+        f"SELECT picture_id FROM {_TABLE} "
+        f"WHERE lane = :lane AND persona_id = :persona_id "
+        f"AND picture_id = ANY(CAST(:ids AS text[]))"
+    )
+    async with get_session() as s:
+        rows = (
+            await s.execute(
+                sql,
+                {
+                    "lane": lane,
+                    "persona_id": persona_id,
+                    "ids": list(wanted.values()),
+                },
+            )
+        ).mappings().all()
+    found = {r["picture_id"] for r in rows}
+    return {name for name, picture_id in wanted.items() if picture_id in found}
+
+
 def _handle_of(picture: Picture) -> str:
-    return f"{_HANDLE_PREFIX}{picture.picture_id}"
+    return printed_handle(picture.file_name)
 
 
 def picture_id_in(what_she_copied: str) -> str:

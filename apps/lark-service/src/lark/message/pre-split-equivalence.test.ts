@@ -21,6 +21,8 @@
 
 import { describe, expect, it } from 'bun:test';
 
+import { inboundImageObject } from '@inner/shared/media';
+
 import { readLarkMessageEvent } from './read-message-event';
 import type { LarkBotLookup } from './mentions';
 import type { LarkMessageEvent } from './wire';
@@ -72,6 +74,26 @@ const DELIBERATE_DIVERGENCES: Record<string, Divergence> = {
 };
 
 /**
+ * 落盘之后**契约本身**长出来的那一格：图片项现在带着它在对象存储里的位置。
+ *
+ * 这不是解析行为的分歧（上面那两条才是）—— 它是通用契约加的一个字段，落盘那天还没
+ * 有它，而这份数据是历史快照、重新生成不了。所以比较之前把它补进期望值：除这一格
+ * 之外，逐字节的判据一条都没松。位置算得对不对由 inbound-message.test.ts 正面钉住。
+ */
+function withImageObjects(contract: unknown): unknown {
+    const c = contract as { content?: Array<Record<string, unknown>> };
+    if (!Array.isArray(c.content)) return contract;
+    return {
+        ...c,
+        content: c.content.map((item) =>
+            item.kind === 'image' && typeof item.key === 'string'
+                ? { ...item, object: inboundImageObject(item.key) }
+                : item,
+        ),
+    };
+}
+
+/**
  * 跟落盘时同一个口径：undefined 的字段视作不存在。
  *
  * 返回 unknown 是刻意的 —— 对面是从 JSON 读进来的数据，类型被放宽成了 string，
@@ -113,7 +135,7 @@ describe('pre-split parser output', () => {
         const divergence = DELIBERATE_DIVERGENCES[name];
 
         it('produces the pre-split generic contract byte for byte', () => {
-            expect(plain(reading.inbound)).toEqual(sample.contract as unknown);
+            expect(plain(reading.inbound)).toEqual(withImageObjects(sample.contract));
         });
 
         it('produces the pre-split Lark-native parts', () => {

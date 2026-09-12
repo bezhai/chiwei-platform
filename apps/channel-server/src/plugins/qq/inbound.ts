@@ -21,6 +21,7 @@ import type {
     InboundMessage,
     ThreadRef,
 } from '@inner/shared/channel';
+import { inboundImageObject } from '@inner/shared/media';
 
 export const QQ_CHANNEL = 'qq';
 
@@ -39,7 +40,14 @@ function verify(_raw: unknown): boolean {
 function attachmentToContentItem(att: CustomInboundAttachment): ContentItem {
     const type = att.contentType ?? '';
     if (type.startsWith('image/')) {
-        return { kind: 'image', key: att.url };
+        // key 是渠道内的引用 —— QQ 给的就是网关原样透传的公网地址。object 是这张图在
+        // 对象存储里的位置：识图管线拿同一个地址当 file_key 交给 tool-service（见
+        // image-pipeline.ts），管线按 `temp/<file_key>.jpg` 存。**位置由写入方说出来**，
+        // 读取侧不许从 key 派生（契约里 ContentItem.object 那段写了为什么）。
+        //
+        // 那条管线是 fire-and-forget 的，所以这一格说的是"它被存到哪儿"，不是"它此刻
+        // 一定在那儿" —— 取图那一步一律要真取一次。
+        return { kind: 'image', key: att.url, object: inboundImageObject(att.url) };
     }
     if (type.startsWith('audio/')) {
         return {

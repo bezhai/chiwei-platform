@@ -24,7 +24,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.neutral import Message, Role
+from app.agent.core import _normalise_tool_result
+from app.agent.neutral import Message, Role, ToolCall, ToolResult
 from app.agent.runtime_context import agent_context
 from app.living.happening import read_perceived_by
 from app.living.loose_ends import LooseEnd, list_open_loose_ends
@@ -73,6 +74,10 @@ class FakeMoment:
     """替身 life：这个 moment 她调了哪些工具是写死的，只有模型那一步是假的。
 
     走真工具 + 真 context 绑定，所以写库、派生 id、lane 隔离都是被真的验到的。
+
+    ``transcript_sink`` 按真 ReAct 循环的口径填：每个工具一条带 tool_call 的
+    ASSISTANT + 一条 TOOL 返回，最后是她那句话。连续上下文存的就是这个列表，填得
+    不像真的，验上下文的用例就是在验一个不存在的形状。
     """
 
     def __init__(self, *calls: tuple[str, dict], said: str = "继续") -> None:
@@ -83,10 +88,32 @@ class FakeMoment:
 
     async def run(self, messages, **kwargs):
         self.runs.append((messages, kwargs))
+        sink = kwargs.get("transcript_sink")
         with agent_context(kwargs["context"]):
-            for name, args in self.calls:
-                self.results.append(await _TOOLS[name].invoke(args))
-        return Message(role=Role.ASSISTANT, content=self.said)
+            for i, (name, args) in enumerate(self.calls):
+                result = await _TOOLS[name].invoke(args)
+                self.results.append(result)
+                if sink is None:
+                    continue
+                call_id = f"call-{i}"
+                sink.append(
+                    Message(
+                        role=Role.ASSISTANT,
+                        content="",
+                        tool_calls=[
+                            ToolCall(id=call_id, name=name, arguments=args)
+                        ],
+                    )
+                )
+                sink.append(
+                    _normalise_tool_result(
+                        ToolResult(tool_call_id=call_id, content=result)
+                    ).to_message()
+                )
+        reply = Message(role=Role.ASSISTANT, content=self.said)
+        if sink is not None:
+            sink.append(reply)
+        return reply
 
 
 @pytest.fixture
@@ -197,6 +224,28 @@ def test_keeping_something_in_mind_does_not_require_changing_what_she_is_doing()
     assert "still_on_my_mind" not in switch_to.definition.parameters["properties"], (
         "线头还绑在 switch_to 上 —— 她答「继续」的那些 moment 就永远记不住任何事"
     )
+
+
+def test_she_has_a_hand_that_ends_this_round():
+    """她自己说「就到这儿」的那只手 —— 不然这一轮什么时候结束只能由代码判。"""
+    from app.living.moment import stop_for_now
+
+    assert stop_for_now in MOMENT_TOOLS
+    assert stop_for_now.definition.parameters.get("properties", {}) == {}, (
+        "这只手有参数 —— 她只决定停，别的什么都不该问她"
+    )
+
+
+def test_ending_the_round_really_ends_it():
+    """名字要在终止工具那份名单上，不然调了它循环照样往下跑。
+
+    名单在 :mod:`app.agent.core`，改名不同步就是**静默**失效：她调了这只手，模型接着
+    被问下一轮，谁也不会报错。
+    """
+    from app.agent.core import _TERMINAL_TOOL_NAMES
+    from app.living.moment import stop_for_now
+
+    assert stop_for_now.name in _TERMINAL_TOOL_NAMES
 
 
 def test_no_tool_ever_asks_her_how_long_something_takes():
@@ -471,12 +520,16 @@ async def test_what_a_sister_said_can_be_kept_in_a_moment_that_carries_on(
     """**验收正条，也是整个实验最想验证的那条：跨 moment 因果延续。**
 
     绫奈跟她说「周末陪我去祭典」。她手上的书没放下（这个 moment 答「继续」，``switched``
-    是 False），但她心里记住了。接下来三个 moment 她什么都没做。第五个 moment 她读到的快照里那件事
-    还在，而且指得出是从哪个 moment 带过来的。
+    是 False），但她心里记住了。接下来她一个 moment 接一个 moment 什么都没做，跨过一个
+    清理点之后那件事还在她眼前，而且指得出是从哪个 moment 带过来的。
 
     「是否换事」不等于「是否记住」——把挂心事绑在 ``switch_to`` 上，这条感知在游标
     推进之后就永久消失了：她自己最近那十二条里只有她**自己**说做的，别人说的话不在
     里面，谁也救不回来。
+
+    **看的是她这一轮读到的全部，不只是最后那条刺激。** 每轮的刺激只送新发生的事；她挂
+    着什么是状态，跟着连续上下文走，清理那一下再重铺一次
+    （:mod:`app.living.continuity`）。
     """
     await _stand("akao", "家/客厅", "看书", _at(13))
     await _stand("ayana", "家/客厅", "待着", _at(13))
@@ -503,17 +556,15 @@ async def test_what_a_sister_said_can_be_kept_in_a_moment_that_carries_on(
     assert first.open_ends == 1
 
     quiet = stub_moment(said="继续")
-    for step in (1, 2, 3):
+    for step in range(1, 7):  # 14:10 一路到 15:10，跨过 15:00 那个清理点
         await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP * step)
 
-    snapshot = "\n".join(
-        m.content for m in quiet.runs[-1][0] if m.role is Role.USER
+    read = _all_she_read(quiet.runs[-1])
+    assert "绫奈问我周末陪不陪她去祭典" in read, (
+        "隔了六个「继续」她就忘了绫奈跟她说过什么 —— 这正是上一代的死法"
     )
-    assert "绫奈问我周末陪不陪她去祭典" in snapshot, (
-        "隔了三个「继续」她就忘了绫奈跟她说过什么 —— 这正是上一代的死法"
-    )
-    assert first.moment_id in snapshot, (
-        "快照说不出这件事是从哪个 moment 带过来的 —— 延续就成了没有证据的断言"
+    assert first.moment_id in read, (
+        "她眼前说不出这件事是从哪个 moment 带过来的 —— 延续就成了没有证据的断言"
     )
     still = await list_open_loose_ends(lane=LANE, persona_id="akao")
     assert still[0].opened_moment_id == first.moment_id
@@ -576,19 +627,103 @@ async def test_keeping_nothing_in_mind_is_a_thing_she_can_say(moment_db, stub_mo
 
 
 def _what_she_read(run) -> str:
-    """她这个 moment 真正读到的 USER 消息（快照 + 手机信封）。"""
-    return "\n".join(m.content for m in run[0] if m.role is Role.USER)
+    """这个 moment **新**摆到她眼前的那条 USER 消息（增量 + 手机信封）。
+
+    喂给模型的列表是"连续上下文 + 这一轮的刺激"，刺激永远是最后一条
+    （:func:`app.living.moment.run_moment`）。验"这个 moment 有没有**新**看到 X"只能
+    看这一条：把整个列表连起来读的话，前几个 moment 的输入也算进来，答案从此永远是 yes。
+    """
+    stimulus = run[0][-1]
+    assert stimulus.role is Role.USER, f"最后一条不是这一轮的刺激：{stimulus!r}"
+    return stimulus.content
+
+
+def _all_she_read(run) -> str:
+    """这个 moment 眼前的全部 —— 连续上下文加这一轮的刺激。
+
+    验"她还记得 X 吗"用这个：状态跟着上下文走，每轮的刺激只送新发生的事，全量状态由
+    清理时那根界桩重铺（:mod:`app.living.continuity`）。
+    """
+    return "\n".join(m.text() for m in run[0])
+
+
+@pytest.mark.integration
+async def test_a_moment_only_puts_what_is_new_in_front_of_her(
+    moment_db, stub_moment
+):
+    """醒来只送新发生的事：几点了、隔了多久、这期间别人做了什么、手机上来了什么。
+
+    她此刻的样子读一百遍字字一样，而且她上一轮已经读过、还在上下文里。每轮重发一份就
+    是把同一段话抄二十四遍。
+    """
+    await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(13))
+    await _stand("ayana", "家/客厅", "待着", _at(13))
+    stub_moment(("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台"]}))
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    from app.living.happening import record_happening
+
+    await record_happening(
+        lane=LANE,
+        happening_id="ay-new",
+        actor="ayana",
+        place="家/客厅",
+        kind=KIND_SPEECH,
+        content="姐，抹茶还有吗",
+        occurred_at=_at(14, 5),
+        audience=["akao"],
+    )
+    quiet = stub_moment(said="继续")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+
+    fresh = _what_she_read(quiet.runs[-1])
+    assert "姐，抹茶还有吗" in fresh, "这期间别人说的话没送到"
+    assert "离上一次过了 10 分钟" in fresh, f"没说隔了多久。拿到：\n{fresh}"
+    for repeated in ("看昨天拍的胶片", "洗的衣服还在阳台"):
+        assert repeated not in fresh, (
+            f"「{repeated}」每一轮都在重发 —— 它在上下文里已经有了"
+        )
+
+
+@pytest.mark.integration
+async def test_a_cold_start_still_tells_her_where_she_stands(
+    moment_db, stub_moment
+):
+    """上下文是空的那一轮（一天的开头、刚重启），全量状态必须还在她眼前。
+
+    它由清理时那根界桩给（:func:`app.living.continuity.trim_for_round`），不是由刺激
+    重新塞一份 —— 两个地方各渲染一份全量状态，迟早只改一处。
+    """
+    await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(13))
+    stub_moment(("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台"]}))
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    quiet = stub_moment(said="继续")
+    # 第二天：上下文按生活日切，这一轮读到的历史是空的
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14) + dt.timedelta(days=1))
+
+    read = _all_she_read(quiet.runs[-1])
+    assert "看昨天拍的胶片" in read, "冷启动那一轮她不知道自己在哪、在做什么"
+    assert "洗的衣服还在阳台" in read, "冷启动那一轮她不知道自己心里挂着什么"
+    assert _what_she_read(quiet.runs[-1]).count("看昨天拍的胶片") == 0, (
+        "刺激里又塞了一份全量状态 —— 全量只该有界桩一个出处"
+    )
 
 
 @pytest.mark.integration
 async def test_a_thing_she_hung_an_hour_on_comes_due_in_front_of_her(
     moment_db, stub_moment
 ):
-    """**验收正条**：她挂一件该在几点的事，下一个 moment 显示还没到，到点之后那个 moment 显示到点了。
+    """**验收正条**：她挂一件该在几点的事，还没到的时候它在她眼前，到点那一下当场说到了。
 
     她的安排不进 ``Upcoming``——那是世界的客观时刻表（快递到门口、天黑），到期交付
     一次就被消费掉。"我该去开的那个会"在她真的去之前不会因为时间过了就不算数，而且
     把她的安排塞进世界的账本等于 life 单方面替世界宣布将要发生什么。
+
+    **"到点了"必须在到点那一个 moment 就送到她手上**，不能等下一次重铺。挂着的清单跟
+    着状态走、清理时才重铺（默认一小时），所以"刚到点的"单独走每轮的增量
+    （:meth:`app.living.snapshot.MomentSnapshot.render_new`）；少了那一段，一件 15:30
+    该做的事要到 16:00 她才看得见。
     """
     await _stand("akao", "家/客厅", "看书", _at(13))
     stub_moment(
@@ -599,15 +734,18 @@ async def test_a_thing_she_hung_an_hour_on_comes_due_in_front_of_her(
 
     quiet = stub_moment(said="继续")
     await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
-    before = _what_she_read(quiet.runs[-1])
+    before = _all_she_read(quiet.runs[-1])
     assert "[2026-07-25 15:00] 家属谈话会" in before, (
         f"她眼前那条没带上该在几点。拿到：\n{before}"
     )
-    assert "还没到" in before
+    assert "到点了" not in before, f"还没到就说到了。拿到：\n{before}"
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(15, 10))
-    after = _what_she_read(quiet.runs[-1])
-    assert "到点了" in after, f"到点了她眼前没有任何变化。拿到：\n{after}"
+    await run_moment(lane=LANE, persona_id="akao", now=_at(15, 0))
+    due = _what_she_read(quiet.runs[-1])
+    assert "到点了" in due or "刚到点的" in due, (
+        f"到点那一下她眼前新来的东西里没有任何变化。拿到：\n{due}"
+    )
+    assert "[2026-07-25 15:00] 家属谈话会" in due
 
 
 @pytest.mark.integration
@@ -706,10 +844,8 @@ async def test_a_moment_only_sees_what_happened_since_the_last_one(
     second = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
     third = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP * 2)
 
-    second_input = "\n".join(
-        m.content for m in runner.runs[1][0] if m.role is Role.USER
-    )
-    third_input = "\n".join(m.content for m in runner.runs[2][0] if m.role is Role.USER)
+    second_input = _what_she_read(runner.runs[1])
+    third_input = _what_she_read(runner.runs[2])
     assert "你在看什么" in second_input
     assert "你在看什么" not in third_input, "游标没推进 —— 同一句话每次重读一遍"
     assert third.after_seq == second.next_seq
@@ -1081,8 +1217,20 @@ async def test_the_cursor_only_advances_when_the_record_lands(
     again = await run_moment(lane=LANE, persona_id="akao", now=_at(14, 1))
 
     assert again.after_seq == 0
-    retried_input = "\n".join(m.content for m in runner.runs[-1][0] if m.role is Role.USER)
+    retried_input = _what_she_read(runner.runs[-1])
     assert "你在看什么" in retried_input, "崩掉那个 moment 的感知被静默吞了"
+
+
+def test_one_wake_has_room_for_more_than_one_whole_thing():
+    """上限的含义是"她一口气能做几件事"，不是"一次思考多深"。
+
+    一件完整的事要三四次模型调用（拿到中间结果 → 用上它 → 说出来 / 做出来），所以
+    8 只够两件；而她 2026-09-11 实测那 12 只需要中间结果的工具一次都没用过。上限本身
+    不是节奏——节奏由 ``stop_for_now`` 交给她自己，这个数只是兜底。
+    """
+    from app.living.moment import _MOMENT_CFG
+
+    assert _MOMENT_CFG.recursion_limit == 12
 
 
 def test_the_moment_runs_on_the_life_model():
@@ -1297,6 +1445,7 @@ def test_the_life_column_shapes_are_pinned():
         "doing": "TEXT",
         "open_ends": "BIGINT",
         "said": "TEXT",
+        "context_ver": "BIGINT",
         "nudged": "BOOLEAN",
     }
 
@@ -1321,6 +1470,7 @@ def test_the_life_records_refuse_a_naive_instant():
             doing="",
             open_ends=0,
             said="继续",
+            context_ver=1,
         )
     with pytest.raises(ValidationError, match="时区"):
         LooseEnd(

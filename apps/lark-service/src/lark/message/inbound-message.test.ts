@@ -140,7 +140,7 @@ describe('inboundMessageOf', () => {
             };
             expect(project({ message_type: 'post', content: JSON.stringify(post) }).content).toEqual([
                 { kind: 'text', text: 'hello ' },
-                { kind: 'image', key: 'img_p' },
+                { kind: 'image', key: 'img_p', object: 'temp/img_p.jpg' },
                 { kind: 'text', text: 'second' },
             ]);
         });
@@ -149,11 +149,37 @@ describe('inboundMessageOf', () => {
             expect(
                 project({ message_type: 'image', content: JSON.stringify({ image_key: 'i' }) })
                     .content,
-            ).toEqual([{ kind: 'image', key: 'i' }]);
+            ).toEqual([{ kind: 'image', key: 'i', object: 'temp/i.jpg' }]);
             expect(
                 project({ message_type: 'sticker', content: JSON.stringify({ file_key: 's' }) })
                     .content,
             ).toEqual([{ kind: 'sticker', key: 's' }]);
+        });
+
+        // 读取侧不许从 key 派生这个位置（飞书那套命名套到 QQ 上当场就错），所以写入
+        // 侧必须说出来：这张图被交给 tool-service 的图片管线，管线存进
+        // `temp/<image_key>.jpg`。少了这一格，她翻到这条消息时那张图就是取不回来的。
+        it('says where each inbound image goes in object storage', () => {
+            const post = {
+                content: [
+                    [
+                        { tag: 'img', image_key: 'img_v3_aa' },
+                        { tag: 'img', image_key: 'img_v3_bb' },
+                    ],
+                ],
+            };
+            expect(project({ message_type: 'post', content: JSON.stringify(post) }).content).toEqual([
+                { kind: 'image', key: 'img_v3_aa', object: 'temp/img_v3_aa.jpg' },
+                { kind: 'image', key: 'img_v3_bb', object: 'temp/img_v3_bb.jpg' },
+            ]);
+        });
+
+        // 一条读得懂 JSON、却没有 image_key 的图片事件。位置无从谈起，但整条入站
+        // 不能因此断掉 —— 解析层对读不懂的消息一律退到占位串而不是抛，这一步同理。
+        it('leaves the object out when Lark sent no image key at all', () => {
+            const got = project({ message_type: 'image', content: '{}' });
+            expect(got.content).toHaveLength(1);
+            expect((got.content[0] as { object?: string }).object).toBeUndefined();
         });
 
         // 通用契约没有"视频"这一类，视频和文件都是可下载附件；lark_type 留在 meta
