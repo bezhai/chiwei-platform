@@ -1,7 +1,8 @@
 // 把赤尾说的那段话、连同她要带的图，变成飞书认得的东西。
 //
 // 输入是一段 markdown（模型写出来的原话）加一串图片句柄。输出是飞书的富文本
-// （PostContent）。三步，每步各自一个文件，这里只负责**把它们按正确的顺序串起来**。
+// （PostContent）**加上真的传上去了的那几张图**（落库那一步要它，见 LarkRendered）。
+// 三步，每步各自一个文件，这里只负责**把它们按正确的顺序串起来**。
 //
 //     1. mention   `@小明`  →  `<at user_id="on_xm">小明</at>`     群聊才做
 //     2. post      markdown  →  若干 md 行                          总是做
@@ -29,7 +30,7 @@
 
 import type { LarkMentionResolver } from './mentions';
 import { markdownToPostContent, type PostContent } from './post-content';
-import { larkPictureRows, type LarkPictureDeps } from './pictures';
+import { renderLarkPictures, type LarkPictureDeps } from './pictures';
 
 /** 渲染这一段话需要知道的外部坐标。两项都可缺省，缺了就跳过对应的那一步。 */
 export interface LarkRenderContext {
@@ -50,10 +51,31 @@ export interface LarkRenderContext {
     pictureFileNames?: readonly string[];
 }
 
+/** 这一段图真的到了飞书：句柄和飞书给的引用，一张图两个身份。 */
+export interface LarkDeliveredPicture {
+    /** 对象存储的永久句柄（出站消息里那个 picture_file_names 项）。 */
+    fileName: string;
+    /** 飞书给的 image_key —— 渠道内能解析回这张图的引用。 */
+    imageKey: string;
+}
+
+/** 渲染的产物：送给飞书的富文本，以及真的传上去了的那几张图。 */
+export interface LarkRendered {
+    post: PostContent;
+    /**
+     * **只有真的成了的那几张**，顺序与句柄一致；降级掉的不在里面。
+     *
+     * 落库那一步照着它记图片项。照请求里的清单记的话，会记下一张真人根本没收到的图 ——
+     * 她下一轮翻到它，会以为对方看过。而 image_key 只在这一步拿得到：渲染完只剩
+     * PostContent 里几个节点，跟句柄对不上号。
+     */
+    pictures: LarkDeliveredPicture[];
+}
+
 export type LarkPostRenderer = (
     markdown: string,
     ctx: LarkRenderContext,
-) => Promise<PostContent>;
+) => Promise<LarkRendered>;
 
 export interface LarkRenderDeps {
     /** 群 @ 解析。实现见 mentions.ts。 */
@@ -74,11 +96,18 @@ export function createLarkPostRenderer(deps: LarkRenderDeps): LarkPostRenderer {
         const post = markdownToPostContent(text);
 
         const fileNames = ctx.pictureFileNames ?? [];
-        if (fileNames.length === 0) return post;
+        if (fileNames.length === 0) return { post, pictures: [] };
 
         // 只追加，不改正文。一张图挂了在这里已经降级成一行文字（见 pictures.ts），
         // 所以这一步永远不抛，她那句话照常送到。
-        const pictures = await larkPictureRows(fileNames, deps.pictures);
-        return { ...post, content: [...post.content, ...pictures] };
+        const rendered = await renderLarkPictures(fileNames, deps.pictures);
+        return {
+            post: { ...post, content: [...post.content, ...rendered.map((p) => p.nodes)] },
+            // 降级掉的那几张在这里被滤掉：真人没收到的图不该进落库那一步。句柄按下标
+            // 配回去 —— renderLarkPictures 保证每个句柄恰好产出一项、顺序不变。
+            pictures: rendered.flatMap((p, at) =>
+                p.imageKey ? [{ fileName: fileNames[at]!, imageKey: p.imageKey }] : [],
+            ),
+        };
     };
 }

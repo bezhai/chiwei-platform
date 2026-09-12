@@ -11,20 +11,46 @@
 // 原生类型映射到这几类里，渠道专有结构/字段名只能留在各自 adapter 内，不上浮
 // 到契约层。
 //   text        纯文字
-//   image       图片，key 是 channel 内可解析回原图的引用
+//   image       图片，key 是 channel 内可解析回原图的引用；object 是这张图在对象
+//               存储里的位置（见下）
 //   audio       语音，key 是音频引用；meta 可带 duration 等
 //   file        文件/视频等"可下载附件"，key 是附件引用；meta 可带 file_name 等
 //   sticker     表情包，key 是表情引用
 //   unsupported channel 能识别但本通道不渲染的类型；text 是给人看的占位串，
 //               meta.original_type 保留原类型名，保证"收到了但没处理"可观测，
 //               堵死静默丢弃。
+// 图片项上的 object：这张图在对象存储里的位置（tool-service get-url 认的那个
+// file_name）。**写入方说了算，读取侧不许从 key 派生**——key 是渠道内的引用，每个
+// channel 各有各的形态（飞书是 image_key，QQ 是一个公网地址），按某一个渠道的命名
+// 约定去猜，换一个渠道当场就指到一个不存在的对象上，而且一句报错都没有。
+//
+// 缺席表示"这张图没有（还没有）进对象存储"，读取侧据此如实呈现为取不回来。写下来的
+// 位置也**不保证对象此刻就在那儿**：入站的缓存是旁路、可能还没跑完或者失败了，所以
+// 取图那一步一律要真取一次。
 export type ContentItem =
     | { kind: 'text'; text: string }
-    | { kind: 'image'; key: string; meta?: Record<string, unknown> }
+    | { kind: 'image'; key: string; object?: string; meta?: Record<string, unknown> }
     | { kind: 'audio'; key: string; meta?: Record<string, unknown> }
     | { kind: 'file'; key: string; meta?: Record<string, unknown> }
     | { kind: 'sticker'; key: string; meta?: Record<string, unknown> }
     | { kind: 'unsupported'; text: string; meta?: Record<string, unknown> };
+
+/**
+ * 一条消息给人看的那一行摘要（`common_message.content_text`）。
+ *
+ * 文字原样，其余每一项折成字面的 `[kind]`。**不是正文**——附件的文件名、图片的位置
+ * 都只在 content 里，读的一侧要认得出"发来的是什么"就得看 content。
+ *
+ * 入站和出站共用这一份：两边各写一遍的话，同一条带图的消息在两个方向上摘出来的样子
+ * 会不一样，而它们本该长成同一个样子。全空时返回空串，写不写这一列由调用方决定 ——
+ * 空串和"没有正文"在读的人眼里是两回事。
+ */
+export function summarizeContent(content: ContentItem[]): string {
+    return content
+        .map((item) => (item.kind === 'text' || item.kind === 'unsupported' ? item.text : `[${item.kind}]`))
+        .join('')
+        .trim();
+}
 
 // ---- 线程 / 关联引用 ----
 
@@ -205,6 +231,19 @@ function assertValidContentItem(item: unknown): asserts item is ContentItem {
             }
             return;
         case 'image':
+            if (typeof it.key !== 'string' || (it.key as string).length === 0) {
+                throw new Error(`ContentItem(${it.kind}).key must be a non-empty string`);
+            }
+            // 有这一格就必须指得到东西。空串在读取侧跟"没有这一格"读起来一样，但它让
+            // "写入方说过这张图在哪"这句话变成假的 —— 而整条取图链的前提正是它为真。
+            if (it.object !== undefined) {
+                if (typeof it.object !== 'string' || (it.object as string).trim().length === 0) {
+                    throw new Error(
+                        'ContentItem(image).object must be a non-empty string when present',
+                    );
+                }
+            }
+            return;
         case 'audio':
         case 'file':
         case 'sticker':

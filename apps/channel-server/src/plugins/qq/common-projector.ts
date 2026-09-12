@@ -10,7 +10,7 @@
 
 import { v7 as uuidv7 } from 'uuid';
 import AppDataSource from 'ormconfig';
-import type { ContentItem, InboundMessage } from '@inner/shared/channel';
+import { summarizeContent, type ContentItem, type InboundMessage } from '@inner/shared/channel';
 import { CommonConversation } from '@inner/shared/entities';
 import { CommonMessage } from '@inner/shared/entities';
 import { CommonUser } from '@inner/shared/entities';
@@ -73,17 +73,6 @@ export async function withQqInboundProjectionLock<T>(
             );
         }
     }
-}
-
-function textProjection(content: ContentItem[]): string | undefined {
-    const text = content
-        .map((item) => {
-            if (item.kind === 'text' || item.kind === 'unsupported') return item.text;
-            return `[${item.kind}]`;
-        })
-        .join('')
-        .trim();
-    return text.length > 0 ? text : undefined;
 }
 
 function primaryMessageType(content: ContentItem[]): string {
@@ -285,7 +274,8 @@ export async function prepareQqInboundProjection(
         senderDisplayName: inbound.senderName,
         mentionedUserIds,
         content: inbound.content,
-        contentText: textProjection(inbound.content),
+        // 空串和"没有正文"在读的人眼里是两回事，所以摘不出东西时这一列不写。
+        contentText: summarizeContent(inbound.content) || undefined,
         scope: inbound.conversation_scope,
     };
 }

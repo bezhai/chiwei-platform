@@ -10,7 +10,7 @@ export type {
     InboundMessage,
     ThreadRef,
 } from './contracts';
-export { assertValidInboundMessage, enforceDecision } from './contracts';
+export { assertValidInboundMessage, enforceDecision, summarizeContent } from './contracts';
 
 export type {
     ChannelPlugin,

@@ -35,10 +35,23 @@
 一张自己根本没看见的图往下编，而且一句报错都没有（这正是 2026-09-02 那条文件消息的
 形状，文件那条修了、图片这条到这次才修）。
 
-图不存在这个包里：入站那一步 lark-service 已经把每个 image_key 交给 tool-service 存
-进对象存储，命名是确定性的（``temp/<image_key>.jpg``），所以这边拿库里的 key 就算得出
-它在哪儿（:func:`picture_file_of`）。**但签得出地址不等于图在那儿** —— 签名是纯计算，
-所以每张都要真取一次才摆给她（:func:`viewable_picture`）。
+**她自己发过的图不摆到她眼前，只给一个标记和一串能取回来的句柄**（``[你发的图
+pic=…]``，:func:`_own_picture_label`），也不占展示名额。一页手机最多带十几张图，她自己
+刷的图跟真人刚发的图抢名额，抢输的那张真人的图就变成「这轮没给你看」；而她发的时候刚
+看过，跨过裁剪线之后她要的是"我发过一张图"这个事实加一个引用 —— 取不取回来是她自己的
+决定。**"是不是她发的"认 bot 不认 role**（见下面那段），否则姐姐发的每张图都会退化成
+一句"你发的图"。**句柄印出去之前先核一次她手上真有这张图**
+（:func:`app.living.pictures.hers_among`）：那一行是她发的保证不了这张图在当前
+lane/persona 下还在她手上 —— 泳道跟 prod 共用一个库，而查会话那条 SQL 没有 lane 条件。
+核不到的只给标记、不给句柄。
+
+图不存在这个包里：一张图在对象存储的哪儿，**由写入方在那一行上写着**（图片项的
+``object``，契约在 ``packages/ts-shared`` 的 ``ContentItem``）—— 入站投影写它、她开口
+时出站落库也写它，这边只读（:func:`picture_object_of`）。**绝不按渠道命名去猜**：飞书
+那套（``temp/<image_key>.jpg``）套到 QQ 上指向的地址根本不存在，而算错了一个字的报错都
+没有。代价是明知的：没有这一格的历史行，图如实显示为取不回来。**写着位置也不等于图在
+那儿** —— 入站的缓存是旁路、可能没跑完或者失败了，所以每张都要真取一次才摆给她
+（:func:`viewable_picture`）。
 
 **入站一步不碰 MQ。** 每一轮直接查她未读的 ``common_message``。两个理由：不跟旧引擎抢
 它那条入站队列；而且"投递只入信箱不唤醒"天然成立——消息本来就躺在库里，没有谁需要被
@@ -199,6 +212,7 @@ from app.data.queries.persona import (
 from app.data.session import get_session
 from app.infra.cst_time import CST, to_cst_dated
 from app.infra.image import image_client, image_is_reachable
+from app.living.pictures import hers_among, printed_handle
 from app.living.records import (
     MEDIUM_GROUP_CHAT,
     MEDIUM_PHONE,
@@ -772,6 +786,17 @@ _PICTURE_SHUT = "[图片：打不开]"
 # 只是这一轮没摆到她眼前。
 _PICTURE_HELD_BACK = "[图片：这轮没给你看]"
 
+# 她自己发出去的那张。**只给标记和句柄，不摆到她眼前**（见模块 docstring）：她发的
+# 时候刚看过，跨过裁剪线之后她要的是"我发过一张图"这个事实加一个能取回来的引用。
+# 句柄那串由 :func:`app.living.pictures.printed_handle` 印，跟看图那只手认的是同一个值。
+_OWN_PICTURE = "[你发的图 {handle}]"
+
+# 她自己发的、而这一刻指不出是哪张的那些。两种情况落在这一档：那一行没写位置（加这
+# 一格之前的行），或者写着位置、而当前 lane/persona 下她手上没有这张图（别条泳道上发
+# 的 —— 两条泳道共用一个库，查会话那条 SQL 没有 lane 条件）。说得出她发过图，指不出
+# 是哪张 —— **绝不印一串取不回来的句柄**：她照抄回去只会被告知"你手上没有这张图"。
+_OWN_PICTURE_UNKNOWN = "[你发的图：指不出是哪张]"
+
 
 def _content_items(row) -> list:
     """这一行的 ``content`` 解成 items 列表。
@@ -791,42 +816,52 @@ def _content_items(row) -> list:
     return items if isinstance(items, list) else []
 
 
-def picture_file_of(item: dict) -> str | None:
-    """一个图片项在对象存储里叫什么；算不出来时 ``None``。
+def picture_object_of(item: dict) -> str | None:
+    """一个图片项在对象存储里的位置；那一行没写就是 ``None``。
 
-    自己带着 ``tos_file`` 的直接用（少数 ``type``/``value`` 形状的历史行是这样），
-    其余按入站那侧的命名派生：lark-service 把正文里每个 image_key 交给 tool-service
-    的 ``/api/image-pipeline/process``（``apps/lark-service`` 的 ``attachments.ts``），
-    那条管线把压过的图存成 ``temp/<image_key>.jpg``（``apps/tool-service`` 的
-    ``image_pipeline.process_image``）。命名是确定性的，所以这边不用再记一份映射。
+    **只读写入方写下的那一格，绝不从 ``key`` 派生。** ``key`` 是渠道内的引用，每个渠道
+    各是各的形态（飞书是 image_key，QQ 是一个公网地址），按某一套命名去猜，换个渠道当场
+    就指到一个不存在的对象上、而且一句报错都没有。位置由写入方说了算：入站投影和出站
+    落库各自写它（``packages/ts-shared`` 的 ``ContentItem.object``）。
 
-    **派生出来的名字不保证真有那个对象。** 群没开"所有人可下载"时入站那一步整条跳过、
-    QQ 那侧的 ``key`` 根本不是 image_key 而是一个公网地址、``temp/`` 还有保留期。所以
-    取图那一步一律要验（:func:`viewable_picture`），签得出地址不算图在那儿。
+    没写就是**取不回来**，如实呈现（:data:`_PICTURE_SHUT`）。加这一格之前的历史行都落
+    在这一档 —— 这是明知的代价，换掉的是一个按渠道猜路径的洞。
+
+    **写着位置也不保证那个对象真在。** 入站的缓存是旁路、可能还没跑完或者失败了，
+    ``temp/`` 还有保留期。所以取图那一步一律要验（:func:`viewable_picture`）。
     """
-    stored = item.get("tos_file")
+    stored = item.get("object")
     if isinstance(stored, str) and stored.strip():
         return stored.strip()
-    key = item.get("key") or item.get("value")
-    if not isinstance(key, str) or not key.strip():
-        return None
-    return f"temp/{key.strip()}.jpg"
+    return None
 
 
-def _picture_files_in(row) -> list[str | None]:
-    """这条消息里每张图的对象名，按正文里出现的先后。
+@dataclass(frozen=True)
+class _Picture:
+    """这一眼里的一张图：它在对象存储的哪儿，以及它是不是她自己发出去的。
 
-    ``None`` 是"这一项是图、但算不出它存在哪儿"。这种项照样占正文里一个位置 ——
-    整条略过的话，她看到的就是一条没有那张图的消息，而对面明明发了。
+    ``where`` 是 ``None`` 表示"这一项是图、但那一行没说它在哪儿"。这种项照样占正文里
+    一个位置 —— 整条略过的话，她看到的就是一条没有那张图的消息，而对面明明发了。
+
+    ``hers`` 认的是 ``said_by_you``（bot 算出来的那一列），不是 ``role``：三姐妹的出站
+    全是 ``role='assistant'``，按 role 判会把姐姐发的每张图都说成"你发的图"。
     """
+
+    where: str | None
+    hers: bool
+
+
+def _pictures_in(row) -> list[_Picture]:
+    """这条消息里的每张图，按正文里出现的先后。"""
+    hers = bool(row["said_by_you"])
     return [
-        picture_file_of(item)
+        _Picture(where=picture_object_of(item), hers=hers)
         for item in _content_items(row)
         if (item.get("type") or item.get("kind")) == _PICTURE_KIND
     ]
 
 
-async def viewable_picture(tos_file: str | None) -> str | None:
+async def viewable_picture(where: str) -> str | None:
     """别人发来的一张图现在能不能看：能就交回一个下载得到的地址，不能就 ``None``。
 
     **签名和验对象是两件事，一件都不能省。** 签名是纯计算（tool-service 的
@@ -840,26 +875,27 @@ async def viewable_picture(tos_file: str | None) -> str | None:
 
     取图这条路单独拎出来，是为了以后"翻回去看别人发过的图"能原样用它 —— 那只手要的
     正是"给一个对象名，交回现在能不能看"。
+
+    **传进来的一定是个位置。** 那一行没写位置的图在上游就分出去了（:func:`_place_pictures`
+    直接写"打不开"），它连一个名额都不占，更不该在这儿花一次往返。
     """
-    if not tos_file:
-        return None
-    url = await image_client.get_url(tos_file)
+    url = await image_client.get_url(where)
     if url is None:
-        logger.info("看手机：%s 签不出地址，这张不摆给她", tos_file)
+        logger.info("看手机：%s 签不出地址，这张不摆给她", where)
         return None
     if not await image_is_reachable(url):
-        logger.info("看手机：%s 签出来了但取不到，这张不摆给她", tos_file)
+        logger.info("看手机：%s 签出来了但取不到，这张不摆给她", where)
         return None
     return url
 
 
-async def _open_pictures(files: list[str | None]) -> list[str | None]:
+async def _open_pictures(where: list[str]) -> list[str | None]:
     """一批图各自现在能不能看，顺序跟传进来的一样，取不到的位置是 ``None``。
 
     并发发出去：一张图卡住不该让她眼前其余几张跟着等
     （``fan_out_wait`` 默认 ``return_exceptions=True``，超时和异常都落回 ``None``）。
     """
-    outcomes = await fan_out_wait([viewable_picture(f) for f in files])
+    outcomes = await fan_out_wait([viewable_picture(one) for one in where])
     return [url if isinstance(url, str) else None for url in outcomes]
 
 
@@ -868,8 +904,7 @@ def _body_of(row, *, pictures: Iterator[str]) -> str:
 
     反过来（先信 ``content_text``）她就永远看不出附件是什么东西：那一列不是正文，
     是投影层拼给人扫一眼的摘要 —— 文本项原样，其余每一项一律拼成字面的 ``[kind]``
-    （lark-service ``inbound-projection.ts`` 的 ``summarize``、channel-server
-    ``common-projector.ts`` 的 ``textProjection``）。所以一条文件消息的
+    （两个渠道共用 ``packages/ts-shared`` 的 ``summarizeContent``）。所以一条文件消息的
     ``content_text`` 就是 ``"[file]"``，非空、于是 items 里的 ``meta.file_name``
     一眼都没被看过。实测（coe-living，2026-09-02 22:27）她看到「某某：[file]」，
     只知道有个东西、不知道是什么，回了一句「发来看看」—— 那文件早就发过来了。
@@ -877,7 +912,7 @@ def _body_of(row, *, pictures: Iterator[str]) -> str:
 
     ``pictures`` 是这一眼里每张图占位写什么，按显示顺序排好的一串
     （:func:`_page_text` 算的）。每碰到一个图片项取一个 —— 所以这个迭代器的顺序
-    必须跟 :func:`_picture_files_in` 数出来的完全一致，两边共用
+    必须跟 :func:`_pictures_in` 数出来的完全一致，两边共用
     :func:`_content_items` 就是为了钉住这一点。
 
     ``content_text`` 仍然留着当兜底 —— ``content`` 不是数组、或者一条 item 都渲染
@@ -978,33 +1013,75 @@ def _one_message(row, *, now: datetime, pictures: Iterator[str]) -> str:
     return f"<msg {' '.join(attrs)}>{esc(_body_of(row, pictures=pictures))}</msg>"
 
 
+def _own_picture_label(picture: _Picture, in_hand: set[str]) -> str:
+    """她自己发过的那张图在正文里的写法：一个标记，加一串能把它取回来的句柄。
+
+    ``in_hand`` 是这一眼里核过的、当前 lane/persona 下她手上真有的那几个位置
+    （:func:`app.living.pictures.hers_among`）。**不在里面的只给标记**：那一行是她发
+    的不代表这张图在她手上 —— 别条泳道发的图，切回来之后位置还在、记录不在。印一串
+    她取不回来的句柄比什么都不印更糟（:data:`_OWN_PICTURE_UNKNOWN`）。
+    """
+    if picture.where is None or picture.where not in in_hand:
+        return _OWN_PICTURE_UNKNOWN
+    return _OWN_PICTURE.format(handle=printed_handle(picture.where))
+
+
 def _place_pictures(
-    by_row: list[tuple[Any, list[str | None]]], urls: list[str | None]
+    by_row: list[tuple[Any, list[_Picture]]],
+    urls: list[str | None],
+    *,
+    in_hand: set[str],
 ) -> tuple[list[str], list[tuple[Any, int, str]]]:
     """给这一眼里的每张图定下正文里的写法，并挑出真摆得出来的那几张。
 
-    ``urls`` 是按显示顺序排在前 :data:`PHONE_PICTURE_LIMIT` 位的那几张各自的地址
-    （取不到的位置是 ``None``），再往后的根本没去取 —— 它们落在"这轮没给你看"那一档。
+    ``urls`` 是**别人发来的、那一行写着位置的**那些里，按显示顺序排在前
+    :data:`PHONE_PICTURE_LIMIT` 位的各自的地址（签不出来或者取不到的位置是 ``None``），
+    再往后的根本没去取 —— 它们落在"这轮没给你看"那一档。
+
+    **占名额的只有可能被摆到她眼前的那些。** 名额说的是"这一轮往她眼前塞几张图"，所以
+    两类图一张都不占：
+
+      * **她自己发的**（:func:`_own_picture_label`）—— 她发的时候刚看过，这里给的是
+        标记和句柄；
+      * **那一行没写位置的** —— 它根本不会被塞到她眼前，成本是零。
+
+    占了的后果都一样：抢输的那张真人的图变成"这轮没给你看"，而名额其实还空着。删掉
+    按渠道猜路径那条分支之后没有位置的行变多了（历史行一律没有），这笔浪费被放大。
+
+    **"有没有位置"先判，"排在第几位"后判。** 这两句话说的是两件事：「这轮没给你看」是
+    关于**这一轮**的（图在那儿，只是这次没摆出来，她据此可以等下一轮），而一行没有位置
+    的图下一轮、下下轮都取不回来。反过来判的话，她看到的就是一句假话，然后一直等一个
+    永远不来的东西。
 
     **编号只给真摆出来的那几张。** 取不到的也占一个号的话，她眼前会出现一个指不到任何
     东西的「[图片3]」；而那个号的全部用处就是把正文里的位置和后面附的那张图对起来。
 
     交回 ``(每张图在正文里的写法, [(哪条消息, 编号, 地址)])``，前者按显示顺序摊平成
-    一串，正是 :func:`_body_of` 要的那个顺序。
+    一串，正是 :func:`_body_of` 要的那个顺序 —— 不占名额的那些在这一串里同样各占一个
+    位置，不然一条消息在她眼里会少掉一张图，而对面明明发了。
     """
     labels: list[str] = []
     shown: list[tuple[Any, int, str]] = []
+    # 只数占名额的那些 —— ``urls`` 就是按它们排的（见 :func:`look_at_phone` 里的
+    # ``theirs``）。多数一个，后面每一张的地址都错位，而且是静默的。
     at = 0
-    for row, files in by_row:
-        for _ in files:
-            url = urls[at] if at < len(urls) else None
+    for row, pictures in by_row:
+        for picture in pictures:
+            if picture.hers:
+                labels.append(_own_picture_label(picture, in_hand))
+                continue
+            if picture.where is None:
+                labels.append(_PICTURE_SHUT)
+                continue
             if at >= len(urls):
                 labels.append(_PICTURE_HELD_BACK)
-            elif url is None:
-                labels.append(_PICTURE_SHUT)
             else:
-                shown.append((row, len(shown) + 1, url))
-                labels.append(f"[图片{len(shown)}]")
+                url = urls[at]
+                if url is None:
+                    labels.append(_PICTURE_SHUT)
+                else:
+                    shown.append((row, len(shown) + 1, url))
+                    labels.append(f"[图片{len(shown)}]")
             at += 1
     return labels, shown
 
@@ -1306,6 +1383,11 @@ async def look_at_phone(
     取不到的那些写成 `[图片：打不开]`——那是真的打不开，别照着它编内容；一次给的张数
     有个上限，超出的写成 `[图片：这轮没给你看]`。
 
+    **你自己发出去的图不会再摆一遍**，只在正文里留一个 `[你发的图 pic=…]`：你发的
+    时候看过了。想再看那张就把那串 pic=… 抄给 look_at_a_picture，想再发一次也是它。
+    写成 `[你发的图：指不出是哪张]` 的那些不在你手上那些图里了——只知道你发过一张，
+    找不回是哪张。
+
     你没调它的时候，消息照堆着、一条都不算你看过。
 
     Args:
@@ -1362,10 +1444,21 @@ async def look_at_phone(
     # 显示顺序（旧的在前）在这儿定一次，正文和取图都按它数 —— 两边各自 reverse 的话，
     # 编号和图错位是静默的：她照着编号说的每一句都指错了图。
     ordered = list(reversed(rows))
-    by_row = [(row, _picture_files_in(row)) for row in ordered]
-    files = [f for _, fs in by_row for f in fs]
+    by_row = [(row, _pictures_in(row)) for row in ordered]
+    # 去取的只有别人发来、而且那一行写着位置的那些 —— 名额也只数它们。她自己发的那几
+    # 张和没写位置的那几张都不占（各自的理由见 _place_pictures）。
+    theirs = [p.where for _, ps in by_row for p in ps if not p.hers and p.where]
+    # 她自己那几张印句柄之前先核一次：这一行是她发的，不代表这张图在**当前**
+    # lane/persona 下还在她手上（理由写在 :func:`app.living.pictures.hers_among` 上）。
+    in_hand = await hers_among(
+        lane=lane,
+        persona_id=persona_id,
+        file_names={p.where for _, ps in by_row for p in ps if p.hers and p.where},
+    )
     labels, pictures = _place_pictures(
-        by_row, await _open_pictures(files[:PHONE_PICTURE_LIMIT])
+        by_row,
+        await _open_pictures(theirs[:PHONE_PICTURE_LIMIT]),
+        in_hand=in_hand,
     )
     seen = _page_text(
         title=conv.title,

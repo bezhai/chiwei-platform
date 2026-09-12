@@ -106,7 +106,10 @@ describe('qqInbound.parse', () => {
         expect(msg.thread_ref).toEqual({ replyToChannelMessageId: 'quoted_qq_msg' });
     });
 
-    it('image attachment -> image content item keyed by url', () => {
+    // key 是渠道内的引用（QQ 给的就是一个公网地址），object 是这张图在对象存储里的
+    // 位置。两格各司其职：读取侧只认后者 —— 它自己按渠道口径去猜的那一天，飞书那套
+    // 命名套到这儿当场就错。
+    it('image attachment -> image content item keyed by url, saying where it is stored', () => {
         const msg = qqInbound.parse(
             directText({
                 text: '',
@@ -114,7 +117,15 @@ describe('qqInbound.parse', () => {
             }),
         ) as InboundMessage;
         assertValidInboundMessage(msg);
-        expect(msg.content).toEqual([{ kind: 'image', key: 'https://qq.cdn/a.png' }]);
+        expect(msg.content).toEqual([
+            {
+                kind: 'image',
+                key: 'https://qq.cdn/a.png',
+                // 识图管线拿这个地址当 file_key（见 image-pipeline.ts），所以对象名里
+                // 带着整个地址。名字长得怪，但它就是那张图真正被存进去的位置。
+                object: 'temp/https://qq.cdn/a.png.jpg',
+            },
+        ]);
     });
 
     it('text + image -> both content items, text first', () => {
@@ -126,7 +137,11 @@ describe('qqInbound.parse', () => {
         ) as InboundMessage;
         expect(msg.content).toEqual([
             { kind: 'text', text: '看图' },
-            { kind: 'image', key: 'https://qq.cdn/b.jpg' },
+            {
+                kind: 'image',
+                key: 'https://qq.cdn/b.jpg',
+                object: 'temp/https://qq.cdn/b.jpg.jpg',
+            },
         ]);
     });
 

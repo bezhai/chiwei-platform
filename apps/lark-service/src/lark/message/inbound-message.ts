@@ -7,6 +7,7 @@
 // addressing_hints 里。
 
 import type { AddressingHint, ContentItem, InboundMessage, ThreadRef } from '@inner/shared/channel';
+import { inboundImageObject } from '@inner/shared/media';
 
 import { LARK_CHANNEL } from '../channel';
 import type { LarkMentionIndex } from './mentions';
@@ -28,7 +29,21 @@ function toContentItem(segment: LarkSegment, mentions: LarkMentionIndex): Conten
         case 'text':
             return { kind: 'text', text: inlineText(segment, mentions) };
         case 'image':
-            return { kind: 'image', key: segment.imageKey };
+            // 位置由写入方说出来，读取侧不再按渠道命名去猜（契约里 ContentItem.object
+            // 那段写了为什么）。这张图由 attachments.ts 交给 tool-service 的图片管线，
+            // 管线把它存进 `temp/<image_key>.jpg`。
+            //
+            // **写下位置不等于对象此刻就在那儿**：那条缓存是旁路、异步、失败只记日志，
+            // 群没开"所有人可下载"时更是整条跳过。所以取图那一步一律要真取一次。
+            //
+            // 没有 image_key 的图片事件（JSON 读得懂、字段缺了）位置无从谈起，这一格
+            // 就缺席。解析层对读不懂的消息一律退到占位串而不抛，这里同理 —— 一条畸形
+            // 消息不该让整条入站断掉。
+            return {
+                kind: 'image',
+                key: segment.imageKey,
+                ...(segment.imageKey ? { object: inboundImageObject(segment.imageKey) } : {}),
+            };
         case 'sticker':
             return { kind: 'sticker', key: segment.fileKey };
         case 'video':

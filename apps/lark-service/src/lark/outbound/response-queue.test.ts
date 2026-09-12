@@ -442,7 +442,10 @@ function tracedDelivery(): {
         },
         render: async (markdown) => {
             note('render');
-            return [[{ tag: 'text', text: markdown }]] as unknown as PostContent;
+            return {
+                post: [[{ tag: 'text', text: markdown }]] as unknown as PostContent,
+                pictures: [],
+            };
         },
         botCommonUserId: (bot) => `cu_${bot}`,
         botDisplayName: () => undefined,

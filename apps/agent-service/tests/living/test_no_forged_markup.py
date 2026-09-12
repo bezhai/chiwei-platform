@@ -229,7 +229,7 @@ async def test_a_display_name_cannot_carry_markup_into_a_picture_caption(
         at=_at(21, 30),
         sender=_SOMEONE,
         sender_name=POISON,
-        items=[{"kind": "image", "key": "img_a"}],
+        items=[{"kind": "image", "key": "img_a", "object": "temp/img_a.jpg"}],
     )
 
     async with in_a_moment("akao", now=_at(21, 35)):

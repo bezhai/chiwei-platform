@@ -37,10 +37,12 @@
 // 幂等（从稳定键派生确定性 common_message_id + 发送前查重 + 强制该 id 落库），
 // 跨服务、动共享写路径，不在这一批里。
 
+import { summarizeContent, type ContentItem } from '@inner/shared/channel';
+
 import type { LarkChatResponse } from './chat-response';
 import type { LarkOutboundApi } from './lark-api';
 import type { LarkResponseLedger } from './ledger';
-import type { LarkPostRenderer } from './render';
+import type { LarkDeliveredPicture, LarkPostRenderer } from './render';
 import type { LarkOutboundStore } from './tables';
 
 /**
@@ -206,7 +208,7 @@ export async function deliverLarkChatResponse(
 
             const sendStartedAt = Date.now();
             spokeToLark = true;
-            const sentMessageId = await send(deps, response, target, partIndex, isProactive);
+            const sent = await send(deps, response, target, partIndex, isProactive);
             const sendSeconds = (Date.now() - sendStartedAt) / 1000;
             deps.observe('channel_send', sendSeconds);
 
@@ -215,7 +217,7 @@ export async function deliverLarkChatResponse(
                 deps,
                 response,
                 target,
-                sentMessageId,
+                sent,
                 botName,
                 partIndex,
                 isProactive,
@@ -330,8 +332,21 @@ async function omIdOrThrow(
     return omId;
 }
 
+/** 发完这一段之后，落库那一步要知道的事。 */
+interface LarkSentSegment {
+    /** 飞书给的新消息 id。**可能没有**，见 LarkSentMessage。 */
+    messageId: string | undefined;
+    /**
+     * 真的到了真人手上的那几张图。
+     *
+     * 渲染那一步对取不到 / 传不上去的图会降级成一行文字继续发（见 pictures.ts），所以
+     * "她请求发的"和"真人收到的"不是同一份清单。落库记的必须是后者。
+     */
+    pictures: LarkDeliveredPicture[];
+}
+
 /**
- * 发出去，返回飞书给的新消息 id（**可能没有**，见 LarkSentMessage）。
+ * 发出去，返回飞书给的新消息 id 和真的发出去了的那几张图。
  *
  * 三个分支：
  *
@@ -347,8 +362,8 @@ async function send(
     target: LarkTarget,
     partIndex: number,
     isProactive: boolean,
-): Promise<string | undefined> {
-    const post = await deps.render(response.content, {
+): Promise<LarkSentSegment> {
+    const { post, pictures } = await deps.render(response.content, {
         // 私聊不解析 @：里面没有第三个人，查一次群成员纯属白花一次查询。
         mentionChatId: response.is_p2p ? undefined : target.chatId,
         // 对象存储的永久句柄，原样往下递。签名只活 1.5 小时，所以现签在渲染那一步
@@ -356,22 +371,33 @@ async function send(
         pictureFileNames: response.picture_file_names,
     });
 
-    if (partIndex === 0 && !isProactive) {
-        return (await deps.api.replyPost(target.omId, post, false)).messageId;
-    }
-    return (await deps.api.sendPost(target.chatId, post)).messageId;
+    const sent =
+        partIndex === 0 && !isProactive
+            ? await deps.api.replyPost(target.omId, post, false)
+            : await deps.api.sendPost(target.chatId, post);
+    return { messageId: sent.messageId, pictures };
 }
 
 /**
  * 记下刚发出去的这条：公共层 assistant 行 ＋ 飞书映射，同一个事务。
  *
  * 返回落下去的 common_message_id —— 台账的 replies 指向它。
+ *
+ * ## content 跟入站长成同一个样子
+ *
+ * 正文一块，**真的发出去的**每张图各一块。图片块两格各司其职：`key` 是渠道内的引用
+ * （这次发送飞书给的 image_key），`object` 是它在对象存储里的位置（她手上那张图的永久
+ * 句柄，本来就是这条消息带着的）。少了图片块，她下一轮翻这条会话只看得到自己发了段
+ * 文字，看不到自己发过图，也没有任何能把那张图取回来的引用。
+ *
+ * **记的是真人收到的那几张，不是她请求发的那几张。** 渲染那一步对取不到 / 传不上去的
+ * 图会降级成一行文字继续发，照着请求落库就会记下一张对方根本没收到的图。
  */
 async function record(
     deps: LarkDeliveryDeps,
     response: LarkChatResponse,
     target: LarkTarget,
-    sentMessageId: string | undefined,
+    sent: LarkSentSegment,
     botName: string,
     partIndex: number,
     isProactive: boolean,
@@ -402,7 +428,7 @@ async function record(
     // 消失是另一回事。om_id 列是 varchar(256)，锚点最长是 `proactive:<uuid>` 的 46 个
     // 字符，加上 `_part{段序}` 远够不着上限。
     const sendAnchor = isProactive ? agentOutboundId || response.message_id : target.omId;
-    const omId = sentMessageId || `${sendAnchor}_part${partIndex}`;
+    const omId = sent.messageId || `${sendAnchor}_part${partIndex}`;
 
     // 重投时复用已经铸过的 id，别再铸一个 —— 同一条飞书消息在公共层有两个身份，
     // 引用链会从中间断开。
@@ -420,6 +446,17 @@ async function record(
     const eventTime = deps.now();
     const commonUserId = deps.botCommonUserId(botName);
 
+    const content: ContentItem[] = [
+        { kind: 'text', text: response.content },
+        ...sent.pictures.map(
+            (picture): ContentItem => ({
+                kind: 'image',
+                key: picture.imageKey,
+                object: picture.fileName,
+            }),
+        ),
+    ];
+
     await deps.store.atomically(async (tables) => {
         await tables.insertCommonMessage({
             common_message_id: commonMessageId,
@@ -428,8 +465,10 @@ async function record(
             common_user_id: commonUserId,
             sender_display_name: deps.botDisplayName(botName),
             role: 'assistant',
-            content: [{ kind: 'text', text: response.content }],
-            content_text: response.content,
+            content,
+            // 摘要跟入站同一份口径（文字原样、别的折成 `[kind]`），所以带图的出站行在
+            // 消息列表里也说得出"这条带了图"。
+            content_text: summarizeContent(content),
             common_root_message_id: commonRootMessageId ?? commonMessageId,
             common_reply_message_id: commonReplyMessageId,
             scope: response.is_p2p ? 'direct' : 'group',
