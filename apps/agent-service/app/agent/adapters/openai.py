@@ -24,11 +24,15 @@ the same Chat Completions path here; no separate Responses adapter is needed.
 
 **reasoning_content (deepseek)** is replicated from the legacy
 ``_ReasoningChatOpenAI`` onto neutral types:
-  - *out*: read ``message.reasoning_content`` from the raw response into
-    ``Message.reasoning_content``;
-  - *in*: re-inject an assistant message's ``reasoning_content`` into the wire
-    payload and normalise every message's content to a plain string (deepseek
-    rejects array / null content).
+  - *out*: read ``message.reasoning_content`` from the raw response and record
+    it as the thought part of the turn's sequence (``Message.turn_parts``);
+  - *in*: re-inject an assistant turn's thinking as ``reasoning_content`` on the
+    wire payload and normalise every message's content to a plain string
+    (deepseek rejects array / null content).
+
+This wire carries no signature of its own: nothing in the provider's contract
+says where a thought signature would go, so the sequence recorded here is
+unsigned and the adapter sends none.
 
 **Retry is off** (``max_retries=0``): retry is the Agent layer's sole
 responsibility (spec). **Proxy**: ``use_proxy`` providers get an httpx client
@@ -51,10 +55,10 @@ from app.agent.client import ModelClient, register_adapter
 from app.agent.neutral import (
     ContentBlock,
     Message,
-    Role,
     StreamChunk,
     ToolCall,
     ToolDef,
+    TurnPart,
     normalize_content_to_text,
 )
 from app.agent.trace import generation_span
@@ -215,22 +219,34 @@ class OpenAIAdapter(ModelClient):
             text_parts: list[str] = []
             usage: dict[str, int] | None = None
 
-            stream = await self._client.chat.completions.create(**request)
-            async for chunk in stream:
-                # the usage-only final chunk (no choices) carries token counts.
-                chunk_usage = _usage_details(chunk)
-                if chunk_usage is not None:
-                    usage = chunk_usage
-                async for out in self._chunk_to_neutral(chunk, assembler, text_parts):
-                    yield out
-
-            span.update(
-                output={
-                    "text": "".join(text_parts),
-                    "tool_calls": [tc.to_dict() for tc in assembler.finished()],
-                },
-                usage_details=usage,
-            )
+            try:
+                stream = await self._client.chat.completions.create(**request)
+                async for chunk in stream:
+                    # the usage-only final chunk (no choices) carries token
+                    # counts. A chunk whose usage object reported no field at
+                    # all is skipped rather than allowed to overwrite a real
+                    # tally with nothing.
+                    chunk_usage = _usage_details(chunk)
+                    if chunk_usage:
+                        usage = chunk_usage
+                    async for out in self._chunk_to_neutral(
+                        chunk, assembler, text_parts
+                    ):
+                        yield out
+            finally:
+                # However this stream ends — drained, raising, or abandoned by a
+                # consumer that stops pulling (render_chat_turn does exactly that
+                # on a content_filter chunk) — the tokens already reported are
+                # what the call cost. Recording only after a clean drain loses
+                # the whole call: no tokens, and no "the provider reported
+                # nothing" either.
+                span.update(
+                    output={
+                        "text": "".join(text_parts),
+                        "tool_calls": [tc.to_dict() for tc in assembler.finished()],
+                    },
+                    usage_details=usage,
+                )
 
     async def _chunk_to_neutral(
         self,
@@ -324,8 +340,10 @@ class OpenAIAdapter(ModelClient):
             out["tool_calls"] = [_tool_call_to_wire(tc) for tc in message.tool_calls]
         if message.tool_call_id is not None:
             out["tool_call_id"] = message.tool_call_id
-        if self._is_deepseek and message.reasoning_content is not None:
-            out["reasoning_content"] = message.reasoning_content
+        if self._is_deepseek:
+            thoughts = message.thought_text()
+            if thoughts:
+                out["reasoning_content"] = thoughts
 
         return out
 
@@ -334,6 +352,15 @@ class OpenAIAdapter(ModelClient):
     # ------------------------------------------------------------------
 
     def _from_wire_response(self, response: Any) -> Message:
+        """One chat-completions response → a neutral assistant turn.
+
+        Chat Completions has no sequence on the wire — reasoning, content and
+        tool calls arrive as three separate fields — so the turn's sequence is
+        recorded in the order this wire always implies: thinking, then what was
+        said, then the calls. It is recorded in full (not only when there is
+        reasoning) because an adapter that finds a sequence on a message sends
+        exactly that sequence, and a partial one would drop what it omits.
+        """
         choice = response.choices[0]
         wire_msg = choice.message
 
@@ -349,16 +376,16 @@ class OpenAIAdapter(ModelClient):
                 )
             )
 
-        reasoning = None
+        parts: list[TurnPart] = []
         if self._is_deepseek:
             reasoning = getattr(wire_msg, "reasoning_content", None)
+            if reasoning:
+                parts.append(TurnPart.from_thought(reasoning))
+        if content:
+            parts.append(TurnPart.from_text(content))
+        parts.extend(TurnPart.from_tool_call(tc) for tc in tool_calls)
 
-        return Message(
-            role=Role.ASSISTANT,
-            content=content,
-            reasoning_content=reasoning,
-            tool_calls=tool_calls,
-        )
+        return Message.from_model_turn(parts, tool_calls)
 
 
 # ---------------------------------------------------------------------------
@@ -544,22 +571,40 @@ def _model_parameters(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _usage_details(response: Any) -> dict[str, int] | None:
+    """What this response reported it cost, one key per dimension it reported.
+
+    A reported 0 is carried; a field the provider never sent leaves its key off
+    entirely. "Measured, and it was zero" and "the provider said nothing about
+    this" are different facts, and writing a 0 in for the second turns it into
+    the first — which is exactly how the cache hit rate came to read as a solid
+    0 for calls that carried no cache data at all. Every dimension follows that
+    one rule. ``None`` (no usage object at all) means the response reported
+    nothing whatsoever.
+
+    Two dimensions sit one level in and under different names than the gemini
+    adapter's: the prompt-cache hit (``prompt_tokens_details.cached_tokens``)
+    and the reasoning tokens this family reports only on the o-series
+    (``completion_tokens_details.reasoning_tokens``). Both come out under the
+    keys the gemini adapter uses — one name per dimension, or one of the two
+    lines reads 0 forever.
+    """
     usage = getattr(response, "usage", None)
     if usage is None:
         return None
-    details = {
-        "input": getattr(usage, "prompt_tokens", 0) or 0,
-        "output": getattr(usage, "completion_tokens", 0) or 0,
-        "total": getattr(usage, "total_tokens", 0) or 0,
-    }
-    # prompt-cache hit: cached_tokens lives under prompt_tokens_details. Surface
-    # it as a langfuse cache key so a hit is observable — only when non-zero, so
-    # a 0 doesn't read as "measured, missed" when the field is simply absent.
     ptd = getattr(usage, "prompt_tokens_details", None)
-    cached = getattr(ptd, "cached_tokens", 0) if ptd is not None else 0
-    if cached:
-        details["cache_read_input_tokens"] = cached
-    return details
+    ctd = getattr(usage, "completion_tokens_details", None)
+    reported = {
+        "input": getattr(usage, "prompt_tokens", None),
+        "output": getattr(usage, "completion_tokens", None),
+        "total": getattr(usage, "total_tokens", None),
+        "cache_read_input_tokens": (
+            getattr(ptd, "cached_tokens", None) if ptd is not None else None
+        ),
+        "thinking_tokens": (
+            getattr(ctd, "reasoning_tokens", None) if ctd is not None else None
+        ),
+    }
+    return {key: int(v) for key, v in reported.items() if v is not None}
 
 
 # ---------------------------------------------------------------------------

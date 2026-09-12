@@ -17,7 +17,7 @@ import logging
 
 import pytest
 
-from app.agent.neutral import ContentBlock, Message, Role, ToolCall
+from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.data.session import get_session
 from app.living.continuity import (
     CHECKPOINT_HEAD,
@@ -36,6 +36,13 @@ from app.living.whereabouts import note_whereabouts
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
 
 LANE = "coe-living"
+
+_PHONE_CALL = ToolCall(
+    id="c1",
+    name="look_at_phone",
+    arguments={"channel_id": "g1"},
+    signature=b"\x00\xff gemini-thought",
+)
 _CST = dt.timezone(dt.timedelta(hours=8))
 
 
@@ -160,18 +167,12 @@ async def test_what_another_process_wrote_comes_back_verbatim(moment_db):
     tid = f"{LANE}:akao:2026-07-25"
     written = [
         Message(role=Role.USER, content="你醒了"),
-        Message(
-            role=Role.ASSISTANT,
-            content="",
-            reasoning_content="想了想",
-            tool_calls=[
-                ToolCall(
-                    id="c1",
-                    name="look_at_phone",
-                    arguments={"channel_id": "g1"},
-                    signature=b"\x00\xff gemini-thought",
-                )
+        Message.from_model_turn(
+            [
+                TurnPart.from_thought("想了想", signature=b"\x01 thought-sig"),
+                TurnPart.from_tool_call(_PHONE_CALL),
             ],
+            [_PHONE_CALL],
         ),
         Message(
             role=Role.TOOL,
@@ -194,7 +195,8 @@ async def test_what_another_process_wrote_comes_back_verbatim(moment_db):
         Role.ASSISTANT,
     ]
     assistant = loaded[1]
-    assert assistant.reasoning_content == "想了想"
+    assert assistant.thought_text() == "想了想"
+    assert assistant.turn_parts[0].signature == b"\x01 thought-sig"
     assert assistant.tool_calls[0].signature == b"\x00\xff gemini-thought"
     assert loaded[2].content[1].image_url == {"url": "https://x/1.png"}
 

@@ -70,6 +70,8 @@ from app.agent.neutral import (
     ToolCall,
     ToolDef,
     ToolResult,
+    TurnPart,
+    TurnPartKind,
 )
 from app.agent.prompts import compile_to_messages, get_prompt
 from app.agent.runtime_context import agent_context
@@ -435,16 +437,44 @@ def _is_terminal_tool_call(call: ToolCall) -> bool:
     return call.name in _TERMINAL_TOOL_NAMES
 
 
+def _extend_turn(
+    parts: list[TurnPart], kind: TurnPartKind, chunk: StreamChunk
+) -> None:
+    """Fold one streamed chunk into the sequence the turn is being rebuilt as.
+
+    A stream cuts one wire part into many chunks, so consecutive chunks of the
+    same kind extend the part that is still open. Two things close it: the
+    adapter saying this chunk opens a new one (``starts_part`` — it read the
+    provider's parts and saw the boundary), and a signature arriving, which
+    belongs to the segment it rode in on. A chunk carrying neither text nor a
+    signature adds nothing.
+    """
+    text = (chunk.text if kind is TurnPartKind.TEXT else chunk.reasoning) or ""
+    if not text and chunk.signature is None:
+        return
+    open_part = parts[-1] if parts else None
+    if (
+        not chunk.starts_part
+        and open_part is not None
+        and open_part.kind is kind
+        and open_part.signature is None
+    ):
+        open_part.text += text
+        open_part.signature = chunk.signature
+        return
+    parts.append(TurnPart(kind=kind, text=text, signature=chunk.signature))
+
+
 def _carries_something(message: Message) -> bool:
     """Whether this message still says anything once it is replayed.
 
-    A message with no tool calls and no content reaches the provider as an
-    empty turn — the gemini adapter builds ``parts=[]`` for it and the request
-    is rejected before the model sees it. ``reasoning_content`` does not count:
-    no adapter replays it, so a turn carrying only thoughts is just as empty on
-    the wire.
+    A message with no tool calls, no turn sequence and no content reaches the
+    provider as an empty turn — the gemini adapter builds ``parts=[]`` for it
+    and the request is rejected before the model sees it. A turn that only
+    thought does carry something: the adapter replays its thought parts, and
+    their signatures are what the model continues its reasoning from.
     """
-    if message.tool_calls:
+    if message.tool_calls or message.turn_parts:
         return True
     content = message.content
     return bool(content.strip()) if isinstance(content, str) else bool(content)
@@ -456,10 +486,12 @@ def _is_empty_turn(text: str, tool_calls: list[ToolCall]) -> bool:
 
     ``text`` should be the turn's plain-text view (``Message.text()`` for
     ``_run_loop``, the joined streamed text parts for ``_stream_loop``) —
-    reasoning is deliberately excluded from both: a turn that only "thought"
-    (``reasoning_content`` set, or streamed ``reasoning`` chunks) without
-    producing text or a tool_call is still empty, because reasoning is never
-    surfaced to the user.
+    thinking is deliberately excluded from both: a turn that only thought
+    (thought parts on the turn, or streamed ``reasoning`` chunks) without
+    producing text or a tool_call is still empty *as an answer*, because
+    thinking is never surfaced to the user. This is a different question from
+    ``_carries_something`` (whether the turn is worth replaying), which counts
+    thoughts because the provider gets them back.
     """
     return not tool_calls and not text.strip()
 
@@ -481,38 +513,52 @@ async def _complete_turn(
     convo: list[Message],
     tool_defs: list[ToolDef] | None,
     call_kwargs: dict[str, Any],
-) -> Message:
-    """Call ``model.complete`` for one ReAct turn, transparently retrying THIS
-    SAME turn (identical ``convo``, nothing appended, no tools dispatched) up
-    to ``_EMPTY_TURN_MAX_ATTEMPTS`` times when the model returns an empty
-    result (see ``_is_empty_turn``).
+) -> list[Message]:
+    """Call ``model.complete`` for one ReAct turn and return every turn the
+    model produced for it, in order — the last one is this turn's result.
 
-    Exhausting the budget changes nothing about the return value or control
-    flow below this call — the caller gets whatever ``Message`` the last
-    attempt produced (possibly still empty), exactly as it always has. Only a
-    warning log marks the exhaustion, so this never introduces a new exception
-    type or return shape: raising here would let the exception escape into a
-    caller's broad ``except Exception``, which would turn it into user-facing
-    error text — exactly the "send something anyway" outcome this fix exists
-    to prevent.
+    A turn that answered nothing (see ``_is_empty_turn``) is retried, up to
+    ``_EMPTY_TURN_MAX_ATTEMPTS`` times, without dispatching tools or appending
+    anything else to the conversation. But an attempt that answered nothing may
+    still have *thought*, and those thoughts carry the signatures the model
+    continues its reasoning from — so the attempt is not thrown away: it is
+    appended to the transcript the retry is issued against, and handed back here
+    for the loop to store. Two different questions, kept apart: "did this turn
+    produce an answer" (retry, and ``_is_empty_turn`` stays blind to thinking on
+    purpose, so a turn that only thought is never handed to her as a reply) and
+    "is this turn worth replaying" (``_carries_something`` — an attempt that
+    came back with nothing at all is dropped, since an empty turn on the wire
+    makes the provider reject the next request).
+
+    Exhausting the budget changes nothing about the result or control flow below
+    this call — the caller gets whatever the last attempt produced (possibly
+    still empty), exactly as it always has. Only a warning log marks the
+    exhaustion, so this never introduces a new exception type or return shape:
+    raising here would let the exception escape into a caller's broad
+    ``except Exception``, which would turn it into user-facing error text —
+    exactly the "send something anyway" outcome this fix exists to prevent.
     """
-    last = await model.complete(convo, tools=tool_defs, **call_kwargs)
-    attempts = 1
-    while (
-        _is_empty_turn(last.text(), last.tool_calls)
-        and attempts < _EMPTY_TURN_MAX_ATTEMPTS
-    ):
+    working = list(convo)
+    kept: list[Message] = []
+    attempts = 0
+    while True:
         attempts += 1
-        last = await model.complete(convo, tools=tool_defs, **call_kwargs)
-    if _is_empty_turn(last.text(), last.tool_calls):
-        logger.warning(
-            "agent turn empty (no text, no tool_calls) after %d/%d attempts; "
-            "model=%s",
-            attempts,
-            _EMPTY_TURN_MAX_ATTEMPTS,
-            _model_label(model),
-        )
-    return last
+        last = await model.complete(working, tools=tool_defs, **call_kwargs)
+        if not _is_empty_turn(last.text(), last.tool_calls):
+            break
+        if attempts >= _EMPTY_TURN_MAX_ATTEMPTS:
+            logger.warning(
+                "agent turn empty (no text, no tool_calls) after %d/%d attempts; "
+                "model=%s",
+                attempts,
+                _EMPTY_TURN_MAX_ATTEMPTS,
+                _model_label(model),
+            )
+            break
+        if _carries_something(last):
+            kept.append(last)
+            working.append(last)
+    return [*kept, last]
 
 
 async def _run_loop(
@@ -543,8 +589,9 @@ async def _run_loop(
     assistant actually says.
 
     ``transcript_sink`` (when given) collects every message *this loop produces*
-    — each assistant turn (with tool calls) + each tool result message + the
-    final assistant reply — in order, so a caller keeping a continuous context
+    — each assistant turn (the ones with tool calls, and the ones that only
+    thought before being retried) + each tool result message + the final
+    assistant reply — in order, so a caller keeping a continuous context
     can store the round losslessly (the in-memory ``Message`` objects still carry
     provider blobs like ``ToolCall.signature``).
 
@@ -577,7 +624,16 @@ async def _run_loop(
     last: Message | None = None
 
     for _ in range(max(1, recursion_limit)):
-        last = await _complete_turn(model, convo, tool_defs, call_kwargs)
+        # An answerless attempt that thought comes back in front of the turn it
+        # was retried into; it is part of this round's transcript like any other
+        # model turn, and the next request replays its signatures.
+        *unanswered, last = await _complete_turn(
+            model, convo, tool_defs, call_kwargs
+        )
+        for turn in unanswered:
+            convo.append(turn)
+            if transcript_sink is not None:
+                transcript_sink.append(turn)
         if not last.tool_calls:
             if transcript_sink is not None:
                 transcript_sink.append(last)
@@ -625,15 +681,24 @@ async def _run_loop(
         recursion_limit,
         _model_label(model),
     )
-    closing = await _complete_turn(model, convo, None, call_kwargs)
+    *unanswered, closing = await _complete_turn(model, convo, None, call_kwargs)
+    for turn in unanswered:
+        if transcript_sink is not None:
+            transcript_sink.append(turn)
     if closing.tool_calls:
         # A model handed an empty tool list can still ask for a tool. Keeping
         # that call would leave the stored context with a call nothing answers,
-        # and the provider rejects the whole next request over it.
+        # and the provider rejects the whole next request over it. The rest of
+        # the turn stays — its thoughts and their signatures are what the next
+        # request replays — minus the parts pointing at the dropped calls.
         closing = Message(
             role=Role.ASSISTANT,
             content=closing.content,
-            reasoning_content=closing.reasoning_content,
+            turn_parts=[
+                p
+                for p in closing.turn_parts
+                if p.kind is not TurnPartKind.TOOL_CALL
+            ],
         )
     # Stripping the call can leave a turn with nothing on it — the closing call
     # came back with no text and only that call. Storing it would put an empty
@@ -679,14 +744,15 @@ async def _stream_loop(
 
     for _ in range(max(1, recursion_limit)):
         text_parts: list[str] = []
-        reasoning_parts: list[str] = []
+        turn_parts: list[TurnPart] = []
         turn_calls: list[ToolCall] = []
         attempts = 0
 
         # Transparent single-turn retry, mirroring _complete_turn: an empty
         # attempt (no text, no tool_calls — see _is_empty_turn) re-issues
-        # model.stream for the SAME turn (identical convo, nothing appended,
-        # no tools dispatched) instead of being accepted as the final turn.
+        # model.stream for the SAME turn (no tools dispatched) instead of being
+        # accepted as the final turn. What that attempt thought does ride into
+        # the retry — see below.
         # Chunks are still forwarded live as they arrive (yield below) so a
         # normal turn keeps true token-by-token streaming — only once this
         # attempt's stream is fully drained do we know whether it was empty.
@@ -699,16 +765,19 @@ async def _stream_loop(
         while True:
             attempts += 1
             text_parts = []
-            reasoning_parts = []
+            turn_parts = []
             turn_calls = []
 
             async for chunk in model.stream(convo, tools=tool_defs, **call_kwargs):
                 if chunk.text:
                     text_parts.append(chunk.text)
-                if chunk.reasoning:
-                    reasoning_parts.append(chunk.reasoning)
+                if chunk.text is not None:
+                    _extend_turn(turn_parts, TurnPartKind.TEXT, chunk)
+                if chunk.reasoning is not None:
+                    _extend_turn(turn_parts, TurnPartKind.THOUGHT, chunk)
                 if chunk.tool_call is not None:
                     turn_calls.append(chunk.tool_call)
+                    turn_parts.append(TurnPart.from_tool_call(chunk.tool_call))
                 yield chunk
 
             empty_turn = _is_empty_turn("".join(text_parts), turn_calls)
@@ -722,20 +791,23 @@ async def _stream_loop(
                         _model_label(model),
                     )
                 break
+            # This attempt answered nothing, but what it thought is kept: the
+            # retry streams against a transcript that has it, so the signatures
+            # the model was reasoning from go back with it. An attempt that came
+            # back with nothing at all is dropped — on the wire it is an empty
+            # turn, which the provider rejects the whole request over.
+            unanswered = Message.from_model_turn(turn_parts, turn_calls)
+            if _carries_something(unanswered):
+                convo.append(unanswered)
 
         if not turn_calls:
             return
 
         # rebuild the assistant turn from what we streamed, then dispatch. The
-        # reasoning is carried back too (mirroring _run_loop, where the Message
-        # returned by model.complete already holds reasoning_content) so the
-        # next turn's context doesn't lose the model's thoughts.
-        assistant_turn = Message(
-            role=Role.ASSISTANT,
-            content="".join(text_parts),
-            reasoning_content="".join(reasoning_parts) or None,
-            tool_calls=list(turn_calls),
-        )
+        # sequence is carried back too (mirroring _run_loop, where the Message
+        # returned by model.complete already holds it) so the next request
+        # replays the thoughts and signatures this turn produced.
+        assistant_turn = Message.from_model_turn(turn_parts, turn_calls)
         convo.append(assistant_turn)
         for call in turn_calls:
             with _tool_span(name=call.name, input=call.arguments) as span:

@@ -28,7 +28,7 @@ from app.agent.client import (
     build_model_client,
     register_adapter,
 )
-from app.agent.neutral import Message, Role, StreamChunk, ToolDef
+from app.agent.neutral import Message, Role, StreamChunk, ToolDef, TurnPart
 
 
 # ---------------------------------------------------------------------------
@@ -91,10 +91,12 @@ class _FakeAdapter(ModelClient):
         **kwargs: object,
     ) -> Message:
         last = messages[-1]
-        return Message(
-            role=Role.ASSISTANT,
-            content=f"echo:{last.text()}",
-            reasoning_content="faked-reasoning",
+        return Message.from_model_turn(
+            [
+                TurnPart.from_thought("faked-reasoning"),
+                TurnPart.from_text(f"echo:{last.text()}"),
+            ],
+            [],
         )
 
     async def stream(
@@ -173,7 +175,7 @@ async def test_complete_returns_neutral_assistant_message(_fake_provider):
     out = await client.complete([Message(role=Role.USER, content="ping")])
     assert out.role == Role.ASSISTANT
     assert out.content == "echo:ping"
-    assert out.reasoning_content == "faked-reasoning"
+    assert out.thought_text() == "faked-reasoning"
 
 
 async def test_stream_yields_neutral_chunks(_fake_provider):

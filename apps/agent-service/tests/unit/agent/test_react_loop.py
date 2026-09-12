@@ -33,6 +33,7 @@ from app.agent.neutral import (
     StreamChunk,
     ToolCall,
     ToolDef,
+    TurnPart,
 )
 from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
@@ -736,21 +737,68 @@ class TestStreamLoop:
         tr_chunk = next(c for c in out if c.tool_result is not None)
         assert isinstance(tr_chunk.tool_result.content, str)
 
-    async def test_stream_rebuilt_assistant_turn_carries_reasoning(self):
+    async def test_stream_rebuilt_assistant_turn_keeps_the_streamed_sequence(self):
         # On a tool-call turn the streaming loop rebuilds the assistant turn it
-        # feeds back into the transcript. That rebuild must carry the streamed
-        # reasoning (reasoning chunks accumulated → Message.reasoning_content),
+        # feeds back into the transcript. The rebuild is hand-copied field by
+        # field, so it must carry the sequence that was streamed — thoughts,
+        # text and calls in order, each with the signature that rode on it —
         # mirroring the non-streaming _run_loop where model.complete returns a
-        # Message that already carries reasoning_content. Dropping it loses the
-        # model's thoughts from the next turn's context.
+        # Message that already holds it. Dropping it hands the next request a
+        # turn the model never produced.
         _, _stream_loop = _import_loops()
         call = ToolCall(id="c1", name="echo_tool", arguments={"text": "x"})
         fake = FakeModelClient(
             stream_script=[
                 [
                     StreamChunk(reasoning="let me "),
-                    StreamChunk(reasoning="think"),
-                    StreamChunk(text="calling tool"),
+                    StreamChunk(reasoning="think", signature=b"sig-t1"),
+                    StreamChunk(text="calling tool", signature=b"sig-x"),
+                    StreamChunk(tool_call=call),
+                    StreamChunk(reasoning="one more", signature=b"sig-t2"),
+                    StreamChunk(finish_reason="tool_calls"),
+                ],
+                [StreamChunk(text="done"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        async for _ in _stream_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[echo_tool],
+            context=None,
+            recursion_limit=12,
+        ):
+            pass
+        # the assistant turn fed into the SECOND model call carries the sequence
+        second_msgs = fake.stream_calls[1][0]
+        assistant_turn = next(
+            m for m in second_msgs if m.role == Role.ASSISTANT and m.tool_calls
+        )
+        assert assistant_turn.thought_text() == "let me thinkone more"
+        assert assistant_turn.text() == "calling tool"
+        assert [str(p.kind) for p in assistant_turn.turn_parts] == [
+            "thought",
+            "text",
+            "tool_call",
+            "thought",
+        ]
+        assert [p.signature for p in assistant_turn.turn_parts] == [
+            b"sig-t1",
+            b"sig-x",
+            None,
+            b"sig-t2",
+        ]
+        assert assistant_turn.turn_parts[2].call_id == "c1"
+
+    async def test_stream_keeps_a_signed_segment_apart_from_the_next_one(self):
+        """一段签名一段：签名落下之后，后面的字属于下一段，不能并进它。"""
+        _, _stream_loop = _import_loops()
+        call = ToolCall(id="c1", name="echo_tool", arguments={"text": "x"})
+        fake = FakeModelClient(
+            stream_script=[
+                [
+                    StreamChunk(text="第一段", signature=b"sig-1"),
+                    StreamChunk(text="第二"),
+                    StreamChunk(text="段"),
                     StreamChunk(tool_call=call),
                     StreamChunk(finish_reason="tool_calls"),
                 ],
@@ -765,13 +813,15 @@ class TestStreamLoop:
             recursion_limit=12,
         ):
             pass
-        # the assistant turn fed into the SECOND model call carries reasoning
-        second_msgs = fake.stream_calls[1][0]
         assistant_turn = next(
-            m for m in second_msgs if m.role == Role.ASSISTANT and m.tool_calls
+            m
+            for m in fake.stream_calls[1][0]
+            if m.role == Role.ASSISTANT and m.tool_calls
         )
-        assert assistant_turn.reasoning_content == "let me think"
-        assert assistant_turn.text() == "calling tool"
+        text_parts = [p for p in assistant_turn.turn_parts if str(p.kind) == "text"]
+        assert [p.text for p in text_parts] == ["第一段", "第二段"]
+        assert [p.signature for p in text_parts] == [b"sig-1", None]
+        assert assistant_turn.text() == "第一段第二段"
 
 
 # ---------------------------------------------------------------------------
@@ -1075,12 +1125,12 @@ class TestRunLoopEmptyTurnRetry:
         assert len(fake.complete_calls) == 2
 
     async def test_reasoning_only_completion_counts_as_empty_and_is_retried(self):
-        # text blank, no tool_calls, but reasoning_content set — reasoning is
-        # never surfaced to the user, so a "thought but didn't answer" turn
+        # text blank, no tool_calls, but a thought part on the turn — thinking
+        # is never surfaced to the user, so a "thought but didn't answer" turn
         # must still count as empty and get retried.
         _run_loop, _ = _import_loops()
-        reasoning_only = Message(
-            role=Role.ASSISTANT, content="", reasoning_content="thinking..."
+        reasoning_only = Message.from_model_turn(
+            [TurnPart.from_thought("thinking...")], []
         )
         fake = FakeModelClient(
             complete_script=[
@@ -1362,3 +1412,319 @@ class TestStreamLoopEmptyTurnRetry:
         # render_chat_turn stops here — it never calls __anext__() again.
         await gen.aclose()
         assert len(fake.stream_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# a model turn's sequence has to live through the loop's own rebuilds
+#
+# Two places hand-copy an assistant turn field by field (the closing call with
+# its tool calls stripped, and the streamed turn rebuilt from chunks) and one
+# decides whether a turn carries anything at all. All three used to be written
+# on the premise that nothing replays a model's thoughts — now they do replay,
+# and a turn that only thought is not empty on the wire any more.
+# ---------------------------------------------------------------------------
+
+
+class TestTheTurnSequenceSurvivesTheLoop:
+    async def test_the_closing_turn_keeps_its_thoughts_and_drops_the_stripped_call(
+        self,
+    ):
+        _run_loop, _ = _import_loops()
+        looping = Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c", name="echo_tool", arguments={"text": "x"})],
+        )
+        still_calling_call = ToolCall(
+            id="z", name="echo_tool", arguments={"text": "y"}, signature=b"sig-z"
+        )
+        still_calling = Message.from_model_turn(
+            [
+                TurnPart.from_thought("再查一下", signature=b"sig-t"),
+                TurnPart.from_text("还想再查一下"),
+                TurnPart.from_tool_call(still_calling_call),
+            ],
+            [still_calling_call],
+        )
+        fake = FakeModelClient(complete_script=[looping] * 2 + [still_calling])
+        sink: list[Message] = []
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[echo_tool],
+            context=None,
+            recursion_limit=2,
+            transcript_sink=sink,
+        )
+
+        assert result.tool_calls == []
+        assert result.thought_text() == "再查一下"
+        assert [str(p.kind) for p in result.turn_parts] == ["thought", "text"]
+        assert result.turn_parts[0].signature == b"sig-t"
+        assert sink[-1] is result
+
+    async def test_a_turn_that_only_thought_is_stored(self):
+        """只有思考的那一轮在 wire 上不再是空的 —— 它带着签名，得留在上下文里。"""
+        _run_loop, _ = _import_loops()
+        looping = Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c", name="echo_tool", arguments={"text": "x"})],
+        )
+        only_thought = Message.from_model_turn(
+            [TurnPart.from_thought("想了想", signature=b"sig-t")], []
+        )
+        fake = FakeModelClient(
+            complete_script=[looping] * 2 + [only_thought, only_thought, only_thought]
+        )
+        sink: list[Message] = []
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[echo_tool],
+            context=None,
+            recursion_limit=2,
+            transcript_sink=sink,
+        )
+
+        stored = sink[-1]
+        assert stored.thought_text() == "想了想"
+        assert stored.turn_parts[0].signature == b"sig-t"
+
+    async def test_a_part_boundary_the_adapter_saw_is_not_folded_away(self):
+        """adapter 说这块开的是新的一段，就不能并进上一段里去。
+
+        段边界只有 adapter 知道（它遍历的是 wire 上的 parts）。上层拿到的是一串
+        chunk，靠"签名封段"去猜的结果是：同一块里回来的两段被并成一段，签名跟着
+        搬到并起来的那一段上。
+        """
+        _, _stream_loop = _import_loops()
+        call = ToolCall(id="c1", name="echo_tool", arguments={"text": "x"})
+        fake = FakeModelClient(
+            stream_script=[
+                [
+                    StreamChunk(reasoning="先想一下"),
+                    StreamChunk(
+                        reasoning="再想一下", signature=b"sig-B", starts_part=True
+                    ),
+                    StreamChunk(tool_call=call),
+                    StreamChunk(finish_reason="tool_calls"),
+                ],
+                [StreamChunk(text="好了"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        async for _ in _stream_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[echo_tool],
+            context=None,
+            recursion_limit=4,
+        ):
+            pass
+
+        replayed = fake.stream_calls[1][0][1]
+        assert [(str(p.kind), p.text, p.signature) for p in replayed.turn_parts] == [
+            ("thought", "先想一下", None),
+            ("thought", "再想一下", b"sig-B"),
+            ("tool_call", "", None),
+        ]
+
+    async def test_a_part_cut_across_chunks_is_still_one_part(self):
+        """边界不知道的时候（一段被切成多块）仍然并成一段，签名在收尾那块上。"""
+        _, _stream_loop = _import_loops()
+        call = ToolCall(id="c1", name="echo_tool", arguments={"text": "x"})
+        fake = FakeModelClient(
+            stream_script=[
+                [
+                    StreamChunk(reasoning="先想"),
+                    StreamChunk(reasoning="一下", signature=b"sig-A"),
+                    StreamChunk(tool_call=call),
+                    StreamChunk(finish_reason="tool_calls"),
+                ],
+                [StreamChunk(text="好了"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        async for _ in _stream_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[echo_tool],
+            context=None,
+            recursion_limit=4,
+        ):
+            pass
+
+        replayed = fake.stream_calls[1][0][1]
+        assert [(str(p.kind), p.text, p.signature) for p in replayed.turn_parts] == [
+            ("thought", "先想一下", b"sig-A"),
+            ("tool_call", "", None),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# 被重试掉的那一轮想过的东西
+#
+# "这一轮有没有形成最终回答"和"这一轮要不要留下来回放"是两个问题。前者决定重不重
+# 试（思考不算回答，只想不答的一轮不能当成回复发出去），后者决定它进不进上下文
+# ——它带着签名，模型正是从那里接着推理的。压成一个判断的结果是：只想不答的那一轮
+# 被重试掉之后，思考和签名一起消失。
+# ---------------------------------------------------------------------------
+
+
+class TestARetriedTurnKeepsWhatItThought:
+    async def test_the_thoughts_of_a_retried_attempt_reach_the_retry(self):
+        _run_loop, _ = _import_loops()
+        thought_only = Message.from_model_turn(
+            [TurnPart.from_thought("想了想", signature=b"sig-a")], []
+        )
+        fake = FakeModelClient(
+            complete_script=[thought_only, Message(role=Role.ASSISTANT, content="好")]
+        )
+        sink: list[Message] = []
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+            transcript_sink=sink,
+        )
+
+        assert result.text() == "好"
+        assert len(fake.complete_calls) == 2
+        replayed = fake.complete_calls[1][0][-1]
+        assert replayed.thought_text() == "想了想"
+        assert replayed.turn_parts[0].signature == b"sig-a"
+        # 存下来的转录里也在——下一轮请求同样要把它发回去
+        assert [m.thought_text() for m in sink] == ["想了想", ""]
+        assert sink[0].turn_parts[0].signature == b"sig-a"
+        assert sink[-1] is result
+
+    async def test_every_attempt_that_only_thought_is_kept_and_none_is_the_reply(
+        self,
+    ):
+        _run_loop, _ = _import_loops()
+
+        def _thought(text: str, sig: bytes) -> Message:
+            return Message.from_model_turn(
+                [TurnPart.from_thought(text, signature=sig)], []
+            )
+
+        fake = FakeModelClient(
+            complete_script=[
+                _thought("一", b"sig-1"),
+                _thought("二", b"sig-2"),
+                _thought("三", b"sig-3"),
+            ]
+        )
+        sink: list[Message] = []
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+            transcript_sink=sink,
+        )
+
+        # 重试照旧跑满：只想不答不是回答，所以它没被当成最终回复发出去
+        assert len(fake.complete_calls) == 3
+        assert result.text() == ""
+        assert not result.tool_calls
+        # 三轮的思考和签名都留在上下文里，每一次重试也都带着前面那些
+        assert [len(msgs) for msgs, _ in fake.complete_calls] == [1, 2, 3]
+        assert [m.thought_text() for m in sink] == ["一", "二", "三"]
+        assert [m.turn_parts[0].signature for m in sink] == [
+            b"sig-1",
+            b"sig-2",
+            b"sig-3",
+        ]
+
+    async def test_an_attempt_that_carried_nothing_is_not_sent_back(self):
+        """什么都没带回来的那一轮不能进重试的请求：wire 上它就是一个空 turn。"""
+        _run_loop, _ = _import_loops()
+        empty = Message(role=Role.ASSISTANT, content="")
+        fake = FakeModelClient(complete_script=[empty, empty, empty])
+        sink: list[Message] = []
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[],
+            context=None,
+            recursion_limit=12,
+            transcript_sink=sink,
+        )
+
+        assert len(fake.complete_calls) == 3
+        assert [len(msgs) for msgs, _ in fake.complete_calls] == [1, 1, 1]
+
+    async def test_the_closing_call_keeps_what_its_retried_attempt_thought(self):
+        """收尾那一次调用（预算用完、不带工具）也走同一条重试路径。"""
+        _run_loop, _ = _import_loops()
+        looping = Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c", name="echo_tool", arguments={"text": "x"})],
+        )
+        thought_only = Message.from_model_turn(
+            [TurnPart.from_thought("收尾前想了想", signature=b"sig-c")], []
+        )
+        fake = FakeModelClient(
+            complete_script=[
+                looping,
+                looping,
+                thought_only,
+                Message(role=Role.ASSISTANT, content="收尾"),
+            ]
+        )
+        sink: list[Message] = []
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[echo_tool],
+            context=None,
+            recursion_limit=2,
+            transcript_sink=sink,
+        )
+
+        assert result.text() == "收尾"
+        assert sink[-2].thought_text() == "收尾前想了想"
+        assert sink[-2].turn_parts[0].signature == b"sig-c"
+        assert sink[-1] is result
+
+    async def test_the_stream_keeps_what_a_retried_attempt_thought(self):
+        _, _stream_loop = _import_loops()
+        call = ToolCall(id="c1", name="echo_tool", arguments={"text": "x"})
+        fake = FakeModelClient(
+            stream_script=[
+                [
+                    StreamChunk(reasoning="想了想", signature=b"sig-a"),
+                    StreamChunk(finish_reason="stop"),
+                ],
+                [
+                    StreamChunk(tool_call=call),
+                    StreamChunk(finish_reason="tool_calls"),
+                ],
+                [StreamChunk(text="好了"), StreamChunk(finish_reason="stop")],
+            ]
+        )
+        out = [
+            c
+            async for c in _stream_loop(
+                fake,
+                messages=[Message(role=Role.USER, content="go")],
+                tools=[echo_tool],
+                context=None,
+                recursion_limit=4,
+            )
+        ]
+
+        assert "".join(c.text or "" for c in out) == "好了"
+        assert len(fake.stream_calls) == 3
+        # 重试那一次带着刚想过的东西
+        retried = fake.stream_calls[1][0][-1]
+        assert retried.thought_text() == "想了想"
+        assert retried.turn_parts[0].signature == b"sig-a"
+        # 再往后它仍然在上下文里，排在工具那一轮前面
+        third = fake.stream_calls[2][0]
+        assert third[1].turn_parts[0].signature == b"sig-a"
+        assert third[2].tool_calls == [call]

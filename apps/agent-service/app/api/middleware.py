@@ -1,7 +1,8 @@
 """HTTP middleware — metrics (Prometheus) + header context (trace/lane).
 
-Merges the old ``middleware/metrics.py``, ``middleware/chat_metrics.py``,
-and ``utils/middlewares/trace.py`` into one module.
+Merges the old ``middleware/metrics.py`` and ``utils/middlewares/trace.py``
+into one module. ``/metrics`` is served from here, so every metric registered
+anywhere in the process is exposed through this middleware.
 """
 
 from __future__ import annotations
@@ -36,37 +37,6 @@ REQUEST_DURATION = Histogram(
 REQUEST_IN_FLIGHT = Gauge(
     "http_requests_in_flight",
     "Number of HTTP requests currently being processed",
-)
-
-# ---------------------------------------------------------------------------
-# Prometheus — chat pipeline metrics
-# ---------------------------------------------------------------------------
-
-PIPELINE_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120)
-
-CHAT_PIPELINE_DURATION = Histogram(
-    "chat_pipeline_duration_seconds",
-    "Duration of each chat pipeline stage",
-    ["stage"],
-    buckets=PIPELINE_BUCKETS,
-)
-
-CHAT_FIRST_TOKEN = Histogram(
-    "chat_first_token_seconds",
-    "Time to first token from agent stream",
-    buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30),
-)
-
-CHAT_TOKENS = Counter(
-    "chat_tokens_total",
-    "Token count by type",
-    ["type"],
-)
-
-CHAT_QUEUE_WAIT = Histogram(
-    "chat_queue_wait_seconds",
-    "Time spent waiting in an MQ queue",
-    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
 )
 
 

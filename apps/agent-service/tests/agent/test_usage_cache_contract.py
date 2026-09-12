@@ -13,6 +13,14 @@ adapter 的 ``usage_details`` → :func:`app.agent.trace.collect_usage` 的本�
 
 两边都是"命中的这部分已经计在 prompt token 里"，所以 ``cache_read_input_tokens``
 永远是 ``input`` 的子集，不能再加进 input 或 total。
+
+**报了 0 和没报是两件事。** provider 给了这个字段、值是 0 =「量过、这次没中」；字段
+根本不在 = 这次调用没有缓存数据可谈。压成同一个形状（0 就把键丢掉）之后，命中率的
+分母里有多少次调用根本没测过就看不出来了 —— 先前误判"命中恒为 0"正是这么来的。
+所以：provider 报了就带着（哪怕是 0），没报才不带。
+
+思考 token 同一条规则：gemini 报 ``thoughts_token_count``，openai 家族报
+``completion_tokens_details.reasoning_tokens``，两边都落到 ``thinking_tokens``。
 """
 
 from __future__ import annotations
@@ -28,26 +36,51 @@ from app.agent.trace import collect_usage
 pytestmark = pytest.mark.unit
 
 CACHE_KEY = "cache_read_input_tokens"
+THINKING_KEY = "thinking_tokens"
 
 
-def _openai_response(prompt: int, completion: int, cached: int) -> SimpleNamespace:
+def _total(prompt: int | None, completion: int | None) -> int | None:
+    if prompt is None and completion is None:
+        return None
+    return (prompt or 0) + (completion or 0)
+
+
+def _openai_response(
+    prompt: int | None,
+    completion: int | None,
+    cached: int | None,
+    thinking: int | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         usage=SimpleNamespace(
             prompt_tokens=prompt,
             completion_tokens=completion,
-            total_tokens=prompt + completion,
-            prompt_tokens_details=SimpleNamespace(cached_tokens=cached),
+            total_tokens=_total(prompt, completion),
+            prompt_tokens_details=(
+                None if cached is None else SimpleNamespace(cached_tokens=cached)
+            ),
+            completion_tokens_details=(
+                None
+                if thinking is None
+                else SimpleNamespace(reasoning_tokens=thinking)
+            ),
         )
     )
 
 
-def _gemini_response(prompt: int, completion: int, cached: int) -> SimpleNamespace:
+def _gemini_response(
+    prompt: int | None,
+    completion: int | None,
+    cached: int | None,
+    thinking: int | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         usage_metadata=SimpleNamespace(
             prompt_token_count=prompt,
             candidates_token_count=completion,
-            total_token_count=prompt + completion,
+            total_token_count=_total(prompt, completion),
             cached_content_token_count=cached,
+            thoughts_token_count=thinking,
         )
     )
 
@@ -73,13 +106,61 @@ def test_a_cache_hit_is_counted_inside_input_not_on_top_of_it():
         assert details[CACHE_KEY] <= details["input"]
 
 
-def test_a_miss_leaves_the_cache_key_off_on_both_sides():
-    """没命中就不报这个键：0 会读成"量过、没中"，而 provider 那边其实是没给数。"""
+def test_a_reported_miss_is_a_zero_not_a_missing_key():
+    """provider 说了"这次 0"就记 0 —— 丢掉它等于把"量过没中"说成"没量过"。"""
     openai = openai_usage_details(_openai_response(50, 7, 0))
     gemini = gemini_usage_details(_gemini_response(50, 7, 0))
 
+    assert openai[CACHE_KEY] == 0
+    assert gemini[CACHE_KEY] == 0
+
+
+def test_a_provider_that_said_nothing_leaves_the_cache_key_off():
+    """字段根本不在：这次调用没有缓存数据可谈，键就不能出现。"""
+    openai = openai_usage_details(_openai_response(50, 7, None))
+    gemini = gemini_usage_details(_gemini_response(50, 7, None))
+
     assert CACHE_KEY not in openai
     assert CACHE_KEY not in gemini
+
+
+def test_both_adapters_name_the_thinking_tokens_the_same_thing():
+    openai = openai_usage_details(_openai_response(50, 7, None, thinking=120))
+    gemini = gemini_usage_details(_gemini_response(50, 7, None, thinking=120))
+
+    assert openai[THINKING_KEY] == 120
+    assert gemini[THINKING_KEY] == 120
+
+
+def test_an_input_or_output_the_provider_never_reported_is_absent_not_a_zero():
+    """四个维度同一条规则：没报就是没报，不能写成 0。
+
+    写成 0 之后，指标上读到的是「量过、这次 0」，而真相是这次调用根本没有这项数据 ——
+    正是缓存那一维踩过的坑，input / output 没有理由例外。
+    """
+    openai = openai_usage_details(_openai_response(None, None, None))
+    gemini = gemini_usage_details(_gemini_response(None, None, None))
+
+    for details in (openai, gemini):
+        assert "input" not in details
+        assert "output" not in details
+
+
+def test_a_reported_zero_input_or_output_is_still_a_zero():
+    openai = openai_usage_details(_openai_response(0, 0, None))
+    gemini = gemini_usage_details(_gemini_response(0, 0, None))
+
+    for details in (openai, gemini):
+        assert details["input"] == 0
+        assert details["output"] == 0
+
+
+def test_thinking_tokens_are_absent_when_the_provider_never_reported_them():
+    openai = openai_usage_details(_openai_response(50, 7, None))
+    gemini = gemini_usage_details(_gemini_response(50, 7, None))
+
+    assert THINKING_KEY not in openai
+    assert THINKING_KEY not in gemini
 
 
 def test_the_round_accumulator_counts_the_key_the_adapters_report():

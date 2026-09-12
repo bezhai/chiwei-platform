@@ -21,7 +21,7 @@ import logging
 
 import pytest
 
-from app.agent.neutral import ContentBlock, Message, Role, ToolCall
+from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.living.continuity import (
     CHECKPOINT_HEAD,
     DEFAULT_TRIM_POLICY,
@@ -645,6 +645,16 @@ def test_the_token_estimate_errs_high():
     assert estimate_tokens([with_picture]) > estimate_tokens([text_only]) + 250
 
 
+def test_what_she_thought_counts_toward_the_estimate():
+    """思考正文占的是同一份 context —— 不算进去就低估了上下文体积。"""
+    spoken = Message.from_model_turn([TurnPart.from_text("嗯")], [])
+    with_thinking = Message.from_model_turn(
+        [TurnPart.from_thought("想" * 300, signature=b"sig"), TurnPart.from_text("嗯")],
+        [],
+    )
+    assert estimate_tokens([with_thinking]) >= estimate_tokens([spoken]) + 300
+
+
 # ---------------------------------------------------------------------------
 # 七 · 阈值全部走动态配置
 # ---------------------------------------------------------------------------
@@ -813,3 +823,139 @@ async def test_a_picture_is_gone_before_she_is_fed_again(
     fed = runner.runs[0][0]
     assert _images(fed) == [], "过期地址在模型看到它之前就该没了"
     assert "pic=abc123" in "".join(_texts(fed)), "句柄还得在"
+
+
+# ---------------------------------------------------------------------------
+# 九 · 这一轮的思考和签名在裁剪里的去留
+#
+# 一轮是一个整体：那一轮的调用带着签名，思考也带着签名，模型靠它们一起恢复这一轮的
+# 推理。所以思考不单独设一档 —— 要么整轮留着（签名一个不少），要么整轮走（不留下
+# 一段没有主的思考）。
+# ---------------------------------------------------------------------------
+
+
+def _thought_round(call_id: str, name: str, thought: str, sig: bytes) -> Message:
+    call = ToolCall(id=call_id, name=name, arguments={}, signature=b"call-" + sig)
+    return Message.from_model_turn(
+        [
+            TurnPart.from_thought(thought, signature=sig),
+            TurnPart.from_tool_call(call),
+        ],
+        [call],
+    )
+
+
+def test_a_round_that_survives_keeps_its_signatures():
+    """载荷换掉了，这一轮的思考和签名还在 —— 换的是工具返回，不是这一轮本身。"""
+    ctx = _play(
+        start=_at(13, 0),
+        until=_at(15, 10),
+        events={
+            "13:10": [
+                _thought_round("s1", "search_online", "查一下这个", b"sig-13"),
+                _result("s1", "网页正文，很长很长"),
+                _said("看完了"),
+            ]
+        },
+    )
+
+    turn = next(m for m in ctx if m.turn_parts)
+    assert turn.thought_text() == "查一下这个"
+    assert turn.turn_parts[0].signature == b"sig-13"
+    assert turn.tool_calls[0].signature == b"call-sig-13"
+    # 同一轮的载荷已经过期换掉了，证明它确实跨过了素材那道线
+    assert MATERIAL_TRIMMED in _texts(ctx)
+
+
+def test_a_round_that_goes_leaves_no_thought_behind():
+    """整组过期整组走：不会留下一段没有调用、没有结果的思考。"""
+    ctx = _play(
+        start=_at(13, 0),
+        until=_at(18, 10),
+        events={
+            "13:10": [
+                _thought_round("s1", "search_online", "查一下这个", b"sig-13"),
+                _result("s1", "网页正文"),
+                _said("看完了"),
+            ]
+        },
+    )
+
+    assert [m for m in ctx if m.thought_text()] == []
+    assert MATERIAL_TRIMMED not in _texts(ctx)
+
+
+def test_a_round_with_a_picture_keeps_its_signatures():
+    """带图那一轮：图换成一句话之后，这一轮的签名一个不少。"""
+    call = ToolCall(
+        id="p1", name="look_at_a_picture", arguments={}, signature=b"call-pic"
+    )
+    ctx = _play(
+        start=_at(13, 0),
+        until=_at(14, 10),
+        events={
+            "13:10": [
+                Message.from_model_turn(
+                    [
+                        TurnPart.from_thought("看看这张", signature=b"sig-pic"),
+                        TurnPart.from_tool_call(call),
+                    ],
+                    [call],
+                ),
+                _result(
+                    "p1",
+                    [
+                        ContentBlock.from_text("pic=abc"),
+                        ContentBlock.from_image_url({"url": _PNG}),
+                    ],
+                ),
+            ]
+        },
+    )
+
+    turn = next(m for m in ctx if m.turn_parts)
+    assert turn.turn_parts[0].signature == b"sig-pic"
+    assert turn.tool_calls[0].signature == b"call-pic"
+    assert any(PICTURE_TRIMMED in t for t in _texts(ctx))
+    assert _images(ctx) == []
+
+
+def test_trimming_the_pictures_changes_the_content_and_nothing_else():
+    """契约是「只换 content」，按 Message 的字段清单逐个比对。
+
+    逐字段手抄的重建每加一个字段就多一次漏抄的机会，而漏抄的症状只落在带图那些轮次
+    上：下一轮请求被 provider 拒掉。这条按 ``dataclasses.fields`` 比，以后加的字段
+    自动在里面。
+    """
+    from dataclasses import fields
+
+    from app.living.continuity import _without_pictures
+
+    call = ToolCall(
+        id="p1",
+        name="look_at_a_picture",
+        arguments={"pic": "abc"},
+        signature=b"call-pic",
+    )
+    message = Message(
+        role=Role.ASSISTANT,
+        content=[
+            ContentBlock.from_text("pic=abc"),
+            ContentBlock.from_image_url({"url": _PNG}),
+        ],
+        tool_calls=[call],
+        tool_call_id="tc-1",
+        turn_parts=[
+            TurnPart.from_thought("看看这张", signature=b"sig-pic"),
+            TurnPart.from_tool_call(call),
+        ],
+    )
+
+    trimmed = _without_pictures(message)
+
+    assert [b.type for b in trimmed.content] == ["text", "text"]
+    assert trimmed.content[1].text == PICTURE_TRIMMED
+    for f in fields(Message):
+        if f.name == "content":
+            continue
+        assert getattr(trimmed, f.name) == getattr(message, f.name), f.name

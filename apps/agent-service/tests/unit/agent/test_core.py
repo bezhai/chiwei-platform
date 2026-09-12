@@ -1296,7 +1296,7 @@ class TestTranscriptSink:
     else the round is persisted (``app.living.continuity``)."""
 
     async def test_sink_collects_tool_call_result_and_final_reply(self, mock_deps):
-        from app.agent.neutral import ToolCall
+        from app.agent.neutral import ToolCall, TurnPart
         from app.agent.tooling import tool
 
         @tool
@@ -1308,20 +1308,20 @@ class TestTranscriptSink:
             """
             return "餐桌已收"
 
+        call = ToolCall(
+            id="c1",
+            name="world_tool",
+            arguments={"x": "v"},
+            signature=b"\x00\xffsig",
+        )
         mock_deps["model"].complete = AsyncMock(
             side_effect=[
-                Message(
-                    role=Role.ASSISTANT,
-                    content="",
-                    reasoning_content="想了想",
-                    tool_calls=[
-                        ToolCall(
-                            id="c1",
-                            name="world_tool",
-                            arguments={"x": "v"},
-                            signature=b"\x00\xffsig",
-                        )
+                Message.from_model_turn(
+                    [
+                        TurnPart.from_thought("想了想", signature=b"\x01sig-t"),
+                        TurnPart.from_tool_call(call),
                     ],
+                    [call],
                 ),
                 Message(role=Role.ASSISTANT, content="这一轮做完了"),
             ]
@@ -1338,7 +1338,8 @@ class TestTranscriptSink:
         assert [m.role for m in produced] == [Role.ASSISTANT, Role.TOOL, Role.ASSISTANT]
         # lossless: the provider-private blob is still on the in-memory message.
         assert produced[0].tool_calls[0].signature == b"\x00\xffsig"
-        assert produced[0].reasoning_content == "想了想"
+        assert produced[0].thought_text() == "想了想"
+        assert produced[0].turn_parts[0].signature == b"\x01sig-t"
         assert produced[1].text() == "餐桌已收"
         assert produced[1].tool_call_id == "c1"
 

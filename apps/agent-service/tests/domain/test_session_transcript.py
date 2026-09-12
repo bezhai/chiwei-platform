@@ -23,7 +23,13 @@ import logging
 
 import pytest
 
-from app.agent.neutral import ContentBlock, Message, Role, ToolCall
+from app.agent.neutral import (
+    ContentBlock,
+    Message,
+    Role,
+    ToolCall,
+    TurnPart,
+)
 from app.agent.session import load_session, replace_session
 from app.domain.session_transcript import SessionTranscript
 from app.runtime.persist import insert_append, select_all_versions, select_latest
@@ -120,23 +126,21 @@ async def test_a_stale_expected_version_writes_nothing(session_db):
 # Lossless replay: tool calls + results + provider signature survive PG
 # ---------------------------------------------------------------------------
 
+_EMIT_CALL = ToolCall(
+    id="c1",
+    name="emit_event",
+    arguments={"summary": "晚餐进行中"},
+    signature=b"\x00\xff gemini-thought",
+)
+
 
 async def test_tool_call_and_result_with_signature_survive_roundtrip(session_db):
     sid = "coe-x:akao:2026-06-04"
     msgs = [
         Message(role=Role.USER, content="该广播了吗"),
-        Message(
-            role=Role.ASSISTANT,
-            content="",
-            reasoning_content="想了想",
-            tool_calls=[
-                ToolCall(
-                    id="c1",
-                    name="emit_event",
-                    arguments={"summary": "晚餐进行中"},
-                    signature=b"\x00\xff gemini-thought",
-                )
-            ],
+        Message.from_model_turn(
+            [TurnPart.from_tool_call(_EMIT_CALL)],
+            [_EMIT_CALL],
         ),
         Message(role=Role.TOOL, content="emitted", tool_call_id="c1"),
     ]
@@ -144,7 +148,6 @@ async def test_tool_call_and_result_with_signature_survive_roundtrip(session_db)
 
     loaded, _ver = await load_session(sid)
     assistant = next(m for m in loaded if m.role == Role.ASSISTANT)
-    assert assistant.reasoning_content == "想了想"
     assert assistant.tool_calls[0].arguments == {"summary": "晚餐进行中"}
     # the provider-private blob must NOT be lost — replay would drift otherwise.
     assert assistant.tool_calls[0].signature == b"\x00\xff gemini-thought"
@@ -243,3 +246,41 @@ async def test_different_actors_same_lane_do_not_cross_contaminate(session_db):
 
     assert (await load_session(akao_sid))[0][0].text() == "akao 的"
     assert (await load_session(world_sid))[0][0].text() == "world 的"
+
+
+async def test_a_model_turn_comes_back_in_the_order_it_went_in(session_db):
+    """跨进程读回来的这一轮，段序、边界和每段的签名跟写下去的逐字节一致。
+
+    这是"下一轮把她上一轮的思考原样发回 wire"的前提：转录是她跨进程的唯一载体，
+    这里丢一段，provider 那边就收到一个残缺的 turn。
+    """
+    sid = "coe-x:akao:2026-06-05"
+    call = ToolCall(id="c9", name="say", arguments={"words": "嗯"}, signature=b"s9")
+    parts = [
+        TurnPart.from_thought("先想一下", signature=b"\x01thought-a"),
+        TurnPart.from_text("嗯"),
+        TurnPart.from_tool_call(call),
+        TurnPart.from_thought("再想一下", signature=b"\x02thought-b"),
+    ]
+    await replace_session(
+        sid, [Message.from_model_turn(parts, [call])], expected_ver=0
+    )
+
+    loaded, _ver = await load_session(sid)
+    stored = loaded[0].turn_parts
+
+    assert [str(p.kind) for p in stored] == [
+        "thought",
+        "text",
+        "tool_call",
+        "thought",
+    ]
+    assert [p.text for p in stored] == ["先想一下", "嗯", "", "再想一下"]
+    assert [p.signature for p in stored] == [
+        b"\x01thought-a",
+        None,
+        None,
+        b"\x02thought-b",
+    ]
+    assert stored[2].call_id == "c9"
+    assert loaded[0].tool_calls[0].signature == b"s9"

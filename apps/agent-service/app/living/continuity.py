@@ -190,7 +190,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -504,8 +504,7 @@ def _message_tokens(message: Message) -> int:
                 total += _text_tokens(block.text or "")
             else:
                 total += _PICTURE_TOKENS
-    if message.reasoning_content:
-        total += _text_tokens(message.reasoning_content)
+    total += _text_tokens(message.thought_text())
     for call in message.tool_calls:
         total += _text_tokens(call.name)
         total += _text_tokens(json.dumps(call.arguments, ensure_ascii=False))
@@ -627,19 +626,20 @@ def _without_pictures(message: Message) -> Message:
 
     换成**文本块**而不是整个丢掉：``look_at_phone`` 的正文里逐张写着 ``[图片N]``，
     块数一少就跟那些编号对不上了。
+
+    ``replace`` 而不是逐字段重建：契约就是「只换 content」，这么写它结构上就漏不了
+    字段。逐字段抄漏一个的症状只落在带图那些轮次上 —— 比如这一轮的思考段和它们的
+    签名（``turn_parts``）没抄上，下一轮请求就被 provider 拒掉。
     """
     content = message.content
     if not isinstance(content, list) or all(b.type == "text" for b in content):
         return message
-    return Message(
-        role=message.role,
+    return replace(
+        message,
         content=[
             b if b.type == "text" else ContentBlock.from_text(PICTURE_TRIMMED)
             for b in content
         ],
-        reasoning_content=message.reasoning_content,
-        tool_calls=message.tool_calls,
-        tool_call_id=message.tool_call_id,
     )
 
 
