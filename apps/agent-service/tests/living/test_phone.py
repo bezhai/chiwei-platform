@@ -1188,6 +1188,53 @@ async def test_she_catches_up_one_page_at_a_time(living_db, in_a_moment):
 
 
 @pytest.mark.integration
+async def test_a_group_carries_on_from_where_the_last_page_ended(
+    living_db, in_a_moment, pinned
+):
+    """群里翻过一页之后再打开，接着上一页往下走 —— 不是退回最新那条。
+
+    只有第一句在叫她。第一次打开落在它上面、给到第 8 句；第二次打开时它已经读过、
+    群里没有别的召唤。锚点这时候退回最新那条的话，这一页是最后十几条，中间那二十来
+    句一个字都没摆到她眼前，却已经落到水位之下、不再算未读。
+
+    私聊里遇不到这个分支：那儿每一条未读都在叫她，锚点永远是"最早那条还没看过的"。
+    """
+    await _seed_world()
+    pinned(str(_GROUP))
+    await _incoming(
+        _GROUP, text_body=" 这个你怎么看", at=_at(20, 0),
+        sender=_SOMEONE, sender_name="路人", names_bot=_AKAO_BOT_UID,
+    )
+    for i in range(1, 30):
+        await _incoming(
+            _GROUP, text_body=f"第{i}句", at=_at(20, i),
+            sender=_SOMEONE, sender_name="路人",
+        )
+
+    async with in_a_moment("akao", now=_at(21, 0)):
+        first = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
+    async with in_a_moment("akao", now=_at(21, 10)):
+        second = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
+
+    assert "第8句" in first and "第9句" not in first, (
+        f"用例前提没成立：第一页该落在那条 @ 上、给到第 8 句。拿到：\n{first}"
+    )
+    assert "第9句" in second, (
+        f"第二次打开退回了最新那条 —— 中间那些她一个字都没看到。拿到：\n{second}"
+    )
+    assert "第29句" not in second, (
+        f"第二页一路跳到了最后。拿到：\n{second}"
+    )
+    left = [
+        e.unread
+        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 11))
+    ]
+    assert left == [29 - 17], (
+        f"没摆到她眼前的那些被算成看过了。拿到：{left}"
+    )
+
+
+@pytest.mark.integration
 async def test_the_chatter_before_the_mention_stops_being_unread(
     living_db, in_a_moment, pinned
 ):

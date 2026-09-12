@@ -364,13 +364,28 @@ async def find_newest_unread_summons(
 # N 条是新的」跟前后那两个数互相对不上。单条语句只取一个快照，几个答案必然出自同一份
 # 事实。
 #
-# **锚点三选一，按优先级：**
+# **锚点四选一，按优先级：**
 #
 #   1. ``asked`` —— 她抄回来那串（往前翻）。不在这条会话上就是零行，调用方据此顶回去；
 #   2. ``calling`` —— 在叫她的未读里**最早**那条（判据是 :data:`_CALLING_HER`，跟把她
 #      提前叫来那条钟共用一份）。**取最早不取最新**：游标只推到"这一页里真摆出来的未
 #      读"上，取最新的话第一页就落在未读堆顶，中间那些一个字没看过却已经算读过了；
-#   3. ``latest`` —— 这条会话上最新那条。没有谁在叫她时就是它，于是这一页正是最后几条。
+#   3. ``resuming`` —— 最早那条还没看过的，**只在她这条会话上已经有水位时**。这是"接
+#      着上次那页往下读"：翻过一页之后她的水位停在那一页最后一条未读上，下一次打开就
+#      从它后面接着来；
+#   4. ``latest`` —— 这条会话上最新那条。她从没打开过这条会话、或者已经追平了未读时
+#      就是它，于是这一页正是最后几条，跟真人点开一个群一样。
+#
+# **第 3 条不是可有可无的分页便利，是"没摆出来的不算看过"那条契约的另一半。** 群里
+# 只有第一条在叫她时：第一次打开落在它上面、给到后面几条，水位推到这一页；第二次打
+# 开时那条已经读过、群里没有别的召唤，退回 ``latest`` 就是一路跳到最后十几条，中间
+# 几十条一个字没摆到她眼前、却全部落到水位之下（水位推到这一页最新那条未读）。私聊
+# 里遇不到这个分支：那儿每一条未读都在叫她，``calling`` 一直管得住。
+#
+# **"她有没有水位"直接从游标参数读**（``:after_ms > 0``）：从没打开过是
+# :data:`app.living.phone.NEVER_LOOKED`，也就是 ``(0, '')``，而真实消息的
+# ``event_time`` 是毫秒纪元、恒为正。第一次打开因此照旧落在最新那条上 —— 换成"最早
+# 那条未读"的话，她点开一个攒了几千条的群会落在几个月前的第一条上。
 #
 # **这一页 = 锚点往后 ``after_n`` 条，剩下的位置往前补满 ``page`` 条。** 往前补而不是
 # 固定"前几条后几条"，是为了让锚点落在最新那条时这一页仍然是满的 —— 否则没人叫她的
@@ -417,8 +432,16 @@ calling AS (
    ORDER BY cm.event_time ASC, cm.common_message_id ASC
    LIMIT 1
 ),
+resuming AS (
+  SELECT 3 AS pick, u.at_ms, u.message_id
+    FROM unread u
+   WHERE CAST(:before_id AS text) IS NULL
+     AND :after_ms > 0
+   ORDER BY u.at_ms ASC, CAST(u.message_id AS text) ASC
+   LIMIT 1
+),
 latest AS (
-  SELECT 3 AS pick, cm.event_time AS at_ms, cm.common_message_id AS message_id
+  SELECT 4 AS pick, cm.event_time AS at_ms, cm.common_message_id AS message_id
     FROM common_message cm
    WHERE CAST(:before_id AS text) IS NULL
      AND cm.common_conversation_id = CAST(:channel_id AS uuid)
@@ -430,6 +453,7 @@ anchor AS (
   SELECT at_ms, message_id
     FROM (      SELECT * FROM asked
           UNION ALL SELECT * FROM calling
+          UNION ALL SELECT * FROM resuming
           UNION ALL SELECT * FROM latest) c
    ORDER BY pick
    LIMIT 1
@@ -520,9 +544,10 @@ async def find_conversation_page(
     两个快照，中间提交的那条消息会被永久跳过。``earlier_total`` / ``later_unread``
     在每一行上都一样，取第一行即可。
 
-    ``before_id`` 是 ``None`` 时锚点由库里算（在叫她的未读里最早那条，没有就是最新那
-    条）；给了就是从那条往前翻，**不在这条会话上就返回零行** —— 调用方据此把抄错的那
-    串顶回去，不悄悄退回第一页。
+    ``before_id`` 是 ``None`` 时锚点由库里算，按 :data:`_CONVERSATION_PAGE_SQL` 上那
+    四档优先级：在叫她的未读里最早那条 → 她已经有水位时最早那条还没看过的（接着上次
+    那页往下）→ 最新那条。给了 ``before_id`` 就是从那条往前翻，**不在这条会话上就返回
+    零行** —— 调用方据此把抄错的那串顶回去，不悄悄退回第一页。
 
     这一页按 ``at_ms`` 降序（最近的在前），**含她自己撤掉的那条**（带 ``recalled_at``
     留痕迹）、不含别人撤掉的。``content`` 是 jsonb 原样，没有解析。
