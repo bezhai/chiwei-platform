@@ -248,6 +248,12 @@ class LifeMoment(Data):
     推一次：一天被搭话十次，她的十分钟就成了不定期。
     而"读到哪了"仍然跨两种 moment 共用一条轴（:func:`latest_moment` 不筛这一列），不然
     提前那个 moment 读过的东西，常规 moment 会原样再读一遍。
+
+    ``context_ver`` 是**这一轮的上下文该写成第几版**（读到的那一版加一），它让下一个
+    moment 判得出"上一轮到底写进去没有"：这条记录先提交、上下文后写，所以下一轮读到的
+    版本比这个数小就是那次写没落地。写失败留得下一行 ERROR，而进程崩在两次提交之间时
+    连 ERROR 都没有 —— 两种在下一轮眼里是同一个形状，判据因此只能落在这一列上
+    （:func:`lost_last_round`）。自愈：补上那一轮写完之后两个数就追平了。
     """
 
     lane: Annotated[str, Key]
@@ -264,6 +270,7 @@ class LifeMoment(Data):
     doing: str           # moment 末她手上是什么事
     open_ends: int       # moment 末她心里还挂着几件
     said: str            # 她这个 moment 最后那句话
+    context_ver: int     # 这个 moment 的上下文该写成第几版
     nudged: bool = False  # 被叫来提前的那个 moment 吗（False = 钟点上该来的）
 
     class Meta:
@@ -286,6 +293,13 @@ class LifeMoment(Data):
     # :func:`latest_moment` 的第二排序键）。``seq`` 本身**没有** pydantic 默认值：
     # 漏传一个提交序是 bug，该当场炸，不该悄悄写成 0。
     _legacy_seq = field_validator("seq", mode="before")(
+        classmethod(legacy_null_is(0))
+    )
+    # 加列之前的行没有这个数，读出来当 0 —— 而 0 是"这一行说不出上下文该是第几版"，
+    # :func:`lost_last_round` 据此不判。判了就是拿一个没人写过的数去说"上下文丢了"，
+    # 于是她每一轮都在重铺状态。**pydantic 那侧不给默认值**：新写的 moment 漏传它是
+    # bug，该当场炸，不该悄悄写成 0 把这条检查关掉（同 ``seq``）。
+    _legacy_context_ver = field_validator("context_ver", mode="before")(
         classmethod(legacy_null_is(0))
     )
 
@@ -809,9 +823,48 @@ def build_moment_runner() -> AgentRunner:
 # 见，再加一列只是把同一件事记两遍。
 CONTEXT_WRITE_FAILED = get_or_create_counter(
     "living_context_write_failed_total",
-    "她这一轮的上下文没写进去的次数（这一轮仍然算数，下一轮冷启动）",
+    "她这一轮的上下文没写进去的次数（这一轮仍然算数，下一轮重铺状态）",
     ["lane", "persona_id"],
 )
+
+# 下一个 moment 发现缺口的次数。**跟上面那个不是同一件事**：写失败那条只有走到
+# :func:`_remember_this_round` 才记得上，进程崩在 moment 记录和上下文之间时一个数都
+# 不动。这个计数是那种情形唯一的痕迹。
+CONTEXT_GAP = get_or_create_counter(
+    "living_context_gap_total",
+    "醒来发现上一轮的上下文没落地的次数（这一轮重铺一次状态）",
+    ["lane", "persona_id"],
+)
+
+
+def lost_last_round(
+    last: LifeMoment | None, *, transcript_id: str, loaded_ver: int
+) -> bool:
+    """上一轮的上下文到底落地了没有。
+
+    moment 记录先提交、上下文后写，所以记录上的 ``context_ver``（那一轮**打算**写成
+    第几版）是一个下一轮读得到的期望值：读到的版本比它小，就是那次写没落地。写失败和
+    "崩在两次提交之间"在这里是同一个判据 —— 后者连一行 ERROR 都留不下，所以判据不能
+    挂在写失败那条补偿路径上。
+
+    两种情形不判：
+
+      * **一个 moment 都没跑过**，或者那一行是加列之前写的（``context_ver`` 读出来是
+        0）—— 没有可比的期望值；
+      * **上一个 moment 不在这个生活日上**。新的一天是另一条上下文，版本从 0 起，跟
+        昨天那个数没有可比性；那一轮本来就该是空上下文（:mod:`app.living.continuity`
+        第一条）。
+    """
+    if last is None or last.context_ver <= 0:
+        return False
+    if (
+        moment_transcript_id(
+            lane=last.lane, persona_id=last.persona_id, now=last.began_at
+        )
+        != transcript_id
+    ):
+        return False
+    return loaded_ver < last.context_ver
 
 
 async def _remember_this_round(
@@ -839,8 +892,8 @@ async def _remember_this_round(
     except Exception:
         CONTEXT_WRITE_FAILED.labels(lane=lane, persona_id=persona_id).inc()
         logger.error(
-            "上下文 %s 没写进去（读到的是 ver=%d）：这一轮算数，下一个 moment 从空"
-            "上下文开始",
+            "上下文 %s 没写进去（读到的是 ver=%d）：这一轮算数，下一个 moment 会"
+            "发现这个缺口并重铺一次状态",
             transcript_id,
             expected_ver,
             exc_info=True,
@@ -886,6 +939,11 @@ async def run_moment(
     moment 记录和手机已读那次提交**之后**单独走：她这时候已经开过口了，让这一轮失败回滚
     不掉出站的消息，只会让下一拍重放、把同一句话对真人再说一遍。写不进去记一行 ERROR 加
     一个计数，这一轮照样算数（:func:`_remember_this_round`）。
+
+    **没落地的那一轮由下一个 moment 自己发现**（:func:`lost_last_round`，判据是这条记录
+    上的 ``context_ver``）：发现了就把她的状态重铺一次
+    （:func:`app.living.continuity.trim_for_round` 的 ``lost_last_round``）。不靠写失败
+    那条补偿路径，因为进程崩在两次提交之间时那条路根本跑不到。
 
     **这一轮跨过清理点时先裁一遍再喂**（:func:`app.living.continuity.trim_for_round`）：
     素材换成短语、过了 4 小时的整组删掉、她此刻的状态作为新起点插进去。裁在模型调用
@@ -933,6 +991,21 @@ async def run_moment(
             lane=lane, persona_id=persona_id, now=began_at
         )
         history, transcript_ver = await load_moment_transcript(transcript_id)
+        # 上一轮的上下文落地了没有。没落地的话这一轮眼前的历史停在更早的地方，而刺激
+        # 写着"离上一次过了十分钟"，指的是她看不到的那一轮 —— 所以要重铺一次状态。
+        gap = lost_last_round(
+            last, transcript_id=transcript_id, loaded_ver=transcript_ver
+        )
+        if gap:
+            CONTEXT_GAP.labels(lane=lane, persona_id=persona_id).inc()
+            logger.error(
+                "上一轮的上下文没落地：%s 读到 ver=%d，上一个 moment（%s）记的是 "
+                "ver=%d。这一轮把她的状态重铺一次",
+                transcript_id,
+                transcript_ver,
+                last.moment_id if last is not None else "",
+                last.context_ver if last is not None else 0,
+            )
         # 这一轮按哪套阈值裁。读在模型调用之前：它是一次带缓存的 HTTP，不该发生在
         # 收尾那个事务里。
         trim_policy = await load_trim_policy()
@@ -989,7 +1062,11 @@ async def run_moment(
         # 裁在这里，不在收尾：喂进去的和存下去的是同一份前缀，而且一段带着过期图片
         # 地址的历史不会在模型调用那一步先炸掉、永远轮不到被裁。
         history = trim_for_round(
-            history, now=began_at, state=state, policy=trim_policy
+            history,
+            now=began_at,
+            state=state,
+            policy=trim_policy,
+            lost_last_round=gap,
         )
         # 这一轮模型产出的每一条（她的每次发言、每次工具调用和工具返回）都收在这里，
         # 收尾时连同历史和这条刺激一起写成下一版上下文。
@@ -1040,6 +1117,7 @@ async def run_moment(
                 await list_open_loose_ends(lane=lane, persona_id=persona_id)
             ),
             said=reply.text().strip(),
+            context_ver=transcript_ver + 1,
             nudged=nudged,
         )
         # **这个 moment 落地和她看过的手机是同一个事务。** 工具返回不等于她看见了——

@@ -434,6 +434,7 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
         doing="看书",
         open_ends=0,
         said="继续",
+        context_ver=1,
         nudged=True,
     )
     assert await insert_idempotent(fresh) == 1

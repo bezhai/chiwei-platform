@@ -21,6 +21,7 @@ from app.agent.neutral import ContentBlock, Message, Role, ToolCall
 from app.data.session import get_session
 from app.living.continuity import (
     CHECKPOINT_HEAD,
+    GAP_HEAD,
     TranscriptConflict,
     commit_moment_transcript,
     load_moment_transcript,
@@ -54,8 +55,9 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
 
 
 def _is_checkpoint(message: Message) -> bool:
+    """这条是界桩吗 —— 固定时刻清理立的，或者上一轮丢了补的那根。"""
     return isinstance(message.content, str) and message.content.startswith(
-        CHECKPOINT_HEAD
+        (CHECKPOINT_HEAD, GAP_HEAD)
     )
 
 
@@ -438,6 +440,134 @@ async def test_a_failed_context_write_only_costs_her_this_round(
     assert "我去煮点抹茶。" in "\n".join(m.text() for m in fed), (
         "她连自己上一轮说过什么都不知道了 —— 那就不只是丢了工具返回"
     )
+
+
+@pytest.mark.integration
+async def test_a_lost_round_puts_her_state_back_in_front_of_her(
+    moment_db, stub_moment, monkeypatch, caplog
+):
+    """一轮写成了、下一轮写失败，第三轮必须发现这个缺口并重铺一次状态。
+
+    14:00 那轮立了界桩，14:10 那轮的上下文没写成，14:20 醒来读到的还是 14:00 那一版。
+    没跨清理点，所以照旧不会重铺 —— 她于是接在一段过时的历史上，而刺激写着"离上一次
+    过了 10 分钟"，指的是她眼前根本看不到的那一轮。
+    """
+    await _stand("akao", "家/客厅", "待着", _at(13))
+    await _stand("ayana", "家/客厅", "看书", _at(13))
+
+    from app.living import moment as moment_mod
+
+    stub_moment(said="第一轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    real_commit = moment_mod.commit_moment_transcript
+
+    async def boom(*_a, **_kw):
+        raise RuntimeError("上下文写不进去")
+
+    monkeypatch.setattr(moment_mod, "commit_moment_transcript", boom)
+    stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="第二轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 10))
+
+    monkeypatch.setattr(moment_mod, "commit_moment_transcript", real_commit)
+    runner = stub_moment(said="第三轮")
+    with caplog.at_level(logging.ERROR, logger="app.living.moment"):
+        await run_moment(lane=LANE, persona_id="akao", now=_at(14, 20))
+
+    fed = runner.runs[0][0]
+    assert [m.role for m in fed] == [
+        Role.USER,       # 14:00 那根界桩
+        Role.USER,       # 14:00 那轮的刺激
+        Role.ASSISTANT,  # 14:00 那轮她说的
+        Role.USER,       # 缺口那根：14:10 丢了，状态在这儿重铺
+        Role.USER,       # 14:20 这一轮的刺激
+    ], "上一轮丢了，这一轮照旧接着过时的历史往下说"
+    assert fed[-2].text().startswith(GAP_HEAD), (
+        "补的是清理那根界桩 —— 那句「再往前的那一段不在你眼前了」在这里是假话，"
+        "往前那一段一条没少"
+    )
+    assert "我去煮点抹茶。" in fed[-2].text(), (
+        "重铺的那条里没有她上一轮做过的事"
+    )
+    assert any("上一轮" in r.message for r in caplog.records), caplog.text
+
+
+@pytest.mark.integration
+async def test_a_crash_between_the_two_commits_is_found_by_the_next_round(
+    moment_db, stub_moment, monkeypatch
+):
+    """进程崩在两次提交之间时连一行 ERROR 都留不下，缺口只能靠下一轮自己发现。
+
+    moment 记录和手机已读已经提交、上下文那一步还没跑到就没了 —— 从下一轮读到的东西
+    看，这跟"写失败"是同一个形状，所以判据必须是同一条，不能依赖写失败那条补偿路径。
+    """
+    await _stand("akao", "家/客厅", "待着", _at(13))
+    await _stand("ayana", "家/客厅", "看书", _at(13))
+
+    from app.living import moment as moment_mod
+
+    stub_moment(said="第一轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    real_remember = moment_mod._remember_this_round
+
+    async def die(*_a, **_kw):
+        raise RuntimeError("pod 没了")
+
+    monkeypatch.setattr(moment_mod, "_remember_this_round", die)
+    stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="第二轮")
+    with pytest.raises(RuntimeError):
+        await run_moment(lane=LANE, persona_id="akao", now=_at(14, 10))
+
+    monkeypatch.setattr(moment_mod, "_remember_this_round", real_remember)
+    runner = stub_moment(said="第三轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 20))
+
+    fed = runner.runs[0][0]
+    assert [m.role for m in fed] == [
+        Role.USER,
+        Role.USER,
+        Role.ASSISTANT,
+        Role.USER,
+        Role.USER,
+    ], "崩在两次提交之间留下的缺口没被发现"
+    assert "我去煮点抹茶。" in fed[-2].text()
+
+
+@pytest.mark.integration
+async def test_the_gap_is_only_reported_once(moment_db, stub_moment, monkeypatch):
+    """缺口补上之后不再重铺：下一轮读到的版本已经追平这个 moment 记的那一版。"""
+    await _stand("akao", "家/客厅", "待着", _at(13))
+
+    from app.living import moment as moment_mod
+
+    stub_moment(said="第一轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    async def boom(*_a, **_kw):
+        raise RuntimeError("上下文写不进去")
+
+    real_commit = moment_mod.commit_moment_transcript
+    monkeypatch.setattr(moment_mod, "commit_moment_transcript", boom)
+    stub_moment(said="第二轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 10))
+
+    monkeypatch.setattr(moment_mod, "commit_moment_transcript", real_commit)
+    stub_moment(said="第三轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 20))
+    runner = stub_moment(said="第四轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 30))
+
+    fed = runner.runs[0][0]
+    assert [m.role for m in fed] == [
+        Role.USER,       # 14:00 那根界桩
+        Role.USER,       # 14:00 那轮的刺激
+        Role.ASSISTANT,  # 14:00 那轮她说的
+        Role.USER,       # 14:20 补上的那根
+        Role.USER,       # 14:20 那轮的刺激
+        Role.ASSISTANT,  # 14:20 那轮她说的
+        Role.USER,       # 14:30 这一轮的刺激
+    ], "缺口已经补上了，这一轮还在重铺状态"
 
 
 @pytest.mark.integration

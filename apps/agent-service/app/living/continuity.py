@@ -29,7 +29,7 @@ lane 在键里，两条泳道天然是两行，不需要额外的隔离字段。
 二 · 写失败的语义
 -----------------
 
-**写失败不让这一轮失败：记一行 ERROR 加一个计数，下一个 moment 冷启动。**
+**写失败不让这一轮失败：记一行 ERROR 加一个计数，下一个 moment 重铺一次状态。**
 :func:`commit_moment_transcript` 自己不吞任何异常（CAS 没落地也当失败抛
 :class:`TranscriptConflict`），接住它的是
 :func:`app.living.moment._remember_this_round`。
@@ -39,13 +39,32 @@ lane 在键里，两条泳道天然是两行，不需要额外的隔离字段。
 一件事，而发送去重键带着 moment_id 和正文——换个措辞或者跨一个时间格就对不上，她于是
 把同一句话对真人再说一遍。那是用户直接看得见的错误。
 
-**"忘了这一轮"的损失有限。** 状态快照里"你刚做过、说过"那段读的是库里的 ``Happening``，
-跟 moment 记录同一批已经提交，所以下一个 moment 冷启动时她照样知道自己说过什么；丢的
-是这一轮的工具返回和中间过程。
+**但"下一轮什么都不做"不成立。** 没写成的那一版之后，下一个 moment 读到的是更早的那
+一版：跨清理点才重铺状态，没跨的话它照旧原样接着往下说 —— 她眼前最后一条是两轮之前
+的，而刺激写着"离上一次过了十分钟"，那十分钟指的是她根本看不到的那一轮。所以**这个
+缺口必须被下一轮发现**，发现了就立一根界桩（:func:`_gap_marker`）把她此刻的状态重铺
+进去。
 
-**不为它加库表列。** 一行 ERROR 加 ``living_context_write_failed_total``
-（:data:`app.living.moment.CONTEXT_WRITE_FAILED`）已经够显性，而且下一个 moment 冷启动
-本身就在 trace 和输入里看得见。
+**发现它靠的是 moment 记录上的 ``context_ver``，不是写失败时做点什么**
+（:func:`app.living.moment.lost_last_round`）。那一列是"这一轮的上下文该写成第几版"，
+跟 moment 记录同一次提交、在上下文写入之前落地，所以下一轮读到的版本比它小就是没落
+地。**这一条不能挂在补偿动作上**：进程崩在两次提交之间时那行 ERROR 根本来不及记，而
+它留下的缺口跟写失败一模一样。
+
+**历史一条不丢，只补一根界桩。** 整条作废（下一轮冷启动）也能让她不接在过时历史上，
+但那是为一轮没写成丢掉一整天的连续上下文，而这整条线存在的理由就是那份连续。界桩自
+己带着时刻，排在那段过时历史后面，先后关系因此是明确的。
+
+**丢掉的到底是什么。** 状态快照里"你刚做过、说过"那段读的是库里的 ``Happening``，跟
+moment 记录同一批已经提交，所以重铺之后她照样知道自己那一轮说过什么；丢的是那一轮的
+工具返回和中间过程。**其中有一样补不回来：那一轮她在手机上读到的别人的正文。** 手机
+已读跟 moment 记录同一次提交，已经推进了，而重铺只重铺她自己那一侧 —— 那些消息她主动
+翻会话还找得到，但不会再被自动摆到眼前。
+
+**观测点有两个，因为它们盖不住同一段。** ``living_context_write_failed_total``
+（:data:`app.living.moment.CONTEXT_WRITE_FAILED`）只有走到写入那一步才记得上；
+``living_context_gap_total``（:data:`app.living.moment.CONTEXT_GAP`）是下一轮发现缺口
+时记的，崩在两次提交之间那种情形只有它看得见。
 
 三 · 提交顺序
 -------------
@@ -64,8 +83,9 @@ lane 在键里，两条泳道天然是两行，不需要额外的隔离字段。
     常规 moment 的重放被时间格挡成同一个 moment；被人叫来的那种身份就是把她叫来的那条
     消息，同一条消息只把她叫来一次（:func:`app.living.moment.moment_ran`）。
 
-剩下的那个缺口是**世界往前走了而她的上下文停在上一轮**（上下文写失败）。它不会被静默
-吞掉，代价见上面第二条。
+剩下的那个缺口是**世界往前走了而她的上下文停在上一轮**（上下文写失败，或者进程崩在
+这两次提交之间）。它不会被静默吞掉：``context_ver`` 让下一个 moment 认得出来，代价和
+处理见上面第二条。
 
 **模型调用不在任何一个事务里。** 事务都在模型跑完之后才开，只包几条 INSERT。一次几十
 秒的模型调用占着一条业务连接会把连接池拖垮，:mod:`app.living.serial` 写了这条。
@@ -348,10 +368,19 @@ _BYTES_PER_TOKEN = 3
 _PICTURE_TOKENS = 2600
 _FRAME_TOKENS = 8
 
-# 界桩那条消息的开头。她读得懂，而且认得出来：只有这里写 USER 消息，她自己写不出
-# 这个开头。
+# 界桩那条消息的开头，两种。她读得懂，而且认得出来：只有这里写 USER 消息，她自己写
+# 不出这个开头。
+#
+#   * :data:`CHECKPOINT_HEAD`  固定时刻的清理，往前那一段真的不在了；
+#   * :data:`GAP_HEAD`         上一轮的上下文没落地，往前那一段还在、中间少了一轮。
+#
+# 两种在结构上是同一回事 —— 都带一个时刻、都重铺一遍状态 —— 所以都算这一代的界桩
+# （:func:`_checkpoint_at` 两个都认）。**文案必须分开**：缺口那次她眼前的历史一条没
+# 少，套用"再往前的那一段不在你眼前了"就是往她眼前塞一句假话。
 CHECKPOINT_HEAD = "【上下文清理 "
+GAP_HEAD = "【上一轮没存下来 "
 _CHECKPOINT_TAIL = "】"
+_CHECKPOINT_HEADS = (CHECKPOINT_HEAD, GAP_HEAD)
 
 
 @dataclass(frozen=True)
@@ -480,28 +509,58 @@ def _cleanup_instant(now: datetime, minutes: int) -> datetime:
     return start + (now - start) // step * step
 
 
-def _checkpoint(at: datetime, state: str) -> Message:
-    """界桩：这次清理的时刻 + 她此刻的状态，作为往后那一段的新起点。"""
+def _marker(head: str, at: datetime, what_happened: str, state: str) -> Message:
+    """一根界桩：发生了什么 + 那个时刻 + 她此刻的状态，作为往后那一段的新起点。"""
     return Message(
         role=Role.USER,
         content=(
-            f"{CHECKPOINT_HEAD}{at.isoformat()}{_CHECKPOINT_TAIL}\n"
-            f"再往前的那一段不在你眼前了，只剩你自己记下来的。你现在：\n\n{state}"
+            f"{head}{at.isoformat()}{_CHECKPOINT_TAIL}\n"
+            f"{what_happened}你现在：\n\n{state}"
         ),
     )
 
 
+def _checkpoint(at: datetime, state: str) -> Message:
+    """固定时刻清理立的那根：再往前的东西这一下真的从她眼前走了。"""
+    return _marker(
+        CHECKPOINT_HEAD,
+        at,
+        "再往前的那一段不在你眼前了，只剩你自己记下来的。",
+        state,
+    )
+
+
+def _gap_marker(at: datetime, state: str) -> Message:
+    """上一轮的上下文没落地时立的那根。
+
+    往前那一段一条没少，少的是**中间那一轮** —— 它做过说过的事照样发生了（那些跟
+    moment 记录同一批已经提交），只是过程没存下来。所以这句话说的是"接不上"，不是
+    "看不到"，而且它带着自己的时刻：没有它的话她眼前最后一条是两轮之前的，而刺激写
+    着"离上一次过了十分钟"，那十分钟指的是她根本看不到的那一轮。
+    """
+    return _marker(
+        GAP_HEAD,
+        at,
+        "上一轮你做过说过的没能存下来，往上那一段停在它**之前** —— 中间那一轮的"
+        "经过接不回来了，它留下的东西在下面这份状态里。",
+        state,
+    )
+
+
 def _checkpoint_at(message: Message) -> datetime | None:
-    """这条是界桩吗；是就给出它的时刻。"""
+    """这条是界桩吗（两种都算）；是就给出它的时刻。"""
     if message.role is not Role.USER or not isinstance(message.content, str):
         return None
-    if not message.content.startswith(CHECKPOINT_HEAD):
+    head = next(
+        (h for h in _CHECKPOINT_HEADS if message.content.startswith(h)), None
+    )
+    if head is None:
         return None
-    end = message.content.find(_CHECKPOINT_TAIL, len(CHECKPOINT_HEAD))
+    end = message.content.find(_CHECKPOINT_TAIL, len(head))
     if end < 0:
         return None
     try:
-        return datetime.fromisoformat(message.content[len(CHECKPOINT_HEAD) : end])
+        return datetime.fromisoformat(message.content[len(head) : end])
     except ValueError:
         return None
 
@@ -649,10 +708,18 @@ def trim_for_round(
     now: datetime,
     state: str,
     policy: TrimPolicy,
+    lost_last_round: bool = False,
 ) -> list[Message]:
     """这一轮该喂给模型的那份历史：跨过清理点就裁一遍并立一根界桩。
 
-    没跨过就把 ``history`` 原样还回来，一个字节都不动。
+    没跨过、也没有缺口就把 ``history`` 原样还回来，一个字节都不动。
+
+    **``lost_last_round`` 是"上一轮的上下文没落地"**（判据在
+    :func:`app.living.moment.lost_last_round`）。这时候没跨清理点也要立一根
+    （:func:`_gap_marker`，时刻取 ``now`` 而不是清理点 —— 它得排在那段过时的历史
+    后面才说得清先后），把她此刻的状态重铺进去。**历史一条不丢**：少的是中间那一轮
+    的经过，往前那些仍然是她真实说过的话，为一轮没写成丢掉一整天的连续上下文是更大
+    的代价。
 
     **``history`` 是空的时候也立一根。** 空上下文就是一天的开头或者刚重启，那时她眼前
     只有这一轮的增量刺激（:func:`app.living.moment.run_moment` 只送新发生的事），没有
@@ -673,6 +740,9 @@ def trim_for_round(
     staged = list(history)
     if _due(history, at):
         staged.append(_checkpoint(at, state))
+    elif lost_last_round:
+        # 跨清理点那根已经重铺过状态了，两根一起立没有意义。
+        staged.append(_gap_marker(now, state))
     return _clean(staged, at=at, policy=policy)
 
 

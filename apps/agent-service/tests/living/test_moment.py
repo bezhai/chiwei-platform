@@ -1445,6 +1445,7 @@ def test_the_life_column_shapes_are_pinned():
         "doing": "TEXT",
         "open_ends": "BIGINT",
         "said": "TEXT",
+        "context_ver": "BIGINT",
         "nudged": "BOOLEAN",
     }
 
@@ -1469,6 +1470,7 @@ def test_the_life_records_refuse_a_naive_instant():
             doing="",
             open_ends=0,
             said="继续",
+            context_ver=1,
         )
     with pytest.raises(ValidationError, match="时区"):
         LooseEnd(
