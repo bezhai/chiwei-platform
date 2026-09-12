@@ -19,7 +19,16 @@ mechanism behind it and must be listed here.
 
 ## Pending
 
-### 1. Point `life-model` at the Gemini provider — **run it at deploy time, not before**
+Nothing.
+
+## Applied
+
+Already present on prod. Listed so nobody re-derives them as pending.
+
+Verified by querying `information_schema.columns` and `pg_indexes` on 2026-09-11, and
+again on 2026-09-12 for the table count and the `life-model` row.
+
+### `life-model` points at the Gemini provider
 
 ```sql
 UPDATE model_mappings
@@ -27,29 +36,15 @@ UPDATE model_mappings
  WHERE alias = 'life-model';
 ```
 
-Her moment turn runs on `life-model` (`app/living/moment.py:165`). On prod that alias
-still resolves to `azure` / `openai_qwen3.7-max`, while every hour of coe verification
-ran on Gemini — a different adapter entirely. The picture path in particular was only
-ever exercised against `app/agent/adapters/gemini.py`.
+Ran as mutation 256 on 2026-09-11, right after agent-service was released — the order
+mattered, because until then the alias was live under the old engine, which had never
+run on Gemini. Her moment turn resolves it at `app/living/moment.py:165`.
 
-Leave `api_version` NULL on the `gemini` provider. That row points at Google's own
-endpoint, where the SDK default (v1beta) is the shape that works; pinning v1 is what
+`api_version` stays NULL on the `gemini` provider: that row points at Google's own
+endpoint, where the SDK default (v1beta) is the shape that works. Pinning v1 is what
 the internal gateway needed.
 
-**Timing matters, which is why this one is not a preflight step.** Until
-agent-service ships, `life-model` is live on prod under the *old* engine —
-`app/nodes/life_wake.py:337` on `main` — and that code has never run on Gemini. The
-mapping cache is 10 seconds, so this UPDATE lands almost immediately. Run it right
-after agent-service is released, not before: a few minutes of the new engine on Azure
-costs at most a missed picture, whereas a few minutes of the old engine on Gemini is
-untested ground on live traffic.
-
-## Applied
-
-Already present on prod. Listed so nobody re-derives them as pending — note that the
-DDL went in ahead of the code, so the branch declaring these columns is still unmerged.
-
-Verified by querying `information_schema.columns` and `pg_indexes` on 2026-09-11.
+### Columns
 
 | Change | Declared at | Commit |
 |---|---|---|
@@ -93,10 +88,12 @@ prod holds 31 `data_*` and `runtime_*` tables, which only migrator could have bu
 (`app/data/bootstrap.py:21` gates SQLAlchemy's `create_all` to `coe-*` lanes, so it
 has never run on prod).
 
-Twelve new tables ship with this branch and will be created on first startup:
-`data_happening`, `data_whereabouts`, `data_upcoming`, `data_life_moment`,
-`data_loose_end`, `data_spoken_outbound`, `data_phone_read`, `data_world_round`,
-`data_living_day_page`, `data_picture`, `data_file_read`, `data_file_picked_up`.
+The living engine's twelve tables were created this way on the first startup after
+release, confirmed 12/12 on 2026-09-12: `data_happening`, `data_whereabouts`,
+`data_upcoming`, `data_life_moment`, `data_loose_end`, `data_spoken_outbound`,
+`data_phone_read`, `data_world_round`, `data_living_day_page`, `data_picture`,
+`data_file_read`, `data_file_picked_up`. prod now holds 43 `data_*` and 3 `runtime_*`
+tables.
 
 Migrator also fails the batch if a still-declared table has a column the class no
 longer has (`migrator.py:218-224`) or if a column's pg type no longer matches the
