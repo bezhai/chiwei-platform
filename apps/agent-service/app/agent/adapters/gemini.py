@@ -24,9 +24,11 @@ gs:// / Files-API URIs) and rejects wildcard mime types, so — mirroring the
 old ``langchain-google-genai`` path (``ImageBytesLoader.load_part``) — the
 adapter *downloads* http(s) urls (and decodes ``data:`` URIs) to bytes and
 sends them as an *inline_data* part with a concrete mime type. Because this
-needs network I/O, ``neutral → wire`` content building is async. On a *tool
-result* the same bytes ride one level in, as ``FunctionResponse.parts``, so one
-answered call stays one part (see ``_tool_result_to_content``).
+needs network I/O, ``neutral → wire`` content building is async. A download that
+fails costs that one picture and nothing else: the part degrades to the text
+``[图片：打不开]`` (see ``_image_url_to_part``). On a *tool result* the same bytes
+ride one level in, as ``FunctionResponse.parts``, so one answered call stays one
+part (see ``_tool_result_to_content``).
 
 **Thinking.** Outbound we ask for thoughts via
 ``thinking_config.include_thoughts=True``; inbound, a response ``Part`` with
@@ -93,6 +95,14 @@ _FINISH_REASON_MAP: dict[str, str] = {
     "SPII": "content_filter",
     "IMAGE_SAFETY": "content_filter",
 }
+
+
+# What a picture that can't be retrieved reads as on the wire. Same wording as
+# ``app.living.phone`` gives a picture it couldn't sign a url for: one picture
+# she can't see is one thing to her, whether the phone already knew or the
+# download failed here. Never a bare "[图片]" — that reads to the model exactly
+# like "a picture I can see", and it will describe one it never saw.
+_PICTURE_SHUT = "[图片：打不开]"
 
 
 class GeminiAdapter(ModelClient):
@@ -434,12 +444,24 @@ def _image_block_url(block: ContentBlock) -> str | None:
 
 
 async def _image_url_to_part(url: str) -> types.Part:
-    """Resolve an image reference to a Gemini image Part.
+    """Resolve an image reference to a Gemini Part.
 
     ``data:`` URIs are decoded locally; ``gs://`` URIs are passed by reference
     (the one case Gemini fetches itself); everything else (our pre-signed TOS
     http(s) urls) is downloaded to bytes and sent inline — Gemini won't fetch
     arbitrary http urls and rejects wildcard mime types.
+
+    A download that fails — expired signature, network trouble, TOS down, the
+    object deleted — costs that one picture and nothing else: the part becomes
+    the text :data:`_PICTURE_SHUT`. This runs *before* the model is called and
+    the history carrying the picture is replayed on every wakeup, so raising
+    here would end the turn with nothing said, again and again, and she'd never
+    reach the point of calling a tool to fetch something else.
+
+    Only the retrieval is caught. Decoding a ``data:`` URI, or anything else
+    raising in this function, is a defect in what we handed ourselves: it fails
+    identically every time, no retry or tool call recovers it, and swallowing it
+    would mean losing pictures with no one ever finding out.
     """
     if url.startswith("data:"):
         data, mime = _decode_data_uri(url)
@@ -447,7 +469,16 @@ async def _image_url_to_part(url: str) -> types.Part:
     if url.startswith("gs://"):
         mime, _ = mimetypes.guess_type(url)
         return types.Part(file_data=types.FileData(file_uri=url, mime_type=mime))
-    data, mime = await _fetch_remote_image(url)
+    try:
+        data, mime = await _fetch_remote_image(url)
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        logger.warning(
+            "gemini: image %s not fetched (%s), sent as %s",
+            _image_ref(url),
+            _fetch_failure(exc),
+            _PICTURE_SHUT,
+        )
+        return types.Part.from_text(text=_PICTURE_SHUT)
     return types.Part(inline_data=types.Blob(data=data, mime_type=mime))
 
 
@@ -457,6 +488,28 @@ async def _fetch_remote_image(url: str) -> tuple[bytes, str]:
         resp = await client.get(url)
         resp.raise_for_status()
     return resp.content, _normalise_image_mime(resp.headers.get("content-type"), url)
+
+
+def _image_ref(url: str) -> str:
+    """How a log names one picture: the object path, without the signed query.
+
+    The query carries the TOS pre-signature — a credential that doesn't belong
+    in a log line, and the path alone already says which picture it was.
+    """
+    return url.split("?", 1)[0]
+
+
+def _fetch_failure(exc: Exception) -> str:
+    """Why a download failed, short enough to read in a log line.
+
+    A status error reports the code (403 = the signature expired or the object
+    is no longer readable, 404 = it's gone); a transport error reports its class
+    (``ReadTimeout``, ``ConnectError``, ...). httpx's own message would drag the
+    full signed url in with it.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__
 
 
 def _decode_data_uri(uri: str) -> tuple[bytes, str]:
@@ -505,9 +558,15 @@ async def _tool_result_to_content(
     would silently drop the pictures). Nesting keeps the answer to one call at
     exactly one part however many pictures came back, which is what Gemini
     counts against the model turn's function_call parts.
+
+    A picture the tool handed back that wouldn't download degrades the same way
+    as anywhere else, but ``FunctionResponsePart`` carries only media — so the
+    :data:`_PICTURE_SHUT` line rides in the answer's text, the one place inside a
+    function_response that can say a picture was there.
     """
     name = call_names.get(message.tool_call_id or "", message.tool_call_id or "tool")
     media: list[types.FunctionResponsePart] = []
+    shut: list[str] = []
     if isinstance(message.content, list):
         for block in message.content:
             if block.type not in ("image", "image_url"):
@@ -515,6 +574,11 @@ async def _tool_result_to_content(
             img_part = await _block_to_part(block)
             blob = getattr(img_part, "inline_data", None)
             if blob is None:
+                if getattr(img_part, "text", None) == _PICTURE_SHUT:
+                    # The download failed and already logged why; carry the
+                    # placeholder into the answer's text.
+                    shut.append(_PICTURE_SHUT)
+                    continue
                 # Only inline bytes nest into a function response. A block with
                 # no usable url, or a by-reference gs:// image, has nothing to
                 # nest — say it was dropped instead of going out blind.
@@ -533,7 +597,7 @@ async def _tool_result_to_content(
             )
     response = types.FunctionResponse(
         name=name,
-        response={"result": message.text()},
+        response={"result": "\n".join(p for p in [message.text(), *shut] if p)},
         # Unset, not empty: an empty list is not None, so it would serialise a
         # "parts": [] onto every text-only tool result.
         parts=media or None,

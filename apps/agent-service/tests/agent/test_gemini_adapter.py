@@ -24,9 +24,11 @@ Coverage (spec §T3 Verification, adapted to mocked transport):
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from app.agent.adapters.gemini import GeminiAdapter
@@ -381,6 +383,323 @@ async def test_complete_data_uri_image_decoded_inline_without_network(
     img = mock_sdk.instance.last_generate_kwargs["contents"][-1].parts[0]
     assert img.inline_data.data == b"JPEGBYTES"
     assert img.inline_data.mime_type == "image/jpeg"
+
+
+# ---------------------------------------------------------------------------
+# an image that can't be downloaded — degrades to text, doesn't kill the turn
+# ---------------------------------------------------------------------------
+
+# What a history picture's url looks like: a TOS object plus a signed query.
+_SIGNED_URL = "https://tos.example/im/dog.png?X-Tos-Signature=deadbeef&expires=1"
+_SHUT = "[图片：打不开]"
+
+
+def _serve_http(monkeypatch, answer) -> None:
+    """Route ``_fetch_remote_image``'s httpx client at ``answer(url)``.
+
+    ``answer`` returns an ``httpx.Response`` (which the adapter then runs
+    ``raise_for_status()`` on, so a 403 raises exactly as it would in prod) or
+    raises a transport error itself.
+    """
+
+    class _FakeAsyncClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> bool:
+            return False
+
+        async def get(self, url: str) -> httpx.Response:
+            return answer(url)
+
+    monkeypatch.setattr("httpx.AsyncClient", _FakeAsyncClient)
+
+
+def _forbidden(url: str) -> httpx.Response:
+    """The shape of an expired TOS signature: 403 with an XML error body."""
+    return httpx.Response(
+        403,
+        request=httpx.Request("GET", url),
+        headers={"content-type": "application/xml"},
+        content=b"<Error><Code>AccessDenied</Code></Error>",
+    )
+
+
+def _timed_out(url: str) -> httpx.Response:
+    raise httpx.ReadTimeout("timed out", request=httpx.Request("GET", url))
+
+
+def _image_bytes(url: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        request=httpx.Request("GET", url),
+        headers={"content-type": "image/png"},
+        content=b"ALIVE",
+    )
+
+
+async def test_history_image_that_403s_degrades_to_a_text_placeholder(
+    mock_sdk, monkeypatch
+):
+    """An expired signature costs one picture, not the whole turn.
+
+    The download runs before the model is even called, so a raise here means she
+    never gets to speak — and the history that carries the picture is replayed
+    every wakeup, so the turn would keep dying.
+    """
+    _serve_http(monkeypatch, _forbidden)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="看不到就算了")]))
+
+    msg = Message(
+        role=Role.USER,
+        content=[
+            ContentBlock.from_text("看这张"),
+            ContentBlock.from_image(url=_SIGNED_URL),
+            ContentBlock.from_text("好看吗"),
+        ],
+    )
+    out = await adapter.complete([msg])
+
+    parts = mock_sdk.instance.last_generate_kwargs["contents"][-1].parts
+    # the placeholder sits where the picture was: she is told one was there
+    assert [p.text for p in parts] == ["看这张", _SHUT, "好看吗"]
+    assert all(getattr(p, "inline_data", None) is None for p in parts)
+    assert out.content == "看不到就算了"
+
+
+async def test_history_image_that_times_out_degrades_to_a_text_placeholder(
+    mock_sdk, monkeypatch
+):
+    """A transport timeout reads the same as a 403: one picture is gone."""
+    _serve_http(monkeypatch, _timed_out)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(
+        role=Role.USER,
+        content=[ContentBlock.from_image_url({"url": _SIGNED_URL})],
+    )
+    await adapter.complete([msg])
+
+    parts = mock_sdk.instance.last_generate_kwargs["contents"][-1].parts
+    assert [p.text for p in parts] == [_SHUT]
+
+
+async def test_unreachable_image_is_logged_with_which_one_and_why(
+    mock_sdk, monkeypatch, caplog
+):
+    """The degrade is never silent: the log names the object and the reason."""
+    _serve_http(monkeypatch, _forbidden)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(role=Role.USER, content=[ContentBlock.from_image(url=_SIGNED_URL)])
+    with caplog.at_level(logging.WARNING, logger="app.agent.adapters.gemini"):
+        await adapter.complete([msg])
+
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "app.agent.adapters.gemini" and r.levelno == logging.WARNING
+    ]
+    assert len(lines) == 1
+    assert "https://tos.example/im/dog.png" in lines[0]
+    assert "HTTP 403" in lines[0]
+    # the pre-signature is a credential; the object path alone names the picture
+    assert "X-Tos-Signature" not in lines[0]
+
+
+async def test_timed_out_image_logs_the_transport_reason(mock_sdk, monkeypatch, caplog):
+    _serve_http(monkeypatch, _timed_out)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(role=Role.USER, content=[ContentBlock.from_image(url=_SIGNED_URL)])
+    with caplog.at_level(logging.WARNING, logger="app.agent.adapters.gemini"):
+        await adapter.complete([msg])
+
+    lines = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(lines) == 1
+    assert "ReadTimeout" in lines[0]
+    assert "https://tos.example/im/dog.png" in lines[0]
+
+
+async def test_one_dead_image_leaves_the_rest_of_the_sequence_encodable(
+    mock_sdk, monkeypatch
+):
+    """A whole system+user+assistant+tool sequence still reaches the wire.
+
+    The dead picture becomes a placeholder; the live one beside it is still
+    downloaded, the tool round still answers its call with exactly one part, and
+    the trace still renders.
+    """
+
+    def _answer(url: str) -> httpx.Response:
+        if "dead" in url:
+            raise httpx.ConnectError("no route", request=httpx.Request("GET", url))
+        return _image_bytes(url)
+
+    _serve_http(monkeypatch, _answer)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="嗯")]))
+
+    history = [
+        Message(role=Role.SYSTEM, content="你是赤尾"),
+        Message(
+            role=Role.USER,
+            content=[
+                ContentBlock.from_text("[图片1]"),
+                ContentBlock.from_image(url="https://tos.example/im/dead.png?sig=a"),
+                ContentBlock.from_text("[图片2]"),
+                ContentBlock.from_image(url="https://tos.example/im/alive.png?sig=b"),
+            ],
+        ),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c1", name="look_at_pictures", arguments={})],
+        ),
+        Message(
+            role=Role.TOOL,
+            tool_call_id="c1",
+            content=[
+                ContentBlock.from_text("@old.png:"),
+                ContentBlock.from_image_url(
+                    {"url": "https://tos.example/im/dead2.png?sig=c"}
+                ),
+            ],
+        ),
+    ]
+    out = await adapter.complete(history)
+
+    kwargs = mock_sdk.instance.last_generate_kwargs
+    assert kwargs["config"].system_instruction == "你是赤尾"
+    contents = kwargs["contents"]
+    assert [c.role for c in contents] == ["user", "model", "user"]
+
+    user_parts = contents[0].parts
+    assert user_parts[1].text == _SHUT
+    assert user_parts[3].inline_data.data == b"ALIVE"
+    assert user_parts[3].inline_data.mime_type == "image/png"
+
+    fr = contents[2].parts[0].function_response
+    assert len(contents[2].parts) == 1
+    assert fr.parts is None
+    assert fr.response == {"result": f"@old.png:\n{_SHUT}"}
+
+    assert out.content == "嗯"
+    # the trace renders the whole thing, placeholder included
+    trace_input = _span_calls[-1]["input"]
+    assert {"text": _SHUT} in trace_input[0]["parts"]
+
+
+async def test_tool_result_with_a_dead_picture_says_so_in_its_answer(
+    mock_sdk, monkeypatch
+):
+    """A tool's own picture that won't download is reported, not just dropped.
+
+    ``FunctionResponsePart`` carries only media, so the placeholder rides in the
+    answer's text — the one place inside a function_response that can say it.
+    """
+    _serve_http(monkeypatch, _forbidden)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    history = [
+        Message(role=Role.USER, content="找张图"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c1", name="find_a_picture_online", arguments={})],
+        ),
+        Message(
+            role=Role.TOOL,
+            tool_call_id="c1",
+            content=[
+                ContentBlock.from_text("找到 1 张:"),
+                ContentBlock.from_image_url({"url": _SIGNED_URL}),
+            ],
+        ),
+    ]
+    await adapter.complete(history)
+
+    tool_turn = mock_sdk.instance.last_generate_kwargs["contents"][2]
+    fr = tool_turn.parts[0].function_response
+    assert fr.parts is None
+    assert fr.response == {"result": f"找到 1 张:\n{_SHUT}"}
+
+
+async def test_an_odd_content_type_is_not_treated_as_a_failed_download(
+    mock_sdk, monkeypatch
+):
+    """Object storage serves ``application/octet-stream`` for real pictures.
+
+    Bytes arrived, so this is not a failed download: the mime is guessed from
+    the object name and the picture goes out. Treating the header as the verdict
+    would blind her to images that are perfectly fine.
+    """
+
+    def _octet_stream(url: str) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url),
+            headers={"content-type": "application/octet-stream"},
+            content=b"REALPNG",
+        )
+
+    _serve_http(monkeypatch, _octet_stream)
+
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(role=Role.USER, content=[ContentBlock.from_image(url=_SIGNED_URL)])
+    await adapter.complete([msg])
+
+    img = mock_sdk.instance.last_generate_kwargs["contents"][-1].parts[0]
+    assert img.inline_data.data == b"REALPNG"
+    assert img.inline_data.mime_type == "image/png"
+
+
+async def test_a_corrupt_data_uri_still_raises(mock_sdk):
+    """A ``data:`` URI we built ourselves and can't decode is a defect, not a
+    picture that got away: it fails the same way every time, no tool call
+    recovers it, and degrading it would hide the bug forever.
+    """
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
+
+    msg = Message(
+        role=Role.USER,
+        content=[ContentBlock.from_image(url="data:image/png;base64,QQ")],
+    )
+    with pytest.raises(Exception, match="padding"):
+        await adapter.complete([msg])
 
 
 # ---------------------------------------------------------------------------
