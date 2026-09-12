@@ -346,6 +346,42 @@ class TestRunLoop:
         assert [m.role for m in sink] == [Role.ASSISTANT, Role.TOOL]
         assert sink[-1].tool_call_id == "c1"
 
+    async def test_a_terminal_tool_answers_the_calls_that_never_ran(self):
+        """One turn asking for ``[terminal, other]``: the loop returns at the
+        terminal tool, so ``other`` is never dispatched.
+
+        Its call still sits on the assistant turn already in the sink. A stored
+        assistant turn whose calls are not all answered makes the provider
+        reject the whole next request, so the loop has to answer the calls it
+        cut off.
+        """
+        _run_loop, _ = _import_loops()
+        calls = [
+            ToolCall(id="c1", name="no_reply", arguments={}),
+            ToolCall(id="c2", name="echo_tool", arguments={"text": "x"}),
+        ]
+        fake = FakeModelClient(
+            complete_script=[
+                Message(role=Role.ASSISTANT, content="", tool_calls=calls)
+            ]
+        )
+        sink: list[Message] = []
+        await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[no_reply, echo_tool],
+            context=None,
+            recursion_limit=12,
+            transcript_sink=sink,
+        )
+
+        answered = [m.tool_call_id for m in sink if m.role is Role.TOOL]
+        assert answered == ["c1", "c2"], "终止之后那个调用没有结果"
+        requested = [c.id for m in sink for c in m.tool_calls]
+        assert requested == answered
+        cut_off = next(m for m in sink if m.tool_call_id == "c2")
+        assert "echoed" not in cut_off.text(), "被切掉的那只手不该真的跑过"
+
     async def test_recursion_limit_closes_the_run_with_a_toolless_call(self, caplog):
         """Hitting the limit hands the dispatched tool results back to the model
         one last time, with no tools, so the run ends on the assistant's words.
@@ -423,6 +459,40 @@ class TestRunLoop:
         assert [
             c.id for m in sink for c in m.tool_calls if c.id not in answered
         ] == []
+
+    async def test_a_closing_call_left_with_nothing_stays_out_of_the_sink(self):
+        """The toolless closing call can come back with no text and only a tool
+        call. Stripping the call leaves an assistant turn carrying nothing —
+        the gemini adapter renders it as ``parts=[]`` and the provider rejects
+        the whole next request over it.
+        """
+        _run_loop, _ = _import_loops()
+        looping = Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="c", name="echo_tool", arguments={"text": "x"})],
+        )
+        nothing_but_a_call = Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(id="z", name="echo_tool", arguments={"text": "y"})],
+        )
+        fake = FakeModelClient(complete_script=[looping] * 2 + [nothing_but_a_call])
+        sink: list[Message] = []
+        result = await _run_loop(
+            fake,
+            messages=[Message(role=Role.USER, content="go")],
+            tools=[echo_tool],
+            context=None,
+            recursion_limit=2,
+            transcript_sink=sink,
+        )
+
+        assert result.text() == ""
+        assert result.tool_calls == []
+        assert all(
+            m.text().strip() or m.tool_calls or m.role is Role.TOOL for m in sink
+        ), "一条既没正文也没调用的消息进了上下文"
 
     async def test_tools_passed_as_tooldefs(self):
         _run_loop, _ = _import_loops()

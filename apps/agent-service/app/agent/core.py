@@ -376,6 +376,13 @@ def _record_tool_output(span: Any, result: ToolResult) -> None:
 # name is pinned by a test next to the tool it belongs to.
 _TERMINAL_TOOL_NAMES = {"no_reply", "stop_for_now"}
 
+# What a call that never ran is answered with. A terminal tool ends the run at
+# the position it holds in the turn, so every call after it is left unexecuted —
+# and an assistant turn whose calls are not all answered makes the provider
+# reject the whole next request. The wording says what happened, so a model
+# reading the stored context does not take it for a tool that failed.
+_NEVER_RAN = "（这一轮在这只手之前就结束了，它没有执行。）"
+
 # The self-written web-search tool. When an agent that opted into native search
 # runs on a model that supports it (and the flag is on), this tool is dropped
 # from the model's tool list and replaced by the provider's native grounding.
@@ -426,6 +433,21 @@ def _normalise_tool_result(result: ToolResult) -> ToolResult:
 def _is_terminal_tool_call(call: ToolCall) -> bool:
     """Whether a tool call intentionally ends the current agent turn."""
     return call.name in _TERMINAL_TOOL_NAMES
+
+
+def _carries_something(message: Message) -> bool:
+    """Whether this message still says anything once it is replayed.
+
+    A message with no tool calls and no content reaches the provider as an
+    empty turn — the gemini adapter builds ``parts=[]`` for it and the request
+    is rejected before the model sees it. ``reasoning_content`` does not count:
+    no adapter replays it, so a turn carrying only thoughts is just as empty on
+    the wire.
+    """
+    if message.tool_calls:
+        return True
+    content = message.content
+    return bool(content.strip()) if isinstance(content, str) else bool(content)
 
 
 def _is_empty_turn(text: str, tool_calls: list[ToolCall]) -> bool:
@@ -524,9 +546,19 @@ async def _run_loop(
     — each assistant turn (with tool calls) + each tool result message + the
     final assistant reply — in order, so a caller keeping a continuous context
     can store the round losslessly (the in-memory ``Message`` objects still carry
-    provider blobs like ``ToolCall.signature``). The empty message a terminal
-    tool ends the run with is the one thing left out: it carries nothing, and a
-    caller whose rounds usually end that way would pile up one per round.
+    provider blobs like ``ToolCall.signature``).
+
+    Two rules keep what lands there replayable, because a caller feeds it back
+    as the next round's history and the provider validates it:
+
+      - **every call is answered.** A terminal tool ends the run where it sits
+        in the turn, so the calls after it never run; each of those gets a
+        result saying so (``_NEVER_RAN``).
+      - **nothing content-free is stored** (``_carries_something``). The empty
+        message a terminal tool returns stays out — it carries nothing, and a
+        caller whose rounds usually end that way would pile up one per round —
+        and so does a closing turn left with nothing after its unanswerable
+        call is stripped.
 
     Tool calls within one assistant turn are dispatched *sequentially* (langgraph
     ToolNode ran them concurrently). Results are identical; only multi-tool-turn
@@ -554,7 +586,7 @@ async def _run_loop(
         convo.append(last)
         if transcript_sink is not None:
             transcript_sink.append(last)
-        for call in last.tool_calls:
+        for at, call in enumerate(last.tool_calls):
             with _tool_span(name=call.name, input=call.arguments) as span:
                 with agent_context(context) if context is not None else _nullctx():
                     result = await dispatch(tools, call)
@@ -565,6 +597,17 @@ async def _run_loop(
             if transcript_sink is not None:
                 transcript_sink.append(tool_msg)
             if _is_terminal_tool_call(call):
+                # The calls after this one never ran, and the assistant turn
+                # carrying them is already stored. Answer each so the stored
+                # round keeps every call paired with a result — a turn with an
+                # unanswered call makes the provider reject the next request.
+                for skipped in last.tool_calls[at + 1 :]:
+                    cancelled = ToolResult(
+                        tool_call_id=skipped.id, content=_NEVER_RAN
+                    ).to_message()
+                    convo.append(cancelled)
+                    if transcript_sink is not None:
+                        transcript_sink.append(cancelled)
                 # The empty message is the run's *return value* only — it stays
                 # out of the sink. It carries no text and no tool call, so a
                 # caller that stores the sink as its continuous context would
@@ -592,7 +635,12 @@ async def _run_loop(
             content=closing.content,
             reasoning_content=closing.reasoning_content,
         )
-    if transcript_sink is not None:
+    # Stripping the call can leave a turn with nothing on it — the closing call
+    # came back with no text and only that call. Storing it would put an empty
+    # turn in the context, which the provider rejects on the next request just
+    # as surely as the unanswered call would have. It is still the run's return
+    # value; only the stored round drops it.
+    if transcript_sink is not None and _carries_something(closing):
         transcript_sink.append(closing)
     return closing
 
