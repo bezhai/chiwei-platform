@@ -738,11 +738,22 @@ def _usage_details(response: Any) -> dict[str, int] | None:
     usage = getattr(response, "usage_metadata", None)
     if usage is None:
         return None
-    return {
+    details = {
         "input": getattr(usage, "prompt_token_count", 0) or 0,
         "output": getattr(usage, "candidates_token_count", 0) or 0,
         "total": getattr(usage, "total_token_count", 0) or 0,
     }
+    # Implicit-cache hit: Gemini counts the prompt tokens served from cache in
+    # cached_content_token_count, and prompt_token_count already includes them
+    # (so this is a slice of "input", not an addition to it). Reported under the
+    # same key as the OpenAI adapter — trace's per-round accumulator and
+    # ThinkingTokensSpent both read it by name. The field is Optional: a miss
+    # arrives as absent or None, and it is left off then, so a 0 doesn't read as
+    # "measured, missed" when the provider simply didn't report.
+    cached = getattr(usage, "cached_content_token_count", 0) or 0
+    if cached:
+        details["cache_read_input_tokens"] = cached
+    return details
 
 
 # ---------------------------------------------------------------------------

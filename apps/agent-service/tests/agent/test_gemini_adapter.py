@@ -1279,6 +1279,131 @@ async def test_stream_generation_span_records_usage(mock_sdk):
 
 
 # ---------------------------------------------------------------------------
+# prompt cache — Gemini's implicit cache is on by default and reports the hit
+# in ``usage_metadata.cached_content_token_count``. Without it on the span a
+# stable-prefix design has no way to show whether the prefix is actually reused.
+# ---------------------------------------------------------------------------
+
+
+def _usage_with_cache(prompt: int, candidates: int, cached: Any) -> SimpleNamespace:
+    """Gemini usage_metadata carrying the implicit-cache hit counter.
+
+    ``cached_content_token_count`` counts the prompt tokens served from cache;
+    ``prompt_token_count`` already includes them (so cached ⊆ input, same
+    relation as OpenAI's prompt_tokens / cached_tokens).
+    """
+    usage = _usage(prompt=prompt, candidates=candidates)
+    usage.cached_content_token_count = cached
+    return usage
+
+
+async def test_complete_records_cached_content_tokens_in_usage(mock_sdk):
+    """A cache hit surfaces on the span as cache_read_input_tokens."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    response = _response()
+    response.usage_metadata = _usage_with_cache(
+        prompt=62000, candidates=18, cached=60000
+    )
+    mock_sdk.instance.set_result(response)
+
+    await adapter.complete([Message(role=Role.USER, content="hi")])
+
+    span = _MOST_RECENT_SPAN[-1]
+    usage_updates = [u for u in span.updates if "usage_details" in u]
+    assert usage_updates, "complete span never recorded usage_details"
+    details = usage_updates[-1]["usage_details"]
+    assert details["input"] == 62000
+    assert details["cache_read_input_tokens"] == 60000
+
+
+async def test_structured_records_cached_content_tokens_in_usage(mock_sdk):
+    """The structured path reports a cache hit the same way complete() does."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    response = _response(parts=[_part(text='{"ok": true}')])
+    response.usage_metadata = _usage_with_cache(prompt=900, candidates=5, cached=700)
+    mock_sdk.instance.set_result(response)
+
+    await adapter.structured(
+        [Message(role=Role.USER, content="q")],
+        schema={"title": "X", "type": "object"},
+    )
+
+    details = [u for u in _MOST_RECENT_SPAN[-1].updates if "usage_details" in u][-1][
+        "usage_details"
+    ]
+    assert details["cache_read_input_tokens"] == 700
+
+
+async def test_stream_records_cached_content_tokens_in_usage(mock_sdk):
+    """The cumulative usage of the last streamed chunk carries the cache hit."""
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    last = _response(parts=[], finish_reason="STOP")
+    last.usage_metadata = _usage_with_cache(prompt=62000, candidates=22, cached=60000)
+    mock_sdk.instance.set_stream(
+        [
+            _response(parts=[_part(text="hi")], finish_reason=None),
+            last,
+        ]
+    )
+
+    async for _ in adapter.stream([Message(role=Role.USER, content="hi")]):
+        pass
+
+    details = [u for u in _MOST_RECENT_SPAN[-1].updates if "usage_details" in u][-1][
+        "usage_details"
+    ]
+    assert details["cache_read_input_tokens"] == 60000
+
+
+async def test_usage_without_cached_content_omits_cache_key(mock_sdk):
+    """No cached_content_token_count at all ⇒ no fabricated cache key.
+
+    Gemini leaves the field off entirely when nothing was served from cache, so
+    reporting a 0 would read as "measured, missed" rather than "not reported".
+    """
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    mock_sdk.instance.set_result(_response())  # plain usage, no cache field
+
+    await adapter.complete([Message(role=Role.USER, content="hi")])
+
+    details = [u for u in _MOST_RECENT_SPAN[-1].updates if "usage_details" in u][-1][
+        "usage_details"
+    ]
+    assert "cache_read_input_tokens" not in details
+
+
+@pytest.mark.parametrize("cached", [None, 0])
+async def test_usage_with_empty_cached_content_omits_cache_key(mock_sdk, cached):
+    """The field present but None / 0 (a miss) must not blow up or fabricate a hit.
+
+    ``cached_content_token_count`` is Optional in the SDK's UsageMetadata: a miss
+    can arrive either as an absent attribute or as an explicit None.
+    """
+    adapter = GeminiAdapter(
+        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
+    )
+    response = _response()
+    response.usage_metadata = _usage_with_cache(prompt=5, candidates=7, cached=cached)
+    mock_sdk.instance.set_result(response)
+
+    await adapter.complete([Message(role=Role.USER, content="hi")])
+
+    details = [u for u in _MOST_RECENT_SPAN[-1].updates if "usage_details" in u][-1][
+        "usage_details"
+    ]
+    assert "cache_read_input_tokens" not in details
+    assert details["input"] == 5
+
+
+# ---------------------------------------------------------------------------
 # registration seam — build_model_client dispatches client_type "google"
 # ---------------------------------------------------------------------------
 
