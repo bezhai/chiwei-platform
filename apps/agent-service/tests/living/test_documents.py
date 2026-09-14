@@ -37,6 +37,7 @@ from app.living.documents import (
     documents_root,
     edit_document,
     list_documents,
+    list_tree,
     read_document,
     resolve_within,
     write_document,
@@ -172,6 +173,41 @@ def test_a_process_without_a_lane_lands_on_prod(tmp_path, monkeypatch):
     monkeypatch.delenv("LANE", raising=False)
 
     assert documents_root() == tmp_path / "mount" / "prod"
+
+
+def test_a_lane_that_has_never_been_written_reads_as_an_empty_tree(
+    tmp_path, monkeypatch
+):
+    """**这条泳道还没写过** ≠ **卷没挂上**。一个照着写就行，一个要找运维。
+
+    实测（coe-living，2026-09-14 22:20）：新泳道第一轮 world 调 ``list_documents``
+    拿回一句「卷没挂上」，而卷挂得好好的，只是这条泳道底下一份文档都还没有 ——
+    泳道那一段是代码拼出来的，谁也没建过那个目录。那句话是喂给模型的**假诊断**：
+    它会据此认为文档这条路整个不通，然后一轮都不再碰。
+    """
+    monkeypatch.setenv(DOCS_DIR_ENV, str(tmp_path / "mount"))
+    (tmp_path / "mount").mkdir()  # 卷挂上了
+    monkeypatch.setenv("LANE", "coe-living")  # 但这条泳道一份都没写过
+
+    listed = list_tree(documents_root())
+
+    assert "卷没挂上" not in listed, f"卷挂着却说没挂上。拿到：\n{listed}"
+    assert "空" in listed, f"该说这棵树是空的。拿到：\n{listed}"
+
+
+def test_a_missing_mount_is_still_called_out_as_a_missing_mount(
+    tmp_path, monkeypatch
+):
+    """卷真没挂上的时候那句话还得在 —— 上面那条不能把它一起改没了。"""
+    monkeypatch.setenv(DOCS_DIR_ENV, str(tmp_path / "never-mounted"))
+    monkeypatch.setenv("LANE", "coe-living")
+
+    listed = list_tree(documents_root())
+
+    assert "卷没挂上" in listed, (
+        f"卷真的没挂上，却说成树是空的 —— world 会照着写，一轮的产出全丢在容器的"
+        f"可写层里，重启就没了。拿到：\n{listed}"
+    )
 
 
 # --------------------------------------------------------------------------

@@ -87,6 +87,18 @@ DOCUMENT_CUT_MARK = "这里被截断了"
 _SEP = "/"
 
 
+def documents_mount() -> Path:
+    """卷挂在哪 —— ``$WORLD_DOCS_DIR``，泳道那一段还没拼上的那一层。
+
+    它单独存在只为一件事：**分得清"卷没挂上"和"这条泳道还没写过"**。根目录不存在时
+    这两种都成立，而给出的话得是两句 —— 一句要去找运维，一句照着写就行。泳道那一段是
+    代码拼的（:func:`documents_root`），所以一条新泳道的根目录本来就不存在，直到第一次
+    写入才被建出来。实测（coe-living，2026-09-14）：新泳道第一轮 world 拿到「卷没挂上」，
+    然后整轮都不再碰文档。
+    """
+    return Path(os.environ.get(DOCS_DIR_ENV) or DEFAULT_DOCS_DIR)
+
+
 def documents_root() -> Path:
     """本进程这条泳道的文档树的根：``$WORLD_DOCS_DIR/<泳道>``。
 
@@ -104,8 +116,7 @@ def documents_root() -> Path:
     （空串会开一条谁也读不到的影子轴）。**这里没有直接调它**：``clock`` 在模块顶层
     import ``world``，而 ``world`` 要拿这几只手，直接用会绕成环。
     """
-    root = Path(os.environ.get(DOCS_DIR_ENV) or DEFAULT_DOCS_DIR)
-    return root / (current_deployment_lane() or "prod")
+    return documents_mount() / (current_deployment_lane() or "prod")
 
 
 def resolve_within(root: Path, path: str) -> Path:
@@ -171,12 +182,22 @@ def list_tree(root: Path, under: str = "") -> str:
 
     ``list_documents`` 那只手和界桩上重铺的那一份走的是同一个函数：两边各渲染一次的话
     它会在界桩上看到一种格式、自己列一次看到另一种，而那种漂移没有任何报错。
+
+    **根目录不存在有两种，得分开说**（:func:`documents_mount`）：挂载点也不在 = 卷没挂
+    上，要去找运维；挂载点在、只是这条泳道底下还没有过东西 = 树是空的，照着写就行 ——
+    泳道那一段是代码拼的，所以一条新泳道的根本来就不存在，直到第一次写入才被建出来。
+    混成一句的下场实测过（coe-living，2026-09-14）：world 第一轮拿到「卷没挂上」，
+    整轮再没碰过文档。
     """
     base = root if under.strip() in ("", ".", "./", _SEP) else resolve_within(root, under)
     if not base.exists():
         if base == root.resolve() or base == root:
-            # 卷没挂上。这跟"树是空的"是两种处境：一个要找运维，一个照着写就行。
-            return f"（读不到文档树的根目录 {root} —— 这不是路径写错了，是卷没挂上。）"
+            if not documents_mount().exists():
+                return (
+                    f"（读不到文档树的挂载点 {documents_mount()} —— "
+                    f"这不是路径写错了，是卷没挂上。）"
+                )
+            return "（这棵文档树现在是空的 —— 还没有写过任何一份。）"
         raise FileNotFoundError(f"「{under}」这个目录不存在。")
 
     found = _entries(base, root)
@@ -203,7 +224,10 @@ def _nearby(root: Path, target: Path) -> str:
     """
     folder = target.parent if target.parent.exists() else root.resolve()
     if not folder.exists():
-        return f"文档树的根目录 {root} 都读不到 —— 卷没挂上。"
+        # 跟 list_tree 同一条分法：挂载点也不在才是卷没挂上，否则只是这条泳道还没写过。
+        if not documents_mount().exists():
+            return f"文档树的挂载点 {documents_mount()} 都读不到 —— 卷没挂上。"
+        return "这棵文档树现在还是空的。"
     siblings = sorted(
         _relative(root, child) + (_SEP if child.is_dir() else "")
         for child in folder.iterdir()

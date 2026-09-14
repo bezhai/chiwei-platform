@@ -705,6 +705,71 @@ async def test_it_does_not_see_the_same_thing_twice(world_db, stub_round):
 
 
 @pytest.mark.integration
+async def test_with_no_cursor_to_resume_from_it_only_reads_the_recent_stretch(
+    world_db, stub_round
+):
+    """没有游标可接的时候只读最近这一段，不是从世界的开头读起。
+
+    两种情形都会走到这儿：这条泳道 world 一轮都没跑过，和 ``next_seq`` 这一列是后加的
+    （已有轮次那一行上是 NULL）。两种的共同点是"不知道该从哪儿接"，而**不是**"该从头
+    读一遍"。
+
+    实测（coe-living，2026-09-14）：加列那天第一轮从 seq=0 起算，于是它开始逐轮补读
+    两周前的事 —— 一次 200 条、5508 条积压要 28 轮，每轮约 0.15 美元，而它要判断的是
+    "这个点该不该冒出点新东西"。两周前谁说了什么对这个判断没有任何用，只会让它照着过时
+    的剧情排事。跳过的那一段它本来也从没拿到过（旧 world 根本不读 happening）。
+
+    边界是 ``LEDGER_LOOK_BACK``，不是"此刻"：崭新的泳道第一轮该看得见刚发生的那几件事
+    （上面 ``test_it_sees_what_the_sisters_did`` 钉的就是这个），瞎的只该是太旧的那一段。
+    """
+    runner = stub_round()
+    await _someone_did_something(
+        at=_at(10) - dt.timedelta(days=7), content="上周就发生完了的事"
+    )
+
+    await run_world_round(lane=LANE, now=_at(10))
+
+    fed = "\n".join(m.text() for m in runner.runs[0][0])
+    assert "上周就发生完了的事" not in fed, (
+        f"第一轮把积压的全读了一遍。拿到：\n{fed}"
+    )
+
+
+@pytest.mark.integration
+async def test_a_round_written_before_the_cursor_existed_does_not_replay_history(
+    world_db, stub_round
+):
+    """``next_seq`` 是 NULL 的那一行是"这一列还不存在时写的"，不是"读到 0"。
+
+    两者在 ``or 0`` 底下长得一模一样，而后果差一整部历史。
+    """
+    from app.living.world import WorldRound
+    from app.runtime.persist import insert_idempotent
+
+    await insert_idempotent(
+        WorldRound(
+            lane=LANE,
+            round_id="老轮次",
+            ran_at=_at(8),
+            produced=0,
+            said="没有",
+            next_seq=None,
+        )
+    )
+    await _someone_did_something(
+        at=_at(10) - dt.timedelta(days=7), content="上周就发生完了的事"
+    )
+
+    runner = stub_round()
+    await run_world_round(lane=LANE, now=_at(10))
+
+    fed = "\n".join(m.text() for m in runner.runs[0][0])
+    assert "上周就发生完了的事" not in fed, (
+        f"把「这一列还不存在」读成了「游标在 0」。拿到：\n{fed}"
+    )
+
+
+@pytest.mark.integration
 async def test_it_picks_up_where_it_left_off(world_db, stub_round):
     """它也有连续上下文 —— 上一轮说过的话在下一轮还在眼前。"""
     runner = stub_round(said="我想让文化祭这条线动起来")

@@ -317,6 +317,27 @@ async def read_all_after(
     return await _scan(lane=lane, after_seq=after_seq, limit=limit)
 
 
+async def seq_before(*, lane: str, at: datetime) -> int:
+    """``at`` 之前那些记录里最大的 ``seq``；之前一条都没有返回 0。
+
+    拿它当游标就等于"只从 ``at`` 以后的事开始读"。给**没有游标可接**的读者用
+    （:func:`app.living.world._resume_from`）：从 0 起算会让它把整部历史补读一遍。
+    **不是**给正常读取用的 —— 正常读取的游标来自上一轮自己的记录。
+
+    按 ``occurred_at`` 卡而不是按 ``seq`` 数条数：这是一个"多久以前"的边界，而 ``seq``
+    是提交序，两者只是相关，不能互相换算。两条轴不完全同向（补记的事件 seq 更大而
+    ``occurred_at`` 更早）在这儿无所谓 —— 这是个够用的下界，不是精确的分界。
+    """
+    sql = (
+        f"SELECT COALESCE(MAX(seq), 0) FROM {_TABLE} "
+        f"WHERE lane = :lane AND occurred_at <= :at"
+    )
+    async with get_session() as s:
+        return int(
+            (await s.execute(text(sql), {"lane": lane, "at": at})).scalar_one()
+        )
+
+
 async def anyone_acted_since(*, lane: str, after_seq: int) -> bool:
     """自游标以来，**world 之外**有没有谁做过 / 说过什么。
 
