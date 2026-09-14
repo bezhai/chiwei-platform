@@ -6,25 +6,30 @@
 
 这份契约是 T3（唤醒与暂停）、T4（分层裁剪）、T5（手机三层）共同的地基，六条：
 
-一 · 粒度与日界
----------------
+一 · 粒度：一个人一条，不分天
+-----------------------------
 
-**一个 persona 一条，键是 ``lane:persona_id:生活日``**
-（:func:`moment_transcript_id`，落在
+**一个 persona 一条，键是 ``lane:persona_id``**
+（:func:`transcript_key`，落在
 :class:`app.domain.session_transcript.SessionTranscript` 的 ``session_id`` 列上）。
 lane 在键里，两条泳道天然是两行，不需要额外的隔离字段。
 
-**日界取生活日（CST 04:00，:func:`app.living.day_page.living_day_of`），不是自然
-日。** 凌晨两点她还醒着、还在说同一件事，按自然日切就会在午夜把这一段从中间劈开，
-而她自己感觉不到这个边界。04:00 是她这一天真正结束的时刻，日记那一页也按同一个边界
-写（:mod:`app.living.day_page`）。
+**这条 loop 不跨天断，是一直连着的。** 键原来带着生活日（CST 04:00 起算），于是
+04:00 那一轮读到的是一条空上下文，跨天靠她自己写下的那一页、挂心事和状态快照重铺接住。
+那一刀同时干了两件事，而只有一件是想要的：控制增长真的需要（但下面第四条那个硬顶已经
+在做），"她每天重新开始"不想要 —— 一个人不会在早上四点忘掉昨晚正在想的事。
 
-**日界一到上下文就是空的，这是设计的一部分。** 跨天由她自己写下的那一页、她心里挂
-着的事和状态快照接住（:mod:`app.living.snapshot`），不靠把昨天的对话原样拖进今天。
+**代价：清零原来是唯一一次保证前缀重建的时刻。** 去掉之后增长只剩裁剪一条路管着，写错
+了不会有每日自愈，症状是上下文只增不减直到撞上模型的 context 上限、之后每一拍都在同一
+个地方抛错。守它的是 ``tests/living/test_context_trim.py`` 第九节。
 
-**一个 moment 的键只按 ``began_at`` 算一次，读和写用同一个。** 一个 03:58 开始、
-04:02 结束的 moment 整个算在旧的那一天里；分别算就会读一个键、写另一个键，这一轮凭
-空消失。
+日记那一页照写不误（:mod:`app.living.day_page`），它按同一个 04:00 的边界分天 —— 那是
+她自己回看一天的东西，不再兼职当跨天的搬运工。清理周期也仍然按生活日 04:00 起算
+（:func:`_cleanup_instant`）：那条为的是让截止线跟她的一天对齐、两次清理之间前缀逐字节
+不动，跟上下文分不分天是两件事。
+
+**一个 moment 的键只算一次，读和写用同一个。** 键不再跟时刻有关，所以这条现在是白给
+的；留着这句话是因为"读一个键、写另一个键"那种失败是整轮凭空消失，而且没有报错。
 
 二 · 写失败的语义
 -----------------
@@ -100,10 +105,15 @@ moment 记录同一批已经提交，所以重铺之后她照样知道自己那�
 （:func:`next_transcript`，规则见下面第六条）。
 
 **硬顶不是优化，是这条线能连续跑的前提。** 没有它的时候上下文只增不减：到了模型的
-context 上限，``Agent.run`` 抛错、收尾不提交、下一拍读到同样的历史再抛一次。日界一
-到（04:00）上下文清空才自己恢复，所以症状是"这一天剩下的每一拍都在同一个地方炸"，
-不是卡死在某一个 moment 上。撞顶要多久是条件估算：可用容量 ``C``、每轮固定输入
-``P``、每轮新增 ``g``，一小时六轮，约 ``(C - P) / (6g)`` 小时。
+context 上限，``Agent.run`` 抛错、收尾不提交、下一拍读到同样的历史再抛一次 —— 而键上
+的日期去掉之后，04:00 那次清空不存在了，撞上去就一直炸下去，直到有人去改配置或者清库。
+撞顶要多久是条件估算：可用容量 ``C``、每轮固定输入 ``P``、每轮新增 ``g``，一小时六轮，
+约 ``(C - P) / (6g)`` 小时。
+
+**硬顶判两次，两次都必要。** 收尾那次（:func:`next_transcript`）**不动这一轮的消息**，
+所以一轮自己就超了的时候它照样把那一份写下去；喂之前那次（:func:`trim_for_round`）没有
+这个豁免，会把它裁回顶以下。少了后者就是上面那个死循环——那一份下一轮读回来仍然超限、
+模型当场失败、失败就不提交、再读到同一份。
 
 五 · 多副本
 -----------
@@ -138,9 +148,11 @@ provider 拒掉整个请求，而且同一轮里多个调用和多个结果必�
 儿"就行。所以：调用还在保留期内时只把过期的**载荷**换成一句写死的短语
 （:data:`MATERIAL_TRIMMED`），消息结构一条不动；整组过期时调用和它的全部结果一起删。
 
-**哪些返回是素材、哪些要留着，逐只手列在** :data:`MATERIAL_TOOLS` / :data:`KEPT_TOOLS`
-**上**，两份合起来必须正好覆盖 ``MOMENT_TOOLS``（有用例钉住）。分不清的那一档是留着：
-留错了只是多占 token，裁错了是她拿着一个失效的句柄去发图。
+**哪些返回是素材、哪些要留着，逐只手列在调用方那边**（life 的在
+:data:`app.living.moment.MATERIAL_TOOLS` / :data:`app.living.moment.KEPT_TOOLS`），
+两份合起来必须正好覆盖那一侧的全部工具（有用例钉住）。分不清的那一档是留着：留错了只是
+多占 token，裁错了是她拿着一个失效的句柄去发图。这一层只认名字，而且**不给默认值** ——
+理由写在下面那两张表原来待的地方。
 
 **``look_at_phone`` 在"留着"那一档，它是唯一一只返回别人内容却留 4 小时的手。** 判据
 不是"这是不是她读到的东西"，而是"这次返回里有没有别处找不到的凭据"：那一页上每条她
@@ -151,7 +163,7 @@ provider 拒掉整个请求，而且同一轮里多个调用和多个结果必�
 3 小时；一页十几条文本跟那个风险不是一个量级，而且图片块不跟着多留（它走下面那条独立
 的线）。
 
-**"素材"只指工具返回的载荷。** 每轮喂进去的那条 USER（状态快照 + 手机信封）和她自
+**"素材"只指工具返回的载荷。** 每轮喂进去的那条 USER（新发生的事 + 手机上刚来的）和她自
 己说的每一句都算她这一侧，走 ``own_minutes``：它们是她那段经历读得懂的骨架，先于她
 的话消失的话，剩下的对白就没有了由头。
 
@@ -163,12 +175,16 @@ provider 拒掉整个请求，而且同一轮里多个调用和多个结果必�
 ``cleanup_minutes`` 加一个 moment 间隔，:data:`MAX_CLEANUP_MINUTES` 把这个和
 :data:`PICTURE_URL_MINUTES` 之间的余量守住。
 
-**每次清理重铺一次状态**（:func:`_checkpoint`，内容是
-:meth:`app.living.snapshot.MomentSnapshot.render_state`）：4 小时前的话被裁掉之后那段
-经历只剩库里还有，所以清理时把她当前的状态（在哪、在做什么、上一次写下的那天、挂着什
-么事、刚做过说过什么）作为新起点插进去。**全量状态只在这里给**——每轮送到她眼前的只
-有新发生的事，她此刻的样子读一百遍字字一样，每轮重发就是把同一段话抄一遍。一天的第一
-轮上下文是空的，那一下同样立一根，所以冷启动她照样知道自己站在哪。
+**每次清理重铺一次状态**（:func:`_checkpoint`，``state`` 由调用方给）：4 小时前的话被
+裁掉之后那段经历只剩库里还有，所以清理时把她当前的状态（在哪、在做什么、上一次写下的
+那天、挂着什么事、刚做过说过什么、手机上还有什么没看）作为新起点插进去。**全量状态只
+在这里给**——每轮送到她眼前的只有新发生的事，她此刻的样子读一百遍字字一样，每轮重发就
+是把同一段话抄一遍。一天的第一轮上下文是空的，那一下同样立一根，所以冷启动她照样知道
+自己站在哪。
+
+**"此刻仍然为真"的事实必须在这里，不能只在某一轮的刺激里。** 未读是最容易漏的那一件：
+每轮的信封只给新到的（:func:`app.living.phone.render_arrived`），她一直不看手机的话，
+摆出那条通知的那一轮刺激到期整组删，之后就再没有第二处说得出有人找过她。
 它同时是**分代的界桩**——每条消息的"年龄下界"就是它右边第一个界桩的时刻，不需要给
 每条消息单独存一个时刻。界桩之前那一代（一天里第一个界桩立起来之前写下的东西）没有
 上界，一律留着，等下一个界桩立起来再算。
@@ -198,7 +214,6 @@ from inner_shared.dynamic_config import dynamic_config
 
 from app.agent.neutral import ContentBlock, Message, Role
 from app.agent.session import load_session, replace_session
-from app.agent.trace import make_session_id
 from app.living.day_page import living_day_bounds, living_day_of
 
 logger = logging.getLogger(__name__)
@@ -215,13 +230,33 @@ class TranscriptConflict(RuntimeError):
     """
 
 
-def moment_transcript_id(*, lane: str, persona_id: str, now: datetime) -> str:
-    """这个人在 ``now`` 所属的那个生活日上的上下文键。
+def transcript_key(*, lane: str, actor: str) -> str:
+    """一个存在的上下文键。格式 ``lane:actor`` —— **不分天，一条到底**。
 
-    格式 ``lane:persona_id:YYYY-MM-DD``，日期是**生活日**（CST 04:00 起算），不是
-    ``now`` 的日历日。整个 moment 只算一次、读写共用（见模块 docstring 第一条）。
+    ``actor`` 是 persona_id，或者 ``"world"``（:data:`app.living.records.WORLD_ACTOR`）：
+    world 也有自己的连续上下文，跟三姐妹在同一个命名空间里。
+
+    键里原来带着生活日（``lane:persona_id:YYYY-MM-DD``），于是凌晨 04:00 那一轮读到的
+    是一条空上下文。那一刀同时干了两件事，而只有一件是想要的：
+
+      * *控制增长* —— 真的需要，但分层裁剪加 200k 硬顶已经在做，不需要每天再砍一次；
+      * *她每天重新开始* —— **不想要**。一个人不会在早上四点忘掉昨晚正在想的事。
+
+    所以日期去掉了，她接着昨天往下想。代价要认：清零原来是唯一一次保证前缀重建的时刻，
+    去掉之后裁剪必须长期正确，写错了不会有每日自愈，症状是上下文只增不减直到撞上模型的
+    context 上限、之后每一拍都在同一个地方抛错。守它的是
+    ``tests/living/test_context_trim.py`` 第九节。
+
+    **跟 langfuse 那个 session 不是一回事。** 这里只是存储键；trace 的 session id 在
+    :func:`app.living.moment.run_moment` 里另给（``living-life:{lane}:{persona_id}``），
+    本来就不带日期。这里不再借 :func:`app.agent.trace.make_session_id` 拼 —— 那个函数
+    答的是"某个角色某一天的那条 langfuse session"，形状就是三段带日期的；两件事现在段数
+    都不一样了，共用一个拼接函数只会让下一个人以为改一处就能改两处。
+
+    **清理周期仍然按生活日 04:00 起算**（:func:`_cleanup_instant`）——那条是为了让截止线
+    跟她的一天对齐、两次清理之间前缀逐字节不动，跟上下文分不分天是两件事。
     """
-    return make_session_id(lane, persona_id, living_day_of(now).isoformat())
+    return f"{lane}:{actor}"
 
 
 async def load_moment_transcript(
@@ -229,9 +264,10 @@ async def load_moment_transcript(
 ) -> tuple[list[Message], int]:
     """她此刻的上下文，以及读到的版本号。
 
-    没有记录（这个生活日的第一个 moment、或者刚清过库）就是 ``([], 0)``：空上下文是
-    一天的正常开头，不是错误。版本号交给 :func:`commit_moment_transcript` 做 CAS，
-    所以调用方必须把它带到收尾，不能中途丢掉。
+    没有记录就是 ``([], 0)``。这条线不分天，所以空上下文只有两种来源：这条泳道上她
+    （或者 world）**从来没跑过**，或者刚清过库。两种都不是错误，接住它的是那一轮必立的
+    界桩（:func:`trim_for_round`，空历史一律立）。版本号交给
+    :func:`commit_moment_transcript` 做 CAS，所以调用方必须把它带到收尾，不能中途丢掉。
 
     进程里不存任何副本 —— 读的就是 PG 里最新那一版。这就是"杀掉 pod 还能接着上次"
     的全部机制。
@@ -252,8 +288,14 @@ async def commit_moment_transcript(
     每一条），不是增量。``expected_ver`` 是 :func:`load_moment_transcript` 读到的那一
     版；库里已经不是它了就抛 :class:`TranscriptConflict`。
 
-    ``session`` 是必填的：这次写入跑在调用方的事务里，而那个事务只包这一件事 ——
-    moment 记录和手机已读在它之前已经单独提交过了（模块 docstring 第三条）。
+    ``session`` 是必填的：这次写入跑在**调用方的**事务里，而那个事务包什么由调用方定，
+    两边不一样：
+
+      * 她那边（:func:`app.living.moment.run_moment`）这个事务只包这一件事 —— moment
+        记录和手机已读在它之前已经单独提交过了（模块 docstring 第三条）。
+      * world 那边（:func:`app.living.world.run_world_round`）``WorldRound`` 和这次写入
+        在**同一个**事务里：它的读游标住在那一行的 ``next_seq`` 上，分两次写的话游标推了
+        而上下文没写成时，那一批发生过的事就此对它永久消失，而且一句报错都没有。
 
     写失败（CAS 没落地、或者 PG 抛错）一律往外抛，这里不吞。怎么处理由调用方定：
     :func:`app.living.moment._remember_this_round` 记一行 ERROR 并让这一轮照样算数。
@@ -273,78 +315,14 @@ async def commit_moment_transcript(
 # 分层裁剪
 # ---------------------------------------------------------------------------
 
-# 她读到的素材：读完就该沉淀成她自己的东西，过了保留期换成一句短语。
+# **哪些工具的返回算素材、哪些留着，不在这一层。** 那是调用方的事：life 那 22 只手和
+# world 那几只手是两套完全不同的东西，而这里只认名字。life 那两张表住在
+# :data:`app.living.moment.MATERIAL_TOOLS` / :data:`app.living.moment.KEPT_TOOLS`，
+# world 的住在它自己那边，各自有用例钉住"两份合起来正好覆盖这一侧的全部工具"。
 #
-#   * ``look_around``      够得着的地方现在什么样 —— 快照每轮重发一份
-#   * ``search_online`` / ``browse_online``  搜索结果和信息流，没有任何工具吃它们的 URL
-#   * ``read_a_guide``     说明书全文，想再看就再读一遍
-#   * ``run_a_script``     命令的输出。上限 4000 字（``app.capabilities.sandbox``），
-#     而且已经带着"还有多少字没给你"那句实话，这里不做第二次截断，只整块换掉
-MATERIAL_TOOLS = frozenset(
-    {
-        "look_around",
-        "search_online",
-        "browse_online",
-        "read_a_guide",
-        "run_a_script",
-    }
-)
-
-# 留着的那一档，两类东西：
-#
-# **一 · 长期标识** —— 不是她读到的内容，是她后面还要原样抄回去的凭据：
-#
-#   * ``draw_a_picture`` / ``find_a_picture_online`` / ``look_at_a_picture`` /
-#     ``look_through_your_pictures``  返回里的 ``pic=<32 位十六进制>``，被
-#     ``send_message(pictures=[...])`` / ``look_at_a_picture(which=...)`` /
-#     ``look_through_your_pictures(before=...)`` 吃。翻页那只手的最后一串还是往前翻
-#     的游标
-#   * ``look_for_something_to_read``  ``file=<attachment_id>``，被 ``read_a_bit(which=...)``
-#     吃。``read_a_bit`` 自己指代不明时抛的那句话里也逐个印着候选的 ``file=``，
-#     所以它也在这一档
-#   * ``look_up_contact`` / ``look_through_your_phone``  ``channel_id=<id>``，被
-#     ``look_at_phone`` / ``send_message`` 吃（翻页那只手的最后一串还是往下翻的游标）。
-#     安静下来的会话不在手机通知上，这两只手是找回它的仅有的两条路
-#   * ``look_at_phone``  **这一档里唯一一只返回是别人内容的手，破例在这里说清楚。**
-#     它那一页上有两样凭据：每条她自己发的消息带的 ``take_back_id``，和头上那串
-#     ``before=``。前者在快照的"你刚做过、说过"那段有副本，但那段只有最近 12 条，滚
-#     出去的旧消息就没有第二份了；后者是往前翻**唯一**的入口，从头到尾只出现在这一
-#     次返回里，换掉正文她就再也翻不回这条会话更早的地方。
-#     只保留句柄、把正文换掉更精确，但那要在裁剪这一层解析手机那边渲染出来的标签 ——
-#     渲染改一个字，句柄就静默地留不住了，而症状是几小时后她拿着一个不存在的编号去
-#     撤消息。别人的正文因此多留 3 小时：一页十几条文本，跟这个风险不是一个量级
-#     （图片块**不**跟着多留，它走 :data:`PICTURE_TRIMMED` 那条独立的线）
-#
-# **二 · 她自己动作的回执** —— ``switch_to`` / ``move_to`` / ``keep_in_mind`` /
-# ``say`` / ``act`` / ``send_message`` / ``take_back_message`` / ``stop_for_now``。
-# 这几条是"这件事到底做成了没有"的唯一记录：``send_message`` 明确区分发出去了、已经说
-# 过了、交出去但没等到确认三种结局，裁掉她就会照着一个不知道有没有成功的动作再来一遍。
-# ``stop_for_now`` 那句确认是她上一轮怎么收尾的唯一痕迹（它结束这一轮，后面没有她的话
-# 跟着），而且整条就几个字，换成短语省不下任何东西。
-#
-# **新加一只手落进哪一档必须显式写下来**（用例 ``test_every_tool_she_has_is_classified``
-# 会因为漏掉而失败）。分不清就放这一档：留错了只是多占 token。
-KEPT_TOOLS = frozenset(
-    {
-        "switch_to",
-        "move_to",
-        "keep_in_mind",
-        "say",
-        "act",
-        "stop_for_now",
-        "send_message",
-        "take_back_message",
-        "look_at_phone",
-        "look_up_contact",
-        "look_through_your_phone",
-        "look_for_something_to_read",
-        "read_a_bit",
-        "draw_a_picture",
-        "find_a_picture_online",
-        "look_through_your_pictures",
-        "look_at_a_picture",
-    }
-)
+# **这一层不给默认值**（:func:`trim_for_round` 的 ``material_tools`` 必填）：给了默认值
+# 的话，接进来的第二个调用方一只手都不在表里也照跑，全部走"留着"那一档完整保留 240
+# 分钟 —— 对一个每轮 read 一份文档的 loop，那正好是最贵的默认值，而且一句报错都没有。
 
 # 过期载荷换成的那句话。**代码写死，不是概括**：概括会留下一个可能已经错了的版本，
 # 而原文没了，错了没人知道（宪法原则 6：宁可不记，不可记错）。
@@ -643,9 +621,11 @@ def _without_pictures(message: Message) -> Message:
     )
 
 
-def _faded(message: Message, *, name: str | None) -> Message:
+def _faded(
+    message: Message, *, name: str | None, material_tools: frozenset[str]
+) -> Message:
     """过期的素材载荷换成一句写死的短语；消息结构一条不动。"""
-    if message.role is not Role.TOOL or name not in MATERIAL_TOOLS:
+    if message.role is not Role.TOOL or name not in material_tools:
         return _without_pictures(message)
     return Message(
         role=Role.TOOL,
@@ -655,7 +635,11 @@ def _faded(message: Message, *, name: str | None) -> Message:
 
 
 def _clean(
-    messages: list[Message], *, at: datetime, policy: TrimPolicy
+    messages: list[Message],
+    *,
+    at: datetime,
+    policy: TrimPolicy,
+    material_tools: frozenset[str],
 ) -> list[Message]:
     """按两档时长裁一遍历史。整组过期整组删，没过期只换过期的载荷。"""
     bounds = _bounds(messages)
@@ -674,7 +658,11 @@ def _clean(
             continue
         if age >= material:
             kept.extend(
-                _faded(messages[i], name=names.get(messages[i].tool_call_id or ""))
+                _faded(
+                    messages[i],
+                    name=names.get(messages[i].tool_call_id or ""),
+                    material_tools=material_tools,
+                )
                 for i in group
             )
         else:
@@ -723,6 +711,7 @@ def trim_for_round(
     now: datetime,
     state: str,
     policy: TrimPolicy,
+    material_tools: frozenset[str],
     lost_last_round: bool = False,
 ) -> list[Message]:
     """这一轮该喂给模型的那份历史：跨过清理点就裁一遍并立一根界桩。
@@ -748,17 +737,29 @@ def trim_for_round(
         走不到。停机超过签名寿命再起来就是这个形状。
       * *前缀缓存。* 这一轮喂进去的前缀和这一轮存下去的前缀因此是同一份，下一轮接着
         命中；裁在收尾的话一次清理会连着换两次前缀，白丢一次命中。
+
+    **硬顶在这里也判一次，这条是死循环的唯一出口。** :func:`_under_cap` 有意让"这一轮
+    自己就超了"的那批原样落盘（丢掉刚发生的事等于这一轮白跑），而那一份紧接着就是下一轮
+    的历史：它大到会让模型请求当场失败，失败就不提交，下一轮读到同一份、再立一根**时刻
+    是当下**的界桩 —— 那一代的年龄永远是 0，两档时长一条都够不着。日界清零没了之后这是个
+    谁也走不出来的循环。判在模型调用之前，恢复就不再依赖"下一轮得先成功提交一次"。
+    没撞顶时 :func:`_under_cap` 原样返回，所以常态下前缀一个字节都不动。
     """
     at = _cleanup_instant(now, policy.cleanup_minutes)
     # 界桩先立起来再裁：它同时是这一代的上界，立完再裁，这一代的图片当场就走。
     # 反过来（先裁后立）的话图片要等到下一轮才走，白多活一个 moment 间隔。
     staged = list(history)
-    if _due(history, at):
+    laid = _due(history, at)
+    if laid:
         staged.append(_checkpoint(at, state))
     elif lost_last_round:
         # 跨清理点那根已经重铺过状态了，两根一起立没有意义。
         staged.append(_gap_marker(now, state))
-    return _clean(staged, at=at, policy=policy)
+        laid = True
+    cleaned = _clean(staged, at=at, policy=policy, material_tools=material_tools)
+    # 刚立的那根界桩不许被兜底裁掉：它是这一轮唯一一份"你现在"，裁了她就不知道自己
+    # 站在哪了。它排在最后，所以护住末尾那一条正好是它。
+    return _under_cap(cleaned, floor=1 if laid else 0, policy=policy)
 
 
 def next_transcript(

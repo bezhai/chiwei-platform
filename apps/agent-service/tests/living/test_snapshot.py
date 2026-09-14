@@ -101,7 +101,9 @@ async def test_the_state_she_stands_in_carries_nothing_that_just_happened(snap_d
     )
     state = snap.render_state()
 
-    assert "看昨天拍的胶片" in state
+    assert "看昨天拍的胶片" not in state, (
+        "她在哪、在干嘛归 render_new —— 位置每轮都可能被她自己改，重铺那份会过期"
+    )
     assert "周末陪绫奈去祭典" in state
     assert "布丁我吃了。" in state
     assert "你上一次写下的那一天" in state
@@ -128,7 +130,8 @@ async def test_what_is_new_is_the_clock_the_gap_and_what_others_did(snap_db):
     assert "2026-07-25" in new and "周六" in new, "她不知道今天是几号、星期几"
     assert "10 分钟" in new, f"没告诉她离上一次隔了多久。拿到：\n{new}"
     assert "冰箱里还有布丁" in new
-    for repeated in ("看昨天拍的胶片", "周末陪绫奈去祭典", "布丁我吃了。"):
+    assert "看昨天拍的胶片" in new, "她这一轮不知道自己在干嘛"
+    for repeated in ("周末陪绫奈去祭典", "布丁我吃了。"):
         assert repeated not in new, (
             f"「{repeated}」每轮都在重发 —— 它在上下文里已经有了"
         )
@@ -233,7 +236,7 @@ async def test_the_snapshot_opens_with_what_is_in_her_hands(snap_db):
 
     assert snap.doing is not None
     assert (snap.doing.place, snap.doing.doing) == ("家/客厅", "看昨天拍的胶片")
-    assert "看昨天拍的胶片" in snap.render_state()
+    assert "看昨天拍的胶片" in snap.render_new(previous_at=_at(14))
 
 
 @pytest.mark.integration
@@ -678,3 +681,50 @@ async def test_the_now_line_says_which_calendar_day_it_is(snap_db):
 
     assert "2026-07-25" in text, f"她不知道今天是几号。拿到：\n{text}"
     assert "周六" in text, f"她不知道今天星期几。拿到：\n{text}"
+
+
+# ---------------------------------------------------------------------------
+# 「手上」搬到每轮刺激里
+#
+# 她在哪、在做什么读一百遍字字一样，所以它本来在界桩上重铺 —— 那条推理对"上一次写下
+# 的那一天""心里挂着什么"成立，对这一条**不成立**：位置每一轮都可能被她自己改（move_to
+# / switch_to），改完之后到下一个清理点之间，她眼前那份状态说的还是旧位置。而位置决定
+# 谁看得见她、她看得见谁，是这一轮里最该准的一样东西。
+#
+# 所以它归到 render_new：那一段本来就是"这一轮的实况"。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_where_she_is_comes_with_every_round(snap_db):
+    await _stand("akao", "家/厨房", "煮抹茶", _at(14))
+
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
+    )
+    new = snap.render_new(previous_at=_at(14))
+
+    assert "家/厨房" in new
+    assert "煮抹茶" in new
+
+
+@pytest.mark.integration
+async def test_where_she_is_is_not_also_in_the_checkpoint(snap_db):
+    """一份输入里不该有两处说她在哪 —— 而且界桩那份还可能是过期的那一个。"""
+    await _stand("akao", "家/厨房", "煮抹茶", _at(14))
+
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
+    )
+
+    assert "家/厨房" not in snap.render_state()
+
+
+@pytest.mark.integration
+async def test_having_never_stood_anywhere_still_says_so(snap_db):
+    """空的时候如实说空，不留白洞 —— 她第一轮得知道"我还没定下自己在哪"。"""
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
+    )
+
+    assert "还没定下" in snap.render_new(previous_at=None)

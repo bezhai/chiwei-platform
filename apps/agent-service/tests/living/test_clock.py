@@ -135,6 +135,7 @@ def test_the_world_round_column_shapes_are_pinned():
         "ran_at": "TIMESTAMPTZ",
         "produced": "BIGINT",
         "said": "TEXT",
+        "next_seq": "BIGINT",
     }, (
         "WorldRound 的列形状变了。加列是可以的；改类型 / 删列会让已经建好表的 lane "
         "在启动时 MigrationError。"

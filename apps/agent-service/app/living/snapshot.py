@@ -113,8 +113,8 @@ class MomentSnapshot:
     perceived: PerceivedWindow
 
     def render_state(self) -> str:
-        """她此刻的样子：在哪、在做什么、上一次写下的那一天、心里挂着什么、刚做过说过
-        什么。每段空的时候如实说空，不留白洞。
+        """她此刻的样子：上一次写下的那一天、心里挂着什么、刚做过说过什么。
+        每段空的时候如实说空，不留白洞。
 
         **这一份不是每轮都送的**，只在清理那一下当作新起点重铺一次
         （:func:`app.living.continuity.trim_for_round`）。四段读一百遍字字一样，连续
@@ -122,10 +122,14 @@ class MomentSnapshot:
 
         **不带时刻。** 界桩自己头上就印着这次清理的时刻，这里再报一次就是同一份输入里
         两个"现在"，而且两个数还不一样（界桩取整点，这一轮的 ``now`` 不是）。
+
+        **"她在哪、在做什么"不在这一半里**，它归 :meth:`render_new`。"读一百遍字字
+        一样"这条对下面三段成立，对位置不成立：她自己每一轮都可能改（``move_to`` /
+        ``switch_to``），改完到下一个清理点之间，重铺那份说的还是旧位置 —— 而位置决定
+        谁看得见她、她看得见谁，是这一轮里最不能过期的一样。
         """
         return "\n\n".join(
             (
-                self._render_hands(),
                 self._render_day_page(),
                 self._render_open_ends(),
                 self._render_own_recent(),
@@ -133,7 +137,8 @@ class MomentSnapshot:
         )
 
     def render_new(self, *, previous_at: datetime | None) -> str:
-        """这一轮新发生的：几点了、离上一次隔了多久、这期间别人做了什么、有什么到点了。
+        """这一轮的实况：几点了、离上一次隔了多久、**你在哪在干嘛**、有什么到点了、
+        这期间别人做了什么。
 
         ``previous_at`` 是上一个落地的 moment 的『现在』；一个都没跑过传 ``None``。
 
@@ -142,7 +147,7 @@ class MomentSnapshot:
         15:30 该做的事要到 16:00 她才看得见，而 :func:`app.living.moment.keep_in_mind`
         的文案对她的承诺是"到点之后你眼前那条会写着「到点了」"。
         """
-        parts = [self._render_now(previous_at)]
+        parts = [self._render_now(previous_at), self._render_hands()]
         just_due = self._render_just_due(previous_at)
         if just_due is not None:
             parts.append(just_due)
