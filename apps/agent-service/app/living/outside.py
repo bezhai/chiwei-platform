@@ -30,8 +30,8 @@ from sqlalchemy import text
 from app.data.session import get_session
 from app.infra.cst_time import CST
 from app.living.happening import record_happening
+from app.living.place import EVERYWHERE
 from app.living.records import (
-    AMBIENT_PLACE,
     KIND_ACT,
     MEDIUM_IN_PERSON,
     WORLD_ACTOR,
@@ -199,7 +199,7 @@ async def look_outside(
         # （``perceive`` 里 ``actor == persona_id`` 那条）会把它从那个人眼前抹掉。
         actor=WORLD_ACTOR,
         # 没绑地点：外面什么样是这一整片上的事，屋里每个人都在这片里面。
-        place=AMBIENT_PLACE,
+        place=EVERYWHERE,
         kind=KIND_ACT,
         medium=MEDIUM_IN_PERSON,
         content="，".join(lines),

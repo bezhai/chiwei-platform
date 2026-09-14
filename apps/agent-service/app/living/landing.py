@@ -64,8 +64,8 @@ from app.data.queries.messages import (
 )
 from app.data.session import get_session
 from app.infra.cst_time import CST
-from app.living.clock import living_lane
 from app.living.mouth import SpokenOutbound
+from app.living.records import living_lane
 from app.runtime.data import Data, Key
 from app.runtime.migrator import _table_name
 from app.runtime.node import node

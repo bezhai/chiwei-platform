@@ -51,10 +51,9 @@ from app.capabilities.agent import AgentRunner
 from app.data.session import get_session
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST, now_cst
-from app.living.clock import living_lane
 from app.living.happening import happening_line, read_happenings_between
 from app.living.persona import LIVING_PERSONAS, persona_prompt_vars
-from app.living.records import _require_aware
+from app.living.records import _require_aware, living_lane
 from app.living.serial import hold
 from app.runtime.data import Data, Key
 from app.runtime.migrator import _table_name

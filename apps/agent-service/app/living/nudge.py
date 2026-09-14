@@ -40,10 +40,10 @@ from datetime import datetime
 from typing import Annotated
 
 from app.infra.cst_time import now_cst
-from app.living.clock import living_lane
 from app.living.moment import LifeMoment, run_moment
 from app.living.persona import LIVING_PERSONAS
 from app.living.phone import newest_unread_summons
+from app.living.records import living_lane
 from app.runtime.data import Data, Key
 from app.runtime.node import node
 

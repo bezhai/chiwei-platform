@@ -132,6 +132,7 @@ _PINNED: dict[type, dict[str, str]] = {
         "audience": "JSONB",
         "who_was_where": "JSONB",
         "channel_id": "TEXT",
+        "lasts_until": "TIMESTAMPTZ",
     },
     Whereabouts: {
         "lane": "TEXT",
@@ -150,6 +151,7 @@ _PINNED: dict[type, dict[str, str]] = {
         "due_at": "TIMESTAMPTZ",
         "place": "TEXT",
         "consumed_at": "TIMESTAMPTZ",
+        "lasts_until": "TIMESTAMPTZ",
     },
     FileRead: {
         "lane": "TEXT",
@@ -306,11 +308,13 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
 
     assert sorted(checked) == [
         ("FileRead", "read_at"),
+        ("Happening", "lasts_until"),
         ("Happening", "occurred_at"),
         ("LivingDayPage", "written_at"),
         ("Picture", "made_at"),
         ("Upcoming", "consumed_at"),
         ("Upcoming", "due_at"),
+        ("Upcoming", "lasts_until"),
         ("Whereabouts", "noted_at"),
     ]
 

@@ -63,6 +63,12 @@ _TABLE = _table_name(Happening)
 # 不丢）。不是"截断上下文"——是一次拿多少行，剩下的下次接着拿。
 _DEFAULT_LIMIT = 200
 
+# 一个时刻最多有多少件事还在持续着。这个数**没有下一批**——它答的是"这儿现在什么样"，
+# 一个瞬间的答案，取前 N 条就是取前 N 条。给得小是因为同时进行的持续事件本来就该是
+# 个位数：真的堆到几十条，那是 world 在往世界上糊状态而不是在让事情发生，那时候该改
+# 的是它那一轮的输入，不是这个数。
+_ONGOING_LIMIT = 20
+
 
 def happening_seq_lock_key(lane: str) -> str:
     """本 lane 上 happening 提交序轴的占用 key（全 lane 一条轴）。"""
@@ -118,6 +124,7 @@ async def record_happening(
     audience: Sequence[str] = (),
     medium: str = MEDIUM_IN_PERSON,
     channel_id: str | None = None,
+    lasts_until: datetime | None = None,
 ) -> Happening:
     """落一件已经发生的事，拿到它在本 lane 提交序上的号。
 
@@ -125,6 +132,10 @@ async def record_happening(
     快照在拿占用之前取：它是这件事发生那一刻的世界状态，不需要跟取号原子。
 
     ``channel_id`` 只有手机 / 群聊那两个 medium 才有：当面说的话不在任何会话上。
+
+    ``lasts_until`` 只有"还在持续"的那一类才填（下雨、停电、街上在办庙会）。说话和
+    动作是一瞬间的事，一律 ``None``——填了它们，她每走进一次房间就会把刚才那句话
+    重听一遍（见 :func:`ongoing_at`）。
 
     重放同一个 ``happening_id`` 只落一行，返回库里已有的那一行（快照以第一次
     写入的为准，重放不覆盖——同一件事不该因为重投而换一批听众）。
@@ -144,6 +155,7 @@ async def record_happening(
         audience=list(audience),
         who_was_where=snapshot,
         channel_id=channel_id,
+        lasts_until=lasts_until,
     )
 
 
@@ -292,6 +304,84 @@ async def read_perceived_by(
         keep_directed=True,
         keep_overheard=True,
     )
+
+
+async def read_all_after(
+    *, lane: str, after_seq: int, limit: int = _DEFAULT_LIMIT
+) -> tuple[list[Happening], int]:
+    """自游标以来的全部原始记录 + 新游标，**不裁给任何人看**。
+
+    world 那一轮走这条：它不站在任何地方，也不是在场的人，三档裁剪对它没有意义 ——
+    它要知道的是世界上客观发生了什么。她们那一侧走 :func:`read_perceived_by`。
+    """
+    return await _scan(lane=lane, after_seq=after_seq, limit=limit)
+
+
+async def anyone_acted_since(*, lane: str, after_seq: int) -> bool:
+    """自游标以来，**world 之外**有没有谁做过 / 说过什么。
+
+    ``actor <> 'world'`` 这一条是硬的，不是优化。``Happening.actor`` 可以是
+    ``"world"`` —— 日历到期交付（:mod:`app.living.calendar`）和每日外部素材
+    （:mod:`app.living.outside`）写的都是它。不排除的话就成了一个闭环：world 排一件事
+    → 到点写一条 happening → 唤醒 world → 它再排一件。上一代 world 一天跑两百多轮就是
+    这个形状，而硬下限只能把它压到一天 144 轮，压不掉。
+    """
+    sql = (
+        f"SELECT 1 FROM {_TABLE} "
+        f"WHERE lane = :lane AND seq > :after_seq AND actor <> :world "
+        f"LIMIT 1"
+    )
+    async with get_session() as s:
+        result = await s.execute(
+            text(sql),
+            {"lane": lane, "after_seq": after_seq, "world": WORLD_ACTOR},
+        )
+        return result.first() is not None
+
+
+async def ongoing_at(
+    *, lane: str, place: str, now: datetime, limit: int = _ONGOING_LIMIT
+) -> list[Happening]:
+    """此刻站在 ``place`` 的人，这儿**还在发生**着的那些事。
+
+    **这条跟 :func:`perceive` 不是同一条规则，故意的。**
+
+    感知走游标：一条事件被谁读到，只取决于它落在谁的 ``seq`` 之后，判在不在场读的
+    是 ``who_was_where``（**事情发生那一刻**她在哪）。那对"刚才发生了什么"完全正确，
+    对"这儿现在是什么样"却是致命的——学校开始下雨的时候她在家，游标早越过了那一条，
+    她随后走进学校，于是永远不知道正在下雨。地方文档只写不变的部分，这件事没有任何
+    别的途径能知道。
+
+    所以这条读的是**她现在站在哪**，判据两条：
+
+    * ``lasts_until`` 还没过（一瞬间的事 ``lasts_until IS NULL``，永远不在这里面——
+      否则她每进一次门就把刚才那句话重听一遍）
+    * 事发范围盖得住她此刻的位置，而且必须是 :attr:`~app.living.place.Reach.SAME_PLACE`
+
+    **只认同一地点，不认同一栋。** "这儿现在什么样"问的是这儿：厨房在漏水跟站在客厅
+    的她无关，那是旁听要答的问题。位置粗一格（只知道她"在家"）同样不算——跟旁听那条
+    fail-closed 同一条纪律，宁可少给一条，不能凭模糊位置判她在场。
+
+    **不做回声抑制**：还在下的雨不因为是谁开始的就对谁不存在。能填 ``lasts_until``
+    的今天只有 world 那一侧，所以这里实际上全是世界自己的事。
+    """
+    sql = (
+        f"SELECT * FROM {_TABLE} "
+        f"WHERE lane = :lane AND lasts_until IS NOT NULL AND lasts_until > :now "
+        f"ORDER BY seq ASC LIMIT :limit"
+    )
+    async with get_session() as s:
+        result = await s.execute(
+            text(sql), {"lane": lane, "now": now, "limit": limit}
+        )
+        rows = result.mappings().all()
+    return [
+        h
+        for h in (
+            Happening(**{k: row[k] for k in Happening.model_fields}) for row in rows
+        )
+        if reach_between(observer=place, happening=h.place) is Reach.SAME_PLACE
+    ]
 
 
 async def read_happenings_between(

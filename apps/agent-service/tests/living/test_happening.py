@@ -17,12 +17,13 @@ from pydantic import ValidationError
 from app.living.happening import (
     _scan,
     happening_seq_lock_key,
+    ongoing_at,
     read_directed_to,
     read_overheard_by,
     read_perceived_by,
     record_happening,
 )
-from app.living.place import Reach
+from app.living.place import EVERYWHERE, Reach
 from app.living.records import (
     MEDIUM_GROUP_CHAT,
     MEDIUM_IN_PERSON,
@@ -67,6 +68,28 @@ async def _say(
         audience=audience,
         medium=medium,
         occurred_at=occurred_at,
+    )
+
+
+async def _rain(
+    happening_id: str,
+    *,
+    place: str = "学校",
+    start: dt.datetime = _TEN_AM,
+    minutes: int = 180,
+    content: str = "外面开始下雨",
+):
+    """一件会持续一段时间的事（world 那一侧写出来的形状）。"""
+    return await record_happening(
+        lane=LANE,
+        happening_id=happening_id,
+        actor="world",
+        place=place,
+        kind="act",
+        content=content,
+        medium=MEDIUM_IN_PERSON,
+        occurred_at=start,
+        lasts_until=start + dt.timedelta(minutes=minutes),
     )
 
 
@@ -504,3 +527,86 @@ async def test_an_unknown_kind_is_rejected_at_write(living_db):
             content="想了点事",
             occurred_at=_TEN_AM,
         )
+
+
+# --------------------------------------------------------------------------
+# 五 · 还在持续的事 —— 她走进来的时候看得到
+#
+# 感知走的是游标：一条事件被谁读到，只取决于它落在谁的 seq 之后。这对"刚才发生了
+# 什么"是对的，对"这儿现在是什么样"是致命的 —— 学校开始下雨的时候她在家、游标越过了
+# 那一条，她随后走进学校，就永远不知道正在下雨。地方文档只写不变的部分，这件事没有
+# 任何别的途径能知道。
+#
+# 所以持续中的事按**她此刻站在哪**另查一条，跟 ``perceive`` 不是同一条规则：那条读的
+# 是 ``who_was_where``（事情发生时她在哪），这条读的是她现在在哪。
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_a_plain_happening_never_lingers(living_db):
+    """说话和动作是一瞬间的事。它们要是也留在这儿，她每进一次门就把刚才那句话重听一遍。"""
+    await _say("h1", place="家/客厅", content="我回来了")
+
+    still = await ongoing_at(lane=LANE, place="家/客厅", now=_TEN_AM)
+
+    assert still == []
+
+
+@pytest.mark.integration
+async def test_someone_arriving_later_still_finds_what_is_still_going_on(living_db):
+    """下雨在她到场之前就开始了，游标早越过去了 —— 她走进来仍然该知道在下雨。"""
+    await _rain("rain", place="学校", start=_TEN_AM, minutes=180)
+
+    still = await ongoing_at(
+        lane=LANE, place="学校/操场", now=_TEN_AM + dt.timedelta(hours=1)
+    )
+
+    assert [h.content for h in still] == ["外面开始下雨"]
+
+
+@pytest.mark.integration
+async def test_what_is_over_is_over(living_db):
+    await _rain("rain", place="学校", start=_TEN_AM, minutes=180)
+
+    still = await ongoing_at(
+        lane=LANE, place="学校/操场", now=_TEN_AM + dt.timedelta(hours=4)
+    )
+
+    assert still == []
+
+
+@pytest.mark.integration
+async def test_something_lasting_everywhere_is_going_on_wherever_she_is(living_db):
+    await _rain("typhoon", place=EVERYWHERE, start=_TEN_AM, minutes=600)
+
+    for place in ("家/客厅", "学校/操场", "老街"):
+        still = await ongoing_at(
+            lane=LANE, place=place, now=_TEN_AM + dt.timedelta(hours=2)
+        )
+        assert [h.content for h in still] == ["外面开始下雨"], place
+
+
+@pytest.mark.integration
+async def test_what_is_going_on_elsewhere_in_the_building_is_not_going_on_here(
+    living_db,
+):
+    """"这儿现在什么样"要的是**这儿**。同一栋别处的动静是旁听的事，不是她走进门看到的。"""
+    await _rain("rain", place="家/厨房", start=_TEN_AM, minutes=180)
+
+    still = await ongoing_at(
+        lane=LANE, place="家/客厅", now=_TEN_AM + dt.timedelta(hours=1)
+    )
+
+    assert still == []
+
+
+@pytest.mark.integration
+async def test_a_coarse_arrival_position_is_not_promoted_to_being_there(living_db):
+    """只知道她"在家"，就不知道她在不在厨房 —— 跟旁听那条 fail-closed 同一条纪律。"""
+    await _rain("rain", place="家/厨房", start=_TEN_AM, minutes=180)
+
+    still = await ongoing_at(
+        lane=LANE, place="家", now=_TEN_AM + dt.timedelta(hours=1)
+    )
+
+    assert still == []
