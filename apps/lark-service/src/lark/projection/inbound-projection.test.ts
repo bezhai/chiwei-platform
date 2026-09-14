@@ -1468,3 +1468,17 @@ it('私聊首次补齐资料后，会话和当前消息均使用真实姓名', a
     expect(tables.commonConversations.get('id_2')?.avatar_url).toBe('avatar');
     expect(tables.commonMessages.get('id_3')?.sender_display_name).toBe('私聊新人');
 });
+
+it.each(['group', 'p2p'])('并发入群补名后即使目录无需更新，%s当前消息仍重读姓名', async (chatType) => {
+    const tables = new MemoryLarkTables();
+    await project(tables, larkMessageEvent({chat_type: chatType}), {
+        refreshDirectory: async () => {
+            // Another event committed after projection's initial lookup.
+            tables.larkUsers.set('on_user', {union_id: 'on_user', name: '并发补档用户'});
+            return false;
+        },
+    });
+    expect(tables.commonMessages.get('id_3')?.sender_display_name).toBe('并发补档用户');
+    expect([...tables.commonUsers.values()][0]?.display_name).toBe('并发补档用户');
+    if (chatType === 'p2p') expect(tables.commonConversations.get('id_2')?.display_name).toBe('并发补档用户');
+});

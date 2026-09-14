@@ -225,8 +225,15 @@ async function projectUnderLock(
 
     // 成员资料只在接收部署补齐，不能在交接到 coe 之前写生产目录。
     try {
-        if (await deps.refreshDirectory(reading, event)) {
-            known = await lookUpKnownFacts(deps.store, reading.message);
+        const missingName = !known.sender?.name?.trim();
+        const refreshed = await deps.refreshDirectory(reading, event);
+        // A concurrent join can fill the name after our initial snapshot, before
+        // the directory checks it. That no-op still requires this message to reread.
+        const unionId = reading.message.sender.unionId;
+        if (unionId && (refreshed || missingName)) {
+            known = { ...known, sender: await deps.store.larkUserProfile(unionId) };
+        }
+        if (known.sender && (refreshed || (missingName && known.sender.name?.trim()))) {
             await registerCommonUser(deps, {
                 appId: commands.appId,
                 openId: reading.message.sender.openId!,
