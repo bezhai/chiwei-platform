@@ -18,6 +18,9 @@
   * :mod:`app.living.outside`     这个家**外面**今天什么样：天气 / 天色 / 节气 / 上不上学
     / 今天更新什么番。同一条腿，一天看一次，也不花模型钱
   * :mod:`app.living.world`       稀疏轮次：有什么新东西该出现了吗，默认「没有」
+  * :mod:`app.living.documents`   world 手里那棵文档树（世界的设定集）：按路径 list /
+    read / write / edit / delete，根目录由环境变量给。**她手里没有这几只手**——文档是
+    world 的工作产物，只以"她看到的东西"的形式到达她
   * :mod:`app.living.clock`       两条时间源和它们的节点
 
 她一直在推进（T2）+ 她对外说话（T4）——嘴在外面，耳朵没有：
