@@ -70,7 +70,11 @@ from app.living.continuity import (
     trim_for_round,
 )
 from app.living.documents import DOCUMENT_TOOLS, documents_root, list_tree
-from app.living.happening import anyone_acted_since, read_all_after
+from app.living.happening import (
+    anyone_acted_since,
+    read_all_after,
+    seq_before,
+)
 from app.living.records import WORLD_ACTOR, Happening, _require_aware, esc
 from app.living.serial import hold
 from app.living.upcoming import list_upcoming_between, schedule_upcoming
@@ -157,6 +161,9 @@ class WorldRound(Data):
     住在这一行上而不是另开一张表，是因为它跟这一轮同生共死 —— 游标推了而上下文没写成
     的话，那一批发生过的事就此对它永久消失，所以两者在同一个事务里落地。
 
+    **NULL 是"这一列还不存在时写的"，不是"读到 0"**（:func:`_resume_from`）。两者在
+    ``or 0`` 底下长得一模一样，而后果差一整部历史。
+
     ``produced`` 是这一轮**真的写上账**的件数（重复调 expect 只算一件）；``said``
     是它最后那句话，默认就是「没有」。这两列不是日志，是验收口径：「没有」的比例
     和实际产出的新东西要能从这张表逐条查出来——只靠 langfuse trace 算不准（会丢
@@ -169,9 +176,8 @@ class WorldRound(Data):
     produced: int
     said: str
     # 它读到哪了。可空是因为这是后加的列：``ALTER TABLE ADD COLUMN`` 给已有行留的是
-    # NULL，声明成 ``int`` 会让那些行一读出来就 ValidationError。读的时候按 0 用
-    # （:func:`latest_world_round` 那头统一），等于"从头读一遍"—— 加列那天它会把积压
-    # 的都看一遍，比永久跳过一段强。
+    # NULL，声明成 ``int`` 会让那些行一读出来就 ValidationError。NULL 的含义是
+    # **"没有游标可接"**，由 :func:`_resume_from` 翻译成"只读最近这一段"。
     next_seq: int | None = None
 
     class Meta:
@@ -381,6 +387,30 @@ async def latest_world_round(*, lane: str) -> WorldRound | None:
     return WorldRound(**{k: row[k] for k in WorldRound.model_fields})
 
 
+async def _resume_from(
+    last: WorldRound | None, *, lane: str, now: datetime
+) -> int:
+    """这一轮从哪个 seq 往后读。**没有游标可接就只读最近这一段，不是从世界的开头。**
+
+    两种情形走到这儿，共同点是"不知道该从哪儿接"：这条泳道 world 一轮都没跑过
+    （``last is None``），和 ``next_seq`` 这一列还不存在时写的那些轮次（值是 NULL）。
+    它们**都不是**"读到 0"。
+
+    从 0 起算的后果实测过（coe-living，2026-09-14 加列那天）：第一轮开始逐轮补读两周前
+    的事，一次 200 条、5508 条积压要 28 轮，每轮约 0.15 美元 —— 而且中间每一轮
+    ``anyone_acted_since`` 都为真，于是它一直按硬下限跑，要补将近五个小时。它要判断的是
+    "这个点该不该冒出点新东西"，两周前谁说了什么对这个判断没有用，只会让它照着过时的剧情
+    排事。跳过的那一段它本来也从没拿到过 —— 旧 world 根本不读 happening。
+
+    **边界用 :data:`LEDGER_LOOK_BACK`，不是"从此刻起算"。** 一条崭新的泳道第一轮该看得见
+    刚刚发生的那几件事；"从此刻起算"会让每条新泳道的第一轮凭空瞎一次。这个窗口跟账本
+    往回看的那一头是同一个数，因为问的是同一件事：**多久以前的事还值得它现在过问**。
+    """
+    if last is not None and last.next_seq is not None:
+        return last.next_seq
+    return await seq_before(lane=lane, at=now - LEDGER_LOOK_BACK)
+
+
 async def world_ledger(*, lane: str, now: datetime) -> str:
     """账本：这段时间已经发生过的、和还没到的，一件一行。
 
@@ -489,7 +519,7 @@ async def run_world_round(*, lane: str, now: datetime) -> WorldRound | None:
     anchor = anchor_on_grid(now, minutes=pace.floor_minutes)
     async with hold(world_round_lock_key(lane)):
         last = await latest_world_round(lane=lane)
-        after_seq = (last.next_seq or 0) if last is not None else 0
+        after_seq = await _resume_from(last, lane=lane, now=anchor)
         if last is not None:
             since = anchor - last.ran_at
             if since < timedelta(minutes=pace.floor_minutes):
