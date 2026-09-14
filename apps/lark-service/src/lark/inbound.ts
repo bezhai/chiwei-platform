@@ -70,6 +70,8 @@ export interface LarkInboundPorts {
      * 而不是由认领者现取，因为认领者跑在应答之后（见 ingress/lark-event.ts 的 receivedAt）。
      */
     onRecall: (recall: LarkRecallEvent, receivedAt: Date) => Promise<void>;
+    /** 群成员变化：先按绑定交接，再查询飞书当前真人名单。 */
+    onMemberChange: (event: LarkEvent) => Promise<void>;
 }
 
 export interface LarkInbound {
@@ -93,6 +95,9 @@ export function createLarkInbound(ports: LarkInboundPorts): LarkInbound {
     const bots = createLarkBotLookup(ports.roster, ports.personaName);
 
     const handlers: LarkEventHandlers = {
+        'im.chat.member.user.added_v1': ports.onMemberChange,
+        'im.chat.member.user.deleted_v1': ports.onMemberChange,
+        'im.chat.member.user.withdrawn_v1': ports.onMemberChange,
         'im.message.receive_v1': async (event) => {
             const reading = readLarkMessageEvent(event.payload as LarkMessageEvent, bots);
             if (!reading) {

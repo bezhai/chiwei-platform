@@ -8,6 +8,8 @@ export interface LarkClientConfig {
     appSecret: string;
     /** 机器人名称（可选，用于多机器人场景） */
     botName?: string;
+    /** HTTP transport shared by the native SDK and its token manager. */
+    httpInstance?: import('@larksuiteoapi/node-sdk').HttpInstance;
 }
 
 /**

@@ -106,6 +106,7 @@ function build(bots: BotConfig[] = [bot()]) {
     const seen: Seen[] = [];
     const pressed: Pressed[] = [];
     const recalled: Recalled[] = [];
+    const memberEvents: LarkEvent[] = [];
     const recorded: unknown[] = [];
     const ports: LarkInboundPorts = {
         roster: { getAllBotConfigs: () => bots },
@@ -124,8 +125,9 @@ function build(bots: BotConfig[] = [bot()]) {
             pressed.push({ payload, botName: context.getBotName() });
         },
         onRecall: async (recall, receivedAt) => void recalled.push({ recall, receivedAt }),
+        onMemberChange: async (event) => void memberEvents.push(event),
     };
-    return { inbound: createLarkInbound(ports), seen, pressed, recalled, recorded };
+    return { inbound: createLarkInbound(ports), seen, pressed, recalled, recorded, memberEvents };
 }
 
 // 同一条飞书消息，三种信封各包一遍。
@@ -256,11 +258,11 @@ async function throughLaneHttp(env: unknown = laneEnvelope()) {
     return { ...built, status: res.status };
 }
 
-async function throughWebhook(bots?: BotConfig[]) {
+async function throughWebhook(bots?: BotConfig[], payload: unknown = webhookBody()) {
     const built = build(bots);
     const app = new Hono();
     built.inbound.registerWebhooks(app);
-    const request = asLarkSends(webhookBody());
+    const request = asLarkSends(payload);
     const res = await app.request('/webhook/chiwei/event', {
         method: 'POST',
         headers: request.headers,
@@ -270,7 +272,7 @@ async function throughWebhook(bots?: BotConfig[]) {
     return { ...built, status: res.status };
 }
 
-async function throughWebSocket() {
+async function throughWebSocket(payload: unknown = webhookBody()) {
     const built = build([bot({ init_type: 'websocket' })]);
     let dispatcher: EventDispatcher | undefined;
     const client: LarkWebSocketClient = {
@@ -288,7 +290,7 @@ async function throughWebSocket() {
         dispatcher as unknown as {
             invoke(d: unknown, p: { needCheck: boolean }): Promise<unknown>;
         }
-    ).invoke(Object.assign(Object.create({ headers: {} }), webhookBody()), { needCheck: false });
+    ).invoke(Object.assign(Object.create({ headers: {} }), payload), { needCheck: false });
     await Bun.sleep(2);
     return built;
 }
@@ -492,4 +494,44 @@ describe('createLarkInbound', () => {
         expect(status).toBeGreaterThanOrEqual(500);
         expect(seen).toEqual([]);
     });
+});
+
+
+describe('成员事件注册', () => {
+    for (const type of ['im.chat.member.user.added_v1', 'im.chat.member.user.deleted_v1',
+        'im.chat.member.user.withdrawn_v1']) {
+        it(`泳道接收端认领 ${type}，不进入消息处理`, async () => {
+            const built = build();
+            const app = new Hono();
+            built.inbound.registerLaneInbound(app);
+            const response = await app.request(LANE_INBOUND_PATH, {
+                method: 'POST',
+                headers: { authorization: `Bearer ${INNER_SECRET}`, 'content-type': 'application/json' },
+                body: JSON.stringify(laneEnvelope({event_type: type, params: {chat_id: 'oc_1'}})),
+            });
+            expect(response.status).toBe(200);
+            expect(built.memberEvents).toHaveLength(1);
+            expect(built.memberEvents[0]?.type).toBe(type);
+            expect(built.memberEvents[0]?.handedOff).toBe(true);
+            expect(built.seen).toHaveLength(0);
+        });
+    }
+});
+
+
+it('成员加入事件经真实SDK webhook和长连接均到达成员处理器', async () => {
+    const payload = {
+        ...webhookBody(),
+        header: {...webhookBody().header, event_type: 'im.chat.member.user.added_v1'},
+        event: {chat_id: 'oc_1', users: [{name: '新人', user_id: {union_id: 'on_new'}}]},
+    };
+    for (const built of [await throughWebhook(undefined, payload), await throughWebSocket(payload)]) {
+        expect(built.memberEvents).toHaveLength(1);
+        expect(built.memberEvents[0]?.payload).toMatchObject({
+            chat_id: 'oc_1',
+            create_time: '1700000000000',
+            users: [{name: '新人', user_id: {union_id: 'on_new'}}],
+        });
+        expect(built.seen).toEqual([]);
+    }
 });

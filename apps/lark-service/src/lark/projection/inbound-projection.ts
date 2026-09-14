@@ -141,6 +141,8 @@ export interface LarkRecordedInbound {
 }
 
 export interface LarkInboundDeps {
+    /** 仅最终落库的部署执行；true 表示资料更新后需要重读姓名。 */
+    refreshDirectory: (reading: LarkMessageReading, event: LarkEvent) => Promise<boolean>;
     store: LarkStore;
     /** 铸一个新的公共层 id。时间有序（uuid v7），因为它同时是主键和排序依据。 */
     newCommonId: () => string;
@@ -194,7 +196,7 @@ async function projectUnderLock(
 ): Promise<ProjectedInbound> {
     // 飞书的消息事件里**没有发送者的名字**，也没有群名。两者都要回查飞书侧的
     // 档案表（它们由群成员事件和定时同步维护）。查一次，身份对应和落账都用它。
-    const known = await lookUpKnownFacts(deps.store, reading.message);
+    let known = await lookUpKnownFacts(deps.store, reading.message);
     const { projection, commands } = await registerCommonIdentities(deps, reading, event, known);
 
     const choice = await chooseInboundLane({
@@ -219,6 +221,41 @@ async function projectUnderLock(
                 handed_off: true,
             },
         };
+    }
+
+    // 成员资料只在接收部署补齐，不能在交接到 coe 之前写生产目录。
+    try {
+        const missingName = !known.sender?.name?.trim();
+        const refreshed = await deps.refreshDirectory(reading, event);
+        // A concurrent join can fill the name after our initial snapshot, before
+        // the directory checks it. That no-op still requires this message to reread.
+        const unionId = reading.message.sender.unionId;
+        if (unionId && (refreshed || missingName)) {
+            known = { ...known, sender: await deps.store.larkUserProfile(unionId) };
+        }
+        if (known.sender && (refreshed || (missingName && known.sender.name?.trim()))) {
+            await registerCommonUser(deps, {
+                appId: commands.appId,
+                openId: reading.message.sender.openId!,
+                unionId: reading.message.sender.unionId,
+                displayName: known.sender?.name,
+            });
+            commands.isAdmin = known.sender?.is_admin === true;
+            if (reading.message.chatType === 'p2p') {
+                await deps.store.saveCommonConversation({
+                    common_conversation_id: projection.commonConversationId,
+                    channel: LARK_CHANNEL,
+                    scope: reading.inbound.conversation_scope,
+                    display_name: known.sender?.name,
+                    avatar_url: known.sender?.avatar_origin,
+                    is_active: true,
+                    attachment_policy: { download_allowed: larkDownloadAllowed(null), source: LARK_CHANNEL },
+                });
+            }
+        }
+    } catch (error) {
+        console.warn(`[lark-directory] sender refresh failed bot=${event.botName} ` +
+            `chat=${reading.message.chatId} message=${reading.message.messageId}:`, error);
     }
 
     // 在场状态是旁路：agent-service 读它判断"这个 bot 还在这个会话里吗"。写不
