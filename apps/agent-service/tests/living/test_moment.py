@@ -41,6 +41,7 @@ from app.living.moment import (
     life_moment_minutes,
     life_moment_tick,
     look_around,
+    move_to,
     run_moment,
     say,
     switch_to,
@@ -55,6 +56,18 @@ _CST = dt.timezone(dt.timedelta(hours=8))
 _STEP = dt.timedelta(minutes=DEFAULT_LIFE_MOMENT_MINUTES)
 
 _TOOLS = {t.name: t for t in MOMENT_TOOLS}
+
+
+async def _wipe_transcripts() -> None:
+    """把连续上下文整条清掉 —— 模拟刚重启、或者刚清过库的那一轮。"""
+    from sqlalchemy import text as _text
+
+    from app.data.session import get_session
+    from app.domain.session_transcript import SessionTranscript
+    from app.runtime.migrator import _table_name
+
+    async with get_session() as s:
+        await s.execute(_text(f"DELETE FROM {_table_name(SessionTranscript)}"))
 
 
 def _at(hour: int, minute: int = 0) -> dt.datetime:
@@ -679,10 +692,13 @@ async def test_a_moment_only_puts_what_is_new_in_front_of_her(
     fresh = _what_she_read(quiet.runs[-1])
     assert "姐，抹茶还有吗" in fresh, "这期间别人说的话没送到"
     assert "离上一次过了 10 分钟" in fresh, f"没说隔了多久。拿到：\n{fresh}"
-    for repeated in ("看昨天拍的胶片", "洗的衣服还在阳台"):
-        assert repeated not in fresh, (
-            f"「{repeated}」每一轮都在重发 —— 它在上下文里已经有了"
-        )
+    assert "看昨天拍的胶片" in fresh, (
+        "她这一轮不知道自己在干嘛 —— 位置和手上的事每轮都可能被她自己改，"
+        "不能只在界桩上铺"
+    )
+    assert "洗的衣服还在阳台" not in fresh, (
+        "「心里挂着什么」每一轮都在重发 —— 它在上下文里已经有了"
+    )
 
 
 @pytest.mark.integration
@@ -699,14 +715,15 @@ async def test_a_cold_start_still_tells_her_where_she_stands(
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
     quiet = stub_moment(said="继续")
-    # 第二天：上下文按生活日切，这一轮读到的历史是空的
+    # 上下文不再按天切，所以"历史是空的"要另外造：清一遍那张表，模拟刚重启 / 刚清库。
+    await _wipe_transcripts()
     await run_moment(lane=LANE, persona_id="akao", now=_at(14) + dt.timedelta(days=1))
 
     read = _all_she_read(quiet.runs[-1])
     assert "看昨天拍的胶片" in read, "冷启动那一轮她不知道自己在哪、在做什么"
     assert "洗的衣服还在阳台" in read, "冷启动那一轮她不知道自己心里挂着什么"
-    assert _what_she_read(quiet.runs[-1]).count("看昨天拍的胶片") == 0, (
-        "刺激里又塞了一份全量状态 —— 全量只该有界桩一个出处"
+    assert read.count("洗的衣服还在阳台") == 1, (
+        "「心里挂着什么」出现了两次 —— 全量只该有界桩一个出处"
     )
 
 
@@ -1662,3 +1679,215 @@ async def test_the_conversations_she_can_see_are_settled_once_for_the_whole_mome
     assert len(counted) == 1, (
         f"这个 moment 把名单算了 {len(counted)} 遍 —— 信封和她手里的工具用的不是同一份"
     )
+
+
+@pytest.mark.integration
+async def test_a_notification_she_ignores_is_not_put_in_front_of_her_again(
+    moment_db, stub_moment
+):
+    """她没看手机，下一轮的刺激里不再有那条通知 —— 上一轮那份还在她眼前。
+
+    上下文一直连着（:mod:`app.living.continuity`），所以"她还不知道有人找她"这件事
+    只需要说一次。每轮重摆一遍同一份未读清单，就是同一段话一小时抄六遍。
+    """
+    from tests.living.test_phone import _DM, _incoming, _seed_world
+
+    await _seed_world()
+    await _incoming(_DM, text_body="在吗", at=_at(21, 0))
+
+    first = stub_moment(said="嗯")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    assert "bezhai" in _what_she_read(first.runs[-1]), (
+        "消息到了的那一轮，通知都没摆到她眼前"
+    )
+
+    second = stub_moment(said="继续")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30) + _STEP)
+
+    fresh = _what_she_read(second.runs[-1])
+    assert "bezhai" not in fresh, (
+        f"这一轮手机没动静，通知却又摆了一遍。拿到：\n{fresh}"
+    )
+    assert "bezhai" in _all_she_read(second.runs[-1]), (
+        "上一轮那份通知也不在她眼前了 —— 那她就真的不知道有人找过她了"
+    )
+
+
+@pytest.mark.integration
+async def test_what_she_still_has_not_read_comes_back_on_the_checkpoint(
+    moment_db, stub_moment
+):
+    """她一直不看，那条通知不能随着旧刺激一起被裁掉。
+
+    每轮只给新到的，摆出它的那一轮刺激走 ``own_minutes``，到期整组删。界桩不重铺的话
+    之后再没有第二处说得出有人找过她 —— 她不看手机就永远不知道。
+    """
+    from app.living.continuity import CHECKPOINT_HEAD
+    from tests.living.test_phone import _DM, _incoming, _seed_world
+
+    await _seed_world()
+    # 消息落在 21:50：跨过 22:00 那个清理点之后它仍在"她看得见的会话"那一档里
+    # （:mod:`app.living.whitelist`，一小时内一句就够），不然这条用例验的是名单过期。
+    await _incoming(_DM, text_body="在吗", at=_at(21, 50))
+
+    stub_moment(said="嗯")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 55))
+
+    # 跨过下一个清理点（默认一小时一次，落在整点上）：这一轮会立一根新界桩。
+    later = stub_moment(said="继续")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(22, 5))
+
+    posts = [
+        m.text()
+        for m in later.runs[-1][0]
+        if m.text().startswith(CHECKPOINT_HEAD)
+    ]
+    assert posts, "这一轮跨过了清理点却没立界桩"
+    assert "bezhai" in posts[-1], (
+        f"界桩上没有她还没看的那条 —— 摆出它的那一轮刺激一到期，这件事就无声消失了。"
+        f"拿到：\n{posts[-1]}"
+    )
+
+
+# --------------------------------------------------------------------------
+# 走进一个地方的时候，看到这个地方
+#
+# 实测：``render_state`` 给她的"我在哪"只有她自己写的一行 place + doing，**那个地点在
+# 她的输入里没有任何内容** —— 厨房什么样、桌上有什么、灯亮着没有，一个字都没有。她不是
+# 感知不到事件，是所在的地点是空的。
+#
+# 地方长什么样在 world 那棵文档树的 ``地方/`` 底下。**她不读文档**（第六节那条边界）：
+# 那些内容只以"她走进去看到的东西"这种形式到达她。
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def places(tmp_path, monkeypatch):
+    """world 那棵文档树，根目录指到 tmp。"""
+    from app.living.documents import DOCS_DIR_ENV
+
+    monkeypatch.setenv(DOCS_DIR_ENV, str(tmp_path / "mount"))
+    monkeypatch.setenv("LANE", LANE)
+    root = tmp_path / "mount" / LANE / "地方"
+    root.mkdir(parents=True)
+
+    def write(place: str, body: str) -> None:
+        doc = root / f"{place}.md"
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.write_text(body, encoding="utf-8")
+
+    return write
+
+
+@pytest.mark.integration
+async def test_walking_into_a_place_shows_her_the_place(
+    moment_db, in_a_moment, places
+):
+    places("家/厨房", "灶台靠窗，窗外是那条老街。桌上还堆着没洗的碗。")
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "找吃的", "place": "家/客厅", "because": "饿了"})
+        said = await move_to.invoke({"place": "家/厨房"})
+
+    assert "桌上还堆着没洗的碗" in said
+
+
+@pytest.mark.integration
+async def test_walking_into_a_place_she_has_been_before_shows_it_again(
+    moment_db, in_a_moment, places
+):
+    """**每次进去都给。**
+
+    换成"第一次才给"的话：她第一次进厨房拿到描述 → 那段描述几小时后被裁掉 → 过几天
+    再进厨房因为"来过"而什么都没有，而她又不能去读文档。那时候她没有任何途径知道厨房
+    什么样。这条管的是信息可达性，不是规定她怎么反应。
+    """
+    places("家/厨房", "灶台靠窗，窗外是那条老街。")
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "找吃的", "place": "家/客厅", "because": "饿了"})
+        await move_to.invoke({"place": "家/厨房"})
+        await move_to.invoke({"place": "家/客厅"})
+        again = await move_to.invoke({"place": "家/厨房"})
+
+    assert "灶台靠窗" in again
+
+
+@pytest.mark.integration
+async def test_a_place_with_nothing_written_about_it_is_not_made_up(
+    moment_db, in_a_moment, places
+):
+    """没写过的地方就是没写过 —— 不报错，也不编一段出来。"""
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "走走", "place": "家/客厅", "because": "闲"})
+        said = await move_to.invoke({"place": "老街/桥头"})
+
+    assert isinstance(said, str), f"没有文档的地点把这只手弄失败了：{said!r}"
+    assert "老街/桥头" in said
+
+
+@pytest.mark.integration
+async def test_walking_in_shows_what_is_still_going_on_here(
+    moment_db, in_a_moment, places
+):
+    """在她到场之前就开始、现在还没结束的事，她走进来要知道。
+
+    这是 ``ongoing_at`` 存在的全部理由：感知走游标，下雨开始时她在家、游标早越过了
+    那一条，而地方文档只写不变的部分 —— 不从这儿给，她永远不知道正在下雨。
+    """
+    from app.living.happening import record_happening
+
+    await record_happening(
+        lane=LANE,
+        happening_id="rain",
+        actor="world",
+        place="学校",
+        kind="act",
+        content="外面下着雨",
+        occurred_at=_at(9),
+        lasts_until=_at(12),
+    )
+    async with in_a_moment("akao", now=_at(10)):
+        await switch_to.invoke({"doing": "上学", "place": "家/门口", "because": "该走了"})
+        said = await move_to.invoke({"place": "学校/操场"})
+
+    assert "外面下着雨" in said
+
+
+@pytest.mark.integration
+async def test_being_taken_somewhere_shows_her_that_place_too(
+    moment_db, in_a_moment, places
+):
+    """``switch_to`` 也落位置，所以它也得给。
+
+    **它还是她唯一的第一次落位入口**（``move_to`` 要求先有"当前"才挪得动），所以只给
+    ``move_to`` 的话，她这一天第一次站到某个地方时那儿必然是空的。两只手都落位置，
+    就都给 —— 不按"地点变没变"分叉：那个判断要拿旧位置比一次，而比错的症状是她站在
+    一个自己看不见的地方。
+    """
+    places("家/浴室", "镜子起着雾，洗衣机在转。")
+    async with in_a_moment("akao"):
+        said = await switch_to.invoke(
+            {"doing": "去洗澡", "place": "家/浴室", "because": "身上黏"}
+        )
+
+    assert "镜子起着雾" in said, f"被带到一个地方却看不见它。拿到：\n{said}"
+
+
+@pytest.mark.integration
+async def test_what_is_over_is_not_shown_on_arrival(moment_db, in_a_moment, places):
+    from app.living.happening import record_happening
+
+    await record_happening(
+        lane=LANE,
+        happening_id="rain",
+        actor="world",
+        place="学校",
+        kind="act",
+        content="外面下着雨",
+        occurred_at=_at(6),
+        lasts_until=_at(8),
+    )
+    async with in_a_moment("akao", now=_at(10)):
+        await switch_to.invoke({"doing": "上学", "place": "家/门口", "because": "该走了"})
+        said = await move_to.invoke({"place": "学校/操场"})
+
+    assert "外面下着雨" not in said

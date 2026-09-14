@@ -4,7 +4,9 @@
 
   * **通知**（本模块里的"信封"）：她每一轮被动扫一眼就看见的。谁给她发消息了、几条、
     什么时候，**正文一个字都没有**。按时间排，最新的在前，一次只给
-    :data:`ENVELOPE_LIMIT` 条。
+    :data:`ENVELOPE_LIMIT` 条。**每轮只给这一轮新到的**（:func:`render_arrived`）——
+    她的上下文一直连着，上一轮那份还在她眼前；还没看的全貌由界桩重铺
+    （:func:`render_unread`）。
   * **会话列表**（:func:`look_through_your_phone`）：她主动翻手机才看到。按**这条会话
     最后一条消息**的时刻倒序，零未读的那些也在里面，一屏 :data:`CONVERSATION_LIST_LIMIT`
     条，想往下自己翻。
@@ -589,7 +591,12 @@ def _instant(ms: int) -> datetime:
 async def envelopes_for(
     *, lane: str, persona_id: str, now: datetime
 ) -> list[Envelope]:
-    """她此刻手机上有动静的那些会话，**按时间排、最新的在前**，一次给几条。
+    """她此刻手机上有动静的那些会话，**按时间排、最新的在前**，一条不少。
+
+    **条数上限不在这里，在通知栏那一份上**（:func:`render_arrived` 截
+    :data:`ENVELOPE_LIMIT` 条）。这里截的话被挤下去的那条会**永久**再也叫不到她：
+    每轮只给比上一轮新的那些，而它重新排得进来的时候已经比"上一轮"旧了，于是一档都进
+    不去，连界桩上都没有。查库那一遍本来就按白名单的全量走，截不截都是同样多次往返。
 
     **没有谁被提到前面去。** 改之前在叫她的那些（私聊全部 + 群里点名）无条件排在最前、
     条数上限只截后半批，理由是"被挤出去的那条她连它存在都不知道"。那条理由现在不成立
@@ -645,7 +652,7 @@ async def envelopes_for(
             )
         )
     out.sort(key=lambda e: e.latest, reverse=True)
-    return out[:ENVELOPE_LIMIT]
+    return out
 
 
 def _clock(moment: datetime, *, now: datetime) -> str:
@@ -669,7 +676,9 @@ def _clock(moment: datetime, *, now: datetime) -> str:
     return to_cst_dated(moment.isoformat(), now=now, seconds=False)
 
 
-def render_envelopes(envelopes: list[Envelope], *, now: datetime) -> str:
+def _render(
+    envelopes: list[Envelope], *, now: datetime, head: str, quiet: str
+) -> str:
     """把通知摆成她读得懂的样子。**正文一个字都不在这里。**
 
     ``channel_id`` 紧跟在会话名后面，不甩到行尾。实测（coe-living，2026-08-31
@@ -681,10 +690,13 @@ def render_envelopes(envelopes: list[Envelope], *, now: datetime) -> str:
     **发件人跟消息行同一套署名**（:func:`_who_tag`）：主人在这儿也标出来，否则她拿起
     手机之前就已经以为找她的是主人。会话标题同样转义 —— 群名是别人写的，跟消息行摆在
     同一段文本里。
+
+    ``head`` 和 ``quiet`` 由两个调用方各给一套：摆到她眼前的那份说的是"刚来的"，铺在
+    界桩上的那份说的是"还没看的"，而这两句话在两种情形下互相都是假话。
     """
     if not envelopes:
-        return "手机上：（没动静）"
-    lines = ["手机上（想知道说了什么，得自己拿起来看）："]
+        return quiet
+    lines = [head]
     for e in envelopes:
         where = "私聊" if e.scope == "direct" else "群"
         bits = [
@@ -704,13 +716,63 @@ def render_envelopes(envelopes: list[Envelope], *, now: datetime) -> str:
     return "\n".join(lines)
 
 
-async def phone_envelope(*, lane: str, persona_id: str, now: datetime) -> str:
-    """她这一轮手机上的信封，一整段文本。
+def render_arrived(
+    envelopes: list[Envelope], *, since: datetime | None, now: datetime
+) -> str:
+    """这一轮**新到的**那些会话，摆到她眼前的那一段。
+
+    **每轮只给新到的。** 她的上下文不再每轮重开（:mod:`app.living.continuity`），上一
+    轮的信封还在她眼前；她没看手机的话那份清单一个字都不会变，每轮重摆就是把同一段话
+    抄一遍，一小时抄六遍。真人手机也是这个形态：新消息才震，躺着的未读不会一直震。
+
+    ``since`` 是上一个 moment 的时刻。**取严格大于**：上一轮的信封算在它那个时刻上，
+    等于它的那些上一轮已经摆过了。这条线上宁可重也不能漏，所以两头有重叠时按重算 ——
+    上一轮真正查库的时刻比它的时间锚略晚，落在那条缝里的消息会被摆两次，那是可以接受的。
+
+    ``since`` 是 ``None``（重启之后的第一轮、或者这条泳道的第一个 moment）就**全给**：
+    那时她眼前一条历史都没有，这些对她全是新的。同一轮界桩也会立起来
+    （:func:`app.living.continuity.trim_for_round`，空上下文一律立），所以这两份会重一
+    次 —— 重一次的代价是几百个 token，漏一次的代价是有人找她而她不知道。
+
+    **数字仍然是这条会话上她没看的全部**，不是这一轮新到的那几条：只数新的，她会以为
+    前面那些已经处理过了。真人手机的角标也是这样，响一声，上面写的是攒下的总数。
+
+    **条数上限截在这里，而且只截这一份。** 通知栏就那么点地方，被挤下去的那条在会话
+    列表上还翻得到、而且此刻还没看的全部都铺在界桩上（:func:`render_unread`）——
+    截在查库那一步的话它两处都进不去，就成了永久失明。
+    """
+    fresh = (
+        envelopes
+        if since is None
+        else [e for e in envelopes if e.latest > since]
+    )
+    return _render(
+        fresh[:ENVELOPE_LIMIT],
+        now=now,
+        head="手机上刚来的（想知道说了什么，得自己拿起来看）：",
+        quiet="手机上：（这一阵没新动静）",
+    )
+
+
+def render_unread(envelopes: list[Envelope], *, now: datetime) -> str:
+    """此刻**还没看的全部**，铺在界桩上的那一段。
+
+    :func:`render_arrived` 只给新到的，所以一条她一直不看的通知，会随着摆出它的那一轮
+    刺激一起在 ``own_minutes`` 之后被裁掉（:mod:`app.living.continuity`）—— 之后再没有
+    第二处说得出有人找过她。界桩重铺的正是这类"此刻仍然为真"的事实，未读是其中一件。
+
+    **这一份不截条数。** 它答的是"此刻还有什么没看"，截断会让这个答案变成假话；而被
+    通知栏挤下去的那条正是最需要它的：那条既进不了新到的那一档（它已经比上一轮旧了），
+    界桩再截一次就再也没有第三处了。条数由白名单兜着（:mod:`app.living.whitelist`），
+    而且一个清理周期才铺一次。
 
     ``now`` 是这一轮的时间锚，信封上每个时刻都拿它判跨没跨天（见 :func:`_clock`）。
     """
-    return render_envelopes(
-        await envelopes_for(lane=lane, persona_id=persona_id, now=now), now=now
+    return _render(
+        envelopes,
+        now=now,
+        head="手机上还没看的（想知道说了什么，得自己拿起来看）：",
+        quiet="手机上：（没有没看的）",
     )
 
 
@@ -1209,7 +1271,7 @@ async def look_up_contact(
     for r in rows:
         where = "私聊" if r["scope"] == "direct" else "群"
         # 私聊的会话标题多半是空的，这时用对得上的那个人名当它的名字——在她眼里
-        # 那条私聊本来就叫那个人。地址紧跟名字，理由见 render_envelopes。
+        # 那条私聊本来就叫那个人。地址紧跟名字，理由见 _render。
         matched = list(r["matched"] or [])
         senders = [Sender(**sender) for sender in r["matched_senders"] or []]
         label = r["title"] or "、".join(matched) or "（没名字）"
@@ -1311,7 +1373,7 @@ async def look_through_your_phone(
         if r["scope"] == "direct" and not r["title"] and other is not None:
             head = f"- {where} {other} channel_id={r['channel_id']}"
         else:
-            # 地址紧跟名字，理由见 render_envelopes。
+            # 地址紧跟名字，理由见 _render。
             label = r["title"] or (r["other_who"] or "（没名字）")
             head = f"- {where}「{esc(label)}」channel_id={r['channel_id']}"
         bits = [head]

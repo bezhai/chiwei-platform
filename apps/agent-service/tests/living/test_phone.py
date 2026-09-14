@@ -34,10 +34,9 @@ from app.living.phone import (
     look_through_your_phone,
     look_up_contact,
     newest_unread_summons,
-    phone_envelope,
     reachable_conversations,
     read_through,
-    render_envelopes,
+    render_unread,
 )
 from tests.living.conftest import glance_text
 
@@ -119,6 +118,18 @@ def _at(hour: int, minute: int = 0, second: int = 0) -> dt.datetime:
 
 def _ms(moment: dt.datetime) -> int:
     return int(moment.timestamp() * 1000)
+
+
+async def _unread_now(now: dt.datetime, *, persona_id: str = "akao") -> str:
+    """她此刻手机上**还没看的全部**，渲染成界桩上铺的那一段。
+
+    信封的内容这一层用它验：这份跟"这一轮新到没到"无关，所以用例不必为每条消息安排
+    一个"上一轮是什么时候"。每轮摆到她眼前的那一份（只给新到的）由
+    :func:`app.living.phone.render_arrived` 单独验，在第七之二节。
+    """
+    return render_unread(
+        await envelopes_for(lane=LANE, persona_id=persona_id, now=now), now=now
+    )
 
 
 # 她读到的一条消息是结构化的：``<msg from=".." rel="owner" time="..">正文</msg>``。
@@ -498,7 +509,7 @@ async def test_the_envelope_never_leaks_a_single_word_of_the_message(living_db):
     await _incoming(_DM, text_body="周末那家抹茶店你去过没", at=_at(21, 30))
     await _incoming(_DM, text_body="想约一下", at=_at(21, 31))
 
-    envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelope = await _unread_now(_at(21, 35))
 
     assert "抹茶店" not in envelope and "想约一下" not in envelope, (
         f"信封漏了正文 —— 那「看手机」这个动作就不存在了。拿到：\n{envelope}"
@@ -531,7 +542,7 @@ async def test_the_envelope_says_when_she_last_spoke_there(living_db, pinned):
         channel_id=str(_GROUP),
     )
 
-    envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelope = await _unread_now(_at(21, 35))
 
     assert "21:25" in envelope, (
         f"信封里该有「你上次在这儿开口是什么时候」 —— 五分钟前刚说过话的群，"
@@ -543,7 +554,7 @@ async def test_the_envelope_says_when_she_last_spoke_there(living_db, pinned):
 async def test_an_empty_phone_says_so_instead_of_leaving_a_hole(living_db):
     await _seed_world()
 
-    envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelope = await _unread_now(_at(21, 35))
 
     assert envelope.strip() != ""
 
@@ -1499,8 +1510,12 @@ async def test_the_notifications_are_in_plain_time_order(
 
     把在叫她的那些无条件提到最前面（改之前那样）是在替她裁决注意力，而且那一下就让
     "按时间排"这句话不成立了。
+
+    **条数上限截在通知栏那一份上，不在查库那一步。** 查库那步一条不少：被挤下去的那
+    条还要铺到界桩上去（:func:`app.living.phone.render_unread`），截在下面的话它两处
+    都进不去。
     """
-    from app.living.phone import ENVELOPE_LIMIT
+    from app.living.phone import ENVELOPE_LIMIT, render_arrived
 
     await _seed_world()
     # 私聊最旧 —— 按时间排它排在最后。
@@ -1512,7 +1527,8 @@ async def test_the_notifications_are_in_plain_time_order(
     pinned(*noisy)
 
     envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 30))
-    channels = [e.channel_id for e in envelopes]
+    shown = render_arrived(envelopes, since=None, now=_at(21, 30))
+    channels = re.findall(r"channel_id=(\S+)", shown)
 
     assert len(channels) == ENVELOPE_LIMIT, f"通知一次只给几条。拿到：{channels}"
     assert channels == list(reversed(noisy))[:ENVELOPE_LIMIT], (
@@ -1521,12 +1537,169 @@ async def test_the_notifications_are_in_plain_time_order(
     assert str(_DM) not in channels, (
         f"最旧那条被提到前面去了 —— 那不是按时间排。拿到：{channels}"
     )
+    assert str(_DM) in render_unread(envelopes, now=_at(21, 30)), (
+        "被挤出通知栏的那条在界桩上也没有 —— 它已经比上一轮旧了，新到的那一档也进不去，"
+        "于是再也叫不到她"
+    )
 
     async with in_a_moment("akao", now=_at(21, 30)):
         listed = await look_through_your_phone.invoke({})
     assert str(_DM) in listed, (
         f"被挤出通知的那条私聊在会话列表上也找不到 —— 那才是真的消失了。拿到：\n{listed}"
     )
+
+
+# --------------------------------------------------------------------------
+# 七之二 · 每轮只给新到的，还没看的全貌铺在界桩上
+# --------------------------------------------------------------------------
+#
+# 上下文不再每轮重开（:mod:`app.living.continuity`），所以上一轮的信封还在她眼前。
+# 这时候每轮重摆一遍同一份未读清单，就是把同一段话抄一遍：她没看手机的话那份清单一个
+# 字都不会变，而一小时六轮抄六遍。
+#
+# 两段文本因此分开：
+#
+#   * :func:`render_arrived` 摆到她眼前，只有**这一轮新到的**那些会话（真人手机是新
+#     消息才震，躺着的未读不会一直震）；
+#   * :func:`render_unread` 铺在界桩上，是**此刻还没看的全部**。没有它的话，她一直不看
+#     手机的那条通知会在 ``own_minutes`` 之后随那一轮的刺激一起被裁掉，之后她再也不知道
+#     有人找过她。
+
+
+def _envelope(*, channel_id: str, latest: dt.datetime, unread: int = 1) -> object:
+    from app.living.phone import Envelope, Sender
+
+    return Envelope(
+        channel_id=channel_id,
+        scope="direct",
+        title="主人",
+        unread=unread,
+        senders=(Sender(name="bezhai", is_owner=True),),
+        earliest=latest - dt.timedelta(minutes=unread),
+        latest=latest,
+        named_you=False,
+        you_last_spoke_at=None,
+    )
+
+
+def test_a_conversation_with_nothing_new_is_not_put_in_front_of_her_again():
+    from app.living.phone import render_arrived
+
+    quiet = _envelope(channel_id="old", latest=_at(20, 40))
+    fresh = _envelope(channel_id="new", latest=_at(21, 3))
+
+    shown = render_arrived([fresh, quiet], since=_at(21, 0), now=_at(21, 5))
+
+    assert "new" in shown, f"这一轮真的来了消息，得摆到她眼前。拿到：\n{shown}"
+    assert "old" not in shown, (
+        f"上一轮就摆过的那条又抄了一遍 —— 上一轮那份还在她眼前，这是同一段话抄两次。"
+        f"拿到：\n{shown}"
+    )
+
+
+def test_the_count_on_a_buzzing_conversation_is_still_everything_unread():
+    """震的是"这一轮来了新的"，但数字仍然是这条会话上她没看的全部。
+
+    只数这一轮新到的那几条，她就会以为前面那些已经处理过了。真人手机的角标也是这样：
+    响一声，上面写的是这条会话攒下的总数。
+    """
+    from app.living.phone import render_arrived
+
+    piled = _envelope(channel_id="dm", latest=_at(21, 3), unread=7)
+
+    shown = render_arrived([piled], since=_at(21, 0), now=_at(21, 5))
+
+    assert "7 条没看" in shown, f"角标只数了这一轮新到的那几条。拿到：\n{shown}"
+
+
+def test_a_quiet_round_says_so_instead_of_repeating_last_round_s_list():
+    from app.living.phone import render_arrived
+
+    quiet = _envelope(channel_id="old", latest=_at(20, 40))
+
+    shown = render_arrived([quiet], since=_at(21, 0), now=_at(21, 5))
+
+    assert "old" not in shown, f"这一轮手机没动静，却又摆了一遍。拿到：\n{shown}"
+    assert shown.strip() != "", "这一轮手机没动静这件事本身也是话，不能留个空洞"
+
+
+def test_a_cold_start_gets_everything_because_none_of_it_is_in_front_of_her_yet():
+    """她上一轮是什么时候都不知道（重启、或者这条泳道的第一轮），那就全给。
+
+    这时候她眼前一条历史都没有，这些对她全是新的。同一轮界桩也会立起来
+    （:func:`app.living.continuity.trim_for_round`，空上下文一律立），所以这两份会重
+    一次 —— 重一次的代价是几百个 token，漏一次的代价是有人找她而她不知道。
+    """
+    from app.living.phone import render_arrived
+
+    old = _envelope(channel_id="old", latest=_at(20, 40))
+
+    shown = render_arrived([old], since=None, now=_at(21, 5))
+
+    assert "old" in shown, f"冷启动那一轮什么都没给她。拿到：\n{shown}"
+
+
+def test_what_she_has_not_read_is_all_on_the_checkpoint():
+    """界桩上是全貌，跟"这一轮新到没到"无关 —— 它答的是"此刻还有什么没看"。"""
+    from app.living.phone import render_unread
+
+    quiet = _envelope(channel_id="old", latest=_at(20, 40))
+    fresh = _envelope(channel_id="new", latest=_at(21, 3))
+
+    shown = render_unread([fresh, quiet], now=_at(21, 5))
+
+    assert "old" in shown and "new" in shown, (
+        f"界桩上少了没看的会话 —— 她一直不看手机的话，那条通知会随旧刺激一起被裁掉，"
+        f"之后再也没有第二处说得出有人找过她。拿到：\n{shown}"
+    )
+
+
+def test_a_conversation_crowded_off_the_notifications_is_still_on_the_checkpoint():
+    """被挤出通知栏的那条，界桩上必须有 —— 不然它会**永久**地再也叫不到她。
+
+    两件事撞在一起才有这个洞：通知栏一次只给
+    :data:`app.living.phone.ENVELOPE_LIMIT` 条，而每轮只给"比上一轮新"的那些。一条
+    消息到的那一轮被八条更新的挤下去、没露过面；等挤它的那些被看掉、它重新排得进
+    来的时候，它已经比"上一轮"旧了，于是永远排不进新到的那一档。改之前每轮重摆全量，
+    它只是当轮没露面、下一轮就露了。
+
+    所以界桩那一份**不截断**：它答的是"此刻还有什么没看"，截断会让这个答案变成假话。
+    条数由白名单兜着（:mod:`app.living.whitelist`），而且一小时才铺一次。
+    """
+    from app.living.phone import ENVELOPE_LIMIT, render_arrived, render_unread
+
+    crowd = [
+        _envelope(channel_id=f"c{i}", latest=_at(21, 10 + i))
+        for i in range(ENVELOPE_LIMIT)
+    ]
+    buried = _envelope(channel_id="buried", latest=_at(21, 9))
+    everything = sorted([*crowd, buried], key=lambda e: e.latest, reverse=True)
+
+    shown = render_arrived(everything, since=_at(21, 0), now=_at(21, 30))
+    assert len(shown.splitlines()) == ENVELOPE_LIMIT + 1, (
+        f"通知栏一次只给 {ENVELOPE_LIMIT} 条。拿到：\n{shown}"
+    )
+    assert "buried" not in shown, "最旧那条没有被挤下去 —— 通知栏不是纯时间序了"
+
+    kept = render_unread(everything, now=_at(21, 30))
+    assert "buried" in kept, (
+        f"被挤出通知栏的那条在界桩上也没有 —— 那它就再也叫不到她了。拿到：\n{kept}"
+    )
+
+
+def test_neither_rendering_leaks_a_word_of_the_message():
+    """两段文本都还是信封：正文一个字都不在里面。"""
+    from app.living.phone import render_arrived, render_unread
+
+    one = _envelope(channel_id="dm", latest=_at(21, 3))
+
+    for shown in (
+        render_arrived([one], since=_at(21, 0), now=_at(21, 5)),
+        render_unread([one], now=_at(21, 5)),
+    ):
+        assert "bezhai" in shown and "1 条没看" in shown, (
+            f"信封该有的东西没了。拿到：\n{shown}"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -1550,9 +1723,7 @@ async def test_an_overnight_pile_says_which_day_it_came_from(living_db):
         _DM, text_body="睡了没", at=_at(23, 50) - dt.timedelta(days=1)
     )
 
-    envelope = await phone_envelope(
-        lane=LANE, persona_id="akao", now=_at(0, 20)
-    )
+    envelope = await _unread_now(_at(0, 20))
 
     assert "07-24 23:50" in envelope, (
         f"昨晚那条渲染成了裸时分 —— 她会当成半小时前刚发来的。拿到：\n{envelope}"
@@ -1590,9 +1761,7 @@ async def test_when_she_last_spoke_there_is_dated_across_the_night(
         channel_id=str(_GROUP),
     )
 
-    envelope = await phone_envelope(
-        lane=LANE, persona_id="akao", now=_at(9, 10)
-    )
+    envelope = await _unread_now(_at(9, 10))
 
     assert "07-24 21:25" in envelope, (
         f"「你上次在这儿开口」跨了一夜却还是裸时分。拿到：\n{envelope}"
@@ -1605,9 +1774,7 @@ async def test_todays_envelope_stays_undated(living_db):
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(21, 30))
 
-    envelope = await phone_envelope(
-        lane=LANE, persona_id="akao", now=_at(21, 35)
-    )
+    envelope = await _unread_now(_at(21, 35))
 
     assert "21:30 CST" in envelope
     assert "07-25 21:30" not in envelope, (
@@ -1638,7 +1805,7 @@ async def test_messages_she_reads_today_stay_undated(living_db, in_a_moment):
     """同一天的那几条**刻意不带**日期。
 
     信封那侧有同一条断言，但两侧是两个渲染出口（信封走
-    :func:`app.living.phone.render_envelopes`，消息行走
+    :func:`app.living.phone._render`，消息行走
     :func:`app.living.phone._one_message`）。消息行这侧改成一律带日期的话，
     信封那条用例照样绿 —— 所以这条否定断言在这侧也得有。
     """
@@ -1778,7 +1945,7 @@ async def test_the_envelope_says_someone_named_her(living_db):
     assert [e.named_you for e in envelopes] == [True], (
         f"群里点了她的名，通知却没认出来。拿到：{envelopes}"
     )
-    assert "有人点了你的名" in render_envelopes(envelopes, now=_at(21, 31))
+    assert "有人点了你的名" in render_unread(envelopes, now=_at(21, 31))
 
 
 @pytest.mark.integration
@@ -1872,7 +2039,7 @@ async def test_the_address_sits_next_to_the_name_it_belongs_to(living_db):
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(20, 0))
 
-    envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(20, 5))
+    envelope = await _unread_now(_at(20, 5))
 
     line = next(ln for ln in envelope.splitlines() if "bezhai" in ln)
     name_at = line.index("「bezhai」")
@@ -2604,7 +2771,7 @@ async def test_the_envelope_only_lists_conversations_in_sight(living_db):
     assert [e.channel_id for e in envelopes] == [str(_DM)], (
         f"没人叫她的那个群还在信封上。拿到：{envelopes}"
     )
-    assert "宅居研究所" not in render_envelopes(envelopes, now=_at(21, 35)), (
+    assert "宅居研究所" not in render_unread(envelopes, now=_at(21, 35)), (
         "群的名字露在信封上了 —— 不在名单里就是整个不进她视野"
     )
 
@@ -2954,7 +3121,7 @@ async def test_the_envelope_marks_the_owner_and_never_merges_him_with_a_namesake
         f"同名的主人和非主人在信封上缩成了一个人。拿到：{[e.senders for e in envelopes]}"
     )
 
-    text_out = render_envelopes(envelopes, now=_at(21, 35))
+    text_out = render_unread(envelopes, now=_at(21, 35))
     assert text_out.count('rel="owner"') == 1, (
         f"信封上要么没标主人、要么两个都标了。拿到：\n{text_out}"
     )
@@ -2982,7 +3149,7 @@ async def test_the_envelope_escapes_what_a_group_calls_itself(living_db, pinned)
         sender_name="路人",
     )
 
-    envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelope = await _unread_now(_at(21, 35))
 
     assert 'rel="owner"' not in envelope, (
         f"群名里那条伪造的主人消息原样摆进了信封。拿到：\n{envelope}"

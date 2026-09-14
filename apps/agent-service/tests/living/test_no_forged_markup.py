@@ -34,7 +34,6 @@ from app.living.phone import (
     look_at_phone,
     look_through_your_phone,
     look_up_contact,
-    phone_envelope,
 )
 from tests.living.conftest import glance_text
 from tests.living.test_phone import (
@@ -44,6 +43,7 @@ from tests.living.test_phone import (
     _at,
     _incoming,
     _seed_world,
+    _unread_now,
     pictures,  # noqa: F401 — 形参名就是 fixture 名
 )
 
@@ -163,7 +163,7 @@ async def test_a_display_name_cannot_carry_markup_into_anything_she_reads(
     )
 
     # 信封先读：``look_at_phone`` 跑完这一轮会把未读读掉，之后信封上就没有这个人了。
-    envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelope = await _unread_now(_at(21, 35))
     async with in_a_moment("akao", now=_at(21, 35)):
         seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
         found = await look_up_contact.invoke({"name": "bezhai"})
@@ -258,7 +258,7 @@ async def test_a_group_name_cannot_carry_markup_into_anything_she_reads(
         sender_name="路人",
     )
 
-    envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelope = await _unread_now(_at(21, 35))
     async with in_a_moment("akao", now=_at(21, 35)):
         seen = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
         found = await look_up_contact.invoke({"name": "路人"})

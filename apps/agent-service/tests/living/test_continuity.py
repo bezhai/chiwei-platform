@@ -25,7 +25,7 @@ from app.living.continuity import (
     TranscriptConflict,
     commit_moment_transcript,
     load_moment_transcript,
-    moment_transcript_id,
+    transcript_key,
 )
 from app.living.happening import record_happening
 from app.living.moment import LifeMoment, latest_moment, run_moment
@@ -102,47 +102,56 @@ async def _write_transcript(
 
 
 # ---------------------------------------------------------------------------
-# 一 · 键与日界
+# 一 · 键：一个人一条，不分天
+#
+# 这一节原来钉的是相反的事：键带生活日，凌晨 4 点上下文清零，跨天靠她自己写下的那一页
+# 加挂心事加状态快照重铺接住。**去掉了。**
+#
+# 为什么：清零的两个职责里只有一个是真的。控制增长那一个由分层裁剪加 200k 硬顶接着做，
+# 不需要每天砍一刀；另一个"她每天重新开始"不是想要的性质 —— 它让她每天早上忘掉昨天正在
+# 想的事，而一个人不会。设计要的是长程 loop：她接着昨天往下想，前缀也因此跨天活着。
+#
+# 代价认下来：清零原来是**唯一一次保证前缀重建**的时刻，去掉之后裁剪必须长期正确，
+# 写错了不会有每日自愈。所以下面第四节（跨天）和 ``test_context_trim.py`` 的收敛用例
+# 是这条决定的配套，不是顺带。
 # ---------------------------------------------------------------------------
 
 
-def test_one_row_per_persona_for_the_whole_living_day():
-    """同一个人同一个生活日内的每一个 moment 都落在同一条上。"""
-    morning = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(9))
-    night = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(23, 50))
-    assert morning == night == f"{LANE}:akao:2026-07-25"
+def test_one_row_per_persona_forever():
+    """同一个人永远落在同一条上 —— 早上、深夜、下个月，都是它。"""
+    morning = transcript_key(lane=LANE, actor="akao")
+    assert morning == f"{LANE}:akao"
 
 
-def test_the_day_rolls_at_four_in_the_morning_not_at_midnight():
-    """凌晨两点她还醒着，上下文不能在午夜断掉。
+def test_the_context_does_not_reset_at_four_in_the_morning():
+    """凌晨 4 点她不该失忆。
 
-    日界按自然日切的话，23:58 和 00:02 是两条 —— 她那一段连着的经历被从中间劈开，
-    而她自己没有任何理由感觉到这个边界。生活日的边界是 04:00。
+    键带生活日的时候，04:01 那一轮读到的是一条空上下文：昨天正在想的事、正说到一半的
+    话，全部只剩库里还有。接住它的是日记页那一层 —— 但那是一份她自己写的概述，不是
+    她昨晚真正说过的每一句。现在两个时刻是同一条，她接着往下想。
     """
-    before_midnight = moment_transcript_id(
-        lane=LANE, persona_id="akao", now=_at(23, 58, day=25)
-    )
-    after_midnight = moment_transcript_id(
-        lane=LANE, persona_id="akao", now=_at(2, 30, day=26)
-    )
-    assert before_midnight == after_midnight
-
-    just_before_four = moment_transcript_id(
-        lane=LANE, persona_id="akao", now=_at(3, 59, day=26)
-    )
-    just_after_four = moment_transcript_id(
-        lane=LANE, persona_id="akao", now=_at(4, 1, day=26)
-    )
-    assert just_before_four != just_after_four
+    before = transcript_key(lane=LANE, actor="akao")
+    after = transcript_key(lane=LANE, actor="akao")
+    assert before == after
 
 
 def test_a_lane_and_a_person_never_share_a_row():
     ids = {
-        moment_transcript_id(lane=LANE, persona_id="akao", now=_at(9)),
-        moment_transcript_id(lane=LANE, persona_id="ayana", now=_at(9)),
-        moment_transcript_id(lane="prod", persona_id="akao", now=_at(9)),
+        transcript_key(lane=LANE, actor="akao"),
+        transcript_key(lane=LANE, actor="ayana"),
+        transcript_key(lane="prod", actor="akao"),
     }
     assert len(ids) == 3
+
+
+def test_the_key_says_who_it_is_without_looking_anything_up():
+    """排查的时候得一眼看出这条是谁的 —— 跟 langfuse 那个 session id 同一条理由。
+
+    顺带钉住"键里没有日期"这件事本身：留着日期段的话它会静默地每天开一条新的，
+    而症状是她每天早上不记得昨天，跟"裁剪太狠"长得一模一样。
+    """
+    tid = transcript_key(lane=LANE, actor="akao")
+    assert tid.split(":") == [LANE, "akao"]
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +303,7 @@ async def test_she_picks_up_a_context_this_process_never_wrote(
 
     等价于"杀掉 pod 之后她接着之前的上下文继续" —— 新进程手上什么都没有，全部来自 PG。
     """
-    tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14))
+    tid = transcript_key(lane=LANE, actor="akao")
     await _write_transcript(
         tid,
         [
@@ -320,7 +329,7 @@ async def test_the_round_lands_in_the_context_exactly_once(moment_db, stub_momen
     )
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
-    tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14))
+    tid = transcript_key(lane=LANE, actor="akao")
     stored, ver = await load_moment_transcript(tid)
     assert ver == 1
     # 一根界桩（一天的头一轮立的）+ 这一轮的刺激 + 工具那一组 + 最后那句
@@ -338,17 +347,30 @@ async def test_the_round_lands_in_the_context_exactly_once(moment_db, stub_momen
 
 
 @pytest.mark.integration
-async def test_the_context_starts_over_at_the_living_day_boundary(
-    moment_db, stub_moment
-):
-    """04:00 一过是新的一条，她不会把昨天的对话原样拖进今天。"""
+async def test_she_carries_on_across_four_in_the_morning(moment_db, stub_moment):
+    """04:00 一过她接着往下说，不是从空上下文重新开始。
+
+    这条原来钉的是相反的事（"04:00 一过是新的一条"）。清零同时干了两件事，而只有一件
+    是想要的：控制增长由分层裁剪加硬顶接着做；"她每天重新开始"不想要 —— 一个人不会在
+    早上四点忘掉昨晚正在想的事。
+
+    验的是**真的跑两轮**，不只是键算出来一样：键、读、写、裁剪四处只要有一处还按天分，
+    她照样会在 04:00 失忆，而那种失忆跟"裁剪太狠"长得一模一样、事后分不出来。
+    """
     runner = stub_moment(said="继续")
     await run_moment(lane=LANE, persona_id="akao", now=_at(3, 50, day=26))
     await run_moment(lane=LANE, persona_id="akao", now=_at(4, 10, day=26))
 
-    # 每一天的第一个 moment 都是"一根界桩 + 这一轮的刺激"，昨天那一段一条都不带过来
+    # 第一轮：一根界桩 + 这一轮的刺激。
     assert len(runner.runs[0][0]) == 2
-    assert len(runner.runs[1][0]) == 2, "跨过 04:00 还接着昨天那条"
+    # 第二轮：前面那一轮的每一条都还在（界桩、刺激、她说的那句），再接这一轮的刺激。
+    second = runner.runs[1][0]
+    assert len(second) > 2, "跨过 04:00 之后上下文空了 —— 她把昨晚忘干净了"
+    assert _is_checkpoint(second[0])
+    assert second[1].content == runner.runs[0][0][-1].content, (
+        "第一轮那条刺激没带过来"
+    )
+    assert len(_stimuli(second)) == 2, "两轮的刺激应该都在这条上下文里"
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +426,7 @@ async def test_a_failed_context_write_leaves_the_round_standing(
 
     assert await _rows(PhoneRead) == 1, "手机已读跟着上下文一起被回滚了"
 
-    tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14))
+    tid = transcript_key(lane=LANE, actor="akao")
     assert await load_moment_transcript(tid) == ([], 0)
     assert any("上下文" in r.message for r in caplog.records), caplog.text
 
@@ -615,7 +637,7 @@ async def test_the_replay_after_a_failed_close_stores_the_round_once(
     assert len(replayed) == 2, "重放读到的历史不该带上没提交的那一轮"
     assert "你在看什么" in replayed[-1].content
 
-    tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14, 1))
+    tid = transcript_key(lane=LANE, actor="akao")
     stored, ver = await load_moment_transcript(tid)
     assert ver == 1
     assert len(_stimuli(stored)) == 1
@@ -636,7 +658,7 @@ async def test_the_same_summons_only_wakes_her_once(moment_db, stub_moment):
     assert second is None
     assert len(runner.runs) == 1
 
-    tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14))
+    tid = transcript_key(lane=LANE, actor="akao")
     stored, ver = await load_moment_transcript(tid)
     assert ver == 1
     assert len(_stimuli(stored)) == 1
@@ -662,6 +684,6 @@ async def test_the_moment_record_and_the_context_land_together(
         ).scalar_one()
     assert rows == 1
 
-    tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14))
+    tid = transcript_key(lane=LANE, actor="akao")
     _stored, ver = await load_moment_transcript(tid)
     assert ver == 1

@@ -11,15 +11,20 @@
 
 **她的上下文跨 moment 连续。** 一个 moment 结束时，这一轮喂进去的那条 USER 消息、她说的
 每一句、每一次工具调用和工具返回原样存下来，下一个 moment 接在输入前面
-（:mod:`app.living.continuity`：键是 ``lane:persona:生活日``，在这条记录和手机已读提交
-之后单独写，写失败只记一行 ERROR、这一轮照样算数）。
+（:mod:`app.living.continuity`：键是 ``lane:persona``，**不分天、一直连着**，在这条记录
+和手机已读提交之后单独写，写失败只记一行 ERROR、这一轮照样算数）。
 
-**所以醒来只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、手机上来了
-什么（:meth:`app.living.snapshot.MomentSnapshot.render_new`）。她此刻的样子（在哪、在做
-什么、上一次写下的那天、心里挂着什么、刚做过说过什么）读一百遍字字一样，上一轮读过的
+**所以醒来只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么
+（:meth:`app.living.snapshot.MomentSnapshot.render_new`）、手机上刚来了什么
+（:func:`app.living.phone.render_arrived`）。她此刻的样子（在哪、在做什么、上一次写下的
+那天、心里挂着什么、刚做过说过什么、手机上还有什么没看）读一百遍字字一样，上一轮读过的
 还在上下文里，所以它只在清理那一下作为新起点重铺一次
 （:func:`app.living.continuity.trim_for_round`）。"心里挂着没了结的事"那份清单由
 :func:`keep_in_mind` 重写（:mod:`app.living.loose_ends`）。
+
+**位置和手上的事是例外，每轮都给**（``render_new`` 里那一行）：那两样她自己就能改
+（:func:`switch_to`、:func:`move_to`），铺在界桩上的那份到下一个清理点之前一直是旧的，
+而位置决定谁看得见她。
 
 **挂线头是独立的一件事，不绑在 ``switch_to`` 上。** 「是否换事」不等于「是否记住」：
 绫奈跟她说"周末陪我去祭典"，她手上的书没放下（这个 moment 答「继续」），但她记住了——这是
@@ -106,20 +111,21 @@ from app.data.session import get_session
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import now_cst
 from app.living.anchor import anchor_on_grid
-from app.living.clock import living_lane
 from app.living.continuity import (
     commit_moment_transcript,
     load_moment_transcript,
     load_trim_policy,
-    moment_transcript_id,
     next_transcript,
+    transcript_key,
     trim_for_round,
 )
+from app.living.documents import _read as read_document_at
+from app.living.documents import documents_root
 
 # 她手边那几份写好的说明：两只手，外加"有哪些可读"那一份清单（清单只能从 prompt
 # 变量进，见本模块最后一段 docstring）。
 from app.living.guides import GUIDE_TOOLS, GUIDES_VAR, guides_she_can_read
-from app.living.happening import record_happening
+from app.living.happening import ongoing_at, record_happening
 from app.living.loose_ends import (
     format_entry,
     list_open_loose_ends,
@@ -132,7 +138,13 @@ from app.living.mouth import MOUTH_TOOLS
 # 在 ``snapshot`` 之上，反向 import 会成环。**这个 moment 不自己查 bot_persona**：正文来自
 # 版本链还是主表由那个模块一处说了算，三条注入路各查一遍就会各漂各的。
 from app.living.persona import LIVING_PERSONAS, persona_prompt_vars
-from app.living.phone import PHONE_TOOLS, commit_glances, phone_envelope
+from app.living.phone import (
+    PHONE_TOOLS,
+    commit_glances,
+    envelopes_for,
+    render_arrived,
+    render_unread,
+)
 from app.living.pictures import PICTURE_TOOLS
 from app.living.place import Reach, reach_between_people
 from app.living.reading import READING_TOOLS
@@ -140,8 +152,11 @@ from app.living.records import (
     KIND_ACT,
     KIND_SPEECH,
     MEDIUM_IN_PERSON,
+    WORLD_ACTOR,
     _require_aware,
+    esc,
     legacy_null_is,
+    living_lane,
 )
 
 # 一个 moment 里每个工具都要读的那四样 ambient 事实，定义在 scope 里（手机和嘴的工具用的
@@ -336,6 +351,43 @@ def _derive(*parts: str) -> str:
     return uuid.uuid5(_ID_NS, "\x1f".join(parts)).hex
 
 
+PLACES_DIR = "地方"
+
+
+async def arriving_at(place: str, *, lane: str, now: datetime) -> str:
+    """走进 ``place`` 的时候看到的：这地方什么样 + 此刻这儿还在发生什么。
+
+    **她不读文档**（那是 world 的工作产物），地方的样子只以这种形式到达她 —— 走进厨房
+    看到的是"桌上还堆着没洗的碗"，不是一份可以 grep 的设定集。
+
+    **每次进去都给，不记"她来过没有"。** 换成第一次才给的话：第一次那段描述几小时后
+    被裁掉，过几天她再进厨房，因为"来过"而什么都没有、又不能去读文档 —— 那时候她没有
+    任何途径知道厨房什么样。这条管的是信息可达性，不规定她怎么反应。停留期间不会重复
+    注入，因为只有"走进去"这个动作才走这条路。
+
+    **没写过的地方就是没写过**：不报错，也不编一段出来（宪法原则 6：宁可不记，不可
+    记错）。文档读失败同理 —— 卷没挂上不该让她挪不了地方。
+
+    ``ongoing_at`` 那一段是另一件事：它答的是"这儿现在正在发生什么"。感知走游标，
+    下雨开始时她在家、游标早越过了那一条，而地方文档只写不变的部分 —— 不从这儿给，
+    她走进学校永远不知道正在下雨。
+    """
+    seen: list[str] = []
+    try:
+        seen.append(
+            await asyncio.to_thread(
+                read_document_at, documents_root(), f"{PLACES_DIR}/{place}.md"
+            )
+        )
+    except Exception:
+        # 没有这一份、卷没挂上、路径她写成了别的形状 —— 都只是"这儿没什么好描述的"。
+        logger.debug("living arriving lane=%s 地方没有文档：%s", lane, place)
+    for h in await ongoing_at(lane=lane, place=place, now=now):
+        who = "" if h.actor == WORLD_ACTOR else f"{h.actor} "
+        seen.append(f"{who}{esc(h.content)}")
+    return "\n\n".join(seen)
+
+
 @tool
 @tool_error("换事情失败")
 async def switch_to(
@@ -391,7 +443,12 @@ async def switch_to(
     get_context().features.setdefault(FEATURE_SWITCHES, []).append(
         {"doing": what, "because": because.strip()}
     )
-    return f"你在 {where}，{what}。"
+    # 落了位置就看得见那个地方，跟 move_to 同一条规则（:func:`arriving_at`）。**不按
+    # "地点变没变"分叉**：这只手还是她唯一的第一次落位入口，而那个判断要拿旧位置比一次，
+    # 比错的症状是她站在一个自己看不见的地方。
+    said = f"你在 {where}，{what}。"
+    seen = await arriving_at(where, lane=lane, now=now)
+    return f"{said}\n\n{seen}" if seen else said
 
 
 @tool
@@ -445,7 +502,9 @@ async def move_to(
     )
     # **不进 FEATURE_SWITCHES**：走一步不是"什么把你从这件事里带走了"。混进去会让
     # 逐个 moment 复盘里的换事率把单纯的走动也算成换事情。
-    return f"你在 {where}，还在{current.doing}。"
+    said = f"你在 {where}，还在{current.doing}。"
+    seen = await arriving_at(where, lane=lane, now=now)
+    return f"{said}\n\n{seen}" if seen else said
 
 
 @tool
@@ -692,6 +751,80 @@ MOMENT_TOOLS = [
     *GUIDE_TOOLS,
 ]
 
+# 她读到的素材：读完就该沉淀成她自己的东西，过了保留期换成一句短语。
+#
+#   * ``look_around``      够得着的地方现在什么样 —— 快照每轮重发一份
+#   * ``search_online`` / ``browse_online``  搜索结果和信息流，没有任何工具吃它们的 URL
+#   * ``read_a_guide``     说明书全文，想再看就再读一遍
+#   * ``run_a_script``     命令的输出。上限 4000 字（``app.capabilities.sandbox``），
+#     而且已经带着"还有多少字没给你"那句实话，这里不做第二次截断，只整块换掉
+MATERIAL_TOOLS = frozenset(
+    {
+        "look_around",
+        "search_online",
+        "browse_online",
+        "read_a_guide",
+        "run_a_script",
+    }
+)
+
+# 留着的那一档，两类东西：
+#
+# **一 · 长期标识** —— 不是她读到的内容，是她后面还要原样抄回去的凭据：
+#
+#   * ``draw_a_picture`` / ``find_a_picture_online`` / ``look_at_a_picture`` /
+#     ``look_through_your_pictures``  返回里的 ``pic=<32 位十六进制>``，被
+#     ``send_message(pictures=[...])`` / ``look_at_a_picture(which=...)`` /
+#     ``look_through_your_pictures(before=...)`` 吃。翻页那只手的最后一串还是往前翻
+#     的游标
+#   * ``look_for_something_to_read``  ``file=<attachment_id>``，被 ``read_a_bit(which=...)``
+#     吃。``read_a_bit`` 自己指代不明时抛的那句话里也逐个印着候选的 ``file=``，
+#     所以它也在这一档
+#   * ``look_up_contact`` / ``look_through_your_phone``  ``channel_id=<id>``，被
+#     ``look_at_phone`` / ``send_message`` 吃（翻页那只手的最后一串还是往下翻的游标）。
+#     安静下来的会话不在手机通知上，这两只手是找回它的仅有的两条路
+#   * ``look_at_phone``  **这一档里唯一一只返回是别人内容的手，破例在这里说清楚。**
+#     它那一页上有两样凭据：每条她自己发的消息带的 ``take_back_id``，和头上那串
+#     ``before=``。前者在快照的"你刚做过、说过"那段有副本，但那段只有最近 12 条，滚
+#     出去的旧消息就没有第二份了；后者是往前翻**唯一**的入口，从头到尾只出现在这一
+#     次返回里，换掉正文她就再也翻不回这条会话更早的地方。
+#     只保留句柄、把正文换掉更精确，但那要在裁剪这一层解析手机那边渲染出来的标签 ——
+#     渲染改一个字，句柄就静默地留不住了，而症状是几小时后她拿着一个不存在的编号去
+#     撤消息。别人的正文因此多留 3 小时：一页十几条文本，跟这个风险不是一个量级
+#     （图片块**不**跟着多留，它走 :data:`PICTURE_TRIMMED` 那条独立的线）
+#
+# **二 · 她自己动作的回执** —— ``switch_to`` / ``move_to`` / ``keep_in_mind`` /
+# ``say`` / ``act`` / ``send_message`` / ``take_back_message`` / ``stop_for_now``。
+# 这几条是"这件事到底做成了没有"的唯一记录：``send_message`` 明确区分发出去了、已经说
+# 过了、交出去但没等到确认三种结局，裁掉她就会照着一个不知道有没有成功的动作再来一遍。
+# ``stop_for_now`` 那句确认是她上一轮怎么收尾的唯一痕迹（它结束这一轮，后面没有她的话
+# 跟着），而且整条就几个字，换成短语省不下任何东西。
+#
+# **新加一只手落进哪一档必须显式写下来**（用例 ``test_every_tool_she_has_is_classified``
+# 会因为漏掉而失败）。分不清就放这一档：留错了只是多占 token。
+KEPT_TOOLS = frozenset(
+    {
+        "switch_to",
+        "move_to",
+        "keep_in_mind",
+        "say",
+        "act",
+        "stop_for_now",
+        "send_message",
+        "take_back_message",
+        "look_at_phone",
+        "look_up_contact",
+        "look_through_your_phone",
+        "look_for_something_to_read",
+        "read_a_bit",
+        "draw_a_picture",
+        "find_a_picture_online",
+        "look_through_your_pictures",
+        "look_at_a_picture",
+    }
+)
+
+
 
 # ---------------------------------------------------------------------------
 # 循环
@@ -837,9 +970,7 @@ CONTEXT_GAP = get_or_create_counter(
 )
 
 
-def lost_last_round(
-    last: LifeMoment | None, *, transcript_id: str, loaded_ver: int
-) -> bool:
+def lost_last_round(last: LifeMoment | None, *, loaded_ver: int) -> bool:
     """上一轮的上下文到底落地了没有。
 
     moment 记录先提交、上下文后写，所以记录上的 ``context_ver``（那一轮**打算**写成
@@ -847,22 +978,17 @@ def lost_last_round(
     "崩在两次提交之间"在这里是同一个判据 —— 后者连一行 ERROR 都留不下，所以判据不能
     挂在写失败那条补偿路径上。
 
-    两种情形不判：
+    一种情形不判：**一个 moment 都没跑过**，或者那一行是加列之前写的
+    （``context_ver`` 读出来是 0）—— 没有可比的期望值。
 
-      * **一个 moment 都没跑过**，或者那一行是加列之前写的（``context_ver`` 读出来是
-        0）—— 没有可比的期望值；
-      * **上一个 moment 不在这个生活日上**。新的一天是另一条上下文，版本从 0 起，跟
-        昨天那个数没有可比性；那一轮本来就该是空上下文（:mod:`app.living.continuity`
-        第一条）。
+    这里原来还有第二道：上一个 moment 不在这个生活日上就不判，因为新的一天是另一条
+    上下文、版本从 0 起、跟昨天那个数没有可比性。**上下文不再分天之后那道门不存在
+    了** —— 同一个人从头到尾就一条，版本一路往上走，跨不跨 04:00 都直接比得了。
+
+    所以它也不再需要知道这一轮读的是哪条键：``last`` 按 ``(lane, persona_id)`` 查出来，
+    上下文也按这两样存，两者必然是同一条。
     """
     if last is None or last.context_ver <= 0:
-        return False
-    if (
-        moment_transcript_id(
-            lane=last.lane, persona_id=last.persona_id, now=last.began_at
-        )
-        != transcript_id
-    ):
         return False
     return loaded_ver < last.context_ver
 
@@ -985,17 +1111,13 @@ async def run_moment(
         # "离上一次过了多久"就摆在她眼前那一行上。取最后落地的那个 moment 的『现在』，
         # 跟游标同一行 —— 两者问的是同一件事："她上一次回到自己身上是什么时候"。
         previous_at = last.began_at if last is not None else None
-        # 她上一个 moment 说到哪了。键按 ``began_at`` 所属的生活日算一次，读和写共用
-        # 同一个；版本号一路带到收尾去做 CAS（:mod:`app.living.continuity`）。
-        transcript_id = moment_transcript_id(
-            lane=lane, persona_id=persona_id, now=began_at
-        )
+        # 她上一个 moment 说到哪了。**键不分天**，她接着昨天往下想；版本号一路带到
+        # 收尾去做 CAS（:mod:`app.living.continuity`）。
+        transcript_id = transcript_key(lane=lane, actor=persona_id)
         history, transcript_ver = await load_moment_transcript(transcript_id)
         # 上一轮的上下文落地了没有。没落地的话这一轮眼前的历史停在更早的地方，而刺激
         # 写着"离上一次过了十分钟"，指的是她看不到的那一轮 —— 所以要重铺一次状态。
-        gap = lost_last_round(
-            last, transcript_id=transcript_id, loaded_ver=transcript_ver
-        )
+        gap = lost_last_round(last, loaded_ver=transcript_ver)
         if gap:
             CONTEXT_GAP.labels(lane=lane, persona_id=persona_id).inc()
             logger.error(
@@ -1042,27 +1164,38 @@ async def run_moment(
         # 一眼时就定下来，之后整个 moment（看手机、找人、发消息、找可读文件）用的都是那一份
         # （:mod:`app.living.whitelist`）。摆在 context 外面算的话名单会被算两遍，
         # 而两遍之间到达的消息会让一条会话半路出现在她眼前。
+        #
+        # **查一次，渲两次**：摆到她眼前的只有这一轮新到的
+        # （:func:`app.living.phone.render_arrived`），还没看的全貌铺在界桩上
+        # （:func:`app.living.phone.render_unread`）。两次渲染是纯函数，查库那一遍
+        # 一条会话一次往返，不能为了两段文本走两遍。
         with agent_context(context):
-            envelope = await phone_envelope(
+            unread = await envelopes_for(
                 lane=lane, persona_id=persona_id, now=began_at
             )
         # 这一轮新摆到她眼前的那条，接在连续上下文后面 —— 所以它永远是最后一条。
         #
-        # **只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、手机上来了
-        # 什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里挂着什么、刚做过说
-        # 过什么）不在这里 —— 那份读一百遍字字一样，每轮重发就是把同一段话抄一遍，而她
-        # 上一轮读过的还在上下文里。它由清理那一下作为新起点重铺
+        # **只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、手机上刚来
+        # 了什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里挂着什么、刚做过
+        # 说过什么、手机上还有什么没看）不在这里 —— 那份读一百遍字字一样，每轮重发就是
+        # 把同一段话抄一遍，而她上一轮读过的还在上下文里。它由清理那一下作为新起点重铺
         # （:func:`app.living.continuity.trim_for_round`，默认一小时一次；一天的第一轮
         # 上下文是空的，那一下也会立一根界桩，所以冷启动她照样知道自己站在哪）。
-        state = snapshot.render_state()
+        #
+        # **未读必须在界桩上**：眼前那份只给新到的，一条她一直不看的通知会随着摆出它的
+        # 那一轮刺激一起在 own_minutes 之后被裁掉，界桩不重铺的话之后再没有第二处说得出
+        # 有人找过她。
+        state = f"{snapshot.render_state()}\n\n{render_unread(unread, now=began_at)}"
+        arrived = render_arrived(unread, since=previous_at, now=began_at)
         stimulus = Message(
             role=Role.USER,
-            content=f"{snapshot.render_new(previous_at=previous_at)}\n\n{envelope}",
+            content=f"{snapshot.render_new(previous_at=previous_at)}\n\n{arrived}",
         )
         # 裁在这里，不在收尾：喂进去的和存下去的是同一份前缀，而且一段带着过期图片
         # 地址的历史不会在模型调用那一步先炸掉、永远轮不到被裁。
         history = trim_for_round(
             history,
+            material_tools=MATERIAL_TOOLS,
             now=began_at,
             state=state,
             policy=trim_policy,
