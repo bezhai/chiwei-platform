@@ -30,6 +30,7 @@ export class LarkClient {
         this.client = new lark.Client({
             appId: this.config.appId,
             appSecret: this.config.appSecret,
+            httpInstance: this.config.httpInstance,
         });
     }
 

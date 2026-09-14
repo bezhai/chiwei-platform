@@ -26,6 +26,11 @@ import { larkCredentials } from './lark/credentials';
 import { postgresEmojiCatalog, type LarkEmojiCatalog } from './lark/emoji/catalog';
 import { httpEmojiSource, syncLarkEmojis } from './lark/emoji/sync';
 import { createLarkInbound, type LarkInbound } from './lark/inbound';
+import { createLarkDirectory, type LarkDirectory } from './lark/directory/directory';
+import { postgresLarkDirectoryStore } from './lark/directory/postgres-directory';
+import { createSdkLarkDirectoryApi } from './lark/directory/sdk-directory-api';
+import { receiveLarkMemberChange } from './lark/directory-events';
+import type { LarkMessageEvent } from './lark/message/wire';
 import {
     handOffToInboundLane,
     inboundLaneDispatchEnabled,
@@ -44,7 +49,7 @@ import {
 import { larkMessageLock, redisMessageLockStore } from './lark/projection/message-lock';
 import { postgresLarkTables } from './lark/projection/postgres-tables';
 import type { LarkStore } from './lark/projection/tables';
-import { createSdkLarkApi, larkClientPool } from './lark/outbound/sdk-lark-api';
+import { createSdkLarkApi, larkClientPool, type LarkClientPool } from './lark/outbound/sdk-lark-api';
 import { receiveLarkMessage } from './lark/receive-message';
 import { receiveLarkRecall } from './lark/recall-message';
 import { redisRepeatCounter } from './lark/repeat/counter';
@@ -66,6 +71,7 @@ import {
 } from './schedule';
 import { bootLarkService, shutdownLarkService, type LarkBackends } from './startup';
 import { createLarkServiceApp } from './server/app';
+import { registerLarkDirectoryRoutes } from './server/directory-routes';
 import { register } from './server/metrics';
 
 const LARK_EVENT_COLLECTION = 'lark_event';
@@ -90,9 +96,10 @@ function realBackends(): LarkBackends {
  * 投影的真实装配：库、Redis 锁、泳道绑定、MQ 全在这里接上，投影本身一个单例都不
  * 认识（见 lark/projection/inbound-projection.ts 的 LarkInboundDeps）。
  */
-function realProjection(store: LarkStore): LarkInboundDeps {
+function realProjection(store: LarkStore, directory: LarkDirectory): LarkInboundDeps {
     return {
         store,
+        refreshDirectory: (_reading, event) => directory.ensureSender(event.payload as LarkMessageEvent),
         // 时间有序的 uuid v7：它同时是主键和"这条消息什么时候来的"的排序依据。
         newCommonId: () => Bun.randomUUIDv7(),
         appIdOfBot: (botName) => larkAppIdOf(botDirectory, botName),
@@ -155,8 +162,7 @@ function realAttachments(): LarkAttachmentCache {
  * 飞书客户端池按 bot 分，一直留着 —— SDK 客户端内部缓存 tenant access token，每次新建
  * 等于每条消息都去飞书换一次 token。定时任务和卡片回调也从这里取（它们跟指令同进程）。
  */
-function realCommandDeps(store: LarkStore, emoji: LarkEmojiCatalog): LarkCommandDeps {
-    const bots = botDirectory.getAllBotConfigs().filter((bot) => bot.channel === LARK_CHANNEL);
+function realCommandDeps(store: LarkStore, emoji: LarkEmojiCatalog, pool: LarkClientPool): LarkCommandDeps {
     const toolService = laneRouter().createClient('tool-service');
     const memes = httpMemes(`${process.env.MEME_HOST}:${process.env.MEME_PORT}`);
     // Redis 上的一个键值对。指令层直接用它，meme 的模板列表缓存也建在它上面。
@@ -166,11 +172,7 @@ function realCommandDeps(store: LarkStore, emoji: LarkEmojiCatalog): LarkCommand
             await getRedisClient().setWithExpire(key, value, seconds);
         },
     };
-    const api = createSdkLarkApi(
-        larkClientPool(
-            bots.map((bot) => ({ botName: bot.bot_name, credentials: larkCredentials(bot) })),
-        ),
-    );
+    const api = createSdkLarkApi(pool);
     return {
         api,
         store,
@@ -222,14 +224,14 @@ function realRules(commands: LarkCommandDeps): LarkRulesDeps {
  * 飞书入站的真实装配。必须在 bootLarkService 之后调用：人设名要查库，bot 目录也
  * 得先加载完。
  */
-async function realInbound(commands: LarkCommandDeps, store: LarkStore): Promise<LarkInbound> {
+async function realInbound(commands: LarkCommandDeps, store: LarkStore, directory: LarkDirectory): Promise<LarkInbound> {
     const personaIds = botDirectory
         .getAllBotConfigs()
         .map((bot) => bot.persona_id)
         .filter((id): id is string => Boolean(id));
     const personaName = await loadLarkPersonaNames(larkDataSource(), personaIds);
     const eventLog = getMongoService().getCollection(LARK_EVENT_COLLECTION);
-    const projection = realProjection(store);
+    const projection = realProjection(store, directory);
     const attachments = realAttachments();
     const rules = realRules(commands);
 
@@ -257,6 +259,19 @@ async function realInbound(commands: LarkCommandDeps, store: LarkStore): Promise
         // 撤回只要两条语句（按 om_id 查映射、标 recalled_at），所以只递库，不递
         // 飞书客户端 —— 这条链一次都不用回头问飞书。
         onRecall: (recall, receivedAt) => receiveLarkRecall({ store }, recall, receivedAt),
+        onMemberChange: event => receiveLarkMemberChange({
+            currentLane: projection.currentLane,
+            laneDispatchEnabled: projection.laneDispatchEnabled,
+            conversationOf: async chatId => (await store.larkChat(chatId))?.common_conversation_id,
+            laneOf: (botName, conversationId) => projection.laneOf(LARK_CHANNEL, botName, conversationId),
+            handOff: projection.handOffToLane,
+            newId: () => Bun.randomUUIDv7(),
+            sync: async (chatId, humanUnionIds) => {
+                const result = await directory.sync(chatId, {preview: false, humanUnionIds});
+                console.info(`[lark-directory] synced bot=${event.botName} chat=${chatId} ` +
+                    `members=${result.members.length} joined=${result.joined.length} left=${result.left.length}`);
+            },
+        }, event),
     });
 }
 
@@ -298,8 +313,17 @@ async function main(): Promise<void> {
     // 表情目录**一份**：写端是下面那个每小时的同步任务，读端是复读指令。两处各建一个
     // 也能跑，但那样"这张表有哪两个动作"就不再是一处能看全的事。
     const emoji = postgresEmojiCatalog(larkDataSource());
-    const commands = realCommandDeps(store, emoji);
-    const inbound = await realInbound(commands, store);
+    const larkBots = botDirectory.getAllBotConfigs().filter(bot => bot.channel === LARK_CHANNEL);
+    const pool = larkClientPool(larkBots.map(bot => ({
+        botName: bot.bot_name, credentials: larkCredentials(bot),
+    })));
+    const commands = realCommandDeps(store, emoji, pool);
+    const directory = createLarkDirectory({
+        store: postgresLarkDirectoryStore(larkDataSource()),
+        api: createSdkLarkDirectoryApi(pool),
+        botUnionIds: larkBots.map(bot => larkCredentials(bot).robot_union_id),
+    });
+    const inbound = await realInbound(commands, store, directory);
 
     // 入口二：长连。主动，而且**会跟别的进程抢** —— 飞书对同一 app_id 的多个长连是
     // 随机投递。gate 保证只有 prod 部署并显式打开时才连（见 websocket.ts）。
@@ -327,6 +351,11 @@ async function main(): Promise<void> {
         bots: botDirectory,
         inbound,
         ingress: () => sockets?.status() ?? NO_WEBSOCKETS,
+    });
+    registerLarkDirectoryRoutes(app, {
+        lane: getLane() ?? 'prod',
+        hasBot: name => larkBots.some(bot => bot.bot_name === name),
+        sync: (chatId, preview) => directory.sync(chatId, {preview, humanUnionIds: []}),
     });
     Bun.serve({ port: config.port, fetch: app.fetch });
 

@@ -339,6 +339,7 @@ function deps(
         handedOff,
         deps: {
             store: tables,
+            refreshDirectory: async () => false,
             newCommonId: () => `id_${++minted}`,
             appIdOfBot: () => APP_ID,
             currentLane: 'prod',
@@ -1417,4 +1418,53 @@ describe('指令事实：投影顺路读到的、只有指令层要用的那几�
         expect(commandFacts(outcome).appId).toBe(APP_ID);
         expect(tables.larkUserOpenIds.has(`${APP_ID}|ou_user`)).toBe(true);
     });
+});
+
+
+describe('成员资料补齐与投影顺序', () => {
+    it('本条消息落库前补齐姓名，复用原来的公共用户和消息ID', async () => {
+        const tables = new MemoryLarkTables();
+        await project(tables, larkMessageEvent(), {
+            refreshDirectory: async () => {
+                tables.larkUsers.set('on_user', { union_id: 'on_user', name: '新人' });
+                return true;
+            },
+        });
+        expect(tables.commonMessages.get('id_3')?.sender_display_name).toBe('新人');
+        expect(tables.commonUsers.size).toBe(1);
+        expect([...tables.commonUsers.values()][0]?.display_name).toBe('新人');
+    });
+
+    it('交给其他泳道之前不执行成员同步', async () => {
+        const tables = new MemoryLarkTables();
+        let refreshed = false;
+        await project(tables, larkMessageEvent(), {
+            laneDispatchEnabled: async () => true,
+            laneOf: async () => 'coe-members',
+            refreshDirectory: async () => { refreshed = true; return true; },
+        });
+        expect(refreshed).toBe(false);
+        expect(tables.commonMessages.size).toBe(0);
+    });
+
+    it('资料查询失败仍保存普通消息', async () => {
+        const tables = new MemoryLarkTables();
+        await project(tables, larkMessageEvent(), {
+            refreshDirectory: async () => { throw new Error('directory unavailable'); },
+        });
+        expect(tables.commonMessages.size).toBe(1);
+    });
+});
+
+it('私聊首次补齐资料后，会话和当前消息均使用真实姓名', async () => {
+    const tables = new MemoryLarkTables();
+    await project(tables, larkMessageEvent({chat_type: 'p2p'}), {
+        refreshDirectory: async () => {
+            tables.larkUsers.set('on_user', {union_id: 'on_user', name: '私聊新人', avatar_origin: 'avatar'});
+            return true;
+        },
+    });
+    expect(tables.commonConversations.get('id_2')?.display_name).toBe('私聊新人');
+    expect(tables.commonConversations.get('id_2')?.avatar_url).toBe('avatar');
+    expect(tables.commonMessages.get('id_3')?.sender_display_name).toBe('私聊新人');
 });

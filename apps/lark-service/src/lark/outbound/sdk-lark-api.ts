@@ -16,6 +16,7 @@
 
 import { createLarkClient, type LarkClient } from '@inner/lark-utils';
 import { context } from '@inner/shared/middleware';
+import { createDirectoryHttpTransport } from '../directory/request-timeout';
 import { Readable } from 'node:stream';
 
 import type { LarkCredentials } from '../credentials';
@@ -44,6 +45,7 @@ export type LarkApiClient = Pick<
     | 'getMessageInfo'
     | 'getMessageList'
     | 'getUserInfo'
+    | 'getChatMembers'
     | 'downloadResource'
     | 'addChatMember'
     | 'request'
@@ -141,6 +143,7 @@ export function larkClientPool(
                 appId: bot.credentials.app_id,
                 appSecret: bot.credentials.app_secret,
                 botName: bot.botName,
+                httpInstance: createDirectoryHttpTransport(),
             }),
         );
     }

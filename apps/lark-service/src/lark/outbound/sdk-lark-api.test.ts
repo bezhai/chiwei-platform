@@ -88,6 +88,7 @@ function fakeClient(over: Partial<LarkApiClient> = {}): { client: LarkApiClient 
                 ],
             };
         },
+        async getChatMembers() { return { items: [], has_more: false }; },
         async getUserInfo(userId, idType) {
             recorded.fetchedUsers.push({ userId, idType });
             return {
