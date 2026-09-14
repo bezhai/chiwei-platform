@@ -27,9 +27,9 @@ from typing import Annotated
 from app.infra.cst_time import now_cst
 from app.living.calendar import deliver_due, load_day_schedule, plan_day
 from app.living.outside import ask_the_world, look_outside
+from app.living.records import living_lane
 from app.living.world import run_world_round
 from app.runtime.data import Data, Key
-from app.runtime.lane_policy import current_deployment_lane
 from app.runtime.node import node
 
 logger = logging.getLogger(__name__)
@@ -41,16 +41,6 @@ CALENDAR_TICK_SECONDS = 60
 # world 那一拍只是"问一句要不要跑"，真正的间隔由 Dynamic Config 决定。五分钟是
 # 这个判断的分辨率上限：把间隔配到 5 分钟以下不会真的生效。
 WORLD_ROUND_TICK_SECONDS = 300
-
-
-def living_lane() -> str:
-    """本进程所在的泳道；prod 部署上是 ``"prod"``。
-
-    lane 进 living 三张表的 Key 是硬约束（runtime 不给任何 Data 自动加 lane）。
-    拿不到泳道时必须落到 ``"prod"`` 而不是空串：空串会开一条谁也读不到的影子轴——
-    写进去的行查不出来，而她那边一片安静，什么报错都没有。
-    """
-    return current_deployment_lane() or "prod"
 
 
 class CalendarTick(Data):

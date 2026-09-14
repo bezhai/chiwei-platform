@@ -53,7 +53,6 @@ from app.capabilities.agent import AgentRunner
 from app.data.queries import find_persona
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST, now_cst
-from app.living.clock import living_lane
 from app.living.day_page import LivingDayPage, read_day_pages_between
 from app.living.persona import (
     LIVING_PERSONAS,
@@ -64,6 +63,7 @@ from app.living.persona import (
     week_start_cst,
     write_persona_version,
 )
+from app.living.records import living_lane
 from app.living.serial import hold
 from app.runtime.data import Data, Key
 from app.runtime.node import node

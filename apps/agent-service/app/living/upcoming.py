@@ -34,6 +34,7 @@ async def schedule_upcoming(
     what: str,
     due_at: datetime,
     place: str | None = None,
+    lasts_until: datetime | None = None,
 ) -> bool:
     """写下一件将要发生的事；返回是不是**这次调用**写下的。
 
@@ -53,6 +54,7 @@ async def schedule_upcoming(
             what=what,
             due_at=due_at,
             place=place,
+            lasts_until=lasts_until,
         ),
         expected_current_ver=0,
     )

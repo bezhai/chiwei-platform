@@ -45,8 +45,8 @@ from inner_shared.dynamic_config import dynamic_config
 
 from app.infra.cst_time import CST
 from app.living.happening import record_happening
+from app.living.place import EVERYWHERE
 from app.living.records import (
-    AMBIENT_PLACE,
     KIND_ACT,
     MEDIUM_IN_PERSON,
     WORLD_ACTOR,
@@ -61,7 +61,7 @@ from app.living.upcoming import (
 logger = logging.getLogger(__name__)
 
 # Dynamic Config key：值 = JSON 数组，每项 {"key","at","what","place"?}。
-# ``at`` 是 CST 的 ``HH:MM``；``place`` 省略 = 不绑地点（走 AMBIENT_PLACE）。
+# ``at`` 是 CST 的 ``HH:MM``；``place`` 省略 = 不绑地点（交付成 EVERYWHERE，全局）。
 LIVING_DAY_SCHEDULE_KEY = "living_day_schedule"
 
 
@@ -207,11 +207,12 @@ async def deliver_due(*, lane: str, now: datetime) -> list[Happening]:
                 lane=lane,
                 happening_id=due_happening_id(item.item_id),
                 actor=WORLD_ACTOR,
-                place=item.place or AMBIENT_PLACE,
+                place=item.place or EVERYWHERE,
                 kind=KIND_ACT,
                 medium=MEDIUM_IN_PERSON,
                 content=item.what,
                 occurred_at=item.due_at,
+                lasts_until=item.lasts_until,
             )
         )
         await mark_upcoming_consumed(

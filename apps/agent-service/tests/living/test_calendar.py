@@ -24,7 +24,8 @@ from app.living.calendar import (
     parse_schedule,
     plan_day,
 )
-from app.living.records import AMBIENT_PLACE, WORLD_ACTOR
+from app.living.place import EVERYWHERE
+from app.living.records import WORLD_ACTOR
 from app.living.upcoming import list_due_upcoming, schedule_upcoming
 from app.living.whereabouts import note_whereabouts
 
@@ -223,26 +224,79 @@ async def test_a_due_item_becomes_something_she_can_perceive(living_db):
 
 
 @pytest.mark.integration
-async def test_an_ambient_item_reaches_everyone_in_the_house(living_db):
-    """没绑地点的事（天黑）发生在整个家的范围里，屋里每个人都感知得到原话。"""
+async def test_an_item_with_no_place_reaches_everyone_wherever_they_are(living_db):
+    """没绑地点的事（天黑）是**全局**的，在学校的人一样感知得到。
+
+    这条以前断言的是相反的事：不绑地点的事被写在 ``家`` 这一整片上（旧的
+    ``AMBIENT_PLACE``），于是在学校的人收不到天黑。实测 19.1% 的记录发生在 ``家``
+    以外的根，她在那些地方时一条日历事件都收不到 —— 那不是"正确的信息差"，是失明。
+    """
     from app.living.happening import read_perceived_by
 
     await _where("akao", "家/客厅")
     await _where("ayana", "家/楼上/绫奈房间")
-    await _where("mio", "学校")
+    await _where("mio", "学校/操场")
     await plan_day(lane=LANE, now=_at(6), schedule=_SCHEDULE)
 
     happened = await deliver_due(lane=LANE, now=_at(19, 1))
 
     nightfall = [h for h in happened if h.content == "天黑了"]
-    assert [h.place for h in nightfall] == [AMBIENT_PLACE]
-    for persona in ("akao", "ayana"):
+    assert [h.place for h in nightfall] == [EVERYWHERE]
+    for persona in ("akao", "ayana", "mio"):
         window = await read_perceived_by(lane=LANE, persona_id=persona)
         assert "天黑了" in [p.content for p in window.items], persona
-    outside = await read_perceived_by(lane=LANE, persona_id="mio")
-    assert "天黑了" not in [
-        p.content for p in outside.items
-    ], "在学校的人看不到这个家里的天黑"
+
+
+@pytest.mark.integration
+async def test_an_item_bound_to_a_place_still_only_reaches_that_place(living_db):
+    """全局那一档不能顺手把绑了地点的事也变成全局的。"""
+    from app.living.happening import read_perceived_by
+
+    await _where("akao", "家/餐厅")
+    await _where("mio", "学校/操场")
+    await plan_day(lane=LANE, now=_at(6), schedule=_SCHEDULE)
+
+    await deliver_due(lane=LANE, now=_at(7, 31))
+
+    here = await read_perceived_by(lane=LANE, persona_id="akao")
+    assert "早饭做好了" in [p.content for p in here.items]
+    away = await read_perceived_by(lane=LANE, persona_id="mio")
+    assert "早饭做好了" not in [
+        p.content for p in away.items
+    ], "在学校的人闻到了家里的早饭"
+
+
+@pytest.mark.integration
+async def test_a_plain_item_does_not_linger(living_db):
+    """日历上那些是一瞬间的事 —— 「早饭做好了」不该在两小时后还"正在发生"。"""
+    await _where("akao", "家/餐厅")
+    await plan_day(lane=LANE, now=_at(6), schedule=_SCHEDULE)
+
+    happened = await deliver_due(lane=LANE, now=_at(7, 31))
+
+    assert [h.lasts_until for h in happened] == [None]
+
+
+@pytest.mark.integration
+async def test_an_item_that_lasts_carries_its_end_into_the_happening(living_db):
+    """账上写了持续到什么时候，交付出来的那件事才知道自己什么时候结束。
+
+    交付**晚了**一分钟也不改结束时刻：它什么时候结束是排的时候就定下的事，
+    跟钟的粒度无关 —— 跟 ``occurred_at`` 取 ``due_at`` 而不是 ``now`` 同一条。
+    """
+    await schedule_upcoming(
+        lane=LANE,
+        item_id="rain-1",
+        what="外面开始下雨",
+        due_at=_at(15),
+        place="学校",
+        lasts_until=_at(18),
+    )
+
+    happened = await deliver_due(lane=LANE, now=_at(15, 1))
+
+    assert [h.content for h in happened] == ["外面开始下雨"]
+    assert happened[0].lasts_until == _at(18)
 
 
 @pytest.mark.integration

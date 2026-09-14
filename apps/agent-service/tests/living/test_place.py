@@ -6,7 +6,12 @@
 """
 from __future__ import annotations
 
-from app.living.place import Reach, reach_between, reach_between_people
+from app.living.place import (
+    EVERYWHERE,
+    Reach,
+    reach_between,
+    reach_between_people,
+)
 
 
 def test_identical_place_is_same_place():
@@ -64,6 +69,44 @@ def test_a_shared_prefix_segment_is_not_containment():
     assert reach_between(observer="家/客厅", happening="家/客") is Reach.SAME_BUILDING
 
 
+# ---------------------------------------------------------------------------
+# 第三档：全局。
+#
+# 上面那条覆盖档只覆盖得到**一栋**：事情发生在 ``家`` 上，学校里的人够不着。可是天黑、
+# 台风、今天是什么节气这些事没有"一栋"—— 它们笼罩所有地方。在只有点位置的模型里，这种
+# 事只能硬塞一个地点，而实测 19.1% 的记录发生在 ``家`` 以外（学校 723、小区 156、老街
+# 48），于是她在那些地方时一条都收不到。
+# ---------------------------------------------------------------------------
+
+
+def test_a_global_event_reaches_everyone_wherever_they_are():
+    """天黑了、台风来了 —— 在哪都算在场。"""
+    assert reach_between(observer="家/客厅", happening=EVERYWHERE) is Reach.SAME_PLACE
+    assert reach_between(observer="学校/操场", happening=EVERYWHERE) is Reach.SAME_PLACE
+    assert reach_between(observer="老街", happening=EVERYWHERE) is Reach.SAME_PLACE
+
+
+def test_a_place_that_was_never_recorded_is_still_out_of_reach():
+    """**"没记下地点"和"笼罩所有地方"是两件事。**
+
+    这条是区分性的：把空地点顺手当成全局，任何一处忘填 place 的写入都会变成全世界都
+    听见，而且一句报错都没有。全局必须是显式写下的那一个值。
+    """
+    assert reach_between(observer="家/客厅", happening="") is Reach.OUT_OF_REACH
+    assert reach_between(observer="家/客厅", happening="   ") is Reach.OUT_OF_REACH
+
+
+def test_a_global_event_still_does_not_reach_someone_who_cannot_be_located():
+    """定位不到她就没有"在场"这个前提 —— 全局档不该把这条 fail-closed 打掉。"""
+    assert reach_between(observer=None, happening=EVERYWHERE) is Reach.OUT_OF_REACH
+    assert reach_between(observer="", happening=EVERYWHERE) is Reach.OUT_OF_REACH
+
+
+def test_a_person_standing_everywhere_is_not_standing_anywhere():
+    """观察者那一侧写成全局不等于她无处不在 —— 那个值只描述事件的范围。"""
+    assert reach_between(observer=EVERYWHERE, happening="家/客厅") is Reach.OUT_OF_REACH
+
+
 def test_unknown_observer_place_is_out_of_reach():
     """定位不到她（从没写过 whereabouts）时旁听一律够不着——定向送达不走这条路。"""
     assert reach_between(observer=None, happening="家/客厅") is Reach.OUT_OF_REACH
@@ -115,6 +158,22 @@ def test_someone_out_of_the_house_is_out_of_reach():
 def test_someone_who_cannot_be_located_is_out_of_reach():
     assert reach_between_people(observer="家/客厅", other=None) is Reach.OUT_OF_REACH
     assert reach_between_people(observer=None, other="家/客厅") is Reach.OUT_OF_REACH
+
+
+def test_nobody_is_everywhere():
+    """全局是**事件**的范围，人没有这一档。
+
+    真让它漏进来：一个位置写成全局的人会被判成跟所有人同处一室，``look_around``
+    直接把每个人正在做什么吐出来 —— 跟"粗定位不许升格成在场"是同一条纪律。
+    """
+    assert (
+        reach_between_people(observer="家/客厅", other=EVERYWHERE)
+        is Reach.OUT_OF_REACH
+    )
+    assert (
+        reach_between_people(observer=EVERYWHERE, other="家/客厅")
+        is Reach.OUT_OF_REACH
+    )
 
 
 def test_whitespace_does_not_change_the_verdict_between_people():
