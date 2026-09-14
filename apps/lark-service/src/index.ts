@@ -71,7 +71,6 @@ import {
 } from './schedule';
 import { bootLarkService, shutdownLarkService, type LarkBackends } from './startup';
 import { createLarkServiceApp } from './server/app';
-import { registerLarkDirectoryRoutes } from './server/directory-routes';
 import { register } from './server/metrics';
 
 const LARK_EVENT_COLLECTION = 'lark_event';
@@ -266,11 +265,8 @@ async function realInbound(commands: LarkCommandDeps, store: LarkStore, director
             laneOf: (botName, conversationId) => projection.laneOf(LARK_CHANNEL, botName, conversationId),
             handOff: projection.handOffToLane,
             newId: () => Bun.randomUUIDv7(),
-            sync: async (chatId, humanUnionIds) => {
-                const result = await directory.sync(chatId, {preview: false, humanUnionIds});
-                console.info(`[lark-directory] synced bot=${event.botName} chat=${chatId} ` +
-                    `members=${result.members.length} joined=${result.joined.length} left=${result.left.length}`);
-            },
+            changeMembers: (chatId, members, hasLeft, occurredAt) =>
+                directory.changeMembers(chatId, members, hasLeft, occurredAt),
         }, event),
     });
 }
@@ -351,11 +347,6 @@ async function main(): Promise<void> {
         bots: botDirectory,
         inbound,
         ingress: () => sockets?.status() ?? NO_WEBSOCKETS,
-    });
-    registerLarkDirectoryRoutes(app, {
-        lane: getLane() ?? 'prod',
-        hasBot: name => larkBots.some(bot => bot.bot_name === name),
-        sync: (chatId, preview) => directory.sync(chatId, {preview, humanUnionIds: []}),
     });
     Bun.serve({ port: config.port, fetch: app.fetch });
 

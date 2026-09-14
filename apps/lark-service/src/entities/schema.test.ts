@@ -317,10 +317,5 @@ describe('lark_* entity mapping matches the physical schema', () => {
         expect(describeTable(meta!)).toEqual(spec);
     });
 
-    // onUpdate 不在通用比对里（它只出现在这一列上），单独钉死：这列靠 DB 侧
-    // CURRENT_TIMESTAMP 更新，去掉之后成员表的 updated_at 会永远停在插入时间。
-    it('keeps the DB-side updated_at trigger on lark_group_member', () => {
-        const meta = probe.entityMetadatas.find((m) => m.tableName === 'lark_group_member');
-        expect(meta!.findColumnWithDatabaseName('updated_at')!.onUpdate).toBe('CURRENT_TIMESTAMP');
-    });
+
 });

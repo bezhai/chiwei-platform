@@ -3,7 +3,6 @@ import type { LarkDirectoryApi, LarkDirectoryProfile } from './directory';
 import {
     DIRECTORY_REQUEST_TIMEOUT_MS,
     withDirectoryDeadline,
-    throwIfDirectoryDeadlineExpired,
 } from './request-timeout';
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -24,46 +23,6 @@ export function createSdkLarkDirectoryApi(
     timeoutMs = DIRECTORY_REQUEST_TIMEOUT_MS,
 ): LarkDirectoryApi {
     return {
-        async members(chatId) {
-            return withDirectoryDeadline(async () => {
-                const client = pool.current();
-                const members = new Map<string, LarkDirectoryProfile>();
-                const cursors = new Set<string>();
-                let cursor: string | undefined;
-                while (true) {
-                    throwIfDirectoryDeadlineExpired();
-                    const page = object(
-                        await client.getChatMembers(chatId, cursor, 'union_id'),
-                        'member page',
-                    );
-                    if (
-                        !Array.isArray(page.items) ||
-                        typeof page.has_more !== 'boolean'
-                    )
-                        throw new Error('incomplete lark member page');
-                    for (const value of page.items) {
-                        const item = object(value, 'member');
-                        if (item.member_id_type !== 'union_id')
-                            throw new Error('unexpected lark member ID type');
-                        const unionId = nonempty(
-                            item.member_id,
-                            'member union_id',
-                        );
-                        const name = nonempty(item.name, 'member name');
-                        if (members.has(unionId))
-                            throw new Error(`duplicate lark member ${unionId}`);
-                        members.set(unionId, { unionId, name });
-                    }
-                    if (!page.has_more) break;
-                    cursor = nonempty(page.page_token, 'member cursor');
-                    if (cursors.has(cursor))
-                        throw new Error('repeated lark member cursor');
-                    cursors.add(cursor);
-                }
-                return [...members.values()];
-            }, timeoutMs);
-        },
-
         async user(unionId) {
             return withDirectoryDeadline(async () => {
                 const response = object(

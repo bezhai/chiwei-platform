@@ -499,7 +499,7 @@ describe('createLarkInbound', () => {
 
 describe('成员事件注册', () => {
     for (const type of ['im.chat.member.user.added_v1', 'im.chat.member.user.deleted_v1',
-        'im.chat.member.user.withdrawn_v1', 'im.chat.member.bot.added_v1']) {
+        'im.chat.member.user.withdrawn_v1']) {
         it(`泳道接收端认领 ${type}，不进入消息处理`, async () => {
             const built = build();
             const app = new Hono();
@@ -527,7 +527,11 @@ it('成员加入事件经真实SDK webhook和长连接均到达成员处理器',
     };
     for (const built of [await throughWebhook(undefined, payload), await throughWebSocket(payload)]) {
         expect(built.memberEvents).toHaveLength(1);
-        expect(built.memberEvents[0]?.payload).toMatchObject({chat_id: 'oc_1'});
+        expect(built.memberEvents[0]?.payload).toMatchObject({
+            chat_id: 'oc_1',
+            create_time: '1700000000000',
+            users: [{name: '新人', user_id: {union_id: 'on_new'}}],
+        });
         expect(built.seen).toEqual([]);
     }
 });

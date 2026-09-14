@@ -98,7 +98,6 @@ export function createLarkInbound(ports: LarkInboundPorts): LarkInbound {
         'im.chat.member.user.added_v1': ports.onMemberChange,
         'im.chat.member.user.deleted_v1': ports.onMemberChange,
         'im.chat.member.user.withdrawn_v1': ports.onMemberChange,
-        'im.chat.member.bot.added_v1': ports.onMemberChange,
         'im.message.receive_v1': async (event) => {
             const reading = readLarkMessageEvent(event.payload as LarkMessageEvent, bots);
             if (!reading) {

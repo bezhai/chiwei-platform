@@ -10,96 +10,23 @@ import {
 } from 'node:http';
 import { createDirectoryHttpTransport } from './request-timeout';
 
-function rig(pages: unknown[]) {
-    const calls: unknown[][] = [];
-    const api = createSdkLarkDirectoryApi({
-        current: () => ({
-            getChatMembers: async (...args: unknown[]) => {
-                calls.push(args);
-                const page = pages.shift();
-                if (page instanceof Error) throw page;
-                return page;
-            },
+describe('SDK directory API', () => {
+    it('gets a real profile by union ID', async () => {
+        const calls: unknown[] = [];
+        const api = createSdkLarkDirectoryApi({current: () => ({
             getUserInfo: async (id: string, type: string) => {
                 calls.push([id, type]);
-                return {
-                    user: { union_id: id, name: '张若', open_id: 'ou_1' },
-                };
+                return {user: {union_id: id, name: '张若', open_id: 'ou_1'}};
             },
-        }),
-    } as unknown as LarkClientPool);
-    return { api, calls };
-}
-const item = (id: string, name = '张若') => ({
-    member_id_type: 'union_id',
-    member_id: id,
-    name,
-});
-
-describe('SDK directory API', () => {
-    it('follows tokens through short and empty pages using union IDs', async () => {
-        const h = rig([
-            { items: [], has_more: true, page_token: 'next' },
-            { items: [item('on_1')], has_more: false },
-        ]);
-        expect(await h.api.members('oc_1')).toEqual([
-            { unionId: 'on_1', name: '张若' },
-        ]);
-        expect(h.calls).toEqual([
-            ['oc_1', undefined, 'union_id'],
-            ['oc_1', 'next', 'union_id'],
-        ]);
+        })} as unknown as LarkClientPool);
+        expect(await api.user('on_1')).toEqual({unionId: 'on_1', name: '张若', openId: 'ou_1'});
+        expect(calls).toEqual([['on_1', 'union_id']]);
     });
-    for (const [label, page] of [
-        ['missing data', undefined],
-        ['missing items', { has_more: false }],
-        ['missing has_more', { items: [] }],
-        [
-            'wrong ID type',
-            {
-                items: [{ ...item('on_1'), member_id_type: 'open_id' }],
-                has_more: false,
-            },
-        ],
-        ['missing name', { items: [item('on_1', '')], has_more: false }],
-        ['missing cursor', { items: [], has_more: true }],
-    ] as const) {
-        it(`rejects ${label} before any snapshot is handed out`, async () => {
-            await expect(rig([page]).api.members('oc_1')).rejects.toThrow();
-        });
-    }
-    it('rejects repeated cursors and conflicting duplicate users', async () => {
-        await expect(
-            rig([
-                { items: [], has_more: true, page_token: 'x' },
-                { items: [], has_more: true, page_token: 'x' },
-            ]).api.members('oc_1'),
-        ).rejects.toThrow('cursor');
-        await expect(
-            rig([
-                {
-                    items: [item('on_1'), item('on_1', '另一个名字')],
-                    has_more: false,
-                },
-            ]).api.members('oc_1'),
-        ).rejects.toThrow('duplicate');
-    });
-    it('propagates API failure after a successful page', async () => {
-        await expect(
-            rig([
-                { items: [item('on_1')], has_more: true, page_token: 'next' },
-                new Error('no permission'),
-            ]).api.members('oc_1'),
-        ).rejects.toThrow('no permission');
-    });
-    it('gets a real profile by union ID', async () => {
-        const h = rig([]);
-        expect(await h.api.user('on_1')).toEqual({
-            unionId: 'on_1',
-            name: '张若',
-            openId: 'ou_1',
-        });
-        expect(h.calls).toEqual([['on_1', 'union_id']]);
+    it('rejects mismatched identities and missing names', async () => {
+        for (const user of [{union_id: 'on_other', name: '错误身份'}, {union_id: 'on_1', name: ''}]) {
+            const api = createSdkLarkDirectoryApi({current: () => ({getUserInfo: async () => ({user})})} as unknown as LarkClientPool);
+            await expect(api.user('on_1')).rejects.toThrow();
+        }
     });
 });
 
@@ -118,13 +45,7 @@ async function actualSdk(
         adapter: async (config) => {
             originalUrls.push(config.url!);
             signals.push(config.signal);
-            const path = config.url!.includes('/auth/')
-                ? '/token'
-                : config.url!.includes('/contact/')
-                  ? '/user'
-                  : config.params?.page_token
-                    ? '/last'
-                    : '/first';
+            const path = config.url!.includes('/auth/') ? '/token' : '/user';
             return axios.getAdapter('http')({
                 ...config,
                 url: local + path,
@@ -152,7 +73,7 @@ async function actualSdk(
 }
 
 describe('directory deadline through the real SDK and token manager', () => {
-    it('cancels a hanging token request, before any member request', async () => {
+    it('cancels a hanging token request, before any profile request', async () => {
         let closed = false;
         const h = await actualSdk(
             (req) =>
@@ -162,7 +83,7 @@ describe('directory deadline through the real SDK and token manager', () => {
             80,
         );
         try {
-            await expect(h.api.members('oc_1')).rejects.toThrow(
+            await expect(h.api.user('on_1')).rejects.toThrow(
                 'directory request timed out',
             );
             for (let i = 0; i < 20 && !closed; i++) await Bun.sleep(10);
@@ -177,49 +98,24 @@ describe('directory deadline through the real SDK and token manager', () => {
         }
     });
 
-    it('uses one total deadline across token acquisition and multiple member pages', async () => {
-        let canceledLast = false;
+    it('shares the total deadline between token acquisition and the profile request', async () => {
+        let canceledUser = false;
         const h = await actualSdk((req, res) => {
             res.setHeader('Content-Type', 'application/json');
-            const path = req.url!.split('?')[0];
-            const body =
-                path === '/token'
-                    ? {
-                          code: 0,
-                          tenant_access_token: 'test-token',
-                          expire: 7200,
-                      }
-                    : path === '/first'
-                      ? {
-                            code: 0,
-                            data: {
-                                items: [item('on_1')],
-                                has_more: true,
-                                page_token: 'last',
-                            },
-                        }
-                      : {
-                            code: 0,
-                            data: { items: [item('on_2')], has_more: false },
-                        };
-            if (path === '/last')
-                req.on('close', () => {
-                    canceledLast = !res.writableEnded;
-                });
-            setTimeout(() => res.end(JSON.stringify(body)), 90);
-        }, 250);
+            const isToken = req.url === '/token';
+            if (!isToken) req.on('close', () => { canceledUser = !res.writableEnded; });
+            setTimeout(() => res.end(JSON.stringify(isToken
+                ? {code: 0, tenant_access_token: 'test-token', expire: 7200}
+                : {code: 0, data: {user: {union_id: 'on_1', name: '张若'}}})), 100);
+        }, 170);
         try {
-            await expect(h.api.members('oc_1')).rejects.toThrow(
-                'directory request timed out',
-            );
-            for (let i = 0; i < 20 && !canceledLast; i++) await Bun.sleep(10);
-            expect(canceledLast).toBe(true);
-            expect(h.signals).toHaveLength(3);
+            await expect(h.api.user('on_1')).rejects.toThrow('directory request timed out');
+            for (let i = 0; i < 20 && !canceledUser; i++) await Bun.sleep(10);
+            expect(canceledUser).toBe(true);
+            expect(h.signals).toHaveLength(2);
             expect(new Set(h.signals).size).toBe(1);
             expect((h.signals[0] as AbortSignal).aborted).toBe(true);
-        } finally {
-            h.close();
-        }
+        } finally { h.close(); }
     });
 
     it('bounds a hanging user-profile response after successfully acquiring a token', async () => {

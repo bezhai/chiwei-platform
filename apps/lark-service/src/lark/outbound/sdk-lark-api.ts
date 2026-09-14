@@ -45,7 +45,6 @@ export type LarkApiClient = Pick<
     | 'getMessageInfo'
     | 'getMessageList'
     | 'getUserInfo'
-    | 'getChatMembers'
     | 'downloadResource'
     | 'addChatMember'
     | 'request'

@@ -1,6 +1,6 @@
 import { Column, Entity, PrimaryColumn } from 'typeorm';
 
-/** 群成员及其群内身份。updated_at 由 DB 侧 CURRENT_TIMESTAMP 维护。 */
+/** 群成员及其群内身份。目录写入时显式保存最近成员证据的 UTC 时间。 */
 @Entity('lark_group_member')
 export class LarkGroupMember {
     @PrimaryColumn()
@@ -24,7 +24,6 @@ export class LarkGroupMember {
     @Column({
         type: 'timestamp',
         default: () => 'CURRENT_TIMESTAMP',
-        onUpdate: 'CURRENT_TIMESTAMP',
     })
     updated_at!: Date;
 }

@@ -5,7 +5,7 @@ import {
     type HttpRequestOptions,
 } from '@larksuiteoapi/node-sdk';
 
-/** One budget for token acquisition and every page of a directory operation. */
+/** One budget for token acquisition and the user-profile request. */
 export const DIRECTORY_REQUEST_TIMEOUT_MS = 15_000;
 const requestScope = new AsyncLocalStorage<{
     controller: AbortController;

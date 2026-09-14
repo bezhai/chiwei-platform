@@ -11,53 +11,57 @@ export interface LarkDirectoryMember {
     unionId: string;
     name: string | null;
     hasLeft: boolean;
+    /** Legacy values are a conservative state boundary, not necessarily event times. */
+    updatedAt: Date | null;
 }
 
 export interface LarkDirectoryApi {
-    /** Returns all human members only after every page has been validated. */
-    members(chatId: string): Promise<readonly LarkDirectoryProfile[]>;
     user(unionId: string): Promise<LarkDirectoryProfile>;
 }
 
 export interface LarkDirectoryTables {
     profile(unionId: string): Promise<LarkDirectoryProfile | null>;
-    member(chatId: string, unionId: string): Promise<LarkDirectoryMember | null>;
-    members(chatId: string): Promise<readonly LarkDirectoryMember[]>;
-    /** Human identity evidence from real user messages in this chat. */
-    humanUnionIds(chatId: string): Promise<readonly string[]>;
-    saveProfile(profile: LarkDirectoryProfile): Promise<void>;
-    applyMembers(
+    member(
         chatId: string,
-        present: readonly LarkDirectoryProfile[],
-        left: readonly string[],
-    ): Promise<void>;
+        unionId: string,
+    ): Promise<LarkDirectoryMember | null>;
+    /** Atomically fill a missing/blank name; never replace a nonempty profile. */
+    fillProfile(profile: LarkDirectoryProfile): Promise<void>;
+    /** Apply newer evidence atomically; leaving wins a timestamp tie. */
+    applyMembership(
+        chatId: string,
+        unionId: string,
+        hasLeft: boolean,
+        observedAt: Date,
+    ): Promise<boolean>;
 }
 
 export interface LarkDirectoryStore extends LarkDirectoryTables {
-    /** Transaction and cross-process lock cover API reads as well as writes. */
-    withChatLock<T>(chatId: string, run: (tables: LarkDirectoryTables) => Promise<T>): Promise<T>;
-}
-
-export interface LarkDirectorySyncResult {
-    chatId: string;
-    preview: boolean;
-    members: Array<{ unionId: string; name: string }>;
-    joined: Array<{ unionId: string; name: string }>;
-    left: Array<{ unionId: string; name: string | null }>;
-    renamed: Array<{ unionId: string; before: string | null; after: string }>;
+    /** Transaction and cross-process lock cover the callback's reads and writes. */
+    withChatLock<T>(
+        chatId: string,
+        run: (tables: LarkDirectoryTables) => Promise<T>,
+    ): Promise<T>;
 }
 
 export interface LarkDirectory {
-    sync(
+    changeMembers(
         chatId: string,
-        options: { preview: boolean; humanUnionIds: readonly string[] },
-    ): Promise<LarkDirectorySyncResult>;
-    /** Throws on API/storage failure; the message entry point decides whether to continue. */
+        members: readonly { unionId: string; name: string }[],
+        hasLeft: boolean,
+        observedAt: Date,
+    ): Promise<void>;
+    /** True means projection should reread profile or membership facts. Throws on failure. */
     ensureSender(event: LarkMessageEvent): Promise<boolean>;
 }
 
 function completeProfile(profile: LarkDirectoryProfile | null): boolean {
     return profile !== null && profile.name.trim().length > 0;
+}
+
+function validateTime(time: Date): void {
+    if (!Number.isFinite(time.getTime()) || time.getTime() < 0)
+        throw new Error('invalid lark membership evidence time');
 }
 
 export function createLarkDirectory(deps: {
@@ -66,77 +70,33 @@ export function createLarkDirectory(deps: {
     botUnionIds?: readonly string[];
 }): LarkDirectory {
     const bots = new Set(deps.botUnionIds ?? []);
-    async function syncLocked(
-        tables: LarkDirectoryTables,
-        chatId: string,
-        options: { preview: boolean; humanUnionIds: readonly string[] },
-    ): Promise<LarkDirectorySyncResult> {
-        const current = await deps.api.members(chatId);
-        const [previous, historicalHumans] = await Promise.all([
-            tables.members(chatId),
-            tables.humanUnionIds(chatId),
-        ]);
-        const humans = new Set([...historicalHumans, ...options.humanUnionIds]);
-        const previousById = new Map(previous.map((member) => [member.unionId, member]));
-        const presentIds = new Set<string>();
-        const members: LarkDirectorySyncResult['members'] = [];
-        const joined: LarkDirectorySyncResult['joined'] = [];
-        const renamed: LarkDirectorySyncResult['renamed'] = [];
-        for (const person of current) {
-            if (
-                !person.unionId ||
-                !person.name.trim() ||
-                bots.has(person.unionId) ||
-                presentIds.has(person.unionId)
-            ) {
-                throw new Error('invalid human member in lark directory snapshot');
-            }
-            presentIds.add(person.unionId);
-            members.push({ unionId: person.unionId, name: person.name });
-            const old = previousById.get(person.unionId);
-            if (!old || old.hasLeft) joined.push({ unionId: person.unionId, name: person.name });
-            // A user can have a profile but no membership row in this chat.
-            const before = old?.name ?? (await tables.profile(person.unionId))?.name ?? null;
-            if (before !== person.name)
-                renamed.push({
-                    unionId: person.unionId,
-                    before,
-                    after: person.name,
-                });
-        }
-        const left = previous
-            .filter(
-                (member) =>
-                    !member.hasLeft &&
-                    !presentIds.has(member.unionId) &&
-                    humans.has(member.unionId) &&
-                    !bots.has(member.unionId),
-            )
-            .map((member) => ({ unionId: member.unionId, name: member.name }));
-        if (!options.preview) {
-            // Users are shared across chats: take their row locks in a stable
-            // order even when two different group snapshots arrive concurrently.
-            const ordered = [...current].sort((a, b) => a.unionId.localeCompare(b.unionId));
-            for (const person of ordered) await tables.saveProfile(person);
-            await tables.applyMembers(
-                chatId,
-                current,
-                left.map((member) => member.unionId),
+    return {
+        async changeMembers(chatId, members, hasLeft, observedAt) {
+            validateTime(observedAt);
+            const humans = members.filter(
+                (member) => !bots.has(member.unionId),
             );
-        }
-        return {
-            chatId,
-            preview: options.preview,
-            members,
-            joined,
-            left,
-            renamed,
-        };
-    }
-    const directory: LarkDirectory = {
-        async sync(chatId, options) {
-            return deps.store.withChatLock(chatId, async (tables) => {
-                return syncLocked(tables, chatId, options);
+            for (const member of humans) {
+                if (!member.unionId || (!hasLeft && !member.name.trim()))
+                    throw new Error('invalid lark member identity');
+            }
+            if (!humans.length) return;
+            // Profiles are shared across chats. Lock their rows in a stable order.
+            const ordered = [...humans].sort((a, b) =>
+                a.unionId.localeCompare(b.unionId),
+            );
+            await deps.store.withChatLock(chatId, async (tables) => {
+                for (const member of ordered) {
+                    await tables.applyMembership(
+                        chatId,
+                        member.unionId,
+                        hasLeft,
+                        observedAt,
+                    );
+                    // Membership event times are local to each chat. Without a global
+                    // name version, events may only fill names that are still missing.
+                    if (!hasLeft) await tables.fillProfile(member);
+                }
             });
         },
 
@@ -144,34 +104,41 @@ export function createLarkDirectory(deps: {
             if (event.sender.sender_type !== 'user') return false;
             const unionId = event.sender.sender_id?.union_id;
             if (!unionId || bots.has(unionId)) return false;
-            let profile = await deps.store.profile(unionId);
+            const profile = await deps.store.profile(unionId);
             if (event.message.chat_type === 'p2p') {
                 if (completeProfile(profile)) return false;
-                await deps.store.saveProfile(await deps.api.user(unionId));
+                await deps.store.fillProfile(await deps.api.user(unionId));
                 return true;
             }
-            const member = await deps.store.member(event.message.chat_id, unionId);
-            if (completeProfile(profile) && member && !member.hasLeft) return false;
-            await deps.store.withChatLock(event.message.chat_id, async (tables) => {
-                const [latestProfile, latestMember] = await Promise.all([
-                    tables.profile(unionId),
-                    tables.member(event.message.chat_id, unionId),
-                ]);
-                // Another message may have completed this user's synchronization while
-                // this one waited. The caller still needs to reread its earlier facts.
-                if (completeProfile(latestProfile) && latestMember && !latestMember.hasLeft) return;
-                await syncLocked(tables, event.message.chat_id, {
-                    preview: false,
-                    humanUnionIds: [unionId],
-                });
+            if (!/^\d+$/.test(event.message.create_time))
+                throw new Error('invalid lark message evidence time');
+            const observedAt = new Date(Number(event.message.create_time));
+            validateTime(observedAt);
+            const chatId = event.message.chat_id;
+            // This commit must survive a later contact lookup failure. Every message
+            // advances evidence, even if the sender already has a complete profile.
+            const membershipChanged = await deps.store.withChatLock(
+                chatId,
+                async (tables) => {
+                    const previous = await tables.member(chatId, unionId);
+                    const applied = await tables.applyMembership(
+                        chatId,
+                        unionId,
+                        false,
+                        observedAt,
+                    );
+                    return applied && (!previous || previous.hasLeft);
+                },
+            );
+            if (completeProfile(profile)) return membershipChanged;
+            // Contact latency must not hold this chat's transaction lock. An event
+            // may supply a newer name while the request is in flight.
+            const fetchedProfile = await deps.api.user(unionId);
+            await deps.store.withChatLock(chatId, async (tables) => {
+                if (!completeProfile(await tables.profile(unionId)))
+                    await tables.fillProfile(fetchedProfile);
             });
-            profile = await deps.store.profile(unionId);
-            // Replayed messages may belong to someone who has since left. Get their name
-            // separately, without manufacturing a current membership from an old message.
-            if (!completeProfile(profile))
-                await deps.store.saveProfile(await deps.api.user(unionId));
             return true;
         },
     };
-    return directory;
 }

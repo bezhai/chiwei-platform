@@ -9,11 +9,16 @@ export interface LarkMemberChangeDeps {
     conversationOf(chatId: string): Promise<string | undefined>;
     laneOf(botName: string, conversationId: string | undefined): Promise<string>;
     handOff(envelope: InboundLaneEnvelope): Promise<void>;
-    sync(chatId: string, humanUnionIds: readonly string[]): Promise<void>;
+    changeMembers(
+        chatId: string,
+        members: readonly { unionId: string; name: string }[],
+        hasLeft: boolean,
+        occurredAt: Date,
+    ): Promise<void>;
     newId(): string;
 }
 
-/** 成员事件只携带同步触发信息；在群状态始终重新查询飞书。 */
+/** 使用事件中的姓名、身份和发生时间增量维护，不能依赖截断的群成员列表。 */
 export async function receiveLarkMemberChange(
     deps: LarkMemberChangeDeps,
     event: LarkEvent,
@@ -21,7 +26,8 @@ export async function receiveLarkMemberChange(
     const payload = event.payload as {
         chat_id?: string;
         event_id?: string;
-        users?: Array<{ user_id?: { union_id?: string } }>;
+        create_time?: string;
+        users?: Array<{ name?: string; user_id?: { union_id?: string } }>;
     } | null;
     if (!payload || typeof payload.chat_id !== 'string' || !payload.chat_id) {
         throw new UnprocessableLarkEvent('lark member event requires chat_id');
@@ -46,18 +52,36 @@ export async function receiveLarkMemberChange(
         });
         return;
     }
-    const humanIds = event.type.startsWith('im.chat.member.user.')
-        ? (payload.users ?? []).flatMap((user) =>
-              typeof user.user_id?.union_id === 'string' && user.user_id.union_id
-                  ? [user.user_id.union_id]
-                  : [],
-          )
-        : [];
+    const timestamp = Number(payload.create_time);
+    if (
+        typeof payload.create_time !== 'string' ||
+        !/^\d+$/.test(payload.create_time) ||
+        !Number.isSafeInteger(timestamp) ||
+        timestamp <= 0 ||
+        !Number.isFinite(new Date(timestamp).getTime()) ||
+        !Array.isArray(payload.users) ||
+        payload.users.length === 0 ||
+        payload.users.some(user =>
+            !user || typeof user.name !== 'string' || !user.name.trim() ||
+            typeof user.user_id?.union_id !== 'string' || !user.user_id.union_id.trim(),
+        )
+    ) {
+        throw new UnprocessableLarkEvent('lark member event requires timestamp and named union IDs');
+    }
+    const members = payload.users.map(user => ({
+        unionId: user.user_id!.union_id!,
+        name: user.name!,
+    }));
+    const hasLeft = event.type === 'im.chat.member.user.deleted_v1' ||
+        event.type === 'im.chat.member.user.withdrawn_v1';
+    if (!hasLeft && event.type !== 'im.chat.member.user.added_v1') {
+        throw new UnprocessableLarkEvent('unsupported lark member event');
+    }
     try {
-        await deps.sync(chatId, humanIds);
+        await deps.changeMembers(chatId, members, hasLeft, new Date(timestamp));
     } catch (error) {
         console.error(
-            `[lark-directory] member sync failed bot=${event.botName} chat=${chatId} event=${event.type}:`,
+            `[lark-directory] member change failed bot=${event.botName} chat=${chatId} event=${event.type}:`,
             error,
         );
         throw error;
