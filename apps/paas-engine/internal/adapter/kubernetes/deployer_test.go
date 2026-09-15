@@ -638,6 +638,212 @@ func TestApplyDeploymentWithVolumesDedup(t *testing.T) {
 	}
 }
 
+// TestApplyDeploymentVolumeReadOnlyIsNotForcedByAnEarlierMount 验证同一 PVC 上
+// 只读挂载排在可写挂载前面时，卷级 ReadOnly 不会被置成 true。
+//
+// K8s 的 PersistentVolumeClaimVolumeSource.ReadOnly 会强制覆盖该卷下所有
+// VolumeMount 的 ReadOnly，所以卷级一旦为 true，可写挂载就写不进去了。
+func TestApplyDeploymentVolumeReadOnlyIsNotForcedByAnEarlierMount(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default", "")
+
+	app := &domain.App{
+		Name: "mixed-mount-app",
+		Port: 8080,
+		Volumes: []domain.VolumeMount{
+			{PVCName: "shared-pvc", MountPath: "/data/skills", ReadOnly: true},
+			{PVCName: "shared-pvc", MountPath: "/data/world", ReadOnly: false, SubPath: "world"},
+		},
+	}
+
+	release := &domain.Release{
+		ID:       "r12",
+		AppName:  "mixed-mount-app",
+		Lane:     "prod",
+		Image:    "harbor.local/inner-bot/mixed-mount-app:v1",
+		Replicas: 1,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "mixed-mount-app-prod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+
+	if len(deploy.Spec.Template.Spec.Volumes) != 1 {
+		t.Fatalf("expected 1 volume (dedup), got %d", len(deploy.Spec.Template.Spec.Volumes))
+	}
+	vol := deploy.Spec.Template.Spec.Volumes[0]
+	if vol.PersistentVolumeClaim == nil {
+		t.Fatalf("volume PVC source = nil")
+	}
+	if vol.PersistentVolumeClaim.ReadOnly != false {
+		t.Errorf("volume ReadOnly = %v, want false (a writable mount shares this PVC)", vol.PersistentVolumeClaim.ReadOnly)
+	}
+
+	container := deploy.Spec.Template.Spec.Containers[0]
+	if len(container.VolumeMounts) != 2 {
+		t.Fatalf("expected 2 volume mounts, got %d", len(container.VolumeMounts))
+	}
+	if container.VolumeMounts[0].ReadOnly != true {
+		t.Errorf("mount[0] (%s) ReadOnly = %v, want true", container.VolumeMounts[0].MountPath, container.VolumeMounts[0].ReadOnly)
+	}
+	if container.VolumeMounts[1].ReadOnly != false {
+		t.Errorf("mount[1] (%s) ReadOnly = %v, want false", container.VolumeMounts[1].MountPath, container.VolumeMounts[1].ReadOnly)
+	}
+}
+
+// TestBuildPVCVolumesReadOnlyMerge 逐形状验证卷级 ReadOnly 的归并：同一 PVC 的每条
+// 挂载都只读才为 true，只要有一条可写就为 false，且与数组顺序无关。
+//
+// 用例里带 [false,true] 和 [true,false,true] 是为了同时挡住「抄第一条」和「抄最后
+// 一条」两种实现 —— 只有 [true,false] 一种形状的话，「抄最后一条」也能蒙混过关。
+// 每条用例同时断言挂载列表的 MountPath / SubPath / ReadOnly，确保归并没有顺带改动
+// 挂载本身。
+func TestBuildPVCVolumesReadOnlyMerge(t *testing.T) {
+	type wantVolume struct {
+		name     string
+		readOnly bool
+	}
+	type wantMount struct {
+		name      string
+		mountPath string
+		subPath   string
+		readOnly  bool
+	}
+
+	tests := []struct {
+		name    string
+		in      []domain.VolumeMount
+		volumes []wantVolume
+		mounts  []wantMount
+	}{
+		{
+			name: "只读在前可写在后（线上 agent-service 的形状）",
+			in: []domain.VolumeMount{
+				{PVCName: "shared-pvc", MountPath: "/data/skills", ReadOnly: true},
+				{PVCName: "shared-pvc", MountPath: "/data/world", ReadOnly: false, SubPath: "world"},
+			},
+			volumes: []wantVolume{{"shared-pvc", false}},
+			mounts: []wantMount{
+				{"shared-pvc", "/data/skills", "", true},
+				{"shared-pvc", "/data/world", "world", false},
+			},
+		},
+		{
+			name: "可写在前只读在后",
+			in: []domain.VolumeMount{
+				{PVCName: "shared-pvc", MountPath: "/data/world", ReadOnly: false, SubPath: "world"},
+				{PVCName: "shared-pvc", MountPath: "/data/skills", ReadOnly: true},
+			},
+			volumes: []wantVolume{{"shared-pvc", false}},
+			mounts: []wantMount{
+				{"shared-pvc", "/data/world", "world", false},
+				{"shared-pvc", "/data/skills", "", true},
+			},
+		},
+		{
+			name: "可写夹在两条只读中间",
+			in: []domain.VolumeMount{
+				{PVCName: "shared-pvc", MountPath: "/a", ReadOnly: true, SubPath: "a"},
+				{PVCName: "shared-pvc", MountPath: "/b", ReadOnly: false, SubPath: "b"},
+				{PVCName: "shared-pvc", MountPath: "/c", ReadOnly: true, SubPath: "c"},
+			},
+			volumes: []wantVolume{{"shared-pvc", false}},
+			mounts: []wantMount{
+				{"shared-pvc", "/a", "a", true},
+				{"shared-pvc", "/b", "b", false},
+				{"shared-pvc", "/c", "c", true},
+			},
+		},
+		{
+			name: "同一 PVC 全只读",
+			in: []domain.VolumeMount{
+				{PVCName: "shared-pvc", MountPath: "/data/skills", ReadOnly: true},
+				{PVCName: "shared-pvc", MountPath: "/data/world", ReadOnly: true, SubPath: "world"},
+			},
+			volumes: []wantVolume{{"shared-pvc", true}},
+			mounts: []wantMount{
+				{"shared-pvc", "/data/skills", "", true},
+				{"shared-pvc", "/data/world", "world", true},
+			},
+		},
+		{
+			name: "单条只读挂载（sandbox-worker 的形状）",
+			in: []domain.VolumeMount{
+				{PVCName: "shared-pvc", MountPath: "/sandbox/skills", ReadOnly: true},
+			},
+			volumes: []wantVolume{{"shared-pvc", true}},
+			mounts: []wantMount{
+				{"shared-pvc", "/sandbox/skills", "", true},
+			},
+		},
+		{
+			name: "两个 PVC 交错，各自独立归并",
+			in: []domain.VolumeMount{
+				{PVCName: "pvc-a", MountPath: "/a1", ReadOnly: true, SubPath: "a1"},
+				{PVCName: "pvc-b", MountPath: "/b1", ReadOnly: true, SubPath: "b1"},
+				{PVCName: "pvc-a", MountPath: "/a2", ReadOnly: false, SubPath: "a2"},
+				{PVCName: "pvc-b", MountPath: "/b2", ReadOnly: true, SubPath: "b2"},
+			},
+			volumes: []wantVolume{{"pvc-a", false}, {"pvc-b", true}},
+			mounts: []wantMount{
+				{"pvc-a", "/a1", "a1", true},
+				{"pvc-b", "/b1", "b1", true},
+				{"pvc-a", "/a2", "a2", false},
+				{"pvc-b", "/b2", "b2", true},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			volumes, mounts := buildPVCVolumes(tt.in)
+
+			if len(volumes) != len(tt.volumes) {
+				t.Fatalf("got %d volumes, want %d", len(volumes), len(tt.volumes))
+			}
+			for i, want := range tt.volumes {
+				got := volumes[i]
+				if got.Name != want.name {
+					t.Errorf("volume[%d].Name = %q, want %q", i, got.Name, want.name)
+				}
+				if got.PersistentVolumeClaim == nil {
+					t.Fatalf("volume[%d].PersistentVolumeClaim = nil", i)
+				}
+				if got.PersistentVolumeClaim.ClaimName != want.name {
+					t.Errorf("volume[%d].ClaimName = %q, want %q", i, got.PersistentVolumeClaim.ClaimName, want.name)
+				}
+				if got.PersistentVolumeClaim.ReadOnly != want.readOnly {
+					t.Errorf("volume[%d] (%s) ReadOnly = %v, want %v", i, want.name, got.PersistentVolumeClaim.ReadOnly, want.readOnly)
+				}
+			}
+
+			if len(mounts) != len(tt.mounts) {
+				t.Fatalf("got %d mounts, want %d", len(mounts), len(tt.mounts))
+			}
+			for i, want := range tt.mounts {
+				got := mounts[i]
+				if got.Name != want.name {
+					t.Errorf("mount[%d].Name = %q, want %q", i, got.Name, want.name)
+				}
+				if got.MountPath != want.mountPath {
+					t.Errorf("mount[%d].MountPath = %q, want %q", i, got.MountPath, want.mountPath)
+				}
+				if got.SubPath != want.subPath {
+					t.Errorf("mount[%d].SubPath = %q, want %q", i, got.SubPath, want.subPath)
+				}
+				if got.ReadOnly != want.readOnly {
+					t.Errorf("mount[%d] (%s) ReadOnly = %v, want %v", i, want.mountPath, got.ReadOnly, want.readOnly)
+				}
+			}
+		})
+	}
+}
+
 // TestApplyDeploymentNoVolumes 验证 App 没有 Volumes 时 Deployment 上没有 volumes/mounts（向后兼容）。
 func TestApplyDeploymentNoVolumes(t *testing.T) {
 	client := fakeclient.NewSimpleClientset()

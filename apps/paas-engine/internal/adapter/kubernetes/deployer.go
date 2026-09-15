@@ -462,19 +462,34 @@ func buildEnvFrom(secrets, configMaps []string) []corev1.EnvFromSource {
 }
 
 // buildPVCVolumes 从 App.Volumes 构建 K8s Volume 列表和主容器 VolumeMount 列表。
-// 同一 PVC 只生成一个 Volume（去重），但允许多个 VolumeMount。
+// 同一 PVC 只生成一个 Volume（去重），但允许多个 VolumeMount —— 靠 SubPath
+// 把同一块盘的不同子目录挂到不同路径。
+//
+// 卷级 ReadOnly 的语义和挂载级不对等：K8s 的
+// PersistentVolumeClaimVolumeSource.ReadOnly 是 "Will force the ReadOnly
+// setting in VolumeMounts"，为 true 时会强制盖掉该卷下每一条 VolumeMount 自己的
+// ReadOnly。所以只有当同一 PVC 的每条挂载都不需要写时，卷级才置 true；只要有一条
+// 要写，卷级就必须是 false，各挂载点的只读由它自己那条 VolumeMount 承担。
+//
+// 按单条挂载决定卷级取值会让同一块盘上的可写挂载被只读挂载连坐（取决于谁排在
+// 数组前面），且完全不体现在渲染出来的 VolumeMount 上 —— 现场只能看到挂载写着
+// 可写、实际却是 ro。
 func buildPVCVolumes(appVolumes []domain.VolumeMount) ([]corev1.Volume, []corev1.VolumeMount) {
 	if len(appVolumes) == 0 {
 		return nil, nil
 	}
 
-	seen := make(map[string]bool)
+	index := make(map[string]int)
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
 
 	for _, v := range appVolumes {
-		if !seen[v.PVCName] {
-			seen[v.PVCName] = true
+		if i, ok := index[v.PVCName]; ok {
+			if !v.ReadOnly {
+				volumes[i].PersistentVolumeClaim.ReadOnly = false
+			}
+		} else {
+			index[v.PVCName] = len(volumes)
 			volumes = append(volumes, corev1.Volume{
 				Name: v.PVCName,
 				VolumeSource: corev1.VolumeSource{
