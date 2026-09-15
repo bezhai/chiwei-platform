@@ -12,6 +12,7 @@ import type { LarkMention } from './wire';
 /** 一个我们自己在跑的飞书 bot。 */
 export interface LarkBotIdentity {
     botName: string;
+    botRole: 'persona' | 'utility';
     /** 人设展示名。没绑人设的工具 bot 是 null。 */
     displayName: string | null;
     /** 身份初始化后才有。缺失说明启动序列没跑完，见下方 fail-loud。 */

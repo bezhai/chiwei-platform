@@ -21,6 +21,7 @@ export type LarkPersonaName = (personaId: string) => string | null;
 function identityOf(bot: BotConfig, personaName: LarkPersonaName): LarkBotIdentity {
     return {
         botName: bot.bot_name,
+        botRole: bot.bot_role,
         displayName: bot.persona_id ? personaName(bot.persona_id) : null,
         commonUserId: bot.common_user_id,
     };

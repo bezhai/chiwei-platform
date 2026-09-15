@@ -130,6 +130,7 @@ export interface LarkDeliveryDeps {
     render: LarkPostRenderer;
     /** 这个 bot 在 common_user 里的身份。取不到**抛** —— 写空串等于写脏数据。 */
     botCommonUserId(botName: string): string;
+    botRole(botName: string): 'persona' | 'utility';
     /** 出站消息上署的名（人设名）。没绑人设就没有。 */
     botDisplayName(botName: string): string | undefined;
     /** 铸一个新的公共层消息 id。 */
@@ -430,11 +431,6 @@ async function record(
     const sendAnchor = isProactive ? agentOutboundId || response.message_id : target.omId;
     const omId = sent.messageId || `${sendAnchor}_part${partIndex}`;
 
-    // 重投时复用已经铸过的 id，别再铸一个 —— 同一条飞书消息在公共层有两个身份，
-    // 引用链会从中间断开。
-    const existing = await deps.store.commonMessageIdOf(omId);
-    const commonMessageId = existing ?? deps.newCommonId();
-
     // 主动发没有来源消息：message_id 是伪 id、root_id 也不是真实的公共层 id，
     // 两者都绝不能进公共层的引用链。root 留空时回落成自己（一条消息至少是自己
     // 这条话题的根）。
@@ -457,14 +453,17 @@ async function record(
         ),
     ];
 
-    await deps.store.atomically(async (tables) => {
+    return deps.store.atomically(async (tables) => {
+        await tables.lockMessage(omId);
+        const existing = await tables.commonMessageIdOf(omId);
+        const commonMessageId = existing ?? deps.newCommonId();
         await tables.insertCommonMessage({
             common_message_id: commonMessageId,
             channel: 'lark',
             common_conversation_id: response.chat_id,
             common_user_id: commonUserId,
-            sender_display_name: deps.botDisplayName(botName),
-            role: 'assistant',
+            sender_display_name: deps.botDisplayName(botName) ?? botName,
+            role: deps.botRole(botName) === 'persona' ? 'assistant' : 'bot',
             content,
             // 摘要跟入站同一份口径（文字原样、别的折成 `[kind]`），所以带图的出站行在
             // 消息列表里也说得出"这条带了图"。
@@ -485,9 +484,8 @@ async function record(
             chat_id: target.chatId,
             message_type: OUTBOUND_MESSAGE_TYPE,
         });
+        return commonMessageId;
     });
-
-    return commonMessageId;
 }
 
 /**

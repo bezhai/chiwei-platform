@@ -39,6 +39,8 @@ import type { LarkMessageEvent, LarkRecallEvent } from './message/wire';
 export interface LarkInboundPorts {
     /** 本进程负责哪些 bot。 */
     roster: LarkBotRoster;
+    /** 发送者身份包含停用配置，不决定接收连接。 */
+    identityRoster: LarkBotRoster;
     /**
      * 本进程所在泳道（prod 部署是 'prod'）。
      *
@@ -92,7 +94,7 @@ export interface LarkInbound {
 }
 
 export function createLarkInbound(ports: LarkInboundPorts): LarkInbound {
-    const bots = createLarkBotLookup(ports.roster, ports.personaName);
+    const bots = createLarkBotLookup(ports.identityRoster, ports.personaName);
 
     const handlers: LarkEventHandlers = {
         'im.chat.member.user.added_v1': ports.onMemberChange,

@@ -33,11 +33,11 @@ import corpus from './pre-split-parser-output.json';
 const bots: LarkBotLookup = {
     byAppId: (appId) =>
         appId === 'cli_registered'
-            ? { botName: 'chiwei', displayName: null, commonUserId: 'cu_chiwei' }
+            ? { botName: 'chiwei', botRole: 'persona', displayName: null, commonUserId: 'cu_chiwei' }
             : null,
     byUnionId: (unionId) =>
         unionId === 'on_registered_bot'
-            ? { botName: 'chiwei', displayName: null, commonUserId: 'cu_chiwei' }
+            ? { botName: 'chiwei', botRole: 'persona', displayName: null, commonUserId: 'cu_chiwei' }
             : null,
 };
 

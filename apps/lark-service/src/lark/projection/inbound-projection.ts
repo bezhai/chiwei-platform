@@ -197,6 +197,9 @@ async function projectUnderLock(
     // 飞书的消息事件里**没有发送者的名字**，也没有群名。两者都要回查飞书侧的
     // 档案表（它们由群成员事件和定时同步维护）。查一次，身份对应和落账都用它。
     let known = await lookUpKnownFacts(deps.store, reading.message);
+    if (reading.sender.bot) {
+        known.sender = { name: reading.sender.bot.displayName ?? reading.sender.bot.botName };
+    }
     const { projection, commands } = await registerCommonIdentities(deps, reading, event, known);
 
     const choice = await chooseInboundLane({
@@ -226,14 +229,14 @@ async function projectUnderLock(
     // 成员资料只在接收部署补齐，不能在交接到 coe 之前写生产目录。
     try {
         const missingName = !known.sender?.name?.trim();
-        const refreshed = await deps.refreshDirectory(reading, event);
+        const refreshed = reading.sender.bot ? false : await deps.refreshDirectory(reading, event);
         // A concurrent join can fill the name after our initial snapshot, before
         // the directory checks it. That no-op still requires this message to reread.
         const unionId = reading.message.sender.unionId;
         if (unionId && (refreshed || missingName)) {
             known = { ...known, sender: await deps.store.larkUserProfile(unionId) };
         }
-        if (known.sender && (refreshed || (missingName && known.sender.name?.trim()))) {
+        if (!reading.sender.bot && known.sender && (refreshed || (missingName && known.sender.name?.trim()))) {
             await registerCommonUser(deps, {
                 appId: commands.appId,
                 openId: reading.message.sender.openId!,
@@ -270,8 +273,8 @@ async function projectUnderLock(
         console.warn('[lark-projection] failed to refresh bot presence:', error);
     }
 
-    await recordInboundMessage(deps.store, reading, event, projection, known);
-    return { kind: 'recorded', projection, commands };
+    const recordedProjection = await recordInboundMessage(deps.store, reading, event, projection, known);
+    return { kind: 'recorded', projection: recordedProjection, commands };
 }
 
 // ---------------------------------------------------------------------------
@@ -305,16 +308,16 @@ async function registerCommonIdentities(
     const message = reading.message;
     const appId = message.appId || deps.appIdOfBot(event.botName);
     const openId = message.sender.openId;
-    if (!openId) {
+    if (!openId && !reading.sender.bot) {
         throw new Error('lark inbound sender has no open_id; cannot map it to a common user');
     }
 
     const senderProfile = known.sender;
     const groupChat = known.groupChat;
 
-    const commonUserId = await registerCommonUser(deps, {
+    const commonUserId = reading.sender.bot?.commonUserId ?? await registerCommonUser(deps, {
         appId,
-        openId,
+        openId: openId!,
         unionId: message.sender.unionId,
         displayName: senderProfile?.name,
     });
@@ -561,18 +564,23 @@ async function recordInboundMessage(
     event: LarkEvent,
     projection: LarkInboundProjection,
     known: KnownLarkFacts,
-): Promise<void> {
+): Promise<LarkInboundProjection> {
     const message = reading.message;
 
-    await store.atomically(async (tx) => {
+    return store.atomically(async (tx) => {
+        await tx.lockMessage(message.messageId);
         const existing = await tx.larkMessage(message.messageId);
-        if (existing && existing.common_message_id !== projection.commonMessageId) {
-            // 有人在我们算完 id 之后抢先写了别的映射。继续写下去，同一条飞书消息在
-            // 公共层就有两个身份。
-            throw new Error(
-                `lark message ${message.messageId} already maps to ` +
-                    `${existing.common_message_id}, not ${projection.commonMessageId}`,
-            );
+        if (existing) {
+            const canonicalId = existing.common_message_id;
+            await tx.fillMessageMentions(canonicalId, projection.mentionedCommonUserIds);
+            return {
+                ...projection,
+                commonMessageId: canonicalId,
+                commonRootMessageId: projection.commonRootMessageId === projection.commonMessageId
+                    ? canonicalId : projection.commonRootMessageId,
+                commonReplyMessageId: projection.commonReplyMessageId === projection.commonMessageId
+                    ? canonicalId : projection.commonReplyMessageId,
+            };
         }
 
         await tx.insertCommonMessage({
@@ -581,7 +589,7 @@ async function recordInboundMessage(
             common_conversation_id: projection.commonConversationId,
             common_user_id: projection.commonUserId,
             sender_display_name: known.sender?.name,
-            role: 'user',
+            role: reading.sender.kind === 'bot' ? 'bot' : reading.sender.bot ? 'assistant' : 'user',
             content: reading.inbound.content,
             // 空串和"没有正文"在读的人眼里是两回事，所以摘不出东西时这一列不写。
             content_text: summarizeContent(reading.inbound.content) || undefined,
@@ -593,7 +601,7 @@ async function recordInboundMessage(
             mentioned_common_user_ids: projection.mentionedCommonUserIds,
             scope: reading.inbound.conversation_scope,
             message_type: message.messageType,
-            bot_name: event.botName,
+            bot_name: reading.sender.bot?.botName ?? (reading.sender.kind === 'bot' ? undefined : event.botName),
             event_time: message.createTime,
         });
 
@@ -619,5 +627,6 @@ async function recordInboundMessage(
                 );
             }
         }
+        return projection;
     });
 }

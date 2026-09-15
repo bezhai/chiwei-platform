@@ -16,7 +16,7 @@ const BOT_COMMON_USER_ID = 'cu_bot_chiwei';
 const bots: LarkBotLookup = {
     byAppId: (appId) =>
         appId === 'cli_chiwei'
-            ? { botName: 'chiwei', displayName: '赤尾', commonUserId: BOT_COMMON_USER_ID }
+            ? { botName: 'chiwei', botRole: 'persona', displayName: '赤尾', commonUserId: BOT_COMMON_USER_ID }
             : null,
     byUnionId: () => null,
 };

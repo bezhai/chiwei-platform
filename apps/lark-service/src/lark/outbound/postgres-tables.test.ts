@@ -105,12 +105,16 @@ describe('反查：公共层 id → 飞书坐标', () => {
 });
 
 describe('写：assistant 行', () => {
-    it('插 common_message 且冲突时静默跳过', async () => {
+    it('补齐出站记录且保留原时间、点名和撤回状态', async () => {
         await h.store.insertCommonMessage(ASSISTANT_ROW);
 
         const insert = h.sqlOf('INSERT INTO "common_message"');
-        // 重投同一条出站消息时必须是 no-op，不是报错。
-        expect(insert.sql).toContain('ON CONFLICT DO NOTHING');
+        expect(insert.sql).toContain('DO UPDATE SET');
+        const updates = insert.sql!.split('DO UPDATE SET')[1]!;
+        for (const field of ['event_time', 'mentioned_common_user_ids', 'recalled_at']) {
+            expect(updates).not.toContain(`"${field}" =`);
+        }
+        expect(updates).toContain('"agent_outbound_id" = EXCLUDED."agent_outbound_id"');
         expect(insert.sql).toContain('"response_id"');
         expect(insert.params).toContain('cm_1');
         expect(insert.params).toContain('assistant');

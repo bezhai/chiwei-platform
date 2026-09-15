@@ -26,6 +26,7 @@ import { larkCredentials } from './lark/credentials';
 import { postgresEmojiCatalog, type LarkEmojiCatalog } from './lark/emoji/catalog';
 import { httpEmojiSource, syncLarkEmojis } from './lark/emoji/sync';
 import { createLarkInbound, type LarkInbound } from './lark/inbound';
+import { loadLarkIdentityBots } from './lark/bot-identities';
 import { createLarkDirectory, type LarkDirectory } from './lark/directory/directory';
 import { postgresLarkDirectoryStore } from './lark/directory/postgres-directory';
 import { createSdkLarkDirectoryApi } from './lark/directory/sdk-directory-api';
@@ -224,8 +225,8 @@ function realRules(commands: LarkCommandDeps): LarkRulesDeps {
  * 得先加载完。
  */
 async function realInbound(commands: LarkCommandDeps, store: LarkStore, directory: LarkDirectory): Promise<LarkInbound> {
-    const personaIds = botDirectory
-        .getAllBotConfigs()
+    const identityBots = await loadLarkIdentityBots(larkDataSource());
+    const personaIds = identityBots
         .map((bot) => bot.persona_id)
         .filter((id): id is string => Boolean(id));
     const personaName = await loadLarkPersonaNames(larkDataSource(), personaIds);
@@ -236,6 +237,7 @@ async function realInbound(commands: LarkCommandDeps, store: LarkStore, director
 
     return createLarkInbound({
         roster: botDirectory,
+        identityRoster: { getAllBotConfigs: () => identityBots },
         // 本进程所在泳道。只用来在交接端点上回报"接住它的是谁"（见 lark/inbound.ts）。
         lane: getLane() ?? 'prod',
         personaName,

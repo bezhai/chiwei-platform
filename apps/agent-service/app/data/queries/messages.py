@@ -146,9 +146,10 @@ _VISIBLE_WHEN_SHE_OPENS_IT = f"(cm.recalled_at IS NULL OR {_SAID_BY_HER})"
 # 区分"没人算过"是因为算不算过是可恢复的事实，而这里"认不出这个人"和"这个人不是主人"
 # 对读的一侧是同一个答案 —— **都不能当成主人**。所以 ``COALESCE(..., false)``。
 _WHO_AND_OWNER = """COALESCE(cm.sender_display_name, '某人') AS who,
-       COALESCE(cu.is_owner, false)             AS by_owner"""
+       COALESCE(cu.is_owner, false)             AS by_owner,
+       (cm.role = 'bot')                      AS is_bot"""
 
-# 上面那两列要的 join。**必须是 ``LEFT JOIN``**：``common_user_id`` 为空的行、以及
+# 上述发送者事实要的 join。**必须是 ``LEFT JOIN``**：``common_user_id`` 为空的行、以及
 # 那个 id 在 ``common_user`` 里根本没落过行的消息（prod 上 360 条，union_id 收敛之前
 # 分裂出来的），照样要出现在结果里 —— 认不出发件人不是"这条消息不存在"。
 #
@@ -213,11 +214,11 @@ SELECT COUNT(*)                          AS unread,
    AND {_STILL_UNREAD}
 """
 
-# **按 ``(名字, 是不是主人)`` 分组，不是按名字。** 只按名字分组的话，主人和一个把昵
+# **按 ``(名字, 是不是主人, 是不是机器人)`` 分组。** 只按名字分组的话，主人和一个把昵
 # 称改成同样几个字的人在信封上并成一行 —— 她拿起手机之前就已经以为只有主人在说话，
 # 而信封正是"这条会话值不值得翻开"的全部依据。
 #
-# 代价只有一个：同一个名字最多占掉两行（一个主人 + 一批非主人），``:limit`` 因此可能
+# 同名的真人和机器人分别呈现，避免通知丢失机器人身份。同一个名字可能占多行，``:limit`` 因此可能
 # 少列一个别的人。比"两个人看起来是同一个人"轻得多。
 _UNREAD_SENDERS_SQL = f"""
 SELECT {_WHO_AND_OWNER},
@@ -226,8 +227,8 @@ SELECT {_WHO_AND_OWNER},
   {_JOIN_SPEAKER}
  WHERE cm.common_conversation_id = CAST(:channel_id AS uuid)
    AND {_STILL_UNREAD}
- GROUP BY 1, 2
- ORDER BY 3 DESC
+ GROUP BY 1, 2, 3
+ ORDER BY 4 DESC
  LIMIT :limit
 """
 
@@ -603,9 +604,11 @@ SELECT m.channel_id       AS channel_id,
        last.at_ms         AS at_ms,
        last.who           AS who,
        last.by_owner      AS by_owner,
+       last.is_bot        AS is_bot,
        last.said_by_you   AS said_by_you,
        other.who          AS other_who,
-       other.by_owner     AS other_by_owner
+       other.by_owner     AS other_by_owner,
+       other.is_bot       AS other_is_bot
   FROM mine m
   LEFT JOIN LATERAL (
     SELECT cm.event_time AS at_ms,
@@ -692,13 +695,15 @@ matched AS (
    WHERE cm.sender_display_name ILIKE :name_like
      AND NOT {_SAID_BY_HER}
      AND {_STILL_IN_THE_CONVERSATION}
-   GROUP BY 1, 2, 3
+   GROUP BY 1, 2, 3, 4
 )
 SELECT m.channel_id AS channel_id,
        m.scope      AS scope,
        m.title      AS title,
        ARRAY_AGG(DISTINCT x.who) FILTER (WHERE x.who IS NOT NULL) AS matched,
-       ARRAY_AGG(DISTINCT x.who) FILTER (WHERE x.by_owner)        AS matched_owner,
+       JSONB_AGG(DISTINCT JSONB_BUILD_OBJECT(
+           'name', x.who, 'is_owner', x.by_owner, 'is_bot', x.is_bot
+       )) FILTER (WHERE x.who IS NOT NULL) AS matched_senders,
        MAX(x.latest) AS latest
   FROM mine m
   LEFT JOIN matched x ON x.channel_id = m.channel_id
@@ -725,9 +730,8 @@ async def search_conversations_by_name(
     私聊按在里面说过话的人匹配 —— 私聊多半没有标题，只查标题等于查不到人。
     ``matched`` 是对得上的那些人名（一条都没有时是 ``None``）。
 
-    ``matched_owner`` 是这些名字里**主人的那些**（同样，一个都没有时是 ``None``）。
-    两列而不是一列名字带标记：名字自己说不出身份，一个把昵称改成主人那几个字的人在
-    ``matched`` 里跟主人是同一个字符串，只有这一列分得开。
+    ``matched_senders`` 保留每个匹配项的 name、is_owner 和 is_bot，不按昵称合并身份。
+    这样同名的主人、普通用户和机器人在上下文中仍是不同发送者。
     """
     async with auto_tx():
         rows = (

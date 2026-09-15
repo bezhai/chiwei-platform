@@ -14,11 +14,13 @@ import type { InboundMessage } from '@inner/shared/channel';
 
 import { larkContentOf, type LarkContentPart } from './lark-content';
 import { inboundMessageOf } from './inbound-message';
-import { resolveLarkMentions, type LarkBotLookup, type LarkMentionIndex } from './mentions';
+import { resolveLarkMentions, type LarkBotIdentity, type LarkBotLookup, type LarkMentionIndex } from './mentions';
 import { parseLarkMessage, type LarkInboundMessage } from './parse-message';
 import type { LarkMessageEvent } from './wire';
 
 export interface LarkMessageReading {
+    /** 内部身份：人设按真人对待，工具和未配置的飞书 bot 标为机器人。 */
+    sender: { kind: 'person' | 'bot'; bot: LarkBotIdentity | null };
     /** 飞书说了什么（事件里的事实，没有解释）。 */
     message: LarkInboundMessage;
     /** 被 @ 的人是谁、叫什么。 */
@@ -36,8 +38,18 @@ export function readLarkMessageEvent(
     const message = parseLarkMessage(event);
     if (!message) return null;
 
+    // 顶层 app_id 属于接收方，只能用发送者的身份查询目录。
+    const bot = message.sender.unionId ? bots.byUnionId(message.sender.unionId) : null;
+    if (bot && !bot.commonUserId) {
+        throw new Error(`lark sender bot "${bot.botName}" has no common_user_id`);
+    }
+    const kind = bot
+        ? (bot.botRole === 'persona' ? 'person' : 'bot')
+        : (event.sender.sender_type === 'bot' ? 'bot' : 'person');
+
     const mentions = resolveLarkMentions(message.mentions, bots);
     return {
+        sender: { kind, bot },
         message,
         mentions,
         content: larkContentOf(message, mentions),

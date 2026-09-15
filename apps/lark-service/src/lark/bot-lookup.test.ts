@@ -11,6 +11,7 @@ import {
 function bot(overrides: Partial<BotConfig> = {}): BotConfig {
     return {
         bot_name: 'chiwei',
+        bot_role: 'persona',
         channel: 'lark',
         common_user_id: 'cu_chiwei',
         persona_id: 'p_chiwei',
@@ -35,7 +36,7 @@ describe('createLarkBotLookup', () => {
     it('finds one of our bots by its Lark app id', () => {
         const lookup = createLarkBotLookup(roster([bot()]), noPersonas);
         expect(lookup.byAppId('cli_chiwei')).toEqual({
-            botName: 'chiwei',
+            botName: 'chiwei', botRole: 'persona',
             displayName: null,
             commonUserId: 'cu_chiwei',
         });
@@ -133,4 +134,9 @@ describe('larkDisplayNameOf', () => {
         ];
         expect(larkDisplayNameOf(roster(bots), personas, 'chiwei')).toBeUndefined();
     });
+});
+
+it('keeps configured inactive personas human in the identity roster', () => {
+    const lookup = createLarkBotLookup(roster([bot({ is_active: false })]), () => '赤尾');
+    expect(lookup.byUnionId('on_chiwei')).toMatchObject({ botName: 'chiwei', botRole: 'persona' });
 });

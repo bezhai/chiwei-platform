@@ -76,7 +76,7 @@ describe('larkContentOf', () => {
             },
         ];
         const bots: LarkBotLookup = {
-            byAppId: () => ({ botName: 'chiwei', displayName: '赤尾', commonUserId: 'cu_1' }),
+            byAppId: () => ({ botName: 'chiwei', botRole: 'persona', displayName: '赤尾', commonUserId: 'cu_1' }),
             byUnionId: () => null,
         };
         expect(partsOf('text', JSON.stringify({ text: '@_user_1' }), mentions, bots)).toEqual([

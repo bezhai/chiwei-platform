@@ -3,18 +3,8 @@
 // 这是一个**端口**：每个方法对应一条语句，一件事，不做判断。真身是
 // postgres-tables.ts（本目录里唯一知道 TypeORM 的地方），测试用内存实现。
 //
-// ## 跟 projection/tables.ts 是两个端口，不是重复
-//
-// 两边确实都写 `common_message` 和 `lark_message`，但写的是同一张表的**两次不同
-// 写入**，冲突语义正好相反：
-//
-//   入站  common_message(user 行) or-ignore ＋ lark_message **普通 insert，撞了要
-//         回滚** —— 撞主键说明有人并发写了别的映射，留下孤儿记录比报错糟
-//   出站  common_message(assistant 行) or-ignore ＋ lark_message **也 or-ignore**
-//         —— 见 insertLarkMessage 的注释，出站的 om_id 会撞，而且是设计使然
-//
-// 把它们塞进一个端口，就得在同一个名字下并存两种冲突语义，读的人无从判断自己
-// 调的是哪一种。分成两个端口之后，每个端口的每个方法只有一种语义。
+// 入站和出站共用事务锁协调同一条飞书消息。入站保留已有公共记录，出站补齐
+// 发送者、内容及出站关联；两侧写入端口分别表达各自拥有的字段。
 //
 // 字段名用**物理列名**而不是驼峰属性名，理由同 projection/tables.ts：这样写入矩阵
 // 和测试断言可以逐字对上，不需要在两套命名之间来回翻译。
@@ -57,7 +47,7 @@ export interface LarkAssistantMessageRow {
  * 出站消息在飞书侧的坐标。
  *
  * 只有四列 —— 出站没有 sender / root / reply / raw_event 可写：发出去这条消息的
- * 是我们自己，飞书也不会把它当作一个入站事件推回来。入站那一侧写的是另一组列，
+ * 是我们自己。回流中的 sender / mentions / raw_event 由入站保留，
  * 见 projection/tables.ts 的 LarkMessageRow。
  */
 export interface LarkOutboundMapping {
@@ -68,6 +58,8 @@ export interface LarkOutboundMapping {
 }
 
 export interface LarkOutboundTables {
+    /** 仅在 atomically 中调用；与入站按同一个 om_id 互斥。 */
+    lockMessage(omId: string): Promise<void>;
     /**
      * 公共层会话 id → 飞书裸 chat_id。没有映射返回 null。
      *
@@ -85,17 +77,10 @@ export interface LarkOutboundTables {
      */
     commonMessageIdOf(omId: string): Promise<string | null>;
 
-    /** insert-or-ignore。重投同一条出站消息时必须是静默 no-op。 */
+    /** 插入或补齐出站权威字段；保留原 event_time、mentions 和撤回状态。 */
     insertCommonMessage(row: LarkAssistantMessageRow): Promise<void>;
 
-    /**
-     * insert-or-ignore。
-     *
-     * **这一条跟入站那条不一样，撞了要忽略而不是回滚**，因为出站的 om_id 真的会撞：
-     * 飞书偶尔返回 code=0 但不带 message_id，这时候落库用的是一个合成的假 id
-     * （见 deliver.ts），而主动发场景下那个假 id 对每条消息都长得一样。撞了回滚的
-     * 后果是整条回复的落库全丢，而消息已经真的发出去了。
-     */
+    /** 同一事务锁内已经认领 canonical ID，保持已有映射。 */
     insertLarkMessage(row: LarkOutboundMapping): Promise<void>;
 }
 

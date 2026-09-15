@@ -396,6 +396,7 @@ function tracedDelivery(): {
 
     const deps: LarkDeliveryDeps = {
         store: {
+            lockMessage: async () => {},
             chatIdOf: async (id) => {
                 note(`db:chatIdOf:${id}`);
                 return 'oc_group';
@@ -413,6 +414,7 @@ function tracedDelivery(): {
             atomically: async (run) => {
                 note('db:atomically');
                 return run({
+                    lockMessage: async () => {},
                     chatIdOf: async () => 'oc_group',
                     omIdOf: async () => 'om_trigger',
                     commonMessageIdOf: async () => null,
@@ -447,6 +449,7 @@ function tracedDelivery(): {
                 pictures: [],
             };
         },
+        botRole: () => 'persona',
         botCommonUserId: (bot) => `cu_${bot}`,
         botDisplayName: () => undefined,
         newCommonId: () => 'cm_new',

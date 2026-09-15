@@ -203,7 +203,7 @@ export interface CommonMessageRow {
     mentioned_common_user_ids: string[];
     scope: string;
     message_type: string;
-    bot_name: string;
+    bot_name?: string;
     /** 飞书给的毫秒时间戳字符串，原样落进 bigint 列。 */
     event_time: string;
 }
@@ -211,6 +211,10 @@ export interface CommonMessageRow {
 // ---- 端口 ----
 
 export interface LarkTables {
+    /** 仅在 atomically 中调用；与出站按同一个 om_id 互斥。 */
+    lockMessage(omId: string): Promise<void>;
+    /** 回流只补齐出站没有记过的点名事实。 */
+    fillMessageMentions(commonMessageId: string, mentions: string[]): Promise<void>;
     larkUserByOpenId(appId: string, openId: string): Promise<LarkUserLink | null>;
     /**
      * 按 union_id 找这个人已有的公共层身份。
