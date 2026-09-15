@@ -6,6 +6,28 @@ import type { LarkMessageEvent } from './wire';
 
 const noBots: LarkBotLookup = { byAppId: () => null, byUnionId: () => null };
 
+describe('sender classification', () => {
+    it.each(['persona', 'utility'] as const)('classifies a configured %s by the sender, not the receiving app', (botRole) => {
+        const bot = { botName: 'ayana', botRole, displayName: '绫奈', commonUserId: 'cu_ayana' };
+        const bots: LarkBotLookup = {
+            byUnionId: (id) => id === 'on_ayana' ? bot : null,
+            byAppId: () => { throw new Error('the event app_id is the receiver'); },
+        };
+        const payload = event('text', '{"text":"hello"}');
+        payload.sender = { sender_type: 'bot', sender_id: { union_id: 'on_ayana', open_id: 'ou_ayana' } };
+        expect(readLarkMessageEvent(payload, bots)!.sender).toEqual({
+            kind: botRole === 'persona' ? 'person' : 'bot', bot,
+        });
+    });
+
+    it('keeps unconfigured bots distinct from human users', () => {
+        const payload = event('text', '{"text":"hello"}');
+        expect(readLarkMessageEvent(payload, noBots)!.sender).toEqual({ kind: 'person', bot: null });
+        payload.sender.sender_type = 'bot';
+        expect(readLarkMessageEvent(payload, noBots)!.sender).toEqual({ kind: 'bot', bot: null });
+    });
+});
+
 function event(messageType: string, content: string, extra: Record<string, unknown> = {}) {
     return {
         app_id: 'cli_app',
@@ -77,7 +99,7 @@ describe('readLarkMessageEvent', () => {
 
     it('fails loudly when a mentioned bot of ours has no identity yet', () => {
         const bots: LarkBotLookup = {
-            byAppId: () => ({ botName: 'chiwei', displayName: '赤尾' }),
+            byAppId: () => ({ botName: 'chiwei', botRole: 'persona', displayName: '赤尾' }),
             byUnionId: () => null,
         };
         expect(() =>
@@ -97,4 +119,13 @@ describe('readLarkMessageEvent', () => {
             ),
         ).toThrow(/common_user_id/);
     });
+});
+
+it('rejects a configured sender without a canonical identity', () => {
+    const payload = event('text', '{"text":"hello"}');
+    const bots: LarkBotLookup = {
+        byAppId: () => null,
+        byUnionId: () => ({ botName: 'broken', botRole: 'persona', displayName: null }),
+    };
+    expect(() => readLarkMessageEvent(payload, bots)).toThrow(/common_user_id/);
 });

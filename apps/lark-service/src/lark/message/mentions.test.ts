@@ -38,7 +38,7 @@ function mention(overrides: Partial<LarkMention> = {}): LarkMention {
 }
 
 const persona: LarkBotIdentity = {
-    botName: 'chiwei',
+    botName: 'chiwei', botRole: 'persona',
     displayName: '赤尾',
     commonUserId: 'cu_chiwei',
 };
@@ -164,7 +164,7 @@ describe('resolveLarkMentions', () => {
         const index = resolveLarkMentions(
             [mention({ mentioned_type: 'bot', bot_info: { app_id: 'cli_a' }, name: 'raw-name' })],
             lookup({
-                byAppId: { cli_a: { botName: 'utility', displayName: null, commonUserId: 'cu_u' } },
+                byAppId: { cli_a: { botName: 'utility', botRole: 'persona', displayName: null, commonUserId: 'cu_u' } },
             }),
         );
         expect(index.all[0]!.displayName).toBe('raw-name');
@@ -203,7 +203,7 @@ describe('resolveLarkMentions', () => {
         expect(() =>
             resolveLarkMentions(
                 [mention({ mentioned_type: 'bot', bot_info: { app_id: 'cli_a' } })],
-                lookup({ byAppId: { cli_a: { botName: 'chiwei', displayName: '赤尾' } } }),
+                lookup({ byAppId: { cli_a: { botName: 'chiwei', botRole: 'persona', displayName: '赤尾' } } }),
             ),
         ).toThrow(/chiwei/);
     });

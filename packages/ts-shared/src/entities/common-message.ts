@@ -26,6 +26,7 @@ export class CommonMessage {
     @Column({ type: 'varchar', length: 256, nullable: true })
     sender_display_name?: string;
 
+    /** user=真人入站，assistant=本系统人设，bot=工具或外部机器人；不是模型 API role。 */
     @Column({ type: 'varchar', length: 20 })
     role!: string;
 

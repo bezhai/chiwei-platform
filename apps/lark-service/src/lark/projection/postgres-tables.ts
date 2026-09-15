@@ -18,6 +18,7 @@ import { LarkBaseChatInfo } from '../../entities/lark-base-chat-info';
 import { LarkGroupChatInfo } from '../../entities/lark-group-chat-info';
 import { LarkGroupMember } from '../../entities/lark-group-member';
 import { LarkMessage } from '../../entities/lark-message';
+import { lockLarkMessage } from '../message-transaction';
 import { LarkUser } from '../../entities/lark-user';
 import { LarkUserOpenId } from '../../entities/lark-user-open-id';
 import { UserGroupBinding } from '../../entities/user-group-binding';
@@ -38,6 +39,13 @@ import type {
 
 function tablesOn(manager: EntityManager): LarkTables {
     return {
+        lockMessage: (omId) => lockLarkMessage(manager, omId),
+        async fillMessageMentions(commonMessageId, mentions): Promise<void> {
+            await manager.createQueryBuilder().update(CommonMessage)
+                .set({ mentioned_common_user_ids: mentions })
+                .where('common_message_id = :commonMessageId', { commonMessageId })
+                .andWhere('mentioned_common_user_ids IS NULL').execute();
+        },
         async larkUserByOpenId(appId, openId): Promise<LarkUserLink | null> {
             const row = await manager.getRepository(LarkUserOpenId).findOne({
                 where: { appId, openId },

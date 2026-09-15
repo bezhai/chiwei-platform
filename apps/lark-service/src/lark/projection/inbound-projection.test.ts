@@ -241,6 +241,12 @@ class MemoryLarkTables implements LarkStore {
         return winner;
     }
 
+    async lockMessage(_omId: string): Promise<void> {}
+    async fillMessageMentions(id: string, mentions: string[]): Promise<void> {
+        const row = this.commonMessages.get(id);
+        if (row && row.mentioned_common_user_ids == null) row.mentioned_common_user_ids = mentions;
+    }
+
     async insertCommonMessage(row: CommonMessageRow): Promise<void> {
         // insert-or-ignore
         if (this.commonMessages.has(row.common_message_id)) return;
@@ -289,11 +295,11 @@ const BOT_COMMON_USER_ID = 'cu_bot_chiwei';
 const bots: LarkBotLookup = {
     byAppId: (appId) =>
         appId === APP_ID
-            ? { botName: BOT_NAME, displayName: '赤尾', commonUserId: BOT_COMMON_USER_ID }
+            ? { botName: BOT_NAME, botRole: 'persona', displayName: '赤尾', commonUserId: BOT_COMMON_USER_ID }
             : null,
     byUnionId: (unionId) =>
         unionId === 'on_bot_chiwei'
-            ? { botName: BOT_NAME, displayName: '赤尾', commonUserId: BOT_COMMON_USER_ID }
+            ? { botName: BOT_NAME, botRole: 'persona', displayName: '赤尾', commonUserId: BOT_COMMON_USER_ID }
             : null,
 };
 
@@ -366,6 +372,31 @@ async function project(
     );
     return { outcome, handedOff: wired.handedOff };
 }
+
+describe('robot senders', () => {
+    it('reuses a persona identity across receiving bots without registering another user', async () => {
+        const tables = new MemoryLarkTables();
+        const payload = larkMessageEvent();
+        payload.sender = { sender_type: 'bot', sender_id: { union_id: 'on_bot_chiwei', open_id: 'ou_chiwei' } };
+        const first = await project(tables, payload, {}, { botName: 'ayana' });
+        const second = await project(tables, payload, {}, { botName: 'chinagi' });
+        expect(recorded(first.outcome).commonUserId).toBe(BOT_COMMON_USER_ID);
+        expect(recorded(second.outcome).commonMessageId).toBe(recorded(first.outcome).commonMessageId);
+        expect([...tables.commonMessages.values()]).toHaveLength(1);
+        expect([...tables.commonMessages.values()][0]).toMatchObject({
+            role: 'assistant', bot_name: BOT_NAME, sender_display_name: '赤尾', common_user_id: BOT_COMMON_USER_ID,
+        });
+        expect(tables.larkUserOpenIds.size).toBe(0);
+    });
+
+    it('records an unconfigured bot as a bot', async () => {
+        const tables = new MemoryLarkTables();
+        const payload = larkMessageEvent();
+        payload.sender.sender_type = 'bot';
+        await project(tables, payload);
+        expect([...tables.commonMessages.values()][0]!.role).toBe('bot');
+    });
+});
 
 function recorded(outcome: LarkInboundOutcome) {
     if (outcome.kind !== 'recorded') {
@@ -1066,26 +1097,20 @@ describe('重放安全', () => {
     // 同一条 om_id 已经映射到别的 common_message_id：说明有人算错了，继续写会让
     // 同一条飞书消息在公共层有两个身份。这里制造的是竞态 —— 读的时候没有、写的
     // 时候被别人抢先写上了。
-    it('om_id 已映射到别的 common_message_id 时拒绝落账', async () => {
+    it('身份准备后出站抢先落库时复用最终消息 ID 和根引用', async () => {
         const tables = new MemoryLarkTables();
-
-        await expect(
-            project(tables, larkMessageEvent(), {
-                withMessageLock: async (_omId, run) => {
-                    tables.onBeforeAtomically = () => {
-                        tables.larkMessages.set('om_1', {
-                            om_id: 'om_1',
-                            common_message_id: 'cm_other',
-                            chat_id: 'oc_1',
-                            message_type: 'text',
-                        });
-                        tables.onBeforeAtomically = undefined;
-                    };
-                    return run();
-                },
-            }),
-        ).rejects.toThrow(/already maps to cm_other/);
-
+        const result = await project(tables, larkMessageEvent(), {
+            withMessageLock: async (_omId, run) => {
+                tables.onBeforeAtomically = () => {
+                    tables.larkMessages.set('om_1', { om_id: 'om_1',
+                        common_message_id: 'cm_other', chat_id: 'oc_1', message_type: 'text' });
+                    tables.onBeforeAtomically = undefined;
+                };
+                return run();
+            },
+        });
+        expect(recorded(result.outcome).commonMessageId).toBe('cm_other');
+        expect(recorded(result.outcome).commonRootMessageId).toBe('cm_other');
         expect(tables.commonMessages.size).toBe(0);
     });
 });

@@ -79,10 +79,13 @@ class MemoryOutboundTables implements LarkOutboundStore {
         return this.larkMessages.get(omId)?.common_message_id ?? null;
     }
 
+    async lockMessage(_omId: string): Promise<void> {}
+
     async insertCommonMessage(row: LarkAssistantMessageRow): Promise<void> {
         if (this.failCommonMessageInsert) throw this.failCommonMessageInsert;
-        if (this.commonMessages.has(row.common_message_id)) return; // or-ignore
-        this.commonMessages.set(row.common_message_id, { ...row });
+        const existing = this.commonMessages.get(row.common_message_id);
+        this.commonMessages.set(row.common_message_id, { ...existing, ...row,
+            event_time: existing?.event_time ?? row.event_time });
     }
 
     async insertLarkMessage(row: LarkOutboundMapping): Promise<void> {
@@ -203,6 +206,7 @@ function harness(overrides: Partial<LarkDeliveryDeps> = {}): Harness {
                 })),
             };
         },
+        botRole: () => 'persona',
         botCommonUserId: (botName) => `cu_${botName}`,
         botDisplayName: (botName) => `名字_${botName}`,
         newCommonId: () => {
@@ -1365,4 +1369,18 @@ describe('图片每一步失败时：她那句话照常送到飞书', () => {
             [{ tag: 'img', image_key: 'img_v3_uploaded' }],
         ]);
     });
+});
+
+it('retains utility classification if a tool message uses the delivery path', async () => {
+    const h = harness({ botRole: () => 'utility' });
+    seedRefs(h.store);
+    await deliverLarkChatResponse(h.deps, proactive({ bot_name: 'tool' }));
+    expect([...h.store.commonMessages.values()][0]).toMatchObject({ role: 'bot', bot_name: 'tool' });
+});
+
+it('keeps a configured utility sender name when it has no persona name', async () => {
+    const h = harness({ botRole: () => 'utility', botDisplayName: () => undefined });
+    seedRefs(h.store);
+    await deliverLarkChatResponse(h.deps, proactive({ bot_name: 'tool' }));
+    expect([...h.store.commonMessages.values()][0]!.sender_display_name).toBe('tool');
 });

@@ -9,6 +9,7 @@ import { CommonMessage } from '@inner/shared/entities';
 
 import { LarkBaseChatInfo } from '../../entities/lark-base-chat-info';
 import { LarkMessage } from '../../entities/lark-message';
+import { lockLarkMessage } from '../message-transaction';
 import type {
     LarkAssistantMessageRow,
     LarkOutboundMapping,
@@ -20,6 +21,7 @@ import type {
 
 function tablesOn(manager: EntityManager): LarkOutboundTables {
     return {
+        lockMessage: (omId) => lockLarkMessage(manager, omId),
         async chatIdOf(commonConversationId): Promise<string | null> {
             const row = await manager.getRepository(LarkBaseChatInfo).findOne({
                 where: { common_conversation_id: commonConversationId },
@@ -64,15 +66,17 @@ function tablesOn(manager: EntityManager): LarkOutboundTables {
                     response_id: row.response_id,
                     agent_outbound_id: row.agent_outbound_id,
                 })
-                // 重投同一段回复时静默 no-op。
-                .orIgnore()
+                // 入站可能已经写了同一行。补齐出站关联，不移动其时间或清除撤回/点名。
+                .orUpdate([
+                    'common_user_id', 'sender_display_name', 'role', 'content', 'content_text',
+                    'common_root_message_id', 'common_reply_message_id', 'bot_name',
+                    'response_id', 'agent_outbound_id',
+                ], ['common_message_id'])
                 .execute();
         },
 
         async insertLarkMessage(row: LarkOutboundMapping): Promise<void> {
-            // **跟入站那条不一样：这一条也 or-ignore。** 理由见 tables.ts 的端口注释
-            // ——出站的 om_id 会撞（平台没返回 message_id 时落的是合成键），而撞了
-            // 回滚会把整条回复的落库全丢，消息却已经真的发出去了。
+            // 同一事务锁内已确认 canonical ID，回流先建立的映射保持不变。
             await manager
                 .createQueryBuilder()
                 .insert()

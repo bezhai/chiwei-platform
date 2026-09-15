@@ -30,7 +30,7 @@ const BOT_APP_ID = 'cli_tool';
 const bots: LarkBotLookup = {
     byAppId: (appId) =>
         appId === BOT_APP_ID
-            ? { botName: 'tool', displayName: null, commonUserId: 'cu_bot_tool' }
+            ? { botName: 'tool', botRole: 'persona', displayName: null, commonUserId: 'cu_bot_tool' }
             : null,
     byUnionId: () => null,
 };

@@ -110,6 +110,7 @@ function build(bots: BotConfig[] = [bot()]) {
     const recorded: unknown[] = [];
     const ports: LarkInboundPorts = {
         roster: { getAllBotConfigs: () => bots },
+        identityRoster: { getAllBotConfigs: () => bots },
         lane: 'ppe-x',
         personaName: (personaId) => (personaId === 'p_chiwei' ? '赤尾' : null),
         record: async (payload) => void recorded.push(payload),

@@ -1280,7 +1280,7 @@ async def test_the_owner_is_marked_on_every_place_she_reads_a_name(bot_db):
 
     assert [r["by_owner"] for r in senders] == [True], f"信封那侧：{senders}"
     assert [r["by_owner"] for r in page] == [True], f"打开会话：{page}"
-    assert list(looked_up[0]["matched_owner"]) == ["bezhai"], (
+    assert [s["name"] for s in looked_up[0]["matched_senders"] if s["is_owner"]] == ["bezhai"], (
         f"按名字找会话：{looked_up}"
     )
     assert [r["by_owner"] for r in files] == [True], f"别人发来的文件：{files}"
@@ -1302,7 +1302,7 @@ async def test_a_namesake_who_is_not_the_owner_is_not_marked(bot_db):
     assert [(r["who"], r["by_owner"]) for r in page] == [("bezhai", False)]
     assert [r["by_owner"] for r in files] == [False]
     assert list(looked_up[0]["matched"]) == ["bezhai"]
-    assert looked_up[0]["matched_owner"] is None, (
+    assert not any(s["is_owner"] for s in looked_up[0]["matched_senders"]), (
         f"名字对得上就被当成了主人。拿到：{looked_up}"
     )
 
@@ -1358,3 +1358,51 @@ async def test_the_same_person_speaking_twice_is_still_one_sender(bot_db):
 
     assert [(r["who"], r["by_owner"]) for r in rows] == [("bezhai", True)]
     assert rows[0]["latest"] == _ms(_at(10))
+
+
+async def test_bot_messages_remain_readable_and_marked_across_phone_views(bot_db):
+    from app.living.phone import Sender, _one_message, _who_tag
+
+    await _seed_her_phone()
+    await _message(_GROUP, at=_at(10), role='bot', who='通知', bot_name='tool', body='工具消息')
+    await _message(_GROUP, at=_at(10, 1), role='user', who='通知', body='真人同名')
+    await _message(_GROUP, at=_at(10, 4), role='bot', who='外部通知', body='外部消息')
+    await _message(_GROUP, at=_at(10, 2), role='assistant', who='绫奈', bot_name='ayana', body='姐姐消息')
+    await _message(_GROUP, at=_at(10, 3), role='assistant', who='赤尾', bot_name='chiwei', body='自己消息')
+    args = {'channel_id': str(_GROUP), 'after_ms': 0, 'after_id': '', 'own_bots': ['chiwei']}
+    summary = await find_unread_summary(**args, bot_user_ids=[str(_AKAO_BOT_UID)])
+    assert summary['unread'] == 4
+    senders = await find_unread_senders(**args, limit=10)
+    same_name = [r for r in senders if r['who'] == '通知']
+    assert sorted(r['is_bot'] for r in same_name) == [False, True]
+    assert 'sender_type="bot"' in _who_tag(Sender(name='通知', is_owner=False, is_bot=True))
+    rows = await find_conversation_page(**args, bot_user_ids=[str(_AKAO_BOT_UID)], is_direct=False,
+                                        before_id=None, page=20, after_n=20, earlier_cap=100)
+    for row in rows:
+        shown = _one_message(row, now=_at(11), pictures=iter([]))
+        assert ('sender_type="bot"' in shown) == (row['content_text'] in {'工具消息', '外部消息'})
+        assert row['said_by_you'] == (row['content_text'] == '自己消息')
+
+    conversations = [{'channel_id': str(_GROUP), 'scope': 'group', 'title': '实验室'}]
+    found = await search_conversations_by_name(conversations=conversations, name_like='通知', own_bots=['chiwei'])
+    assert {tuple(sorted(s.items())) for s in found[0]['matched_senders']} == {
+        tuple(sorted({'name': '通知', 'is_owner': False, 'is_bot': flag}.items())) for flag in (True, False)
+    }
+    latest = await find_conversations_by_last_message(conversations=conversations, own_bots=['chiwei'])
+    assert latest[0]['is_bot'] is True
+    assert latest[0]['other_is_bot'] is True
+
+
+async def test_contact_search_preserves_owner_and_bot_identity_for_namesakes(bot_db):
+    from app.living.phone import Sender, _who_tag
+
+    await _seed_her_phone()
+    await _message(_GROUP, at=_at(10), sender=_OWNER, who='bezhai', body='主人')
+    await _message(_GROUP, at=_at(10, 1), role='bot', who='bezhai', body='同名机器人')
+    found = await search_conversations_by_name(
+        conversations=[{'channel_id': str(_GROUP), 'scope': 'group', 'title': '实验室'}],
+        name_like='bezhai', own_bots=['chiwei'])
+    senders = [Sender(**sender) for sender in found[0]['matched_senders']]
+    assert set(senders) == {Sender('bezhai', True, False), Sender('bezhai', False, True)}
+    bot = next(sender for sender in senders if sender.is_bot)
+    assert 'rel="owner"' not in _who_tag(bot)

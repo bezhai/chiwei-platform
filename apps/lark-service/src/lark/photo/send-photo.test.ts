@@ -28,7 +28,7 @@ const BOT_COMMON_USER_ID = 'cu_bot_tool';
 const bots: LarkBotLookup = {
     byAppId: (appId) =>
         appId === APP_ID
-            ? { botName: BOT_NAME, displayName: '工具', commonUserId: BOT_COMMON_USER_ID }
+            ? { botName: BOT_NAME, botRole: 'persona', displayName: '工具', commonUserId: BOT_COMMON_USER_ID }
             : null,
     byUnionId: () => null,
 };

@@ -189,6 +189,11 @@ async function realOutbound(): Promise<LarkOutbound> {
                 },
             }),
             botCommonUserId: (botName) => botDirectory.getBotCommonUserId(botName),
+            botRole: (botName) => {
+                const bot = botDirectory.getBotConfig(botName);
+                if (!bot) throw new Error(`unknown lark sender bot: ${botName}`);
+                return bot.bot_role;
+            },
             botDisplayName: (botName) => larkDisplayNameOf(botDirectory, personaName, botName),
             // 时间有序的 uuid v7：它同时是主键和"这条消息什么时候发的"的排序依据。
             newCommonId: () => Bun.randomUUIDv7(),

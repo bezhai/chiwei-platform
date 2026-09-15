@@ -68,7 +68,7 @@ from app.data.session import get_session
 from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
 from app.infra.cst_time import CST, to_cst_dated
-from app.living.phone import reachable_conversations
+from app.living.phone import Sender, _who_tag, reachable_conversations
 from app.living.records import _require_aware, esc
 from app.living.scope import moment_scope
 from app.runtime.data import Data, Key, Version
@@ -187,6 +187,13 @@ class SentFile:
     at: datetime
     where: str
     still_gettable: bool
+    is_bot: bool = False
+
+
+def _file_sender(file: SentFile) -> str:
+    if file.is_bot:
+        return _who_tag(Sender(file.who, is_owner=False, is_bot=True))
+    return esc(file.who)
 
 
 def _where_of(scope: str, title: str, who: str) -> str:
@@ -231,6 +238,7 @@ async def files_sent_to(*, persona_id: str, now: datetime) -> list[SentFile]:
             title=r["file_name"],
             tos_file=derive_tos_file(str(r["file_key"])),
             who=r["who"],
+            is_bot=bool(r["is_bot"]),
             at=datetime.fromtimestamp(int(r["at_ms"]) / 1000, tz=CST),
             where=_where_of(r["scope"], r["where_title"], r["who"]),
             still_gettable=bool(r["still_gettable"]),
@@ -316,7 +324,7 @@ def _one_file(f: SentFile, mark: FileRead | None, *, now: datetime) -> str:
     # 名字、谁发的、发在哪三样都是外面来的（``_name_of`` / ``_where_of`` 自己过了
     # :func:`esc`，显示名在这儿过）。**印象不过** —— 那是她读完之后自己写下的一段话，
     # 不是谁能决定字节的通道，判据写在 :func:`esc` 上。
-    head = f"- {_name_of(f)} {esc(f.who)} {when} 发在{f.where} {tail}"
+    head = f"- {_name_of(f)} {_file_sender(f)} {when} 发在{f.where} {tail}"
     if mark is None:
         return head + "\n  （还没翻开过）"
     read = "你读完了" if mark.finished else f"你已经读了 {mark.pages_read} 页"
@@ -446,7 +454,7 @@ async def read_a_bit(
         # 跟 :func:`_one_file` 同一批外面来的字串，同样过 :func:`esc`：这段回问也是
         # 她眼前那段文本的一部分，摊开候选跟摆清单没有区别。
         spread = "\n".join(
-            f"- {_name_of(f)} {esc(f.who)} "
+            f"- {_name_of(f)} {_file_sender(f)} "
             f"{to_cst_dated(f.at.isoformat(), now=now, seconds=False)} "
             f"发在{f.where} {_HANDLE_PREFIX}{f.attachment_id}"
             for f in hit
