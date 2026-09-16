@@ -35,11 +35,36 @@ time source 做 leader election，不是先把这把锁换成跨进程的**—�
     asyncio 锁没有这条：持有它的协程死了才轮到下一个，没有"锁没了但活还在跑"。
 
 **不要嵌套同一个 key**：``asyncio.Lock`` 不可重入，同 key 嵌套 = 永久自锁死。
+
+占用有上限，因为「炸了会放开」挡不住「不结束」
+----------------------------------------------
+
+2026-09-16 prod 实证：一次挂住的调用（不返回、也不超时）让 akao 和 chinagi 停摆 15
+小时，同一天 coe-living 的 world 停摆 8 小时。三处的形状一样 —— 进程活着、别的 key
+照跑、**日志、trace、报错一个都没有**：时间源投拍是 fire-and-forget，后面每一拍都
+静悄悄排在这把锁后面等，而等待没有尽头。
+
+所以 :data:`HELD_SECONDS` 给占用封了个顶。它**不是给她的轮次设预算** —— 值取得远
+大于任何一轮正常该花的时间（校准见常量处），唯一的作用是把"永远"变成"有限"。到顶
+了掐断那一轮，走的是**既有的崩溃恢复语义**：占用随之放开，下一拍重来，而轮次本来
+就按"中途崩掉会重跑"设计（派生 id + CAS + 幂等写）。
+
+这**不等于**"掐断不留下任何中间状态"。已经发出去、结果未知的那一类（比如 mouth 那
+边在发消息前后被取消）照旧要靠原有的对账收尾 —— 这个顶没有让它们变干净，只是把
+"卡死"换成了"崩溃"这种已经有人管的形状。
+
+取消是协作式的，所以有两种 body 掐不断：纯 CPU 打转、从不 await 的，和把
+``CancelledError`` 吞掉照常走完的。前者整个事件循环本来就已经停了，不是这里能兜的；
+后者会正常返回、不抛 ``TimeoutError``，但占用仍然在它返回时放开。
+
+**这一层不替代下面该有的超时。** 真正该掐的是模型调用、HTTP、数据库各自那一层；
+这里兜的是"不管哪一层漏了，占用都不会被永久扣住"。
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, TypeVar
@@ -52,7 +77,21 @@ from app.runtime.data import Data, key_fields
 from app.runtime.migrator import _table_name
 from app.runtime.persist import insert_idempotent, select_latest
 
+logger = logging.getLogger(__name__)
+
 T = TypeVar("T", bound=Data)
+
+# 一次占用最长持有多久。见模块 docstring：这是死锁兜底，不是轮次预算。
+#
+# 按 prod 实测校准，不是拍的：2026-09-16 取 Langfuse 上 1413 条 prod 轮次，
+# p50 8.5 秒、p95 76.4 秒、p99 121.8 秒、**最长 188.9 秒**（world 的一轮）。900 是
+# 实测最长值的 4.8 倍。注意这个分布只统计得到跑完的轮次 —— 卡死的那些根本没有
+# trace，所以它回答的是"正常一轮能有多慢"，不是"卡死前能拖多久"，而前者正是这个
+# 顶该躲开的东西。
+#
+# 哪天真在日志里看到 `占住超过` 而那一轮其实是正常的慢，说明这个分布变了，该重新
+# 量一次再调，不要顺手往上加。
+HELD_SECONDS = 900.0
 
 # key -> 锁，按事件循环分桶。
 #
@@ -78,15 +117,34 @@ def _lock_for(key: str) -> asyncio.Lock:
 
 
 @asynccontextmanager
-async def hold(key: str) -> AsyncIterator[None]:
+async def hold(key: str, *, seconds: float | None = None) -> AsyncIterator[None]:
     """占住 ``key``；已被别人占着就**排队等**，等到为止。
 
     ``asyncio.Lock`` 的等待是 FIFO 的：先来的先拿到。这条是
     :func:`append_in_commit_order` 那个"下一个拿到占用的人一定看得见上一个人写的
     行"论证的一半——另一半是那边的 commit 落在放开占用之前。
+
+    拿到之后最多持有 ``seconds`` 秒（不传就用 :data:`HELD_SECONDS`），到点把这一轮
+    掐断并抛 ``TimeoutError``，占用随之放开。为什么要有这个顶见模块 docstring。
     """
+    cap = HELD_SECONDS if seconds is None else seconds
     async with _lock_for(key):
-        yield
+        try:
+            async with asyncio.timeout(cap) as cutoff:
+                yield
+        except TimeoutError:
+            # 只认**这一层**到点。body 自己抛 TimeoutError（HTTP 超时之类），或者
+            # 内层嵌套的另一把占用到点，都会以 TimeoutError 穿过这里 —— 照单全收
+            # 就会报出一条"某某占住超过 900 秒"的假账，而这个顶存在的全部意义正是
+            # 出事时能一眼看出是谁卡住了。
+            if cutoff.expired():
+                logger.warning(
+                    "living serial: %s 占住超过 %.0f 秒，这一轮被掐断 —— "
+                    "当它崩在那儿处理，占用即将放开，下一拍重来",
+                    key,
+                    cap,
+                )
+            raise
 
 
 async def append_in_commit_order(
