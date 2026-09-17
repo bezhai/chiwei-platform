@@ -1824,6 +1824,210 @@ async def test_a_place_with_nothing_written_about_it_is_not_made_up(
     assert "老街/桥头" in said
 
 
+# 她写的地名跟设定集对不上的时候，告诉她设定集上有哪些
+#
+# 实测（coe-living，2026-09-17）：同一个地方她们写出四种名字 —— ``家/二楼/洗手间``
+# 对 ``家/浴室``、``家/走廊`` 对 ``家/楼上/走廊``。而 prod 上更狠，``家/楼上/我房间``
+# 被绫奈和千凪**两个人**同时用，2026-09-13 21:00 两人同一分钟落在这个地名上，各自在
+# 自己卧室、判定却是同处一室。
+#
+# 根因是 place 这个参数没有词表：她唯一见过的样本就是工具参数说明里那几个举例，
+# 每次换地方都是现编一个。写错了走进一片沉默，**而沉默跟"这地方还没被写过"长得一模一样**，
+# 她没有任何途径分辨，也就没有任何途径改回来。
+#
+# 这一档给的是**设定集上确实有的那些地名**，不是猜她想去哪 —— 跟"不编造那个地方
+# 长什么样"（上一条）不冲突：那条管的是不许无中生有一段描述，这条是把树里的事实如实报给她。
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_a_name_that_matches_nothing_gets_told_which_names_exist(
+    moment_db, in_a_moment, places
+):
+    """写错名字不能只换来沉默 —— 那跟"这地方还没写过"分不清。"""
+    places("家/浴室", "干湿分离，镜柜上三只不同色的漱口杯。")
+    places("家/客厅", "南向连着阳台。")
+    places("家/楼上/走廊", "尽头一扇朝东的高长窗。")
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "洗漱", "place": "家/二楼/洗手间", "because": "起床了"})
+        said = await move_to.invoke({"place": "家/二楼/洗手间"})
+
+    assert "家/浴室" in said, f"没告诉她设定集上那间浴室叫什么：{said!r}"
+    assert "家/楼上/走廊" in said, f"多层的地名没列出来：{said!r}"
+
+
+@pytest.mark.integration
+async def test_the_names_offered_are_only_from_the_building_she_is_in(
+    moment_db, in_a_moment, places
+):
+    """只报她所在那一栋的。整棵树报出来是一堵墙，而且她要的就在这一栋里。"""
+    places("家/浴室", "干湿分离。")
+    places("学校/操场", "塑胶跑道绕着草坪。")
+    places("学校/图书馆", "二楼靠窗一排旧书架。")
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "洗漱", "place": "家/二楼/洗手间", "because": "起床了"})
+        said = await move_to.invoke({"place": "家/二楼/洗手间"})
+
+    assert "家/浴室" in said
+    assert "学校/操场" not in said, f"把别的地方的地名也倒给她了：{said!r}"
+    assert "学校/图书馆" not in said
+
+
+@pytest.mark.integration
+async def test_a_building_nobody_has_written_offers_no_names(
+    moment_db, in_a_moment, places
+):
+    """整栋都没写过，就没有词表可给 —— 这时候沉默是对的，别把家里那些倒出来。"""
+    places("家/浴室", "干湿分离。")
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "走走", "place": "家/客厅", "because": "闲"})
+        said = await move_to.invoke({"place": "老街/桥头"})
+
+    assert "老街/桥头" in said, f"这只手根本没成功：{said!r}"
+    assert "家/浴室" not in said, f"她在老街，却被倒了一串家里的地名：{said!r}"
+
+
+@pytest.mark.integration
+async def test_getting_the_name_right_adds_nothing_at_all(
+    moment_db, in_a_moment, places
+):
+    """写对了，给的就**只有**那份文档，一个字都不多。
+
+    只断言"没出现别的地名"挡不住这一条：多出来的可以是任何东西。
+    """
+    places("家/厨房", "灶台靠窗，窗外是那条老街。")
+    places("家/浴室", "干湿分离。")
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "找吃的", "place": "家/客厅", "because": "饿了"})
+        said = await move_to.invoke({"place": "家/厨房"})
+
+    assert said.endswith("灶台靠窗，窗外是那条老街。"), f"写对了还被加了东西：{said!r}"
+
+
+@pytest.mark.integration
+async def test_a_scan_that_blows_up_does_not_stop_her_from_moving(
+    moment_db, in_a_moment, places
+):
+    """报地名这一档是锦上添花，**它自己炸了不能把她钉在原地**。
+
+    codex T3 复现：第一段 300 个字符时 ``OSError(ENAMETOOLONG)`` 会一路抛出
+    ``arriving_at``，于是这只手返回失败——而位置那一刻**已经写进库了**，她收到一句
+    「挪个地方失败」，而且 ``ongoing_at`` 整段被跳过，这儿正在发生什么她也拿不到。
+    ``arriving_at`` 原来那条 ``except`` 的全部意义就是防这个。
+    """
+    places("家/浴室", "干湿分离。")
+    too_long = "家" * 300
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "走走", "place": "家/客厅", "because": "闲"})
+        said = await move_to.invoke({"place": f"{too_long}/里屋"})
+
+    assert too_long[:8] in said, f"扫描炸了就把她挪不动了：{said!r}"
+    assert "失败" not in said, f"她收到的是一句失败：{said!r}"
+
+
+@pytest.mark.integration
+async def test_a_path_that_normalizes_away_does_not_widen_to_other_buildings(
+    moment_db, in_a_moment, places
+):
+    """``.`` 这种段不能把范围放大到整棵树。
+
+    codex T3 复现：``./不存在`` 交给文件路径解析器会把 ``.`` 消掉、退回 ``地方/`` 根，
+    于是家里和学校的地名一起倒给她——而 :func:`app.living.place.reach_between` 判这条
+    路径对两边都是 ``OUT_OF_REACH``。两套规范化必须是同一套。
+    """
+    places("家/浴室", "干湿分离。")
+    places("学校/操场", "塑胶跑道绕着草坪。")
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "走走", "place": "家/客厅", "because": "闲"})
+        said = await move_to.invoke({"place": "./不存在"})
+
+    assert "家/浴室" not in said, f"``.`` 把范围放大到了整棵树：{said!r}"
+    assert "学校/操场" not in said
+
+
+@pytest.mark.integration
+async def test_a_padded_path_finds_the_same_building_as_the_reach_rule(
+    moment_db, in_a_moment, places
+):
+    """空白段要跟感知规则一样被略过，否则同一条路径两处判出两个答案。"""
+    from app.living.place import Reach, reach_between
+
+    places("家/浴室", "干湿分离。")
+    padded = "/ /家/不存在"
+    assert reach_between(observer=padded, happening="家/浴室") is Reach.SAME_BUILDING
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "走走", "place": "家/客厅", "because": "闲"})
+        said = await move_to.invoke({"place": padded})
+
+    assert "家/浴室" in said, f"感知规则认这是「家」，报地名这档却不认：{said!r}"
+
+
+@pytest.mark.integration
+async def test_a_document_that_exists_but_cannot_be_read_is_not_called_missing(
+    moment_db, in_a_moment, places, monkeypatch
+):
+    """读不出来 ≠ 没有这个地方。
+
+    codex T3 复现：让一份**真实存在**的 ``家/浴室.md`` 抛 ``PermissionError``，
+    输出是「设定集上没有「家/浴室」这个地方。家里已经写下来的是：家/浴室。」——
+    同一句话里自己否定自己。那条 ``except`` 捕的是所有读取失败，不只是"不存在"。
+    """
+    places("家/浴室", "干湿分离。")
+    places("家/客厅", "南向连着阳台。")
+
+    def boom(*_args, **_kwargs):
+        raise PermissionError("卷权限没了")
+
+    monkeypatch.setattr("app.living.moment.read_document_at", boom)
+
+    async with in_a_moment("akao"):
+        said = await switch_to.invoke(
+            {"doing": "洗漱", "place": "家/浴室", "because": "起床了"}
+        )
+
+    assert "没有「家/浴室」这个地方" not in said, f"把读取失败说成不存在：{said!r}"
+
+
+@pytest.mark.integration
+async def test_too_many_names_are_not_dumped_on_her(
+    moment_db, in_a_moment, places
+):
+    """超过上限就不报了 —— 糊一屏地名不如照旧沉默。"""
+    from app.living.moment import MAX_PLACE_NAMES_OFFERED
+
+    for i in range(MAX_PLACE_NAMES_OFFERED + 1):
+        places(f"家/房{i}", "随便什么。")
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "走走", "place": "家/不存在", "because": "闲"})
+        said = await move_to.invoke({"place": "家/不存在"})
+
+    assert "家/房0" not in said, f"超上限还是倒了一屏：{said!r}"
+
+
+@pytest.mark.integration
+async def test_getting_the_name_right_adds_nothing(
+    moment_db, in_a_moment, places
+):
+    """写对了就只给那个地方的样子，一个多余的字都没有。"""
+    places("家/厨房", "灶台靠窗，窗外是那条老街。")
+    places("家/浴室", "干湿分离。")
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "找吃的", "place": "家/客厅", "because": "饿了"})
+        said = await move_to.invoke({"place": "家/厨房"})
+
+    assert "灶台靠窗" in said
+    assert "家/浴室" not in said, f"写对了还给她列词表：{said!r}"
+
+
 @pytest.mark.integration
 async def test_walking_in_shows_what_is_still_going_on_here(
     moment_db, in_a_moment, places

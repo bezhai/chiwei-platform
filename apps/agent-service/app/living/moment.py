@@ -120,7 +120,7 @@ from app.living.continuity import (
     trim_for_round,
 )
 from app.living.documents import _read as read_document_at
-from app.living.documents import documents_root
+from app.living.documents import documents_root, resolve_within
 
 # 她手边那几份写好的说明：两只手，外加"有哪些可读"那一份清单（清单只能从 prompt
 # 变量进，见本模块最后一段 docstring）。
@@ -146,7 +146,7 @@ from app.living.phone import (
     render_unread,
 )
 from app.living.pictures import PICTURE_TOOLS
-from app.living.place import Reach, reach_between_people
+from app.living.place import Reach, building_of, reach_between_people
 from app.living.reading import READING_TOOLS
 from app.living.records import (
     KIND_ACT,
@@ -353,6 +353,86 @@ def _derive(*parts: str) -> str:
 
 PLACES_DIR = "地方"
 
+# 她写错地名时，最多报给她多少个真实地名。一栋楼里的地方是个位数到几十条；真长到超过
+# 这个数的时候，她要的那一条多半也不在里面，糊一屏地名不如让她照旧走进沉默。
+MAX_PLACE_NAMES_OFFERED = 30
+
+
+def _place_names_in_the_same_building(place: str) -> str:
+    """她写的地名在设定集上找不到时，报出**同一栋里确实写过的那些地名**。
+
+    **为什么要有这一档。** ``place`` 是自由字符串，而她的输入里从来没有"有哪些地方"
+    这份东西——她唯一见过的样本就是工具参数说明里那几个举例，每次换地方都是现编一个。
+    写对了走进去看得见描述，写错了走进沉默，**而沉默跟"这地方还没被写过"长得一模一样**，
+    她没有任何途径分辨，也就没有任何途径改回来。实测：coe-living 同一间浴室出现
+    ``家/浴室`` 和 ``家/二楼/洗手间`` 两种写法；prod 上 ``家/楼上/我房间`` 被绫奈和
+    千凪两个人同时用，2026-09-13 21:00 两人同一分钟落在这个地名上，各自在自己卧室、
+    判定却是同处一室。
+
+    **这跟"不编造那个地方长什么样"不冲突**（见 :func:`arriving_at`）：那条管的是不许
+    无中生有一段描述，这条是把树里确实有的地名如实报给她。给的是事实，不是猜她想去哪，
+    也不命令她改——她自己判断。
+
+    **只报同一栋。** 整棵树倒出来是一堵墙，而她要的那条就在这一栋里。整栋都没写过时
+    返回空：那时候没有词表可给，硬把别处的地名倒给她只会把她从一个真的新地方劝回去。
+    """
+    try:
+        return _scan_for_place_names(place)
+    except Exception:
+        # **整段扫描失败一律当没提示**，不能让它把她钉在原地：这个函数跑在
+        # :func:`arriving_at` 的 except 分支里，而那条 except 的全部意义就是"卷没挂上
+        # 也不该让她挪不了地方"。实测（codex T3）：第一段 300 个字符时 ``OSError``
+        # 会一路抛出去，这只手返回「挪个地方失败」—— 而位置那一刻已经写进库了，
+        # 她收到一句失败，连 ``ongoing_at`` 那段都被跳过。
+        #
+        # ``except Exception`` 不吃 ``CancelledError``（它是 BaseException），
+        # 轮次被掐断时照旧往外传。
+        logger.debug("living arriving 报地名失败，当没提示：%s", place, exc_info=True)
+        return ""
+
+
+def _scan_for_place_names(place: str) -> str:
+    """:func:`_place_names_in_the_same_building` 的正文，异常由外层统一兜住。"""
+    building = building_of(place)
+    if not building:
+        return ""
+    root = documents_root()
+    places_root = (root / PLACES_DIR).resolve()
+    base = resolve_within(root, f"{PLACES_DIR}/{building}")
+    # **这一栋必须正好是 ``地方/`` 底下的一层。** 判父目录而不是黑名单 ``.`` / ``..``：
+    # ``building_of`` 保证不含分隔符，但 ``.`` 这种段经文件路径解析后会退回 ``地方/``
+    # 自己，于是整棵树的地名一起倒给她 —— 实测 ``./不存在`` 会同时列出家里和学校的地名，
+    # 而感知规则判这条路径对两边都是够不着。
+    if base.parent != places_root:
+        return ""
+    if not base.is_dir():
+        return ""
+    # **读得出来就不是"没有这个地方"。** 这个函数只在读文档失败之后被调用，而那条
+    # except 捕的是所有读取失败：文件在、只是读不动（权限、卷掉线）也会走到这儿。
+    # 实测：让真实存在的 ``家/浴室.md`` 抛 PermissionError，输出是「设定集上没有
+    # 「家/浴室」这个地方。家里已经写下来的是：家/浴室。」—— 同一句话自己否定自己。
+    if resolve_within(root, f"{PLACES_DIR}/{place}.md").exists():
+        return ""
+
+    names: list[str] = []
+    for found in base.rglob("*.md"):
+        if not found.is_file():
+            continue
+        names.append(found.relative_to(places_root).as_posix().removesuffix(".md"))
+        # 上限同时是**扫描量**的上限，不是扫完再筛：这条链上持着她这一轮的排他占用，
+        # 而 ``asyncio.to_thread`` 只保证不阻塞事件循环，持锁时间照样被拉长。
+        if len(names) > MAX_PLACE_NAMES_OFFERED:
+            return ""
+    if not names:
+        return ""
+    names.sort()
+    # 说的是"这一份还没写过"，不是"你写错了"：同一栋里也可能真有个没被写下来的新地方，
+    # 这句话不该替她下判断，列出来的只是树上确实有的那些。
+    return (
+        f"（设定集上还没有「{place}」这一份。"
+        f"{building}里已经写下来的是：{'、'.join(names)}。）"
+    )
+
 
 async def arriving_at(place: str, *, lane: str, now: datetime) -> str:
     """走进 ``place`` 的时候看到的：这地方什么样 + 此刻这儿还在发生什么。
@@ -368,6 +448,11 @@ async def arriving_at(place: str, *, lane: str, now: datetime) -> str:
     **没写过的地方就是没写过**：不报错，也不编一段出来（宪法原则 6：宁可不记，不可
     记错）。文档读失败同理 —— 卷没挂上不该让她挪不了地方。
 
+    **但不编一段描述，不等于一个字都不说。** 找不到那一份时，会报出同一栋里确实写过的
+    那些地名（:func:`_place_names_in_the_same_building`）—— 那是树里的事实，不是对这个
+    地方的想象。没有这一档的话，"名字写歪了"和"这地方还没被写过"给她的是同一片沉默，
+    而前者的代价是她从此站在一个谁也够不着的地名上。
+
     ``ongoing_at`` 那一段是另一件事：它答的是"这儿现在正在发生什么"。感知走游标，
     下雨开始时她在家、游标早越过了那一条，而地方文档只写不变的部分 —— 不从这儿给，
     她走进学校永远不知道正在下雨。
@@ -382,6 +467,11 @@ async def arriving_at(place: str, *, lane: str, now: datetime) -> str:
     except Exception:
         # 没有这一份、卷没挂上、路径她写成了别的形状 —— 都只是"这儿没什么好描述的"。
         logger.debug("living arriving lane=%s 地方没有文档：%s", lane, place)
+        # 但同一栋里写过哪些地名是能告诉她的。同样放进线程：这一步要走文件系统，
+        # 而这只手在她每一次换地方的路径上。
+        offered = await asyncio.to_thread(_place_names_in_the_same_building, place)
+        if offered:
+            seen.append(offered)
     for h in await ongoing_at(lane=lane, place=place, now=now):
         who = "" if h.actor == WORLD_ACTOR else f"{h.actor} "
         seen.append(f"{who}{esc(h.content)}")
@@ -395,7 +485,12 @@ async def switch_to(
         str, Field(description="你现在改去做的这件事，一句话，例如「去洗澡」")
     ],
     place: Annotated[
-        str, Field(description="你人在哪，层级路径如「家/浴室」「家/楼上/我房间」")
+        # 举例里**不能出现「我房间」这种说话人相对的词**。place 是全局字符串，三个人
+        # 共用一套写法：谁写「家/楼上/我房间」都落在同一个路径上。prod 实测 45 次
+        # ``家/楼上/我房间`` 加 9 次 ``家/我房间`` 全部由绫奈和千凪两个人写出，
+        # 2026-09-13 21:00 两人同一分钟落在这个地名上 —— 各自在自己卧室，
+        # 判定却是同处一室。旧的举例正是 ``家/楼上/我房间``。
+        str, Field(description="你人在哪，层级路径如「家/浴室」「家/楼上/绫奈房间」")
     ],
     because: Annotated[
         str, Field(description="什么把你从刚才那件事里带走的，一句话")
@@ -455,7 +550,10 @@ async def switch_to(
 @tool_error("挪个地方失败")
 async def move_to(
     place: Annotated[
-        str, Field(description="你现在人在哪，层级路径如「学校/二年三班教室」")
+        # 同上：举例会被原样抄走。``学校/二年三班教室`` 被绫奈一字不差照抄过，而世界的
+        # 设定集里那间教室叫 ``学校/初二三班教室`` —— 举例里编一个设定集上没有的地名，
+        # 等于教她写一个走进去什么都看不到的地方。这里换成谁都不会歧义的公共场地。
+        str, Field(description="你现在人在哪，层级路径如「学校/操场」")
     ],
 ) -> str:
     """我人换地方了，手上的事没变。

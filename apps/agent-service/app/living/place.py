@@ -69,6 +69,24 @@ def _normalize(path: str) -> str:
     return _SEP.join(seg for seg in segments if seg)
 
 
+def building_of(path: str | None) -> str:
+    """这条路径属于哪一栋 —— 就是 :func:`reach_between` 判 ``SAME_BUILDING`` 时比的那一段。
+
+    单独暴露出来，是因为**别处也要问这个问题**（:func:`app.living.moment.arriving_at`
+    报"同一栋里有哪些地名"时要先知道是哪一栋），而那边自己拿 ``split`` 切一次就会切出
+    另一套规范化：``/ /家/不存在`` 这边算"家"、那边算空，``./不存在`` 这边算 ``.``、
+    那边交给文件路径解析器会被消成根目录。同一条路径在两处判出两个答案，而且一句报错
+    都没有。
+
+    定位不到（``None`` / 空 / 全是空白）返回空串，跟 :attr:`Reach.OUT_OF_REACH` 同源：
+    没有"在某一栋里"这个前提。
+    """
+    if not path:
+        return ""
+    segments = _normalize(path).split(_SEP)
+    return segments[0] if segments else ""
+
+
 def reach_between(*, observer: str | None, happening: str) -> Reach:
     """观察者站在 ``observer`` 时，对发生在 ``happening`` 的事够得着几分。
 

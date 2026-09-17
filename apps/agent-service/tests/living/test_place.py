@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from app.living.place import (
+    building_of,
     EVERYWHERE,
     Reach,
     reach_between,
@@ -180,3 +181,38 @@ def test_whitespace_does_not_change_the_verdict_between_people():
     assert (
         reach_between_people(observer=" 家/客厅/ ", other="家/客厅") is Reach.SAME_PLACE
     )
+
+
+# 这条路径属于哪一栋
+#
+# 单独暴露这个函数，是因为 arriving_at 报"同一栋里有哪些地名"时也要问这个问题，
+# 而它原先自己 split 了一次，切出了另一套规范化。下面几条钉的就是"两处必须同一个答案"。
+# --------------------------------------------------------------------------
+
+
+def test_the_building_is_the_segment_the_reach_rule_compares():
+    assert building_of("家/楼上/绫奈房间") == "家"
+    assert building_of("学校") == "学校"
+
+
+def test_whitespace_segments_are_skipped_like_the_reach_rule_skips_them():
+    """``/ /家/不存在`` 按感知规则属于「家」，这里必须给出同一个答案。"""
+    padded = "/ /家/不存在"
+    assert reach_between(observer=padded, happening="家/浴室") is Reach.SAME_BUILDING
+    assert building_of(padded) == "家"
+
+
+def test_a_dot_segment_is_not_silently_dropped():
+    """``.`` 要原样留着让调用方拒绝掉。
+
+    这里**不能**替调用方把它规范化掉：交给文件路径解析器时 ``.`` 会被消成根目录，
+    于是"同一栋"退化成整棵树。留着它，调用方才看得见这是一个不该接受的段。
+    """
+    assert building_of("./不存在") == "."
+
+
+def test_located_nowhere_belongs_to_no_building():
+    assert building_of(None) == ""
+    assert building_of("") == ""
+    assert building_of("   ") == ""
+    assert building_of("///") == ""
