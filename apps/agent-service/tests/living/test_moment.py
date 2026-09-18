@@ -1876,18 +1876,82 @@ async def test_the_names_offered_are_only_from_the_building_she_is_in(
 
 
 @pytest.mark.integration
-async def test_a_building_nobody_has_written_offers_no_names(
+async def test_a_building_nobody_has_written_is_told_which_buildings_exist(
     moment_db, in_a_moment, places
 ):
-    """整栋都没写过，就没有词表可给 —— 这时候沉默是对的，别把家里那些倒出来。"""
+    """整栋都没写过时，报的是**有哪几栋**，不是别处的地名。
+
+    她凭空造一个顶层地名的代价最重：按 :func:`app.living.place.reach_between`，
+    那是一栋独立的楼，家里所有人跟她互相够不着，发生在别处的事她一件也收不到。
+    实测 coe-living：千凪写 ``超市``（树上那处叫 ``街区/生鲜超市``），拿回来的只有
+    她自己那句话的回声。这时候她要的恰恰是"这世界分哪几处"。
+
+    但**不能把别的栋里的地名倒给她** —— 那是另一栋的内部词表，跟她要去的地方无关。
+    """
     places("家/浴室", "干湿分离。")
+    places("学校/操场", "塑胶跑道绕着草坪。")
 
     async with in_a_moment("akao"):
         await switch_to.invoke({"doing": "走走", "place": "家/客厅", "because": "闲"})
         said = await move_to.invoke({"place": "老街/桥头"})
 
     assert "老街/桥头" in said, f"这只手根本没成功：{said!r}"
-    assert "家/浴室" not in said, f"她在老街，却被倒了一串家里的地名：{said!r}"
+    assert "家" in said and "学校" in said, f"没告诉她世界分哪几处：{said!r}"
+    assert "家/浴室" not in said, f"把别栋的内部地名倒给她了：{said!r}"
+    assert "学校/操场" not in said, f"把别栋的内部地名倒给她了：{said!r}"
+
+
+@pytest.mark.integration
+async def test_a_name_with_no_building_at_all_is_told_which_buildings_exist(
+    moment_db, in_a_moment, places
+):
+    """只写了一段、而且这一段树上没有 —— 同一条路，报有哪几栋。
+
+    这是实测那一条的原样：``超市`` 只有一段，它自己就是"哪一栋"。
+    """
+    places("街区/生鲜超市", "冷柜贴着墙排开。")
+    places("家/厨房", "灶台靠窗。")
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "走走", "place": "家/客厅", "because": "闲"})
+        said = await move_to.invoke({"place": "超市"})
+
+    assert "街区" in said and "家" in said, f"没告诉她世界分哪几处：{said!r}"
+    assert "街区/生鲜超市" not in said, f"把别栋的内部地名倒给她了：{said!r}"
+
+
+@pytest.mark.integration
+async def test_a_one_segment_place_counts_as_a_building(
+    moment_db, in_a_moment, places
+):
+    """``地方/公园.md`` 这种一段的地方，它自己就是一栋，也要报出来。
+
+    否则树上真有的一处会从这份清单里消失，而她照着清单改名字。
+    """
+    places("公园", "长椅背后是一排香樟。")
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "走走", "place": "公园", "because": "闲"})
+        said = await move_to.invoke({"place": "广场"})
+
+    assert "公园" in said, f"一段的地方没被算进有哪几栋：{said!r}"
+
+
+@pytest.mark.integration
+async def test_too_many_buildings_are_not_dumped_on_her(
+    moment_db, in_a_moment, places
+):
+    """有哪几栋同样有上限，判据跟同栋那档一致。"""
+    from app.living.moment import MAX_PLACE_NAMES_OFFERED
+
+    for i in range(MAX_PLACE_NAMES_OFFERED + 1):
+        places(f"楼{i}/某处", "随便什么。")
+
+    async with in_a_moment("akao"):
+        await switch_to.invoke({"doing": "走走", "place": "楼0/某处", "because": "闲"})
+        said = await move_to.invoke({"place": "没这栋/某处"})
+
+    assert "楼0" not in said, f"超上限还是倒了一屏：{said!r}"
 
 
 @pytest.mark.integration

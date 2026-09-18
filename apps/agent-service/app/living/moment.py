@@ -93,6 +93,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Annotated
 
 from inner_shared.dynamic_config import dynamic_config
@@ -373,8 +374,15 @@ def _place_names_in_the_same_building(place: str) -> str:
     无中生有一段描述，这条是把树里确实有的地名如实报给她。给的是事实，不是猜她想去哪，
     也不命令她改——她自己判断。
 
-    **只报同一栋。** 整棵树倒出来是一堵墙，而她要的那条就在这一栋里。整栋都没写过时
-    返回空：那时候没有词表可给，硬把别处的地名倒给她只会把她从一个真的新地方劝回去。
+    **只报同一栋。** 整棵树倒出来是一堵墙，而她要的那条就在这一栋里。
+
+    **那一栋本身也不存在的时候，报的是有哪几栋。** 这一档是实测补上的：千凪写
+    ``超市``（树上那处叫 ``街区/生鲜超市``）拿回来的是纯粹的沉默。而按
+    :func:`app.living.place.reach_between`，凭空一个顶层地名是一栋独立的楼——家里
+    三个人跟她互相够不着，发生在 ``街区`` 上的事她一件也收不到，代价比写错一个房间名
+    重得多。她说不出这一栋叫什么的时候，要的恰恰是"这世界分哪几处"：几个词，她自己
+    就能把「超市」接回「街区/生鲜超市」。**但只报栋名，不报别栋的内部地名**——那是
+    另一栋的词表，跟她要去的地方无关，倒给她才是真把她劝回去。
     """
     try:
         return _scan_for_place_names(place)
@@ -405,15 +413,21 @@ def _scan_for_place_names(place: str) -> str:
     # 而感知规则判这条路径对两边都是够不着。
     if base.parent != places_root:
         return ""
-    if not base.is_dir():
-        return ""
     # **读得出来就不是"没有这个地方"。** 这个函数只在读文档失败之后被调用，而那条
     # except 捕的是所有读取失败：文件在、只是读不动（权限、卷掉线）也会走到这儿。
     # 实测：让真实存在的 ``家/浴室.md`` 抛 PermissionError，输出是「设定集上没有
     # 「家/浴室」这个地方。家里已经写下来的是：家/浴室。」—— 同一句话自己否定自己。
     if resolve_within(root, f"{PLACES_DIR}/{place}.md").exists():
         return ""
+    if base.is_dir():
+        return _names_under_the_building(place, building, base, places_root)
+    return _buildings_in_the_tree(place, places_root)
 
+
+def _names_under_the_building(
+    place: str, building: str, base: Path, places_root: Path
+) -> str:
+    """这一栋底下已经写过的那些地名。"""
     names: list[str] = []
     for found in base.rglob("*.md"):
         if not found.is_file():
@@ -431,6 +445,30 @@ def _scan_for_place_names(place: str) -> str:
     return (
         f"（设定集上还没有「{place}」这一份。"
         f"{building}里已经写下来的是：{'、'.join(names)}。）"
+    )
+
+
+def _buildings_in_the_tree(place: str, places_root: Path) -> str:
+    """树上一共有哪几栋 —— 她写的那一栋本身就不存在时给的。
+
+    一栋可以是目录（``地方/家/`` 底下还有房间），也可以是 ``地方/公园.md`` 这种一段
+    就到头的地方 —— 后者按 :func:`app.living.place.building_of` 同样是一栋，漏掉它
+    等于让树上真有的一处从这份清单里消失，而她照着这份清单改名字。
+    """
+    names: set[str] = set()
+    for found in places_root.iterdir():
+        if found.is_dir():
+            names.add(found.name)
+        elif found.is_file() and found.suffix == ".md":
+            names.add(found.stem)
+        # 同栋那档为什么要早返回，这里同理。
+        if len(names) > MAX_PLACE_NAMES_OFFERED:
+            return ""
+    if not names:
+        return ""
+    return (
+        f"（设定集上还没有「{place}」这一份。"
+        f"已经写下来的地方分在这几处：{'、'.join(sorted(names))}。）"
     )
 
 
