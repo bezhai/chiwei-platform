@@ -13,6 +13,8 @@ fixtures along the rootdir→test-file path.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
@@ -235,3 +237,75 @@ def in_a_moment():
                 )
 
     return bind
+
+
+# ---------------------------------------------------------------------------
+# 喂给模型的字符串里不许出现具体地名
+#
+# 她（和 world）唯一见过的地名样本，就是工具参数说明里的举例 —— **举例就是词表，会被
+# 逐字抄走**。这件事炸过两次：
+#
+#   * 举例写 ``家/楼上/我房间``，于是绫奈和千凪两个人都把自己的卧室写成这一条全局
+#     路径，2026-09-13 21:00 两人同一分钟落在同一个地名上，各自在自己屋里，判定却是
+#     同处一室。
+#   * 举例写 ``学校/二年三班教室``，被一字不差抄走，而设定集里那间教室叫
+#     ``学校/初二三班教室`` —— 同一个地方从此分成两半。
+#
+# 换一批新的写死字符串只是把过期时间往后推：世界随时可以改名、删掉、重写那些地方，
+# 而举例不会跟着变。所以这里钉的是**一个样本都不给**。
+# ---------------------------------------------------------------------------
+
+_PATH_SAMPLE = re.compile(r"\S/\S")
+
+# 这一批曾经出现在工具说明、参数描述或报错文案里。列出来是因为它们是**世界的内容**，
+# 不是格式：世界改名之后，代码里这几个字仍然在教模型写一个不存在的地方。
+NAMES_ONCE_IN_TOOL_TEXT = (
+    "我房间",
+    "绫奈房间",
+    "二年三班教室",
+    "初二三班教室",
+    "浴室",
+    "操场",
+    "客厅",
+    "厨房",
+    "文化祭",
+    "教室",
+    "走廊",
+    "阳台",
+    "灶台",
+    "老街",
+)
+
+
+def path_samples(text: str) -> list[str]:
+    """``text`` 里长得像一条具体路径的片段。
+
+    判据是**斜杠两边都贴着字**：那时候它不是在说"层与层之间用这个符号隔开"，而是在
+    把某一条具体路径摆给模型看。说清楚路径的形状不需要样本 —— 斜杠两边留空，说的是
+    这个符号本身；贴着字，说的就是某一个具体的地方。
+
+    这条判据顺带也挡住占位符（``A/B``、``某地/某处``、``<建筑>/<房间>``）：那些同样
+    是在给一个可以照着填的模板，而且比直白的规则更难懂。
+
+    唯一的例外是 ``「/」`` —— 那是在指这个符号自己（列目录时目录带的那个尾巴）。
+    """
+    return _PATH_SAMPLE.findall(text.replace("「/」", ""))
+
+
+def names_of_places_in(text: str) -> list[str]:
+    """``text`` 里出现的具体地名（:data:`NAMES_ONCE_IN_TOOL_TEXT` 那一批）。"""
+    return [name for name in NAMES_ONCE_IN_TOOL_TEXT if name in text]
+
+
+def model_facing_text(tool) -> dict[str, str]:
+    """一只手交给模型的全部字符串：整段说明 + 每个参数的描述。
+
+    按来源分开返回，红的时候一眼看得出是哪一段还留着样本。
+    """
+    texts = {"说明": tool.definition.description}
+    props = tool.definition.parameters.get("properties", {})
+    for name, schema in props.items():
+        described = schema.get("description")
+        if described:
+            texts[f"参数 {name}"] = described
+    return texts

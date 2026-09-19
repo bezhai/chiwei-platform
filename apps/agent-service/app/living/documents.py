@@ -52,13 +52,80 @@ world 维护的是**世界观**，不是物理状态的记账。这棵树就是�
 lane 决定它们写到哪条轴上；这里的隔离来自根目录，时间和 persona 一样都不用。要求一个
 用不到的 context 只会多一个保护不了任何东西的失败面。日志里印的是解析后的真实路径，
 本来就比 lane 更能说明这一次碰到了哪儿。
+
+两个写者
+--------
+
+**没有人的写入可以被静默丢掉。** 文件系统本身不拦任何东西：``write_text`` 是后写覆盖
+先写，``_edit`` 是 read-modify-write —— 两个写者同改一份，先写的那一版连同它以为自己
+做成了的那件事一起消失，两边都拿到一句"写好了"。这棵树是世界的设定集，丢掉的那一段
+不会有第二个地方留着。
+
+挡住它的是两件事，各管一种竞争：
+
+* **每份文档一把锁**。管的是*同一瞬间*：读指纹和写下去之间、``_edit`` 读到改完之间，
+  不会有别人插进来。按文档分键而不是整棵树一把 —— 两份不相干的文档之间没有任何关系，
+  共用一把锁只是让每次写入都排在上一次后面。这把锁实际上是两把，见下一节。
+* **对一份已经存在的文档做破坏性的事要带上指纹**（:func:`fingerprint_of`）。整份重写
+  （``write_document``）和删掉（``delete_document``）都算。管的是*跨调用*那条真实路径：
+  模型 ``read_document`` 一次、想一会儿、再写回来或者删掉，那中间是它自己的思考，锁按
+  住不了。指纹只从 ``read_document`` 交回来（目录里没有），所以带得出指纹 == 看过现在
+  写的是什么；对不上就拒，并让它重读一遍再决定。
+
+  **删掉和覆盖同一条规矩，不能比覆盖松。** 只给覆盖设这道门的话，带着过期指纹去盖会
+  被拦下来、什么都不带直接删却放行 —— 而删掉更狠：覆盖至少还留下新的那一版，删掉是把
+  那一份整个带走。
+
+``edit_document`` 不要指纹：``find`` 必须唯一命中本来就是一次 CAS —— 别人改过那一段，
+锚点就找不到了，它照旧会被拒。锁保证"找到"和"改完"之间没人插队。
+
+**失败一律出声。** 拒绝的那几种（没带指纹、指纹过期、文档被删了）都是"一个字都没动"
+外加一句它能照着做的话，跟 :class:`app.living.continuity.TranscriptConflict` 同一条：
+默默覆盖等于把另一个人刚写下的一整段丢掉，而且没有任何痕迹。
+
+锁按住的是碰盘那一段，不是那个协程
+----------------------------------
+
+碰盘跑在 ``asyncio.to_thread`` 里，而**取消只到得了协程，到不了线程**：协程被取消时
+``async with`` 会退出、锁跟着放开，那个线程一行都停不下来。只有一把 asyncio 锁的话，
+"锁按住的那一段"和"真正碰盘的那一段"就错开了，后者伸到锁外面去：
+
+1. 甲拿到锁，过了指纹检查，还没写盘；
+2. 甲那个协程被取消 —— 锁放开，甲的线程接着跑；
+3. 乙拿到锁，盘上确实还是甲读到的那一版，于是指纹对得上、写下去、**拿到一句写好了**；
+4. 甲的线程这时才落盘，把乙那一版盖掉。
+
+乙拿到的是成功确认，最终文件是甲的内容 —— 正是这一层承诺不会发生的那件事，单进程就能
+复现。所以这里是两把锁，各管一头：
+
+* :func:`app.living.serial.hold`（asyncio 锁）管协程这一侧的排队，顺带带来
+  :data:`app.living.serial.HELD_SECONDS` 那个上限 —— 一次挂死的落盘不会把这一份永久扣住。
+* :func:`_file_lock`（``threading.Lock``）管线程这一侧。**它才是覆盖真正碰盘那一段的
+  那把**：它在线程里拿、在线程里放，协程有没有被取消跟它无关。于是上面第 3 步的乙会
+  一直等到甲的线程真的写完，然后读到甲写下的内容、发现指纹对不上、**被拒**。
+
+两把锁的获取顺序永远是 asyncio 锁在外、线程锁在内，同一次调用各只拿一把、不嵌套，
+所以不会死锁；线程锁按住的那一段里没有任何 await，不会把事件循环拖住。
+
+**代价是等在线程锁上的那个线程真的占着一个 executor 槽**（等在 asyncio 锁上是不占的）。
+同一个键在任一瞬间最多有一个这样的等待者 —— 外层那把 asyncio 锁本来就只放一个进来 ——
+外加被取消那几次留下的、还没跑完的线程，而 900 秒那个上限决定了后者最快每 15 分钟才多
+一个。真要把这一点也拿掉，得给线程锁的等待带上限，那是另一件事。
+
+取消之后线程还会做完手上这一次（**已经动过手的半途收手更坏**：``_edit`` 的
+read-modify-write 断在中间就是一份被改了一半的文档），但**不会再开一次新的**：拿到线程
+锁时发现没人等这个结果了就什么都不做。不然一次挂住的落盘后面会排下一整串补写，挂住的
+解开之后它们挨个补上 —— 那些写入不出现在任何一次工具返回里，下一轮读回来树却已经变了。
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -66,6 +133,7 @@ from pydantic import Field
 
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
+from app.living.serial import hold
 from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
@@ -89,7 +157,49 @@ MAX_LISTING_ENTRIES = 400
 # 设定却不知道，就会把残篇当成世界的全貌，然后据此改写别的文档。
 DOCUMENT_CUT_MARK = "这里被截断了"
 
+# 指纹跟着正文一起交回去，这句话是模型认出它的记号。**它只出现在 read / write 交回
+# 去的那段话里**，目录里没有：指纹要是能不读就拿到，它就成了一个纯版本号，而这道门
+# 挡的正是"没看过现在写的是什么就整份换掉"。
+DOCUMENT_FINGERPRINT_MARK = "这一份现在的指纹"
+
+# 指纹取多少位。摘要越短越省上下文，而它只需要区分同一份文档的两个版本：12 位十六
+# 进制 = 48 bit，撞上的概率远低于这套东西里任何一条别的假设。
+FINGERPRINT_CHARS = 12
+
 _SEP = "/"
+
+# ---------------------------------------------------------------------------
+# 说清路径的形状，但一条具体路径都不摆出来
+#
+# 这几只手的参数描述里原来举着 ``地方/家/厨房.md``、``当下/文化祭.md``、``地方``。
+# 它们既是路径形状的说明，**也是世界的内容** —— 而这棵树正是 world 自己在写的：那几
+# 份文档改名、搬走、删掉之后，代码里这几个字仍然在教它写一条早就不成立的路径。
+#
+# 同一个病在她那侧炸过两次（见 :data:`app.living.place.PLACE_SHAPE` 上方那段）：
+# 举例就是词表，会被逐字抄走。换一批新的写死字符串只是把过期时间往后推。
+#
+# 路径形状不需要样本：几层、用什么隔开、末一段是什么，直说就行。占位符
+# （``A/B``、``<目录>/<文件>.md``）同样不给 —— 那还是一个可以照着填的模板。
+#
+# **只有 write_document 需要说形状**：另外四只手写的都是树上已经有的路径，
+# ``list_documents`` 列出来的那份清单就是它们的样本来源，照着抄即可。
+# ---------------------------------------------------------------------------
+
+NO_DOCUMENT_NAMED = "没说是哪一份文档。写一条相对树根的路径，层与层之间用 / 隔开。"
+
+WHERE_TO_WRITE = (
+    "写到哪：一条相对树根的路径，层与层之间用 / 隔开，"
+    "末一段是这份文档的文件名，带 .md 后缀；中间的目录不存在会自动建"
+)
+
+
+def fingerprint_of(body: str) -> str:
+    """这一段正文的指纹。**认的是内容，不是时间也不是长度。**
+
+    换成 mtime 的话，同一秒内的两次写入分不出来；换成长度的话，改一个字换一个字就是
+    同一个指纹。内容摘要没有这两种盲区：正文变了指纹一定变。
+    """
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:FINGERPRINT_CHARS]
 
 
 def documents_mount() -> Path:
@@ -141,7 +251,7 @@ def resolve_within(root: Path, path: str) -> Path:
     """
     raw = path.strip()
     if not raw:
-        raise ValueError("没说是哪一份文档。写一条相对路径，例如「地方/家/厨房.md」。")
+        raise ValueError(NO_DOCUMENT_NAMED)
     if "\x00" in raw:
         raise ValueError("路径里有非法字符。")
     if raw.startswith(_SEP) or raw.startswith("\\"):
@@ -149,7 +259,7 @@ def resolve_within(root: Path, path: str) -> Path:
 
     segments = [seg for seg in raw.replace("\\", _SEP).split(_SEP) if seg and seg != "."]
     if not segments:
-        raise ValueError("没说是哪一份文档。写一条相对路径，例如「地方/家/厨房.md」。")
+        raise ValueError(NO_DOCUMENT_NAMED)
     if ".." in segments:
         raise ValueError(f"「{path}」里有 ..，文档树外面的东西碰不到。")
 
@@ -260,7 +370,44 @@ def _read(root: Path, path: str) -> str:
     return body
 
 
-def _write(root: Path, path: str, content: str) -> str:
+def _fingerprint_footer(fingerprint: str) -> str:
+    """挂在正文后面的那截。模型认的是 :data:`DOCUMENT_FINGERPRINT_MARK` 这句话。
+
+    跟 :data:`DOCUMENT_CUT_MARK` 同一条路子：**必须出现在交回去的正文里**，只记一行
+    日志等于没说。挂在末尾而不是开头，是为了让正文那一段还能被逐字取下来。
+    """
+    return (
+        f"\n\n【{DOCUMENT_FINGERPRINT_MARK}：{fingerprint}，"
+        f"想整份换掉它（write_document）或者删掉它（delete_document）就把这一串带上 —— "
+        f"中途被别人改过会当场拦下来，而不是把那一版悄悄抹掉。】"
+    )
+
+
+def _read_with_fingerprint(root: Path, path: str) -> str:
+    """:func:`_read` 的正文，后面缀上这一份此刻的指纹。
+
+    **只有这只手（和写入那只）交指纹。** :func:`_read` 自己一个字不动：她走进厨房看到
+    的那段描述走的是同一个函数（:mod:`app.living.moment`），那里冒出一串十六进制就是
+    出戏。
+
+    正文和指纹是两次触盘，所以这个函数必须在那把锁里跑 —— 中间被写了一版的话，交回去
+    的就是"上一版的正文配下一版的指纹"，它照着改完写回来一路畅通，而它改的是一份自己
+    从没读过的正文。那比直接放行覆盖更坏：门开着，还看起来是关的。
+    """
+    body = _read(root, path)
+    whole = resolve_within(root, path).read_text(encoding="utf-8")
+    return body + _fingerprint_footer(fingerprint_of(whole))
+
+
+def _write(root: Path, path: str, content: str, fingerprint: str = "") -> str:
+    """整份重写。**覆盖一份已经存在的文档必须带上读到的那一版的指纹。**
+
+    没带 = 它没看过现在写的是什么，覆盖过去就是把别人写的那一段静默丢掉；带的那个对
+    不上 = 它读完之后有人改过，照着旧正文写回来同样是丢掉那一段。两种都拒，都是一个
+    字都没写。
+
+    新建一份不要指纹：那时候没有任何人的写入会被吃掉。
+    """
     target = resolve_within(root, path)
     if len(content) > MAX_DOCUMENT_CHARS:
         # **不截断落盘**：落进去的是残篇而它以为写全了，下一轮读回来就当成全貌。
@@ -272,9 +419,39 @@ def _write(root: Path, path: str, content: str) -> str:
     if target.is_dir():
         raise IsADirectoryError(f"「{path}」是一个目录，不能当成一份文档写。")
 
+    given = fingerprint.strip()
+    on_disk = target.read_text(encoding="utf-8") if target.is_file() else None
+    if on_disk is None:
+        if given:
+            # 删掉也是一次写入：一条线走完了就是把它那一份删掉，不能被一次过期的覆盖
+            # 写回来 —— 那一份会以"它还在"的样子接着进世界。
+            raise ValueError(
+                f"「{path}」在你读到之后被删掉了（你带的指纹是 {given}），一个字都没写。"
+                "它那条线多半已经走完了；确实要重新起一份的话，不带指纹再来一次。"
+            )
+    else:
+        current = fingerprint_of(on_disk)
+        if not given:
+            raise ValueError(
+                f"「{path}」已经有了（{len(on_disk)} 字），一个字都没写 —— "
+                "整份换掉之前得先看看它现在写的是什么。先 read_document 读一遍，"
+                "把末尾那个指纹带上再写。"
+            )
+        if given != current:
+            raise ValueError(
+                f"「{path}」在你读到之后被改过了（你带的指纹是 {given}，"
+                f"现在是 {current}），一个字都没写。重新 read_document 读一遍，"
+                "在新的那一版上改，再带着新指纹写回来 —— 直接盖过去会把别人刚写下的"
+                "那一段丢掉。"
+            )
+
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
-    return f"写好了：{_relative(root, target)}（{len(content)} 字）"
+    return (
+        f"写好了：{_relative(root, target)}（{len(content)} 字）。"
+        f"【{DOCUMENT_FINGERPRINT_MARK}：{fingerprint_of(content)}，"
+        f"接着改它就带上这一串，不用再读一遍。】"
+    )
 
 
 def _edit(root: Path, path: str, find: str, replace: str) -> str:
@@ -313,11 +490,15 @@ def _edit(root: Path, path: str, find: str, replace: str) -> str:
     return f"改好了：{_relative(root, target)}"
 
 
-def _delete(root: Path, path: str) -> str:
-    """删掉一份文档。**只删文件。**
+def _delete(root: Path, path: str, fingerprint: str = "") -> str:
+    """删掉一份文档。**只删文件，而且必须带上读到的那一版的指纹。**
 
-    删一份和端掉整个「设定/」不能是同一只手：前者是一条线走完了，后者是世界没了。
-    目录要清空的话一份一份删，那个笨拙本身就是刹车。
+    删一份和端掉整个目录不能是同一只手：前者是一条线走完了，后者是世界没了。目录要
+    清空的话一份一份删，那个笨拙本身就是刹车。
+
+    指纹那道门跟 :func:`_write` 同一条规矩，理由见模块 docstring：删掉比覆盖更狠，
+    不能反而更容易。没带 = 它没看过现在写的是什么；带的那个对不上 = 它读完之后有人
+    改过，删下去就把那一段一起带走了。两种都拒，都是一个字没动。
     """
     target = resolve_within(root, path)
     if target.is_dir():
@@ -327,8 +508,102 @@ def _delete(root: Path, path: str) -> str:
     if not target.exists():
         raise FileNotFoundError(f"没有「{path}」这一份。{_nearby(root, target)}")
 
+    given = fingerprint.strip()
+    on_disk = target.read_text(encoding="utf-8")
+    current = fingerprint_of(on_disk)
+    if not given:
+        raise ValueError(
+            f"「{path}」还在（{len(on_disk)} 字），一个字都没动 —— "
+            "删掉它之前得先看看它现在写的是什么。先 read_document 读一遍，"
+            "把末尾那个指纹带上再来删。"
+        )
+    if given != current:
+        raise ValueError(
+            f"「{path}」在你读到之后被改过了（你带的指纹是 {given}，"
+            f"现在是 {current}），一个字都没动。重新 read_document 读一遍，"
+            "确认那条线真的走完了，再带着新指纹来删 —— 照着旧的那一版删下去会把"
+            "别人刚写进去的那一段一起带走。"
+        )
+
     target.unlink()
     return f"删掉了：{_relative(root, target)}"
+
+
+def _one_document(root: Path, path: str) -> str:
+    """这一份文档那把锁的键。两把锁（协程那把、线程那把）共用它。
+
+    键取**解析后的真实路径**，所以同一份文件的几种写法（同一条路径多写一个分隔符、
+    一条指过来的符号链接）共用同一把锁。解析不出来（逃逸路径）在这儿就抛，跟没有锁
+    的时候是同一句话。
+
+    两把锁都是**进程内**的，前提是 agent-service 单副本（同 :mod:`app.living.serial`
+    那条）。多副本下它们拦不住跨进程的两个写者 —— 那时候要么给这棵树换一层带 CAS 的
+    存储，要么先做 leader election。
+    """
+    return f"world-docs:{resolve_within(root, path)}"
+
+
+# 每份文档的线程锁，键同 :func:`_one_document`。为什么光有 ``hold`` 那把 asyncio 锁
+# 不够，见模块 docstring 最后一节。
+#
+# 不按事件循环分桶（``serial`` 那边要分是因为 ``asyncio.Lock`` 第一次排队时会绑死当
+# 时的循环）：``threading.Lock`` 跟循环无关，一把就够。条目只增不减，但键是这棵树上
+# 的文档路径，数量被树本身压着。
+_file_locks: dict[str, threading.Lock] = {}
+_file_locks_guard = threading.Lock()
+
+
+def _file_lock(key: str) -> threading.Lock:
+    """``key`` 那一份文档的线程锁；还没有就现建一把。"""
+    with _file_locks_guard:
+        lock = _file_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _file_locks[key] = lock
+        return lock
+
+
+def _inside_the_lock(
+    key: str, dropped: threading.Event, work: Callable[..., str], *args: object
+) -> str:
+    """按住 ``key`` 那一份，把 ``work`` 做完。**这一整段都在同一个线程里。**
+
+    ``dropped`` 是"等这个结果的那个协程已经没了"。拿到锁时它已经立起来的话，说明这一
+    次还一个字都没碰过盘 —— 那就什么都不做。做了也没人接得到那句话：它不出现在任何一
+    次工具返回里，可下一轮读回来树已经变了。
+
+    检查放在锁里、``work`` 之前，过了这一关就不再看它：**已经动过手的那一次要做完**，
+    半途收手更坏 —— :func:`_edit` 的 read-modify-write 断在中间就是一份被改了一半的
+    文档。返回值这时候没有人接，是什么都不重要。
+    """
+    with _file_lock(key):
+        if dropped.is_set():
+            logger.info(
+                "world documents 这一次还没碰盘就已经没人等结果了，什么都没做 key=%s",
+                key,
+            )
+            return ""
+        return work(*args)
+
+
+async def _touch_disk(key: str, work: Callable[..., str], *args: object) -> str:
+    """把 ``work`` 放进线程跑，全程按住 ``key`` 那一份文档。
+
+    两把锁各管一头，缺一不可（为什么，见模块 docstring 最后一节）：``hold`` 管协程那
+    一侧的排队和 900 秒上限，:func:`_file_lock` 管线程那一侧、覆盖真正碰盘的那一段。
+
+    取消从这里传给线程：``await`` 被取消时线程还在跑，立一面旗让它在动手之前看得到。
+    旗立得晚了（它已经进了 ``work``）就没用，那时候按"做完"算。
+    """
+    dropped = threading.Event()
+    async with hold(key):
+        try:
+            return await asyncio.to_thread(
+                _inside_the_lock, key, dropped, work, *args
+            )
+        except asyncio.CancelledError:
+            dropped.set()
+            raise
 
 
 @tool
@@ -336,7 +611,9 @@ def _delete(root: Path, path: str) -> str:
 async def list_documents(
     under: Annotated[
         str,
-        Field(description="只看哪个目录底下，例如「地方」；留空就是整棵树"),
+        Field(
+            description="只看树上的哪个目录底下，写它在树里的路径；留空就是整棵树"
+        ),
     ] = "",
 ) -> str:
     """看看这个世界的设定集里现在都有些什么。
@@ -366,7 +643,7 @@ async def list_documents(
 async def read_document(
     path: Annotated[
         str,
-        Field(description="这一份的路径，例如「地方/家/厨房.md」；照 list_documents 列出来的抄"),
+        Field(description="这一份的路径，照 list_documents 列出来的逐字抄"),
     ],
 ) -> str:
     """把设定集里的一份从头读一遍。
@@ -377,14 +654,19 @@ async def read_document(
     一份太长会只读到前面一部分，截了会写在末尾 —— 看到那句话就知道你读到的不是全的，
     别拿它当这一份的全貌去改别的文档。
 
+    **末尾还有一串指纹，那是你读到的这一版的记号。** 想整份换掉这一份（write_document）
+    就把它带上：中间要是有别人改过，你的覆盖会被拦下来，而不是把那一版悄悄盖掉。
+
     Args:
         path: 这一份的路径。
 
     Returns:
-        那一份的正文。
+        那一份的正文，末尾缀着这一版的指纹。
     """
     root = documents_root()
-    body = await asyncio.to_thread(_read, root, path)
+    body = await _touch_disk(
+        _one_document(root, path), _read_with_fingerprint, root, path
+    )
     logger.info("world documents 读 root=%s path=%r（%d 字）", root, path, len(body))
     return body
 
@@ -394,32 +676,52 @@ async def read_document(
 async def write_document(
     path: Annotated[
         str,
-        Field(description="写到哪，例如「当下/文化祭.md」；目录不存在会自动建"),
+        Field(description=WHERE_TO_WRITE),
     ],
     content: Annotated[str, Field(description="这一份的全部正文")],
+    fingerprint: Annotated[
+        str,
+        Field(
+            description=(
+                "你上一次 read_document（或 write_document）交回来的那串指纹；"
+                "换掉一份已经存在的文档时必填，第一次写下一份留空"
+            )
+        ),
+    ] = "",
 ) -> str:
     """写下一份文档，或者把已有的一份整份换掉。
 
     **这是整份重写，不是追加。** 已经有这一份的话，原来的内容全部被换成你这次给的。
     只改其中一句用 edit_document。
 
+    **换掉一份已经存在的文档，要带上你读到的那一版的指纹。** 指纹在 read_document 交回
+    来的正文末尾。没带、或者带的那一串已经过期（你读完之后有人改过），这次写入会被拒，
+    一个字都不会写 —— 那时候重新 read_document 读一遍，在新的那一版上改，再带着新指纹
+    写回来。不这么做的话，你会把别人刚写下的整段悄悄盖掉，而且两边都不会知道。
+
+    第一次写下一份不需要指纹。写成之后交回来的话里会有这一份的新指纹，接着改它带上
+    那一串就行，不用再读一遍。
+
     路径里的目录不存在会自动建，不用先建目录。
 
-    **写自然的描述，不要写属性表。** 这些内容最终会变成她看到的东西 —— 写成
-    「# 厨房 / ## 布局 / 灶台靠窗」会很出戏，写成「灶台靠窗，窗外是那条老街」才是
-    一个人走进厨房时看到的样子。
+    **写自然的描述，不要写属性表。** 这些内容最终会变成她看到的东西 —— 分级标题
+    套着字段名、一行一条属性，读起来会很出戏；同样的内容写成连贯的句子（走进去第一
+    眼看到什么、那儿正是什么样），才是一个人真的站在那儿看到的东西。
 
     一份有字数上限，超了会**一个字都不写**并且告诉你 —— 那时候拆成几份，别硬塞。
 
     Args:
         path: 写到哪。
         content: 这一份的全部正文。
+        fingerprint: 你读到的那一版的指纹；新写一份留空。
 
     Returns:
-        一句确认。
+        一句确认，末尾带着这一份的新指纹。
     """
     root = documents_root()
-    said = await asyncio.to_thread(_write, root, path, content)
+    said = await _touch_disk(
+        _one_document(root, path), _write, root, path, content, fingerprint
+    )
     logger.info("world documents 写 root=%s path=%r（%d 字）", root, path, len(content))
     return said
 
@@ -427,7 +729,9 @@ async def write_document(
 @tool
 @tool_error("这一处没改成")
 async def edit_document(
-    path: Annotated[str, Field(description="改哪一份，例如「地方/家/厨房.md」")],
+    path: Annotated[
+        str, Field(description="改哪一份，照 list_documents 列出来的逐字抄")
+    ],
     find: Annotated[
         str,
         Field(description="要被换掉的那一段原文，逐字照抄；必须在这一份里独一无二"),
@@ -441,6 +745,9 @@ async def edit_document(
 
     找不到也会报错。两种情况都是一个字都没改，可以放心重来。
 
+    **这只手不要指纹**：find 逐字唯一命中本身就顶了指纹的用 —— 别人把那一段改过了，
+    锚点就找不到了，这次替换照样会被拒。
+
     改一整份用 write_document；改一句用这只手。
 
     Args:
@@ -452,7 +759,9 @@ async def edit_document(
         一句确认。
     """
     root = documents_root()
-    said = await asyncio.to_thread(_edit, root, path, find, replace)
+    said = await _touch_disk(
+        _one_document(root, path), _edit, root, path, find, replace
+    )
     logger.info("world documents 改 root=%s path=%r", root, path)
     return said
 
@@ -460,23 +769,43 @@ async def edit_document(
 @tool
 @tool_error("这一份没删成")
 async def delete_document(
-    path: Annotated[str, Field(description="删哪一份，例如「当下/文化祭.md」")],
+    path: Annotated[
+        str, Field(description="删哪一份，照 list_documents 列出来的逐字抄")
+    ],
+    fingerprint: Annotated[
+        str,
+        Field(
+            description=(
+                "你上一次 read_document（或 write_document）交回来的那串指纹；"
+                "删掉一份文档时必填"
+            )
+        ),
+    ] = "",
 ) -> str:
     """把一份文档删掉。
 
     一条线走完了就是把它那一份删掉 —— 不用留一个"已结束"的标记，设定集里不该有
     只为了记状态而存在的东西。
 
+    **删掉之前要带上你读到的那一版的指纹**，跟整份换掉是同一条规矩：删掉比换掉更狠，
+    换掉至少还留下新的那一版，删掉是把这一份整个带走。指纹在 read_document 交回来的
+    正文末尾。没带、或者带的那一串已经过期（你读完之后有人改过），这次删除会被拒，
+    一个字都不会动 —— 那时候重新 read_document 读一遍，看看新写进去的那一段是什么，
+    确认这条线真的走完了再来。
+
     **只删单份文档，删不了目录。** 整个目录要清就一份一份来。
 
     Args:
         path: 删哪一份。
+        fingerprint: 你读到的那一版的指纹。
 
     Returns:
         一句确认。
     """
     root = documents_root()
-    said = await asyncio.to_thread(_delete, root, path)
+    said = await _touch_disk(
+        _one_document(root, path), _delete, root, path, fingerprint
+    )
     logger.info("world documents 删 root=%s path=%r", root, path)
     return said
 
