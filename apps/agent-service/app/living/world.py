@@ -5,6 +5,14 @@
 （:mod:`app.living.calendar`）。**另一件是维护那棵文档树**
 （:mod:`app.living.documents`）：地方长什么样、人是谁、设定是什么，都是文件。
 
+**它还够得着真实世界**（:data:`OUTSIDE_SOURCE_TOOLS`）：天气、日出日落、农历节气、
+节假日、今天更新的番、那座城市这两周在卖票的活动，六只手。这几样从前由一层代码（已删）
+每个生活日替它取一次再广播出去 —— 代码去取数，代码就得知道查哪座城市、几点去查、取回来
+怎么说、一天查几次，四个写死同出一源。交到它手上
+之后这四个一起消失：城市是它传的（这家人住在哪写在它自己的设定集里）、什么时候看是它
+定的、拿到的是原始事实、想再看一次就再看一次。**代价是它可能不看** —— 接受了，不补
+兜底、不提醒、不自动注入。
+
 **它不写世界叙述。** 上一代每轮被要求描述此刻的世界，14 天 prod 实测烧掉总消耗约一半
 去写「水槽水珠成浅印」这类静物记账，那些字没有任何一个变成她能遇上的事。设定写进文档
 只写一次、之后一直在；这一轮该不该冒出点新东西是另一个问题。所以一轮只回一句「没有」
@@ -54,6 +62,14 @@ from app.agent.neutral import Message, Role
 from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
+from app.agent.tools.external_sources import (
+    query_anime_calendar,
+    query_city_events,
+    query_holiday,
+    query_lunar_term,
+    query_sun_times,
+    query_weather,
+)
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
 from app.data.session import get_session
@@ -75,6 +91,7 @@ from app.living.happening import (
     read_all_after,
     seq_before,
 )
+from app.living.place import PLACE_SHAPE
 from app.living.records import WORLD_ACTOR, Happening, _require_aware, esc
 from app.living.serial import hold
 from app.living.upcoming import list_upcoming_between, schedule_upcoming
@@ -241,12 +258,25 @@ async def expect(
     place: Annotated[
         str,
         Field(
-            # 举例用设定集上真有的那个地名。``家/门口`` 设定集上没有（那扇门叫
-            # ``家/玄关``），而举例是会被原样抄走的 —— 见 :func:`app.living.moment.switch_to`
-            # 那两条注释，同一个坑在她那侧已经踩出过一次真事故。
-            description="发生在哪，层级路径如「家/玄关」；"
-            "写一整片（「学校」）就是那一片里的人都碰得上；"
-            "不属于任何地方（天黑、台风）就留空"
+            # **这里不举地名的例子。** 判据跟她那侧同一条：样本和规则的区别在于斜杠两
+            # 边有没有贴着字 —— ``家/玄关`` 是样本，``<建筑>/<房间>`` 也是样本（占位符
+            # 同样是个可以照着填的模板，只是更难懂），而"层与层之间用 / 隔开"是规则。
+            # 举例就是词表，会被逐字抄走；她那侧为此炸过两次线上事故，原委写在
+            # :data:`app.living.place.PLACE_SHAPE` 上方那一段。
+            #
+            # 说形状那一段**就是她那侧的同一份**（引的同一个常量）：world 写的地点和她
+            # 写的地点落在同一套地名空间上，同一个地方两边写成同一条路径才算同一处，两
+            # 边各写一份措辞必然漂开，而漂开的表现就是同一个地方裂成两个。
+            #
+            # 后面那两句是这只手自己的：事情的范围（只写最外面那一层 = 一整片）和留空
+            # 等于到处 —— 她那侧没有这两档，人不是范围（见
+            # :func:`app.living.place.reach_between_people`）。
+            description=(
+                "发生在哪。"
+                + PLACE_SHAPE
+                + "只写最外面那一层，就是那一整片里的人都碰得上；"
+                "不属于任何地方（天黑、台风）就留空"
+            )
         ),
     ] = "",
     lasts_minutes: Annotated[
@@ -262,9 +292,9 @@ async def expect(
     只说**是什么、在哪、多久之后、持续多久**。谁会碰上它不用你管——到点了它自己会
     发生，在场的人自然感知得到。
 
-    **地点就是这件事的范围**：写一个具体位置（「家/厨房」）就是那儿的人碰得上；写一
-    整片（「学校」）就是这片里的人都碰得上；不属于任何地方的（天黑了、台风来了）
-    **留空**，那样在哪的人都碰得上。别为了填而编一个地点。
+    **地点就是这件事的范围**：写到具体的那一层就是站在那儿的人碰得上；只写最外面那
+    一层就是这一整片里的人都碰得上；不属于任何地方的（天黑了、台风来了）**留空**，那
+    样在哪的人都碰得上。别为了填而编一个地点 —— 地名照设定集上写着的那个写。
 
     **持续多久决定后到的人知不知道。** 填 0 的事是一瞬间的：它发生的那一刻在场的人
     知道，之后走进来的人不知道，这对「快递送到门口」是对的。会持续一段的事
@@ -313,11 +343,45 @@ async def expect(
     return f"记下了：{due_at.strftime('%m-%d %H:%M')} 「{what}」"
 
 
-# 它这一轮手里的东西：一棵文档树（世界的设定集）加一只"让一件事发生"。
+# 它够得着的真实世界：天气、日出日落、农历节气、节假日、今天更新的番、那座城市这两周
+# 在卖票的活动（:mod:`app.agent.tools.external_sources`）。
+#
+# **这六只是它的手，不是一层代码。** 从前有一层代码每个生活日凌晨替它去问一轮、贴上
+# 标签广播成一件所有人都感知得到的事。代码去取数，代码就必须知道查哪座城市
+# （于是市名写进配置）、几点去取（于是有个写死的钟点）、取回来怎么呈现（于是有一张呈现
+# 表）、一天取几次（于是凌晨四点的实况要带一整天）。四个写死是同一个根：不该由代码替它
+# 取数。交到它手上之后，城市是它传的（那写在它自己的设定集里）、什么时候看是它定的、
+# 拿到的是原始事实、想再看一次就再看一次。
+#
+# **代价是它可能不看。** 接受了 —— 不补兜底、不提醒、不自动注入。用强推消除不确定性
+# 是这个项目明令禁止的形状。
+#
+# **不给她们。** 她在世界里：下雨是她走到窗边感受到的，不是她查一次 API 查到的。world
+# 是世界事实的唯一来源，它看见了写进世界，她通过世界感知。还有第二层理由 —— 这六只交
+# 回来的是上游原样的字节，而她那段文本里有带属性的标记（``<msg … rel="owner">``，
+# :mod:`app.living.phone`），把没转义的上游字节放进去就是一个伪造身份的口子；它这边没有
+# 那种标记。用例 ``test_she_does_not_get_these_hands`` 钉着。
+#
+# **但那条用例只证明得了直接调用这一头。** 上游的字节进了它的上下文之后还有两跳能走到
+# 她眼前：抄进 ``Happening.content``（两处渲染都转义），或者抄进一份地方文档的正文 /
+# 文件名（她走进去时看到，转义在 :func:`app.living.moment.arriving_at`）。后一条不能靠
+# "别给她那只手"来堵 —— 她本来就没有读文档的手，是**文档正文自己走到她眼前的**。
+# 门禁在 ``tests/living/test_no_forged_markup.py`` 的「地方文档」那一节。
+OUTSIDE_SOURCE_TOOLS = [
+    query_weather,
+    query_sun_times,
+    query_lunar_term,
+    query_holiday,
+    query_anime_calendar,
+    query_city_events,
+]
+
+# 它这一轮手里的东西：一棵文档树（世界的设定集）、一只"让一件事发生"、六只够得着真实
+# 世界的手。
 #
 # ``update_outline`` / ``describe_place`` / ``npc_visit`` 这些都不需要 —— 全是文档的
 # 写入。NPC 登场就是让一件事发生（「林小满来敲门」），她是谁写在 ``人/林小满`` 里。
-WORLD_ROUND_TOOLS = [*DOCUMENT_TOOLS, expect]
+WORLD_ROUND_TOOLS = [*DOCUMENT_TOOLS, expect, *OUTSIDE_SOURCE_TOOLS]
 
 # 哪些返回是素材（过期了再读一次就有），哪些要留着。裁剪层不给默认值，所以这两张表
 # 必须在这儿写全；用例 ``test_every_hand_it_has_is_classified`` 钉住两份正好覆盖
@@ -326,7 +390,14 @@ WORLD_ROUND_TOOLS = [*DOCUMENT_TOOLS, expect]
 # 读回来的设定是素材：它当时读过、想过，结论已经变成它自己的话留在上下文里；原文过期
 # 了再读一次就有。**它自己改过什么则要留着** —— 那是"这件事到底做成了没有"的唯一记录，
 # 裁掉它会照着一个不知道成没成的动作再来一遍。
-WORLD_MATERIAL_TOOLS = frozenset({"list_documents", "read_document"})
+#
+# **外面那六样也是素材，而且它们是真的会过期的那种**：天气是这一刻的实况、番是今天的、
+# 活动是这两周的。留着的话，凌晨那一份天气会跟着它走一整天 —— 那正是旧投递层"一天只取
+# 一次"的病换个地方重新长出来。想知道后来变了没有，再看一次就有。
+WORLD_MATERIAL_TOOLS = frozenset(
+    {"list_documents", "read_document"}
+    | {t.definition.name for t in OUTSIDE_SOURCE_TOOLS}
+)
 WORLD_KEPT_TOOLS = frozenset(
     {"write_document", "edit_document", "delete_document", "expect"}
 )
@@ -449,8 +520,9 @@ def _line(h: Happening, *, now: datetime) -> str:
     **它不站在任何地方**，所以这里不走三档裁剪（:func:`app.living.happening.perceive`）
     —— 那一套答的是"在场的人听见了什么"，而 world 要知道的是世界上客观发生了什么。
 
-    ``content`` 过 :func:`app.living.records.esc`：这一条上有逐字通道 ——
-    :func:`app.living.outside.look_outside` 把天气、番名从外部数据源逐字拼进 content。
+    ``content`` 过 :func:`app.living.records.esc`：这条路上有第三方的字节 —— 它自己
+    够得着六个真实数据源（:data:`OUTSIDE_SOURCE_TOOLS`），把外面的天气、番名抄进世界
+    时，上游写下的字节就转写到了 content 上。
     ``actor`` / ``place`` 不过，它们是 persona id 和世界的地点路径，取值由代码定死。
     """
     where = h.place if h.place else "（没记下地点）"

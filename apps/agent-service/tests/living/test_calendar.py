@@ -102,9 +102,8 @@ def test_a_slot_without_a_place_is_ambient():
 def test_an_unusable_config_falls_back_to_the_builtin_schedule(raw):
     """配脏了不能让世界的钟停掉 —— 退回内置那份，并且吵一声（见实现的 warning）。
 
-    这跟 ``world_daylight_coords`` 配脏就不拼日照那条不一样：那边编一个日落时刻是
-    撒谎，这边退回内置作息只是回到默认值，而「今天一件会到期的事都没有」才是真的
-    把实验弄死。
+    这跟外面那几只手拿不到城市就不给日落那条不一样：那边编一个日落时刻是撒谎，这边
+    退回内置作息只是回到默认值，而「今天一件会到期的事都没有」才是真的把实验弄死。
     """
     assert parse_schedule(raw) == DEFAULT_DAY_SCHEDULE
 

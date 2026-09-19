@@ -147,7 +147,13 @@ from app.living.phone import (
     render_unread,
 )
 from app.living.pictures import PICTURE_TOOLS
-from app.living.place import Reach, building_of, reach_between_people
+from app.living.place import (
+    PLACE_IS_EVERYONES,
+    PLACE_SHAPE,
+    Reach,
+    building_of,
+    reach_between_people,
+)
 from app.living.reading import READING_TOOLS
 from app.living.records import (
     KIND_ACT,
@@ -354,9 +360,25 @@ def _derive(*parts: str) -> str:
 
 PLACES_DIR = "地方"
 
-# 她写错地名时，最多报给她多少个真实地名。一栋楼里的地方是个位数到几十条；真长到超过
-# 这个数的时候，她要的那一条多半也不在里面，糊一屏地名不如让她照旧走进沉默。
-MAX_PLACE_NAMES_OFFERED = 30
+# ---------------------------------------------------------------------------
+# place 这个参数交给她的字
+#
+# 说形状那两句（:data:`~app.living.place.PLACE_SHAPE` /
+# :data:`~app.living.place.PLACE_IS_EVERYONES`）定义在 :mod:`app.living.place`，world
+# 那只 :func:`app.living.world.expect` 引的是同一份 —— 两边写的是同一套地名空间，一个
+# 地方裂成两个的代价和那里一个样本都不给的原委，都写在它们上方那段。
+#
+# 这儿只剩把它们拼成**她这两只手**要说的话：落位置的参数怎么问、空 place 怎么回绝。
+# ---------------------------------------------------------------------------
+
+PLACE_DESCRIPTION = f"你人在哪。{PLACE_SHAPE}{PLACE_IS_EVERYONES}"
+
+# 空 place 那一句。两只手共用同一句：后果一模一样（位置是别人能不能感知到你的全部
+# 依据），分成两份写只会让其中一份悄悄变旧。
+PLACE_CANNOT_BE_EMPTY = (
+    "place 不能是空的：位置是别人能不能感知到你的全部依据，"
+    "空位置会让你从此谁也听不见、也没人听得见你。" + PLACE_SHAPE
+)
 
 
 def _place_names_in_the_same_building(place: str) -> str:
@@ -427,24 +449,53 @@ def _scan_for_place_names(place: str) -> str:
 def _names_under_the_building(
     place: str, building: str, base: Path, places_root: Path
 ) -> str:
-    """这一栋底下已经写过的那些地名。"""
-    names: list[str] = []
-    for found in base.rglob("*.md"):
-        if not found.is_file():
-            continue
-        names.append(found.relative_to(places_root).as_posix().removesuffix(".md"))
-        # 上限同时是**扫描量**的上限，不是扫完再筛：这条链上持着她这一轮的排他占用，
-        # 而 ``asyncio.to_thread`` 只保证不阻塞事件循环，持锁时间照样被拉长。
-        if len(names) > MAX_PLACE_NAMES_OFFERED:
-            return ""
+    """这一栋底下已经写过的那些地名。**写了几个就报几个，没有上限。**
+
+    这儿原来有个 ``len(names) > 30 → 返回空串``。它是这套东西里被明令禁止的那个形状：
+    一个拍出来的数字 + 静默失败。她拿到的"什么都没说"跟"这地方还没被写过"长得一模
+    一样，而地名越多她自己蒙对的概率越低 —— 正是名字多的时候更需要把树上有什么如实
+    说出来。换一个更大的数字不算修，那个数字照旧是拍的。
+
+    **扫描量因此也没有上限，代价量过再决定的。** 本地磁盘、页缓存热、5 次取中位数，
+    一栋楼底下 N 份文档跑完这个函数：
+
+    ==========  ========  ==================
+    一栋里几份   扫描耗时   交给她的字数
+    ==========  ========  ==================
+    10          0.56 ms   120
+    100         3.6 ms    1 020
+    1 000       34 ms     11 420
+    10 000      348 ms    133 420
+    50 000      1.7 s     733 420
+    ==========  ========  ==================
+
+    **耗时这一侧没有问题。** 这条链持着她自己那条 moment 轴的占用
+    （:func:`life_moment_lock_key`，每人一条），拖的是她下一次醒来的排队时间，不阻塞
+    别人也不阻塞世界写树；那条轴的硬顶是 900 秒（:data:`app.living.serial.HELD_SECONDS`），
+    5 万份文档用掉的是它的 0.19%。
+
+    **真正先撑不住的是交给她的字数**，不是时间：一栋一千个地方就是一万多字进她这一轮，
+    一万个地方直接把她的上下文顶爆。但那时候该修的是"一栋楼里有一万个地方"这件事本身
+    —— 而且上下文顶爆是一声响的失败，跟这儿原来那个上限不一样：静默不报换来的沉默，
+    跟"这地方还没被写过"在她眼里完全一致，她连有过一次失败都不知道。
+    """
+    names = [
+        found.relative_to(places_root).as_posix().removesuffix(".md")
+        for found in base.rglob("*.md")
+        if found.is_file()
+    ]
     if not names:
         return ""
     names.sort()
     # 说的是"这一份还没写过"，不是"你写错了"：同一栋里也可能真有个没被写下来的新地方，
     # 这句话不该替她下判断，列出来的只是树上确实有的那些。
+    #
+    # 地名过 :func:`~app.living.records.esc`，理由跟正文同一条（见 :func:`arriving_at`）：
+    # 文件名也是 world 定的，而文件系统对名字里的尖括号和引号没有任何意见 —— 起个文件名
+    # 比写一段正文还省事。``place`` 不过：那是她自己这一轮写下的字。
     return (
         f"（设定集上还没有「{place}」这一份。"
-        f"{building}里已经写下来的是：{'、'.join(names)}。）"
+        f"{building}里已经写下来的是：{'、'.join(esc(n) for n in names)}。）"
     )
 
 
@@ -454,6 +505,10 @@ def _buildings_in_the_tree(place: str, places_root: Path) -> str:
     一栋可以是目录（``地方/家/`` 底下还有房间），也可以是 ``地方/公园.md`` 这种一段
     就到头的地方 —— 后者按 :func:`app.living.place.building_of` 同样是一栋，漏掉它
     等于让树上真有的一处从这份清单里消失，而她照着这份清单改名字。
+
+    **世界分几处就报几处，同栋那档为什么没有上限，这里同理** —— 而且这一档的代价更
+    重：栋名写错按 :func:`app.living.place.reach_between` 是一栋独立的楼，她跟所有人
+    互相够不着。这一档只 ``iterdir`` 一层（不是 ``rglob``），扫描量本来就是"有几栋"。
     """
     names: set[str] = set()
     for found in places_root.iterdir():
@@ -461,14 +516,12 @@ def _buildings_in_the_tree(place: str, places_root: Path) -> str:
             names.add(found.name)
         elif found.is_file() and found.suffix == ".md":
             names.add(found.stem)
-        # 同栋那档为什么要早返回，这里同理。
-        if len(names) > MAX_PLACE_NAMES_OFFERED:
-            return ""
     if not names:
         return ""
+    # 栋名同样过 esc，理由见上一档。
     return (
         f"（设定集上还没有「{place}」这一份。"
-        f"已经写下来的地方分在这几处：{'、'.join(sorted(names))}。）"
+        f"已经写下来的地方分在这几处：{'、'.join(esc(n) for n in sorted(names))}。）"
     )
 
 
@@ -494,12 +547,26 @@ async def arriving_at(place: str, *, lane: str, now: datetime) -> str:
     ``ongoing_at`` 那一段是另一件事：它答的是"这儿现在正在发生什么"。感知走游标，
     下雨开始时她在家、游标早越过了那一条，而地方文档只写不变的部分 —— 不从这儿给，
     她走进学校永远不知道正在下雨。
+
+    **正文过** :func:`app.living.records.esc`。这条路跟 ``Happening.content`` 上那两处
+    是同一条转写通道，而且它绕过了那两处：正文不经过任何一张表，直接从文件系统进她
+    这一轮。world 够得着六个真实数据源（:data:`app.living.world.OUTSIDE_SOURCE_TOOLS`），
+    上游原样的字节进它的上下文，它把一个活动名抄进地方文档，那段字节就落到了她眼前 ——
+    而她这段文本里 ``rel="owner"`` 是唯一说得出身份的东西。护栏"这六只不在她手上"只
+    挡得住直接调用，挡不住这一跳；而**她不读文档**是既定契约，所以也不能靠"别给她读
+    文档的手"来堵，堵点只能在这里。
+
+    代价是正文里真出现 ``& < > "`` 时她读到的是实体（``(>_<)`` 这种颜文字会变形）。
+    书名号、引号、撇号、颜文字的其余部分一个字节不动 —— :func:`~app.living.records.esc`
+    只挡那四个，判据写在它自己那儿。
     """
     seen: list[str] = []
     try:
         seen.append(
-            await asyncio.to_thread(
-                read_document_at, documents_root(), f"{PLACES_DIR}/{place}.md"
+            esc(
+                await asyncio.to_thread(
+                    read_document_at, documents_root(), f"{PLACES_DIR}/{place}.md"
+                )
             )
         )
     except Exception:
@@ -522,14 +589,8 @@ async def switch_to(
     doing: Annotated[
         str, Field(description="你现在改去做的这件事，一句话，例如「去洗澡」")
     ],
-    place: Annotated[
-        # 举例里**不能出现「我房间」这种说话人相对的词**。place 是全局字符串，三个人
-        # 共用一套写法：谁写「家/楼上/我房间」都落在同一个路径上。prod 实测 45 次
-        # ``家/楼上/我房间`` 加 9 次 ``家/我房间`` 全部由绫奈和千凪两个人写出，
-        # 2026-09-13 21:00 两人同一分钟落在这个地名上 —— 各自在自己卧室，
-        # 判定却是同处一室。旧的举例正是 ``家/楼上/我房间``。
-        str, Field(description="你人在哪，层级路径如「家/浴室」「家/楼上/绫奈房间」")
-    ],
+    # 这段描述里一个地名都不给，为什么见 :data:`app.living.place.PLACE_SHAPE` 上方那段。
+    place: Annotated[str, Field(description=PLACE_DESCRIPTION)],
     because: Annotated[
         str, Field(description="什么把你从刚才那件事里带走的，一句话")
     ],
@@ -540,7 +601,7 @@ async def switch_to(
 
     别报时长——你不知道自己要做多久，也不用知道。
 
-    人挪了地方但手上还是同一件事（走廊走进教室、端着咖啡进阳台），那是 move_to。
+    人挪了地方但手上还是同一件事，那是 move_to。
 
     心里挂着什么是另一回事，走 keep_in_mind，跟换不换事没有关系。
 
@@ -557,11 +618,7 @@ async def switch_to(
     if not what:
         raise ValueError("doing 不能是空的：说一句你改去做什么。")
     if not where:
-        raise ValueError(
-            "place 不能是空的：位置是别人能不能感知到你的全部依据，"
-            "空位置会让你从此谁也听不见、也没人听得见你。写一个层级路径，"
-            "例如「家/客厅」。"
-        )
+        raise ValueError(PLACE_CANNOT_BE_EMPTY)
 
     # whereabouts 的自然键带上内容派生的后缀：同一个 moment 里她改两次主意要落两行
     # （最新的那条才是"当前"），而重放同样的内容仍然只落一行。
@@ -587,19 +644,15 @@ async def switch_to(
 @tool
 @tool_error("挪个地方失败")
 async def move_to(
-    place: Annotated[
-        # 同上：举例会被原样抄走。``学校/二年三班教室`` 被绫奈一字不差照抄过，而世界的
-        # 设定集里那间教室叫 ``学校/初二三班教室`` —— 举例里编一个设定集上没有的地名，
-        # 等于教她写一个走进去什么都看不到的地方。这里换成谁都不会歧义的公共场地。
-        str, Field(description="你现在人在哪，层级路径如「学校/操场」")
-    ],
+    # 同上，一个地名都不给：见 :data:`app.living.place.PLACE_SHAPE` 上方那段。
+    place: Annotated[str, Field(description=PLACE_DESCRIPTION)],
 ) -> str:
     """我人换地方了，手上的事没变。
 
-    走到别处、但还在做同一件事的时候调它：从走廊走进教室、端着咖啡从厨房走到阳台。
+    走到别处、但还在做同一件事的时候调它。
 
     你在哪，决定了谁看得见你、你看得见谁。人挪了而这里没挪，你在所有人眼里就还
-    待在原地——你说你回教室了，她们看到的你还在走廊上。
+    待在原地——你说你已经到了别处，她们看到的你还在你上一次落下的那个地方。
 
     被别的事带走了、手上这件事本身换了，那是 switch_to；那只手也会顺带记下位置。
 
@@ -612,11 +665,7 @@ async def move_to(
     lane, now, persona_id, moment_id = moment_scope()
     where = place.strip()
     if not where:
-        raise ValueError(
-            "place 不能是空的：位置是别人能不能感知到你的全部依据，"
-            "空位置会让你从此谁也听不见、也没人听得见你。写一个层级路径，"
-            "例如「家/客厅」。"
-        )
+        raise ValueError(PLACE_CANNOT_BE_EMPTY)
 
     # 手上那件事原样带走 —— 这只手改的只有位置。没有"当前"就没有可带走的事：
     # 她还没落过位置，这一步无从下脚（第一次落位走 switch_to）。
@@ -704,7 +753,16 @@ async def say(
     what: Annotated[str, Field(description="你说出口的那句话，原话")],
     to: Annotated[
         list[str],
-        Field(description="说给谁（可以同时对好几个人）；自言自语就传空数组"),
+        # 这里**不举例**：举出来的名字就是词表，她会逐字抄走（同 switch_to / move_to
+        # 的 place 举例事故）。而且一旦举的是"这个家里的三个人"，就等于把"世界上有
+        # 谁"重新写回了工具描述里 —— 那正是这只手刚拆掉的那道门。
+        Field(
+            description=(
+                "说给谁（可以同时对好几个人）；自言自语就传空数组。"
+                "名字要跟这个人在世界里被记成的那个对上 —— 对不上，这句话就只剩"
+                "同一个地方的人听得见"
+            )
+        ),
     ],
 ) -> str:
     """当面说一句话。
@@ -716,7 +774,7 @@ async def say(
 
     Args:
         what: 你说出口的那句话，原话。
-        to: 说给谁（persona_id，可以多个）。
+        to: 说给谁，可以多个。
 
     Returns:
         一句确认文本。
@@ -760,24 +818,25 @@ async def act(
 
 
 async def _record(*, kind: str, content: str, audience: list[str]) -> str:
-    """``say`` / ``act`` 共用的落库：位置和收件人都必须是真的。
+    """``say`` / ``act`` 共用的落库：位置必须是真的，说给谁是她的事。
 
-    两处 fail-loud，都是因为错了会**静默**：
+    位置这条 fail-loud，是因为错了会**静默**：没定下位置 = 这条事件落在一个空地点
+    上，谁也感知不到，而她那边一片安静。
 
-      * 没定下位置 = 这条事件落在一个空地点上，谁也感知不到，而她那边一片安静；
-      * 收件人写错（写了显示名、写了不存在的人）= ``audience`` 谁也匹配不上，定向
-        送达那条路直接落空，只剩位置旁听——她以为自己说给了姐姐，姐姐什么都没收到。
+    **收件人不校验，故意的。** 这里曾经拿 :data:`~app.living.persona.LIVING_PERSONAS`
+    当白名单挡下"不是这三个人"的名字。那是把"这个世界里住着谁"这条断言存在了代码
+    里：world 写得出"许阿姨下午来敲门"，而她对许阿姨物理上开不了口——门一关，世界
+    往前走一步，代码就离世界远一步。世界里有谁由 world 说了算。
+
+    换成"查一遍树上有没有这个人"同样不对：树是 world 写的，它可能还没来得及写，而
+    那会把这只手和文档树耦上。说给一个没人接的名字，那句话就落在世界里没人接（定向
+    送达那条路匹配不上，只剩位置旁听，见 :func:`app.living.happening.perceive`）——
+    这本身是真实的，不是错误。
     """
     lane, now, persona_id, moment_id = moment_scope()
     said = content.strip()
     if not said:
         raise ValueError("内容不能是空的：说一句真的话 / 写清楚你做了什么。")
-    unknown = [name for name in audience if name not in LIVING_PERSONAS]
-    if unknown:
-        raise ValueError(
-            f"{unknown} 不是这个家里的人。收件人只能是 {list(LIVING_PERSONAS)} "
-            f"里的 id（不是显示名）。写错了她收不到，而且没有任何报错。"
-        )
     where = await current_whereabouts(lane=lane, persona_id=persona_id)
     if where is None:
         raise ValueError(

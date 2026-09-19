@@ -357,17 +357,51 @@ async def test_speaking_to_two_sisters_at_once_is_one_thing_not_two(
 
 
 @pytest.mark.integration
-async def test_speaking_to_a_name_that_is_nobody_is_refused(moment_db, stub_moment):
-    """收件人写错会静默送不到（audience 谁也匹配不上）。挡在工具里，报错喂回去。"""
-    await _stand("akao", "家/客厅", "待着", _at(13))
-    runner = stub_moment(("say", {"what": "喂。", "to": ["绫奈"]}))
+async def test_she_can_speak_to_someone_the_code_never_heard_of(
+    moment_db, stub_moment
+):
+    """这个世界里住着谁由 world 写，不由代码里的名单说了算。
+
+    旧行为是拿 :data:`~app.living.persona.LIVING_PERSONAS` 当收件人白名单：``to`` 里
+    出现三姐妹之外的任何名字直接报错。于是 world 可以写"许阿姨下午来敲门"，而她物理
+    上对许阿姨开不了口 —— 代码里存着一份"世界上有谁"的断言，越写越不是世界的样子。
+    """
+    await _stand("akao", "家/玄关", "应门", _at(13))
+    runner = stub_moment(("say", {"what": "许阿姨，进来坐。", "to": ["xu_yi"]}))
 
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
-    assert isinstance(runner.results[0], dict), "一个不存在的收件人被接受了"
+    assert not isinstance(runner.results[0], dict), (
+        f"她对世界里的第四个人开不了口：{runner.results[0]!r}"
+    )
     from app.living.snapshot import recent_own_happenings
 
-    assert await recent_own_happenings(lane=LANE, persona_id="akao", limit=5) == []
+    said = await recent_own_happenings(lane=LANE, persona_id="akao", limit=5)
+    assert [(h.content, h.audience) for h in said] == [
+        ("许阿姨，进来坐。", ["xu_yi"])
+    ]
+
+
+@pytest.mark.integration
+async def test_a_name_nobody_answers_to_still_lands_in_the_room(
+    moment_db, stub_moment
+):
+    """说给一个没人接的名字，那句话就落在屋子里没人接 —— 这本身是真实的。
+
+    没人匹配上 ``audience`` 时定向送达那条路落空，只剩按位置旁听：屋里的人照样听见
+    原话，读到的是"赤尾对 xu_yi 说"。这条钉的是下游（:func:`app.living.happening.perceive`）
+    对一个它不认识的收件人名不挑剔 —— 挡在工具里的那道门拆掉之后，这里才是真正兜底的地方。
+    """
+    await _stand("akao", "家/玄关", "应门", _at(13))
+    await _stand("ayana", "家/玄关", "穿鞋", _at(13))
+    stub_moment(("say", {"what": "许阿姨，进来坐。", "to": ["xu_yi"]}))
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    heard = await read_perceived_by(lane=LANE, persona_id="ayana")
+    assert [(p.content, p.directed, p.audience) for p in heard.items] == [
+        ("许阿姨，进来坐。", False, ("xu_yi",))
+    ]
 
 
 @pytest.mark.integration
@@ -1750,6 +1784,87 @@ async def test_what_she_still_has_not_read_comes_back_on_the_checkpoint(
 
 
 # --------------------------------------------------------------------------
+# place 这个参数不给她任何地名样本
+#
+# 她唯一见过的地名样本就是这只手的参数说明，而**举例就是词表**：``家/楼上/我房间``
+# 被两个人同时抄走（同一分钟判成同处一室），``学校/二年三班教室`` 被一字不差抄走
+# （设定集里那间叫 ``学校/初二三班教室``）。换一批新的写死字符串只是把过期时间往后
+# 推 —— 世界随时会改名、删掉、重写那些地方，而举例不跟着变。
+#
+# 说清楚路径的形状不需要样本：层级、分隔符、从哪一层写起，都能直说。
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("hand", ["switch_to", "move_to"])
+def test_the_place_parameter_hands_her_no_place_name(hand):
+    """落位置那两只手交给她的每一段字，都不含一条具体路径、也不含一个具体地名。"""
+    from tests.living.conftest import (
+        model_facing_text,
+        names_of_places_in,
+        path_samples,
+    )
+
+    for where, text in model_facing_text(_TOOLS[hand]).items():
+        assert not path_samples(text), (
+            f"{hand} 的{where}里摆着一条路径样本 {path_samples(text)!r} —— "
+            f"她会逐字抄走它。原文：\n{text}"
+        )
+        assert not names_of_places_in(text), (
+            f"{hand} 的{where}里写着具体地名 {names_of_places_in(text)!r} —— "
+            f"那是世界的内容，世界改名之后这几个字还在教她写一个不存在的地方。"
+            f"原文：\n{text}"
+        )
+
+
+@pytest.mark.parametrize("hand", ["switch_to", "move_to"])
+def test_the_place_parameter_quotes_no_example_at_all(hand):
+    """place 的描述里不出现引号 —— 这一档挡的是**没有斜杠的**那种样本。
+
+    ``path_samples`` 判的是"斜杠两边贴着字"，可一个顶层地名只有一段、根本没有斜杠，
+    它照样是样本，照样会被逐字抄走（``超市`` 那次就是一段）。在这个参数的描述里，
+    引号引起来的东西只可能是一个可以照着填的名字。
+    """
+    described = _TOOLS[hand].definition.parameters["properties"]["place"]["description"]
+
+    assert "「" not in described, f"place 的描述里引着一个样本：{described!r}"
+    assert "例如" not in described, f"place 的描述里在举例：{described!r}"
+
+
+@pytest.mark.parametrize("hand", ["switch_to", "move_to"])
+def test_the_place_parameter_still_says_what_shape_a_path_is(hand):
+    """清掉样本不等于不说形状 —— 分隔符是什么，仍然要在参数描述里说出来。
+
+    只钉"没有样本"的话，把整段描述删空也能绿，而那时她连该写成几层都不知道。
+    """
+    described = _TOOLS[hand].definition.parameters["properties"]["place"]["description"]
+
+    assert "/" in described, f"没告诉她层与层之间用什么隔开：{described!r}"
+    assert "层" in described, f"没告诉她这是一条层级路径：{described!r}"
+
+
+@pytest.mark.integration
+async def test_refusing_an_empty_place_hands_her_no_place_name(
+    moment_db, in_a_moment
+):
+    """空 place 那句报错也是喂给她的字 —— 它同样不能夹一个地名进去。
+
+    这一句比参数描述更容易被漏掉：它只在她写错的时候出现，而她写错的那一刻正是最
+    可能照着眼前这句话改的时候。
+    """
+    from tests.living.conftest import names_of_places_in, path_samples
+
+    async with in_a_moment("akao"):
+        refused = await switch_to.invoke(
+            {"doing": "走走", "place": "   ", "because": "闲"}
+        )
+        moved = await move_to.invoke({"place": ""})
+
+    for said in (str(refused), str(moved)):
+        assert not path_samples(said), f"报错里摆着路径样本：{said!r}"
+        assert not names_of_places_in(said), f"报错里写着具体地名：{said!r}"
+
+
+# --------------------------------------------------------------------------
 # 走进一个地方的时候，看到这个地方
 #
 # 实测：``render_state`` 给她的"我在哪"只有她自己写的一行 place + doing，**那个地点在
@@ -1938,20 +2053,23 @@ async def test_a_one_segment_place_counts_as_a_building(
 
 
 @pytest.mark.integration
-async def test_too_many_buildings_are_not_dumped_on_her(
+async def test_however_many_buildings_the_world_has_she_is_told_all_of_them(
     moment_db, in_a_moment, places
 ):
-    """有哪几栋同样有上限，判据跟同栋那档一致。"""
-    from app.living.moment import MAX_PLACE_NAMES_OFFERED
+    """世界分几处就报几处 —— 同栋那档怎么办，这一档一样。
 
-    for i in range(MAX_PLACE_NAMES_OFFERED + 1):
+    旧实现跟同栋那档共用一个"超过 30 就整段不报"，而这一档的代价比同栋那档还重：
+    栋名写错 = 她站在一栋独立的楼上，跟所有人互相够不着。
+    """
+    for i in range(60):
         places(f"楼{i}/某处", "随便什么。")
 
     async with in_a_moment("akao"):
         await switch_to.invoke({"doing": "走走", "place": "楼0/某处", "because": "闲"})
         said = await move_to.invoke({"place": "没这栋/某处"})
 
-    assert "楼0" not in said, f"超上限还是倒了一屏：{said!r}"
+    missing = [f"楼{i}" for i in range(60) if f"楼{i}" not in said]
+    assert not missing, f"这几处没报给她：{missing!r}。拿到：{said!r}"
 
 
 @pytest.mark.integration
@@ -2060,20 +2178,26 @@ async def test_a_document_that_exists_but_cannot_be_read_is_not_called_missing(
 
 
 @pytest.mark.integration
-async def test_too_many_names_are_not_dumped_on_her(
+async def test_however_many_names_a_building_has_she_is_told_all_of_them(
     moment_db, in_a_moment, places
 ):
-    """超过上限就不报了 —— 糊一屏地名不如照旧沉默。"""
-    from app.living.moment import MAX_PLACE_NAMES_OFFERED
+    """一栋里写过多少个地名就报多少个，没有一个"超过几个就闭嘴"的数。
 
-    for i in range(MAX_PLACE_NAMES_OFFERED + 1):
+    旧实现是 ``len(names) > 30`` 就整段不报，而"不报"跟"这地方还没被写过"给她的是
+    同一片沉默 —— 她没有任何途径分辨，也就没有任何途径改回来。地名越多她自己蒙对的
+    概率越低，正是这时候更需要把树上有什么如实说出来。
+
+    换一个更大的数字不算修：那个数字照旧是拍的，只是把同一种静默往后推。
+    """
+    for i in range(60):
         places(f"家/房{i}", "随便什么。")
 
     async with in_a_moment("akao"):
         await switch_to.invoke({"doing": "走走", "place": "家/不存在", "because": "闲"})
         said = await move_to.invoke({"place": "家/不存在"})
 
-    assert "家/房0" not in said, f"超上限还是倒了一屏：{said!r}"
+    missing = [f"家/房{i}" for i in range(60) if f"家/房{i}" not in said]
+    assert not missing, f"这些地名没报给她：{missing!r}。拿到：{said!r}"
 
 
 @pytest.mark.integration

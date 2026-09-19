@@ -825,7 +825,8 @@ def test_every_hand_it_has_is_classified():
 
 def test_the_documents_are_material_and_its_own_writes_are_kept():
     """读回来的设定是素材（过期了再读一次就有）；它自己改过什么要留着。"""
-    assert WORLD_MATERIAL_TOOLS == {"list_documents", "read_document"}
+    assert {"list_documents", "read_document"} <= WORLD_MATERIAL_TOOLS
+    assert not (WORLD_MATERIAL_TOOLS & {"write_document", "edit_document"})
     assert "expect" in WORLD_KEPT_TOOLS
 
 
@@ -884,3 +885,171 @@ async def test_by_default_nothing_lingers(world_db, stub_round):
 
     items = await list_upcoming_between(lane=LANE, since=_at(0), until=_at(23, 59))
     assert [i.lasts_until for i in items] == [None]
+
+
+# --------------------------------------------------------------------------
+# 九 · 让一件事发生：地点那个参数不给它任何地名样本
+#
+# 跟她那侧 ``switch_to`` / ``move_to`` 是同一条（见 ``tests/living/test_moment.py``
+# 里那一节的两次真事故）：**举例就是词表**。world 手里的地名该从设定集里来 —— 它自己
+# 就是写设定集的那个 —— 而工具描述里写死的那一条路径既不会跟着设定集改名，又会被逐字
+# 抄走，抄出来的地方从此跟设定集上那个分成两半。
+#
+# 这只手原来举的是 ``家/玄关`` 和 ``学校``，旁边的注释还自承"举例是会被原样抄走的"。
+# --------------------------------------------------------------------------
+
+
+def test_the_place_parameter_of_expect_hands_it_no_place_name():
+    """``expect`` 交给模型的每一段字，都不含一条具体路径、也不含一个具体地名。"""
+    from tests.living.conftest import (
+        model_facing_text,
+        names_of_places_in,
+        path_samples,
+    )
+
+    for where, text in model_facing_text(expect).items():
+        assert not path_samples(text), (
+            f"expect 的{where}里摆着一条路径样本 {path_samples(text)!r} —— "
+            f"它会逐字抄走它。原文：\n{text}"
+        )
+        assert not names_of_places_in(text), (
+            f"expect 的{where}里写着具体地名 {names_of_places_in(text)!r} —— "
+            f"那是世界的内容，世界改名之后这几个字还在教它写一个不存在的地方。"
+            f"原文：\n{text}"
+        )
+
+
+def test_expect_and_her_hands_say_a_place_the_same_way():
+    """``expect`` 和她那两只落位置的手，说形状那一段**一字不差**。
+
+    world 写的地点和她写的地点落在同一套地名空间上：同一个地方两边写成同一条路径才算
+    同一处。两边各写一份措辞就会漂，而漂开的表现是同一个地方裂成两个 —— 那正是她那侧
+    两次事故的形状。
+
+    钉的是**三只手真正交给模型的那段字**，不是"两份拷贝有没有漂"：那句话现在只有一处
+    定义（:data:`app.living.place.PLACE_SHAPE`），拷贝不存在了。谁哪天在任何一侧改回
+    手写一段措辞，这里红。
+    """
+    from app.living.moment import MOMENT_TOOLS
+    from app.living.place import PLACE_SHAPE
+
+    hands = {t.name: t for t in MOMENT_TOOLS}
+    described = {
+        "expect": expect.definition.parameters["properties"]["place"]["description"],
+        "switch_to": hands["switch_to"]
+        .definition.parameters["properties"]["place"]["description"],
+        "move_to": hands["move_to"]
+        .definition.parameters["properties"]["place"]["description"],
+    }
+
+    for hand, text in described.items():
+        assert PLACE_SHAPE in text, (
+            f"{hand} 的 place 描述里说形状那一段跟别人漂开了 —— 三只手写的是同一套地名"
+            f"空间。\n该有的那一段：{PLACE_SHAPE!r}\n{hand} 这边：{text!r}"
+        )
+
+
+def test_the_place_parameter_of_expect_still_says_what_shape_a_path_is():
+    """清掉样本不等于不说形状 —— 分隔符和层级仍然要说出来。
+
+    只钉"没有样本"的话，把整段描述删空也能绿，而那时它连该写成几层都不知道。
+    """
+    described = expect.definition.parameters["properties"]["place"]["description"]
+
+    assert "/" in described, f"没告诉它层与层之间用什么隔开：{described!r}"
+    assert "层" in described, f"没告诉它这是一条层级路径：{described!r}"
+
+
+# --------------------------------------------------------------------------
+# 十 · 外面那六个真实数据源是它自己的手
+#
+# 从前是代码替它去取：每个生活日凌晨四点问一轮六个源，贴上标签广播成一件所有人都
+# 感知得到的事（那一层已删）。那条路逼出了一串写死的东西 —— 查哪座
+# 城市、几点去查、取回来怎么说、一天查几次，全是代码替世界拿的主意。
+#
+# 现在六个源就是它手上的六只手：这家人住在哪是它写在设定集里的，所以城市由它传；想
+# 什么时候看就什么时候看，想再看一次就再看一次。**代价是它可能不看** —— 那是接受了的，
+# 不补兜底、不提醒、不自动注入。
+# --------------------------------------------------------------------------
+
+
+OUTSIDE_SOURCE_NAMES = {
+    "query_weather",
+    "query_sun_times",
+    "query_lunar_term",
+    "query_holiday",
+    "query_anime_calendar",
+    "query_city_events",
+}
+
+
+def test_the_six_real_world_sources_are_in_its_hands():
+    """六个源都接进了这一轮的工具集 —— 漏一个是静默的，它只是永远看不见那一样。"""
+    every = {t.definition.name for t in WORLD_ROUND_TOOLS}
+    assert OUTSIDE_SOURCE_NAMES <= every, (
+        f"没接进来的：{OUTSIDE_SOURCE_NAMES - every}"
+    )
+
+
+def test_the_six_sources_are_material_not_kept():
+    """外面的事是**会过期**的素材：想知道后来变了没有，再看一次就有。
+
+    留着的话，凌晨那一份天气会跟着它走一整天 —— 那正是旧投递层"一天只取一次"的病，
+    换个地方重新长出来。
+    """
+    assert OUTSIDE_SOURCE_NAMES <= WORLD_MATERIAL_TOOLS
+    assert not (OUTSIDE_SOURCE_NAMES & WORLD_KEPT_TOOLS)
+
+
+def test_she_does_not_get_these_hands():
+    """**这六只不在她手上。**
+
+    她在世界里：下雨是她走到窗边感受到的，不是她查一次 API 查到的。world 是世界事实的
+    唯一来源，它看见了写进世界，她通过世界感知。
+
+    这条还有第二层：上游的字节进到谁的上下文里，转义那道就得跟到哪。她那段文本里有
+    ``<msg … rel="owner">``（:mod:`app.living.phone`），而这六只手交回来的是上游原样
+    的字节、没有过 :func:`app.living.records.esc` —— 哪天把它们塞进她手里，那就是一个
+    真的伪造口子。world 那边没有这种带属性的标记，所以同样的字节在它那儿伪造不出身份。
+
+    **这条只证明得了直接调用那一头。** 字节从 world 的上下文再走到她眼前的那几条间接
+    的路（``Happening.content``、地方文档的正文和名字）各有各的转义，门禁在
+    ``tests/living/test_no_forged_markup.py`` —— 拿这一条去论证那几条也安全是错的。
+    """
+    from app.living.moment import MOMENT_TOOLS
+
+    hers = {t.definition.name for t in MOMENT_TOOLS}
+    assert not (OUTSIDE_SOURCE_NAMES & hers), (
+        f"她手上多了外面的数据源：{OUTSIDE_SOURCE_NAMES & hers} —— "
+        "天气该是她走到窗边感受到的，不是她查出来的"
+    )
+
+
+def test_the_city_is_something_it_passes_in():
+    """跟地点有关的那三只收 ``city``，所以"这家人住在哪"是世界的事实，不是配置。
+
+    从前那两个 Dynamic Config（世界坐标 / 世界所在城市）就是
+    "代码替它取数"逼出来的：代码要去查，代码就得知道查哪儿。
+    """
+    hands = {t.definition.name: t for t in WORLD_ROUND_TOOLS}
+    for name in ("query_weather", "query_sun_times", "query_city_events"):
+        props = hands[name].definition.parameters.get("properties", {})
+        assert "city" in props, f"{name} 没收城市参数"
+
+
+def test_no_hand_of_its_shows_it_a_sample_city():
+    """举例就是词表 —— 城市那个参数一个市名样本都不给。
+
+    判据和落点在 ``tests/unit/agent/tools/test_external_sources.py``；这里只钉住
+    "接到 world 手上的就是那几只被钉过的手"，免得哪天换成一层自己写描述的包装。
+    """
+    from tests.living.conftest import model_facing_text
+    from tests.unit.agent.tools.test_external_sources import (
+        CITY_NAMES_ONCE_IN_TOOL_TEXT,
+    )
+
+    hands = {t.definition.name: t for t in WORLD_ROUND_TOOLS}
+    for name in sorted(OUTSIDE_SOURCE_NAMES):
+        for where, text in model_facing_text(hands[name]).items():
+            named = [c for c in CITY_NAMES_ONCE_IN_TOOL_TEXT if c in text]
+            assert not named, f"{name} 的{where}里写着 {named!r}"

@@ -26,7 +26,6 @@ from typing import Annotated
 
 from app.infra.cst_time import now_cst
 from app.living.calendar import deliver_due, load_day_schedule, plan_day
-from app.living.outside import ask_the_world, look_outside
 from app.living.records import living_lane
 from app.living.world import run_world_round
 from app.runtime.data import Data, Key
@@ -63,20 +62,19 @@ class WorldRoundTick(Data):
 
 @node
 async def calendar_tick(tick: CalendarTick) -> None:
-    """补今天的日历 + 把到期的东西交付出去 + 到点了看一眼外面。
+    """补今天的日历 + 把到期的东西交付出去。
 
-    三件都幂等，所以每一拍照跑就是重启后的自愈方式，不需要"今天排过没有"的标记。
+    两件都幂等，所以每一拍照跑就是重启后的自愈方式，不需要"今天排过没有"的标记。
 
-    看外面（:mod:`app.living.outside`）挂在这条钟上而不是另起一条：它跟日历项是
-    同一性质的东西 —— 客观事实、不花模型钱、到点变成一件她感知得到的事，区别只在
-    这个家里面和这个家外面。它一天只真的跑一次，其余每一拍在打网络之前就返回了。
+    **这条钟上不再有"替世界去看一眼外面"那一步。** 天气、节气、番、城里的活动现在是
+    world 自己手上的六只手（:data:`app.living.world.OUTSIDE_SOURCE_TOOLS`）：它想什么
+    时候看就什么时候看。代价是它可能不看 —— 那是接受了的，这里不补一条兜底的广播。
     """
     lane, now = living_lane(), now_cst()
     written = await plan_day(
         lane=lane, now=now, schedule=await load_day_schedule()
     )
     happened = await deliver_due(lane=lane, now=now)
-    outside = await look_outside(lane=lane, now=now, ask=ask_the_world)
     if written or happened:
         logger.info(
             "living calendar lane=%s 新排 %d 件、到期 %d 件",
@@ -84,8 +82,6 @@ async def calendar_tick(tick: CalendarTick) -> None:
             len(written),
             len(happened),
         )
-    if outside is not None:
-        logger.info("living outside lane=%s 今天外面：%s", lane, outside.content)
 
 
 @node

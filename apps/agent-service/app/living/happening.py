@@ -342,8 +342,8 @@ async def anyone_acted_since(*, lane: str, after_seq: int) -> bool:
     """自游标以来，**world 之外**有没有谁做过 / 说过什么。
 
     ``actor <> 'world'`` 这一条是硬的，不是优化。``Happening.actor`` 可以是
-    ``"world"`` —— 日历到期交付（:mod:`app.living.calendar`）和每日外部素材
-    （:mod:`app.living.outside`）写的都是它。不排除的话就成了一个闭环：world 排一件事
+    ``"world"`` —— 日历到期交付（:mod:`app.living.calendar`）和 world 排的事到期
+    （:mod:`app.living.world`）写的都是它。不排除的话就成了一个闭环：world 排一件事
     → 到点写一条 happening → 唤醒 world → 它再排一件。上一代 world 一天跑两百多轮就是
     这个形状，而硬下限只能把它压到一天 144 轮，压不掉。
     """
@@ -486,14 +486,20 @@ def perceived_line(p: Perceived, *, me: str) -> str:
     """一条感知记录的样子。``content is None`` 时**没有任何口子**能漏出原话。
 
     ``content`` 过 :func:`app.living.records.esc`，:func:`own_line` 不过。差别不在
-    "谁写的更可信"，在**有没有一条逐字通道**：这一条上有 ——
-    :func:`app.living.outside.look_outside` 把天气、番名从外部数据源**逐字**拼进
-    ``content``，那几个源在外面，交回来什么就是什么。``own_line`` 那边一条都没有
-    （她自己的话、她自己的动作、她去撤的那句原话，全是她这一侧的模型写的）。判据
-    写在 :func:`app.living.records.esc` 上。
+    "谁写的更可信"，在这条路上**有没有第三方的字节**：这一条上有 —— world 够得着六个
+    真实数据源（:data:`app.living.world.OUTSIDE_SOURCE_TOOLS`），它把外面的天气、番名
+    抄进世界的时候，上游写下的字节就转写到了 ``content`` 上。中间隔着一个模型，所以按
+    :func:`app.living.records.esc` 的判据这已经不算"逐字通道"；但转写正是它最容易被劝着
+    做的事，而 ``content`` 上转义没有代价，所以这一道无条件保留。``own_line`` 那边一条
+    都没有（她自己的话、她自己的动作、她去撤的那句原话，全是她这一侧的模型写的）。
 
-    ``actor`` / ``place`` / ``audience`` 不过：它们是 persona id、世界的地点路径，
-    取值由代码定死，外面写不进来。
+    ``actor`` / ``place`` / ``audience`` 不过，但三者的理由不是同一条：``actor`` 和
+    ``place`` 是 persona id 和世界的地点路径，取值由代码定死；``audience`` 现在是**她
+    那一侧的模型写下的自由字符串**（:func:`app.living.moment.say` 的 ``to`` 拆掉收件人
+    白名单之后就是了，其余写入方一律传空）。不转义的依据因此落回跟 :func:`own_line`
+    同一条：这上面今天没有逐字通道 —— 没有任何一个第三方能决定 ``audience`` 里的字节。
+    模型被劝着写出任意字节要挡的是输出审计，不是转义（判据写在
+    :func:`app.living.records.esc` 上）。
     """
     if p.content is None:
         return f"{p.place} 那边有动静"
