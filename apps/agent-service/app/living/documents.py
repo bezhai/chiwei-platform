@@ -83,6 +83,31 @@ lane 决定它们写到哪条轴上；这里的隔离来自根目录，时间和
 外加一句它能照着做的话，跟 :class:`app.living.continuity.TranscriptConflict` 同一条：
 默默覆盖等于把另一个人刚写下的一整段丢掉，而且没有任何痕迹。
 
+**而那句话不是结果本身。** 整份重写和删除交回来的是 :class:`DocumentChange`：成功和
+那三种拒绝各有一个 :class:`ChangeOutcome` 值，那句中文只是它的一种呈现。分开是因为
+这条路径有两个受众 —— 模型读句子，程序读字段，而句子里没有任何机器可读的东西，靠
+解析中文来分辨冲突会在措辞一改的时候静默失效。两种呈现从同一处来，不会各说各的。
+
+第三个写者：从外面来的那一只手
+------------------------------
+
+这棵树还有一条从进程外面进来的入口（:mod:`app.nodes.world_documents` 那四个端点）。
+树上写歪的一份文档在那之前只能等 world 自己发现自己改，而它发现不了的那些就一直留着。
+
+**它和 world 是对等的两个写者，谁也不比谁高一级。** 成立的前提是它走的是同一条路：
+:func:`listing` / :func:`read_whole` / :func:`rewrite` / :func:`remove` 是这一层交给
+外面的四个入口，每一个都落在 :func:`_touch_disk` 上，抢的就是 world 那五只手真正碰盘
+时抢的同一把 per-file 锁，认的也是同一套指纹。换任何别的进程去写这个卷，这两把锁立刻
+失效，指纹 CAS 也跟着变成摆设 —— 读和写之间不再有共同的锁，中间可以插进任意多次别人的
+完整写入。
+
+它们跟那五只手的差别只在**呈现**：交回去的是 :class:`TreeListing` / :class:`WholeDocument`
+/ :class:`DocumentChange`，不是渲染给模型看的那几段中文。
+
+:func:`read_whole` 还有一处是**故意跟 :func:`_read` 不一样的**：它不截断。给模型的那只手
+截是因为一份跑飞的文档能把整轮上下文顶掉；这一侧照抄的话，交出去的就是"截过的正文配整份
+的指纹"，拿回来改完写回去指纹**对得上**，而尾巴被静默删掉了 —— 正是指纹这道门要挡的事。
+
 锁按住的是碰盘那一段，不是那个协程
 ----------------------------------
 
@@ -126,8 +151,10 @@ import logging
 import os
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 from pydantic import Field
 
@@ -167,6 +194,10 @@ DOCUMENT_FINGERPRINT_MARK = "这一份现在的指纹"
 FINGERPRINT_CHARS = 12
 
 _SEP = "/"
+
+# 碰盘那一段（:func:`_touch_disk`）交回来的是它跑的那个函数交回来的东西：读是一段
+# 正文，整份重写和删除是一个 :class:`DocumentChange`。
+T = TypeVar("T")
 
 # ---------------------------------------------------------------------------
 # 说清路径的形状，但一条具体路径都不摆出来
@@ -214,6 +245,19 @@ def documents_mount() -> Path:
     return Path(os.environ.get(DOCS_DIR_ENV) or DEFAULT_DOCS_DIR)
 
 
+def documents_lane() -> str:
+    """本进程这棵树落在哪条泳道上 —— :func:`documents_root` 末一段那个名字。
+
+    **只从进程自己的部署环境读。** 从外面改这棵树的那几个端点每次都把它交回去，而它
+    要回答的是"这次调用改的是哪棵树"：回显请求里带来的任何东西等于什么都没回答。
+    请求送进哪个 pod 决定动哪棵树，而那件事只有收到请求的这个进程知道。
+
+    跟根目录共用同一个表达式，不是另算一遍：算两遍的话它们会漂，而漂了之后自报的
+    落点仍然看起来像个正确答案。
+    """
+    return current_deployment_lane() or "prod"
+
+
 def documents_root() -> Path:
     """本进程这条泳道的文档树的根：``$WORLD_DOCS_DIR/<泳道>``。
 
@@ -231,7 +275,7 @@ def documents_root() -> Path:
     （空串会开一条谁也读不到的影子轴）。**这里没有直接调它**：``clock`` 在模块顶层
     import ``world``，而 ``world`` 要拿这几只手，直接用会绕成环。
     """
-    return documents_mount() / (current_deployment_lane() or "prod")
+    return documents_mount() / documents_lane()
 
 
 def resolve_within(root: Path, path: str) -> Path:
@@ -399,7 +443,62 @@ def _read_with_fingerprint(root: Path, path: str) -> str:
     return body + _fingerprint_footer(fingerprint_of(whole))
 
 
-def _write(root: Path, path: str, content: str, fingerprint: str = "") -> str:
+class ChangeOutcome(StrEnum):
+    """整份重写或删除的结果，**程序那一侧读的就是它**。
+
+    这几个值是对外契约的一部分（谁照着它分辨成功和冲突，改一个值就是改契约），所以
+    它们是稳定的英文标识而不是那句中文 —— 中文是措辞，措辞会改。
+
+    :attr:`GONE` 两只手共用一个值：``write`` 那边是"读到之后被删掉了"，``delete``
+    那边是"要删的那一份已经不在了"。对调用方是同一件事 —— 那一份没了，重读一遍再
+    决定 —— 所以不拆成两个值。
+    """
+
+    OK = "ok"
+    NO_FINGERPRINT = "no_fingerprint"
+    STALE_FINGERPRINT = "stale_fingerprint"
+    GONE = "gone"
+
+
+@dataclass(frozen=True)
+class DocumentChange:
+    """一次整份重写或删除的结果。**一处定义，两种呈现。**
+
+    这条写入路径现在有两个受众，它们看的不是同一样东西：
+
+    * **模型**读 :attr:`said` 那句中文。它是唯一入口：那句话既要说清一个字都没写，
+      也要说清下一步该做什么。
+    * **程序**读 :attr:`outcome`、:attr:`path`、:attr:`fingerprint`。中文句子里没有
+      任何机器可读的东西，靠解析它来分辨"写成了"和"指纹过期被拒"是脆的，而且会在
+      措辞一改的时候静默失效 —— 而这条路径的整个契约就是"靠指纹挡冲突"，分不清冲突
+      等于这份契约对程序那一侧不成立。
+
+    **模型看到的东西不只是那句话。** 被拒的时候 :attr:`said` 不是返回值，是被抛出去、
+    由 :func:`app.agent.tools._common.tool_error` 包成 outcome dict 的；包的时候
+    ``type(exc).__name__`` 会被写进 ``detail["original_error_type"]``，**那个字段同样
+    进模型的上下文**。所以异常类型也是这份呈现的一部分，由 :attr:`refused_as` 定死：
+    整份重写的三种拒绝都是 ``ValueError``，删除的"那一份不在了"是 ``FileNotFoundError``
+    （它本来就是这么抛的）。为了结构化而换一个自造的异常类型 = 改了模型看到的东西。
+
+    :attr:`fingerprint` 说的是**这次落下去的是哪一版**，所以只有写成的时候有值，跟句子
+    末尾交回去的那一串是同一个。一个字都没写就没有这一版。
+    """
+
+    outcome: ChangeOutcome
+    path: str
+    said: str
+    fingerprint: str = ""
+    refused_as: type[Exception] | None = None
+
+    def raise_if_refused(self) -> None:
+        """被拒就按模型那一侧原本的类型和措辞抛出去；写成了什么都不做。"""
+        if self.refused_as is not None:
+            raise self.refused_as(self.said)
+
+
+def _write(
+    root: Path, path: str, content: str, fingerprint: str = ""
+) -> DocumentChange:
     """整份重写。**覆盖一份已经存在的文档必须带上读到的那一版的指纹。**
 
     没带 = 它没看过现在写的是什么，覆盖过去就是把别人写的那一段静默丢掉；带的那个对
@@ -407,6 +506,10 @@ def _write(root: Path, path: str, content: str, fingerprint: str = "") -> str:
     字都没写。
 
     新建一份不要指纹：那时候没有任何人的写入会被吃掉。
+
+    这三种拒绝交的是 :class:`DocumentChange` 而不是异常 —— 它们是这条路径的**结果**，
+    两个受众都要认（见那个类的 docstring）。路径逃逸、超长、目标是个目录仍然抛：那些
+    是参数不对，不是两个写者撞上了。
     """
     target = resolve_within(root, path)
     if len(content) > MAX_DOCUMENT_CHARS:
@@ -419,38 +522,61 @@ def _write(root: Path, path: str, content: str, fingerprint: str = "") -> str:
     if target.is_dir():
         raise IsADirectoryError(f"「{path}」是一个目录，不能当成一份文档写。")
 
+    here = _relative(root, target)
     given = fingerprint.strip()
     on_disk = target.read_text(encoding="utf-8") if target.is_file() else None
     if on_disk is None:
         if given:
             # 删掉也是一次写入：一条线走完了就是把它那一份删掉，不能被一次过期的覆盖
             # 写回来 —— 那一份会以"它还在"的样子接着进世界。
-            raise ValueError(
-                f"「{path}」在你读到之后被删掉了（你带的指纹是 {given}），一个字都没写。"
-                "它那条线多半已经走完了；确实要重新起一份的话，不带指纹再来一次。"
+            return DocumentChange(
+                outcome=ChangeOutcome.GONE,
+                path=here,
+                said=(
+                    f"「{path}」在你读到之后被删掉了（你带的指纹是 {given}），"
+                    "一个字都没写。它那条线多半已经走完了；确实要重新起一份的话，"
+                    "不带指纹再来一次。"
+                ),
+                refused_as=ValueError,
             )
     else:
         current = fingerprint_of(on_disk)
         if not given:
-            raise ValueError(
-                f"「{path}」已经有了（{len(on_disk)} 字），一个字都没写 —— "
-                "整份换掉之前得先看看它现在写的是什么。先 read_document 读一遍，"
-                "把末尾那个指纹带上再写。"
+            return DocumentChange(
+                outcome=ChangeOutcome.NO_FINGERPRINT,
+                path=here,
+                said=(
+                    f"「{path}」已经有了（{len(on_disk)} 字），一个字都没写 —— "
+                    "整份换掉之前得先看看它现在写的是什么。先 read_document 读一遍，"
+                    "把末尾那个指纹带上再写。"
+                ),
+                refused_as=ValueError,
             )
         if given != current:
-            raise ValueError(
-                f"「{path}」在你读到之后被改过了（你带的指纹是 {given}，"
-                f"现在是 {current}），一个字都没写。重新 read_document 读一遍，"
-                "在新的那一版上改，再带着新指纹写回来 —— 直接盖过去会把别人刚写下的"
-                "那一段丢掉。"
+            return DocumentChange(
+                outcome=ChangeOutcome.STALE_FINGERPRINT,
+                path=here,
+                said=(
+                    f"「{path}」在你读到之后被改过了（你带的指纹是 {given}，"
+                    f"现在是 {current}），一个字都没写。重新 read_document 读一遍，"
+                    "在新的那一版上改，再带着新指纹写回来 —— 直接盖过去会把别人刚写下的"
+                    "那一段丢掉。"
+                ),
+                refused_as=ValueError,
             )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
-    return (
-        f"写好了：{_relative(root, target)}（{len(content)} 字）。"
-        f"【{DOCUMENT_FINGERPRINT_MARK}：{fingerprint_of(content)}，"
-        f"接着改它就带上这一串，不用再读一遍。】"
+    landed = fingerprint_of(content)
+    return DocumentChange(
+        outcome=ChangeOutcome.OK,
+        path=here,
+        said=(
+            f"写好了：{here}（{len(content)} 字）。"
+            f"【{DOCUMENT_FINGERPRINT_MARK}：{landed}，"
+            f"接着改它就带上这一串，不用再读一遍。】"
+        ),
+        fingerprint=landed,
     )
 
 
@@ -490,7 +616,7 @@ def _edit(root: Path, path: str, find: str, replace: str) -> str:
     return f"改好了：{_relative(root, target)}"
 
 
-def _delete(root: Path, path: str, fingerprint: str = "") -> str:
+def _delete(root: Path, path: str, fingerprint: str = "") -> DocumentChange:
     """删掉一份文档。**只删文件，而且必须带上读到的那一版的指纹。**
 
     删一份和端掉整个目录不能是同一只手：前者是一条线走完了，后者是世界没了。目录要
@@ -499,34 +625,56 @@ def _delete(root: Path, path: str, fingerprint: str = "") -> str:
     指纹那道门跟 :func:`_write` 同一条规矩，理由见模块 docstring：删掉比覆盖更狠，
     不能反而更容易。没带 = 它没看过现在写的是什么；带的那个对不上 = 它读完之后有人
     改过，删下去就把那一段一起带走了。两种都拒，都是一个字没动。
+
+    结果的形状跟 :func:`_write` 一样是 :class:`DocumentChange`，**"那一份不在了"
+    那一种交的仍然是 ``FileNotFoundError``**：它跟整份重写那边的 ``GONE`` 在程序那
+    一侧是同一个值，可模型那一侧收到的类型名不一样，而类型名进它的上下文。
     """
     target = resolve_within(root, path)
     if target.is_dir():
         raise IsADirectoryError(
             f"「{path}」是一个目录。这只手只删单份文档 —— 整个目录要清，一份一份来。"
         )
+    here = _relative(root, target)
     if not target.exists():
-        raise FileNotFoundError(f"没有「{path}」这一份。{_nearby(root, target)}")
+        return DocumentChange(
+            outcome=ChangeOutcome.GONE,
+            path=here,
+            said=f"没有「{path}」这一份。{_nearby(root, target)}",
+            refused_as=FileNotFoundError,
+        )
 
     given = fingerprint.strip()
     on_disk = target.read_text(encoding="utf-8")
     current = fingerprint_of(on_disk)
     if not given:
-        raise ValueError(
-            f"「{path}」还在（{len(on_disk)} 字），一个字都没动 —— "
-            "删掉它之前得先看看它现在写的是什么。先 read_document 读一遍，"
-            "把末尾那个指纹带上再来删。"
+        return DocumentChange(
+            outcome=ChangeOutcome.NO_FINGERPRINT,
+            path=here,
+            said=(
+                f"「{path}」还在（{len(on_disk)} 字），一个字都没动 —— "
+                "删掉它之前得先看看它现在写的是什么。先 read_document 读一遍，"
+                "把末尾那个指纹带上再来删。"
+            ),
+            refused_as=ValueError,
         )
     if given != current:
-        raise ValueError(
-            f"「{path}」在你读到之后被改过了（你带的指纹是 {given}，"
-            f"现在是 {current}），一个字都没动。重新 read_document 读一遍，"
-            "确认那条线真的走完了，再带着新指纹来删 —— 照着旧的那一版删下去会把"
-            "别人刚写进去的那一段一起带走。"
+        return DocumentChange(
+            outcome=ChangeOutcome.STALE_FINGERPRINT,
+            path=here,
+            said=(
+                f"「{path}」在你读到之后被改过了（你带的指纹是 {given}，"
+                f"现在是 {current}），一个字都没动。重新 read_document 读一遍，"
+                "确认那条线真的走完了，再带着新指纹来删 —— 照着旧的那一版删下去会把"
+                "别人刚写进去的那一段一起带走。"
+            ),
+            refused_as=ValueError,
         )
 
     target.unlink()
-    return f"删掉了：{_relative(root, target)}"
+    return DocumentChange(
+        outcome=ChangeOutcome.OK, path=here, said=f"删掉了：{here}"
+    )
 
 
 def _one_document(root: Path, path: str) -> str:
@@ -564,8 +712,8 @@ def _file_lock(key: str) -> threading.Lock:
 
 
 def _inside_the_lock(
-    key: str, dropped: threading.Event, work: Callable[..., str], *args: object
-) -> str:
+    key: str, dropped: threading.Event, work: Callable[..., T], *args: object
+) -> T | None:
     """按住 ``key`` 那一份，把 ``work`` 做完。**这一整段都在同一个线程里。**
 
     ``dropped`` 是"等这个结果的那个协程已经没了"。拿到锁时它已经立起来的话，说明这一
@@ -582,11 +730,11 @@ def _inside_the_lock(
                 "world documents 这一次还没碰盘就已经没人等结果了，什么都没做 key=%s",
                 key,
             )
-            return ""
+            return None
         return work(*args)
 
 
-async def _touch_disk(key: str, work: Callable[..., str], *args: object) -> str:
+async def _touch_disk(key: str, work: Callable[..., T], *args: object) -> T:
     """把 ``work`` 放进线程跑，全程按住 ``key`` 那一份文档。
 
     两把锁各管一头，缺一不可（为什么，见模块 docstring 最后一节）：``hold`` 管协程那
@@ -598,7 +746,9 @@ async def _touch_disk(key: str, work: Callable[..., str], *args: object) -> str:
     dropped = threading.Event()
     async with hold(key):
         try:
-            return await asyncio.to_thread(
+            # ``_inside_the_lock`` 只在"已经没人等结果了"那一种情况下交回 None，而
+            # 那一刻这个 await 已经被取消，交回来的东西到不了任何人手里。
+            return await asyncio.to_thread(  # type: ignore[return-value]
                 _inside_the_lock, key, dropped, work, *args
             )
         except asyncio.CancelledError:
@@ -719,11 +869,14 @@ async def write_document(
         一句确认，末尾带着这一份的新指纹。
     """
     root = documents_root()
-    said = await _touch_disk(
+    change = await _touch_disk(
         _one_document(root, path), _write, root, path, content, fingerprint
     )
+    # 抛在记日志之前：被拒的那几次 ``@tool_error`` 自己会记一条带 traceback 的
+    # warning，这儿再记一条"写 ... 12 字"只会让日志看起来像写成了。
+    change.raise_if_refused()
     logger.info("world documents 写 root=%s path=%r（%d 字）", root, path, len(content))
-    return said
+    return change.said
 
 
 @tool
@@ -803,11 +956,12 @@ async def delete_document(
         一句确认。
     """
     root = documents_root()
-    said = await _touch_disk(
+    change = await _touch_disk(
         _one_document(root, path), _delete, root, path, fingerprint
     )
+    change.raise_if_refused()
     logger.info("world documents 删 root=%s path=%r", root, path)
-    return said
+    return change.said
 
 
 # world 一轮里操作设定集的五只手。**她手里没有这几只**（第六节那条边界），
@@ -819,3 +973,120 @@ DOCUMENT_TOOLS = [
     edit_document,
     delete_document,
 ]
+
+
+# ---------------------------------------------------------------------------
+# 从外面进来的那一只手
+#
+# 见模块 docstring「第三个写者」那一节。下面四个入口是这一层交给进程外面的全部，
+# 它们和上面五只手的差别只在呈现：结构化的结果，不是渲染给模型看的那几段中文。
+# 走的锁和指纹是同一套 —— 每一个都落在 :func:`_touch_disk` 上。
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TreeListing:
+    """一次列目录的结果。
+
+    :func:`list_tree` 交给模型的是一段话：空树是一句、卷没挂上是另一句。程序这一侧要
+    的是清单本身，外加"树在不在"这个判断 —— 从那段话里解析出来会在措辞一改的时候静默
+    失效，而这两种处境的下一步完全不同：一个是照着写就行，一个是去找运维。
+    """
+
+    entries: tuple[str, ...]
+    mounted: bool
+
+
+@dataclass(frozen=True)
+class WholeDocument:
+    """一份文档此刻的**全文**和它的指纹。
+
+    ``path`` 是解析后相对树根的那条路径，不暴露挂载点。正文不截断，理由见模块
+    docstring「第三个写者」那一节最后一段。
+    """
+
+    path: str
+    content: str
+    fingerprint: str
+
+
+def _listing(root: Path, under: str) -> TreeListing:
+    """``under`` 底下的清单。根目录不在的两种处境由 ``mounted`` 分开。"""
+    base = root if under.strip() in ("", ".", "./", _SEP) else resolve_within(root, under)
+    if not base.exists():
+        if base == root.resolve() or base == root:
+            return TreeListing(entries=(), mounted=documents_mount().exists())
+        raise FileNotFoundError(f"「{under}」这个目录不存在。")
+    if base.is_file():
+        # ``rglob`` 对一个文件交回空，于是"路径写错了"会长得跟"这个目录是空的"一样。
+        raise NotADirectoryError(f"「{under}」是一份文档不是一个目录。")
+    return TreeListing(entries=tuple(_entries(base, root)), mounted=True)
+
+
+def _whole(root: Path, path: str) -> WholeDocument:
+    """整篇正文加上它的指纹。两次触盘都在锁里，所以指纹配的一定是这一段正文。"""
+    target = resolve_within(root, path)
+    if target.is_dir():
+        raise IsADirectoryError(f"「{path}」是一个目录不是一份文档。")
+    if not target.exists():
+        raise FileNotFoundError(f"没有「{path}」这一份。")
+    content = target.read_text(encoding="utf-8")
+    return WholeDocument(
+        path=_relative(root, target),
+        content=content,
+        fingerprint=fingerprint_of(content),
+    )
+
+
+async def listing(under: str = "") -> TreeListing:
+    """列目录。跟 ``list_documents`` 一样不进锁 —— 一把锁按的是一份文档，不是一棵树。"""
+    root = documents_root()
+    found = await asyncio.to_thread(_listing, root, under)
+    logger.info(
+        "world documents 外部列目录 root=%s under=%r（%d 项）",
+        root,
+        under,
+        len(found.entries),
+    )
+    return found
+
+
+async def read_whole(path: str) -> WholeDocument:
+    """读一份文档的全文和指纹。"""
+    root = documents_root()
+    found = await _touch_disk(_one_document(root, path), _whole, root, path)
+    logger.info(
+        "world documents 外部读 root=%s path=%r（%d 字）",
+        root,
+        path,
+        len(found.content),
+    )
+    return found
+
+
+async def rewrite(path: str, content: str, fingerprint: str = "") -> DocumentChange:
+    """整份重写。指纹那道门跟 :func:`_write` 是同一道 —— 用的就是它。"""
+    root = documents_root()
+    change = await _touch_disk(
+        _one_document(root, path), _write, root, path, content, fingerprint
+    )
+    logger.info(
+        "world documents 外部写 root=%s path=%r（%d 字）结果=%s",
+        root,
+        path,
+        len(content),
+        change.outcome,
+    )
+    return change
+
+
+async def remove(path: str, fingerprint: str = "") -> DocumentChange:
+    """删掉一份文档。同样只删单份，不删目录。"""
+    root = documents_root()
+    change = await _touch_disk(
+        _one_document(root, path), _delete, root, path, fingerprint
+    )
+    logger.info(
+        "world documents 外部删 root=%s path=%r 结果=%s", root, path, change.outcome
+    )
+    return change

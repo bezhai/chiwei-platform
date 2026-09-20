@@ -101,12 +101,31 @@ class RegisteredSource(NamedTuple):
     consumers: tuple[str, ...]
 
 
-def _ops_http(data_type: str, method: str, path: str, consumer: str) -> tuple:
-    """一条运维 HTTP 口的完整身份。"""
+def _ops_http(
+    data_type: str,
+    method: str,
+    path: str,
+    consumer: str,
+    *,
+    requires_inner_secret: bool = False,
+    answers_with_lane: bool = False,
+) -> tuple:
+    """一条运维 HTTP 口的完整身份。
+
+    ``requires_inner_secret`` 也算身份的一部分：一条口要不要凭据，跟它通向谁一样是
+    "它是不是一条能放行的外部来源"的组成部分。默认 ``False`` 是因为搜索和 DLQ 那几条
+    今天就是裸的 —— 把它们悄悄关起来会在下一次运维的时候才被发现。
+    """
     return (
         "http",
         data_type,
-        (("method", method), ("path", path), ("response", True)),
+        (
+            ("answers_with_lane", answers_with_lane),
+            ("method", method),
+            ("path", path),
+            ("requires_inner_secret", requires_inner_secret),
+            ("response", True),
+        ),
         (consumer,),
     )
 
@@ -145,6 +164,45 @@ _OPS_ONLY_EXTERNAL_SOURCES = frozenset({
         "app.domain.dlq_admin_events.DlqRequeueRequest",
         "POST", "/admin/dlq/requeue",
         "app.nodes.dlq_admin.dlq_requeue_node",
+    ),
+    # 世界文档树的四个外部端点。
+    #
+    # **为什么它们的消费者不在 app.living 里，而且也不该在。** 这四条碰的是 world
+    # 写出来的那棵文档树，不是任何一条唤醒路径：它们既不 emit 任何 Data，也到不了
+    # moment / world / life 的轮次上——外面打一次请求，没有谁会因此醒来、也没有谁
+    # 会因此开口。这份名单挡的是"外面的东西能把她叫起来"，这四条不是那个形状。
+    #
+    # 树本来只有一个写者入口（world 自己那五只手），树上写歪的一份文档人插不上手。
+    # 这四条让人插得上，而插进去的那只手走的是 app.living.documents 里同一条加锁
+    # 路径（每份文档一把锁 + 破坏性操作要带指纹），所以它跟 world 是对等的两个写者，
+    # 不是绕开它的第二条写入路径。
+    _ops_http(
+        "app.domain.world_documents.WorldDocumentListingRequest",
+        "GET", "/admin/world-documents/listing",
+        "app.nodes.world_documents.world_document_listing_node",
+        requires_inner_secret=True,
+        answers_with_lane=True,
+    ),
+    _ops_http(
+        "app.domain.world_documents.WorldDocumentReadRequest",
+        "GET", "/admin/world-documents/document",
+        "app.nodes.world_documents.world_document_read_node",
+        requires_inner_secret=True,
+        answers_with_lane=True,
+    ),
+    _ops_http(
+        "app.domain.world_documents.WorldDocumentWriteRequest",
+        "PUT", "/admin/world-documents/document",
+        "app.nodes.world_documents.world_document_write_node",
+        requires_inner_secret=True,
+        answers_with_lane=True,
+    ),
+    _ops_http(
+        "app.domain.world_documents.WorldDocumentDeleteRequest",
+        "DELETE", "/admin/world-documents/document",
+        "app.nodes.world_documents.world_document_delete_node",
+        requires_inner_secret=True,
+        answers_with_lane=True,
     ),
 })
 

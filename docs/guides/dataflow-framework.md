@@ -231,7 +231,12 @@ Source.mq("runtime_delayed_trigger_agent-service")   # 消费一条 MQ queue
 Source.cron("*/5 * * * *")           # crontab 表达式(分钟级)
 Source.interval(seconds=10)          # 秒级定时
 Source.http("/api/trigger")          # HTTP endpoint(Runtime 自动注册 FastAPI)
+Source.http("/admin/x", requires_inner_secret=True, answers_with_lane=True)  # 外加 Bearer 校验 + 自报执行泳道
 ```
+
+> `requires_inner_secret=True` 让这条路由校验 `INNER_HTTP_SECRET`（`Authorization: Bearer`，`app/runtime/http_auth.py`）：没带、带错、**进程根本没配这把凭据**，三种都进不到 handler，校验跑在参数反序列化之前。声明在源上而不是挂全局中间件，是因为路由是自动注册的——挂中间件会顺手盖住 `/health` 和那几条运维口，而靠路径前缀去认又把"挡哪几条"变成两处各写一遍的东西。默认 `False`：现有那几条运维口今天是裸的，这个开关不改变它们。
+
+> `answers_with_lane=True` 让框架在 handler 之外挡回去的那几种回答（401 / 503 / 422）也带上执行进程的泳道（`{"lane": ..., "message": ...}`），默认 `False` 时 detail 还是原来那句话本身、一个字节不变。它跟 `requires_inner_secret` 是两个开关：合成一个的话，下一条要凭据的路由会跟着把自己的部署身份告诉没通过校验的人，而那不是任何人选过的。
 
 > **当前图里用了哪几种**：业务边只有 `Source.interval`（五条钟，`app/wiring/living.py`）和 `Source.http`（运维 admin / DLQ 端点，`app/wiring/admin.py`）。**业务侧一条 `Source.mq` 都没有** —— 入站不经队列：两个渠道服务把消息投影成公共层口径写进 `common_message` 就结束，她每次醒来自己去查（`app/living/phone.py`），自己决定要不要开口。唯一一条 `Source.mq` 是框架内部的 `runtime_delayed_trigger_agent-service`（`app/runtime/delayed_trigger.py::register_runtime_trigger_wire`，`emit_delayed` 的跨进程回投）。`Source.cron` 有 adapter 但当前没有边在用。也没有专门的 `Source.manual`，因为它跟 http 没有运行时差异。
 

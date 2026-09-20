@@ -45,6 +45,8 @@ from app.living.documents import (
     DOCUMENT_TOOLS,
     MAX_DOCUMENT_CHARS,
     MAX_LISTING_ENTRIES,
+    _delete,
+    _write,
     delete_document,
     documents_root,
     edit_document,
@@ -1152,3 +1154,203 @@ async def test_refusing_an_empty_path_shows_no_path_sample(docs, empty):
 
     assert not path_samples(said), f"报错里摆着路径样本：{said!r}"
     assert not names_of_places_in(said), f"报错里写着具体地名：{said!r}"
+
+
+# --------------------------------------------------------------------------
+# 十一 · 结果和措辞分开：模型读那句话，程序读那几个字段
+#
+# 整份重写和删掉现在有**两个受众**。中文句子里没有任何机器可读的东西 ——「写好了」
+# 和「指纹过期被拒」只差在措辞上，程序要分辨就只能去解析中文，而措辞一改它就静默
+# 失效。分不清冲突 = 「靠指纹挡冲突」这条契约对程序那一侧根本不成立。
+#
+# 所以这一节钉两头：
+#
+# * **程序那一侧**：成功、缺指纹、指纹过期、目标已被删，四种各有自己的 outcome 值。
+#   那几个值本身就是对外契约，所以用例把字符串写死，不从实现里 import 枚举 ——
+#   import 过来的话实现和用例会被一起改窄，而用例照样绿。
+# * **模型那一侧**：**逐字不变**，而"模型看到的东西"不只是那句话。被拒是抛出去、由
+#   ``@tool_error`` 包成 outcome dict 的，包的时候 ``type(exc).__name__`` 会被写进
+#   ``detail["original_error_type"]``，**那个字段同样进模型的上下文** —— 为了结构化
+#   换一个自造的异常类型，模型看到的东西就已经变了。所以这里断言的是**完整**返回，
+#   而且那几段字是这次改动之前从当时的实现上原样跑出来的，不是照着新实现抄的：照着
+#   新实现抄的快照只能证明它跟自己一致。
+# --------------------------------------------------------------------------
+
+
+def test_a_program_can_tell_the_four_write_outcomes_apart(docs):
+    """四种结果四个不同的值。塌成同一个值 = 程序分不出冲突和成功。"""
+    (docs / "甲.md").write_text("灶台靠窗。", encoding="utf-8")
+    (docs / "乙.md").write_text("筹备中。林小满负责舞台。", encoding="utf-8")
+
+    assert {
+        "写成了": _write(docs, "新的线.md", "线").outcome,
+        "没带指纹": _write(docs, "甲.md", "全新的一版").outcome,
+        "指纹过期": _write(docs, "乙.md", "另一版", fingerprint_of("筹备中。")).outcome,
+        "那一份已经没了": _write(
+            docs, "丙.md", "写回来", fingerprint_of("筹备中。")
+        ).outcome,
+    } == {
+        "写成了": "ok",
+        "没带指纹": "no_fingerprint",
+        "指纹过期": "stale_fingerprint",
+        "那一份已经没了": "gone",
+    }
+
+
+def test_a_program_can_tell_the_four_delete_outcomes_apart(docs):
+    """删掉跟整份重写共用同一套结果值 —— 两只手各一套的话调用方得认两份契约。"""
+    (docs / "甲.md").write_text("灶台靠窗。", encoding="utf-8")
+    (docs / "乙.md").write_text("筹备中。", encoding="utf-8")
+    (docs / "丙.md").write_text("筹备中。林小满负责舞台。", encoding="utf-8")
+
+    assert {
+        "删掉了": _delete(docs, "乙.md", fingerprint_of("筹备中。")).outcome,
+        "没带指纹": _delete(docs, "甲.md").outcome,
+        "指纹过期": _delete(docs, "丙.md", fingerprint_of("筹备中。")).outcome,
+        "那一份已经没了": _delete(docs, "丁.md", fingerprint_of("筹备中。")).outcome,
+    } == {
+        "删掉了": "ok",
+        "没带指纹": "no_fingerprint",
+        "指纹过期": "stale_fingerprint",
+        "那一份已经没了": "gone",
+    }
+
+
+def test_a_write_that_landed_hands_the_program_the_new_fingerprint(docs):
+    """写成之后接着改，程序跟模型一样不该被逼着再读一遍。
+
+    模型从句子末尾那一串拿，程序从这个字段拿 —— 同一个东西的两种呈现。
+    """
+    change = _write(docs, "当下/新的线.md", "线")
+
+    assert change.path == "当下/新的线.md"
+    assert change.fingerprint == fingerprint_of("线")
+
+
+def test_a_refused_change_carries_no_fingerprint(docs):
+    """这个字段说的是"这次落下去的是哪一版"。一个字都没写，就没有这一版。"""
+    (docs / "甲.md").write_text("灶台靠窗。", encoding="utf-8")
+
+    blind = _write(docs, "甲.md", "全新的一版")
+    stale = _write(docs, "甲.md", "全新的一版", fingerprint_of("筹备中。"))
+    gone = _delete(docs, "丁.md", fingerprint_of("筹备中。"))
+
+    assert [blind.fingerprint, stale.fingerprint, gone.fingerprint] == ["", "", ""]
+
+
+async def test_what_the_model_reads_back_from_a_write_is_word_for_word(docs):
+    """整份重写：模型那一侧收到的**完整**返回逐字不变。
+
+    这几段字（含那几串十六进制和 ``original_error_type`` 里的类型名）是改动之前从
+    当时的实现上原样跑出来的。
+    """
+    (docs / "甲.md").write_text("灶台靠窗。", encoding="utf-8")
+    (docs / "乙.md").write_text("筹备中。", encoding="utf-8")
+    (docs / "厨房.md").write_text("灶台靠窗。", encoding="utf-8")
+
+    assert await write_document.invoke(
+        {"path": "当下/新的线.md", "content": "线"}
+    ) == (
+        "写好了：当下/新的线.md（1 字）。"
+        "【这一份现在的指纹：83ee4811d833，接着改它就带上这一串，不用再读一遍。】"
+    )
+
+    assert await write_document.invoke(
+        {
+            "path": "厨房.md",
+            "content": "灶台靠窗，窗外下着雨。",
+            "fingerprint": fingerprint_of("灶台靠窗。"),
+        }
+    ) == (
+        "写好了：厨房.md（11 字）。"
+        "【这一份现在的指纹：868bf622865b，接着改它就带上这一串，不用再读一遍。】"
+    )
+
+    assert await write_document.invoke(
+        {"path": "甲.md", "content": "全新的一版"}
+    ) == {
+        "kind": "tool_error",
+        "message": (
+            "这一份没写成: 「甲.md」已经有了（5 字），一个字都没写 —— "
+            "整份换掉之前得先看看它现在写的是什么。先 read_document 读一遍，"
+            "把末尾那个指纹带上再写。"
+        ),
+        "detail": {"original_error_type": "ValueError"},
+    }
+
+    stale = fingerprint_of("筹备中。")
+    (docs / "乙.md").write_text("筹备中。林小满负责舞台。", encoding="utf-8")
+    assert await write_document.invoke(
+        {"path": "乙.md", "content": "筹备中。已经定好日子。", "fingerprint": stale}
+    ) == {
+        "kind": "tool_error",
+        "message": (
+            "这一份没写成: 「乙.md」在你读到之后被改过了"
+            "（你带的指纹是 8c4a88c5d9a2，现在是 cf0ca795b84b），一个字都没写。"
+            "重新 read_document 读一遍，在新的那一版上改，再带着新指纹写回来 —— "
+            "直接盖过去会把别人刚写下的那一段丢掉。"
+        ),
+        "detail": {"original_error_type": "ValueError"},
+    }
+
+    assert await write_document.invoke(
+        {"path": "丙.md", "content": "筹备中。", "fingerprint": stale}
+    ) == {
+        "kind": "tool_error",
+        "message": (
+            "这一份没写成: 「丙.md」在你读到之后被删掉了（你带的指纹是 8c4a88c5d9a2），"
+            "一个字都没写。它那条线多半已经走完了；确实要重新起一份的话，"
+            "不带指纹再来一次。"
+        ),
+        "detail": {"original_error_type": "ValueError"},
+    }
+
+
+async def test_what_the_model_reads_back_from_a_delete_is_word_for_word(docs):
+    """删掉：同上。**那一份不在了是 FileNotFoundError，不是 ValueError** ——
+
+    两只手的拒绝在程序那一侧是同一个 outcome 值，可模型那一侧收到的类型名不一样，
+    而类型名进它的上下文。结构化的时候把两边拉齐成同一个异常，模型看到的就变了。
+    """
+    (docs / "丁.md").write_text("灶台靠窗。", encoding="utf-8")
+    (docs / "戊.md").write_text("筹备中。", encoding="utf-8")
+    (docs / "己.md").write_text("灶台靠窗。", encoding="utf-8")
+    (docs / "独").mkdir()
+    (docs / "独/还在.md").write_text("还在。", encoding="utf-8")
+
+    assert await delete_document.invoke(
+        {"path": "己.md", "fingerprint": fingerprint_of("灶台靠窗。")}
+    ) == "删掉了：己.md"
+
+    assert await delete_document.invoke({"path": "丁.md"}) == {
+        "kind": "tool_error",
+        "message": (
+            "这一份没删成: 「丁.md」还在（5 字），一个字都没动 —— "
+            "删掉它之前得先看看它现在写的是什么。先 read_document 读一遍，"
+            "把末尾那个指纹带上再来删。"
+        ),
+        "detail": {"original_error_type": "ValueError"},
+    }
+
+    stale = fingerprint_of("筹备中。")
+    (docs / "戊.md").write_text("筹备中。林小满负责舞台。", encoding="utf-8")
+    assert await delete_document.invoke(
+        {"path": "戊.md", "fingerprint": stale}
+    ) == {
+        "kind": "tool_error",
+        "message": (
+            "这一份没删成: 「戊.md」在你读到之后被改过了"
+            "（你带的指纹是 8c4a88c5d9a2，现在是 cf0ca795b84b），一个字都没动。"
+            "重新 read_document 读一遍，确认那条线真的走完了，再带着新指纹来删 —— "
+            "照着旧的那一版删下去会把别人刚写进去的那一段一起带走。"
+        ),
+        "detail": {"original_error_type": "ValueError"},
+    }
+
+    assert await delete_document.invoke(
+        {"path": "独/走完了.md", "fingerprint": stale}
+    ) == {
+        "kind": "tool_error",
+        "message": "这一份没删成: 没有「独/走完了.md」这一份。这儿有的是：\n独/还在.md",
+        "detail": {"original_error_type": "FileNotFoundError"},
+    }
