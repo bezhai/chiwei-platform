@@ -27,13 +27,14 @@ const containsDangerousOperator = (value: unknown): boolean => {
   return false;
 };
 
-const buildMongoUrl = () => {
+export const buildMongoUrl = () => {
   const username = process.env.MONGO_INITDB_ROOT_USERNAME || '';
   const password = process.env.MONGO_INITDB_ROOT_PASSWORD || '';
   const host = process.env.MONGO_HOST || 'localhost';
+  const port = Number(process.env.MONGO_PORT) || 27017;
 
   return (
-    `mongodb://${username}:${password}@${host}/chiwei?` +
+    `mongodb://${username}:${password}@${host}:${port}/chiwei?` +
     `connectTimeoutMS=2000&authSource=admin`
   );
 };
