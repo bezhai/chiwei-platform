@@ -1,19 +1,20 @@
 // 把赤尾说的那段话、连同她要带的图，变成飞书认得的东西。
 //
-// 输入是一段 markdown（模型写出来的原话）加一串图片句柄。输出是飞书的富文本
+// 输入是一段话（模型写出来的原话）加一串图片句柄。输出是飞书的富文本
 // （PostContent）**加上真的传上去了的那几张图**（落库那一步要它，见 LarkRendered）。
 // 三步，每步各自一个文件，这里只负责**把它们按正确的顺序串起来**。
 //
 //     1. mention   `@小明`  →  `<at user_id="on_xm">小明</at>`     群聊才做
-//     2. post      markdown  →  若干 md 行                          总是做
+//     2. post      文字  →  text / at / emotion 行（`[白眼]` 查表）  总是做
 //     3. pictures  句柄  →  现签、下载、上传  →  若干 img 行         有句柄才做
 //
 // ## 图从句柄来，不从正文来
 //
 // 上游的正文是一个对话模型自由生成的，没有任何原样保留的通道 —— 混在正文里的图片
 // 引用必然被改写或丢掉，而且不报错。所以图有自己的字段（出站消息的
-// `picture_file_names`，对象存储的永久句柄），第 2 步则把正文那条路彻底堵死：正文里
-// 的图片引用一个都变不成 image_key（飞书认不出的 key 会让它拒收**整条消息**）。
+// `picture_file_names`，对象存储的永久句柄），正文那条路则根本产出不了 img 节点：第 2 步
+// 只认 text / at / emotion，正文里的图片引用就是一串字（飞书认不出的 image_key 会让它
+// 拒收**整条消息**）。
 //
 // 图接在正文后面，各自成行。第 3 步只**追加**行，一个字都不改正文 —— 这也是它为什么
 // 排在 mention 之后不再是个需要小心的问题。
@@ -28,8 +29,9 @@
 // 把句柄取出来交给这里，是消费侧的事 —— 它知道分段、知道 content item 的种类，这里
 // 只知道"一段话和几个句柄"。
 
+import type { LarkEmojiCatalog } from '../emoji/catalog';
 import type { LarkMentionResolver } from './mentions';
-import { markdownToPostContent, type PostContent } from './post-content';
+import { larkTextToPostContent, type PostContent } from './post-content';
 import { renderLarkPictures, type LarkPictureDeps } from './pictures';
 
 /** 渲染这一段话需要知道的外部坐标。两项都可缺省，缺了就跳过对应的那一步。 */
@@ -73,27 +75,29 @@ export interface LarkRendered {
 }
 
 export type LarkPostRenderer = (
-    markdown: string,
+    text: string,
     ctx: LarkRenderContext,
 ) => Promise<LarkRendered>;
 
 export interface LarkRenderDeps {
     /** 群 @ 解析。实现见 mentions.ts。 */
     mentions: LarkMentionResolver;
+    /** 她写的 `[白眼]` → 飞书的表情 key。查不到的留原文（见 post-content.ts）。 */
+    emoji: Pick<LarkEmojiCatalog, 'emojisByText'>;
     /** 句柄 → 飞书 img 行要用到的三个协作者。实现见 pictures.ts。 */
     pictures: LarkPictureDeps;
 }
 
 export function createLarkPostRenderer(deps: LarkRenderDeps): LarkPostRenderer {
-    return async (markdown, ctx) => {
-        let text = markdown;
+    return async (said, ctx) => {
+        let text = said;
 
         // 顺序见文件头。mention 必须先看见原话。
         if (ctx.mentionChatId) {
             text = await deps.mentions(text, ctx.mentionChatId);
         }
 
-        const post = markdownToPostContent(text);
+        const post = await larkTextToPostContent(deps.emoji, text);
 
         const fileNames = ctx.pictureFileNames ?? [];
         if (fileNames.length === 0) return { post, pictures: [] };

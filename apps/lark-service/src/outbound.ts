@@ -34,6 +34,7 @@ import { loadOutboundConfig } from './config';
 import { larkDisplayNameOf, type LarkPersonaName } from './lark/bot-lookup';
 import { LARK_CHANNEL } from './lark/channel';
 import { larkCredentials } from './lark/credentials';
+import { postgresEmojiCatalog } from './lark/emoji/catalog';
 import { larkSpeakAs } from './lark/outbound/bot-context';
 import { deliverLarkChatResponse, type LarkDeliveryDeps } from './lark/outbound/deliver';
 import {
@@ -170,6 +171,7 @@ async function realOutbound(): Promise<LarkOutbound> {
             ledger,
             api,
             render: createLarkPostRenderer({
+                emoji: postgresEmojiCatalog(dataSource),
                 mentions: createLarkMentionResolver({
                     roster,
                     // 每次都重算：common_user_id 和人设名都是启动时回填的，缓存一份
