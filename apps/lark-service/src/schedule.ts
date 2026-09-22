@@ -56,7 +56,7 @@ export const LARK_SCHEDULES: readonly LarkScheduleSlot[] = [
     { name: 'daily-photo', cron: '0 18 * * *', botName: 'tool' },
     // 每天 19:30：昨天入库的新图汇成一张卡片发给特定群。
     { name: 'daily-new-photo', cron: '30 19 * * *', botName: 'tool' },
-    // 每小时：拉远端 emoji 表，整体替换本地 lark_emoji（复读功能唯一的读端）。
+    // 每小时：拉远端 emoji 表，整体替换本地 lark_emoji（复读和赤尾回复里的 `[微笑]` 靠它换成表情）。
     { name: 'emoji-sync', cron: '0 * * * *', botName: 'chiwei' },
 ];
 

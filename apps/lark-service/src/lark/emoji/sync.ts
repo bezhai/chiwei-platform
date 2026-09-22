@@ -74,7 +74,7 @@ export function syncLarkEmojis(deps: LarkEmojiSyncDeps): () => Promise<void> {
         console.info(`[lark-emoji] fetched ${all.length} emoji(s), ${alive.length} still alive`);
 
         // 一个有效表情都没有 = 远端出了问题（整批下架是不会发生的）。往下写就是把
-        // lark_emoji 清空，而复读只会安静地不再认表情。
+        // lark_emoji 清空，而复读和赤尾的回复只会安静地不再认表情。
         if (alive.length === 0) {
             console.warn('[lark-emoji] the feed has no live emoji; leaving lark_emoji untouched');
             return;

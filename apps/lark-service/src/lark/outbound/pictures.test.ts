@@ -95,7 +95,7 @@ describe('renderLarkPictures 出问题的时候：降级成一行文字，绝不
     it('现签拿不到地址：换成"取不到地址"，不下载也不上传', async () => {
         const h = harness({ sign: async () => null });
         expect(await renderLarkPictures(['cat.png'], h.deps)).toEqual([
-            { nodes: [{ tag: 'md', text: '(第 1 张图取不到地址)' }] },
+            { nodes: [{ tag: 'text', text: '(第 1 张图取不到地址)' }] },
         ]);
         expect(h.downloaded).toEqual([]);
         expect(h.uploaded).toBe(0);
@@ -108,7 +108,7 @@ describe('renderLarkPictures 出问题的时候：降级成一行文字，绝不
             },
         });
         expect(await renderLarkPictures(['cat.png'], h.deps)).toEqual([
-            { nodes: [{ tag: 'md', text: '(第 1 张图处理失败)' }] },
+            { nodes: [{ tag: 'text', text: '(第 1 张图处理失败)' }] },
         ]);
         expect(h.uploaded).toBe(0);
     });
@@ -120,7 +120,7 @@ describe('renderLarkPictures 出问题的时候：降级成一行文字，绝不
             },
         });
         expect(await renderLarkPictures(['cat.png'], h.deps)).toEqual([
-            { nodes: [{ tag: 'md', text: '(第 1 张图处理失败)' }] },
+            { nodes: [{ tag: 'text', text: '(第 1 张图处理失败)' }] },
         ]);
         expect(h.uploaded).toBe(0);
     });
@@ -128,7 +128,7 @@ describe('renderLarkPictures 出问题的时候：降级成一行文字，绝不
     it('上传成功但飞书没给 key：换成"上传失败"', async () => {
         const h = harness({ upload: async () => null });
         expect(await renderLarkPictures(['cat.png'], h.deps)).toEqual([
-            { nodes: [{ tag: 'md', text: '(第 1 张图上传失败)' }] },
+            { nodes: [{ tag: 'text', text: '(第 1 张图上传失败)' }] },
         ]);
     });
 
@@ -139,7 +139,7 @@ describe('renderLarkPictures 出问题的时候：降级成一行文字，绝不
             },
         });
         expect(await renderLarkPictures(['cat.png'], h.deps)).toEqual([
-            { nodes: [{ tag: 'md', text: '(第 1 张图处理失败)' }] },
+            { nodes: [{ tag: 'text', text: '(第 1 张图处理失败)' }] },
         ]);
     });
 
@@ -148,7 +148,7 @@ describe('renderLarkPictures 出问题的时候：降级成一行文字，绝不
             sign: async (fileName) => (fileName === 'bad.png' ? null : `https://tos/${fileName}`),
         });
         expect(await renderLarkPictures(['bad.png', 'good.png'], h.deps)).toEqual([
-            { nodes: [{ tag: 'md', text: '(第 1 张图取不到地址)' }] },
+            { nodes: [{ tag: 'text', text: '(第 1 张图取不到地址)' }] },
             { nodes: [{ tag: 'img', image_key: 'img_v3_uploaded' }], imageKey: 'img_v3_uploaded' },
         ]);
     });
@@ -157,8 +157,8 @@ describe('renderLarkPictures 出问题的时候：降级成一行文字，绝不
         const h = harness({ sign: async () => null });
         const rows = await renderLarkPictures(['a.png', 'b.png'], h.deps);
         expect(rows).toEqual([
-            { nodes: [{ tag: 'md', text: '(第 1 张图取不到地址)' }] },
-            { nodes: [{ tag: 'md', text: '(第 2 张图取不到地址)' }] },
+            { nodes: [{ tag: 'text', text: '(第 1 张图取不到地址)' }] },
+            { nodes: [{ tag: 'text', text: '(第 2 张图取不到地址)' }] },
         ]);
     });
 });

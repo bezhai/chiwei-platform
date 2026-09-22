@@ -10,7 +10,7 @@ import {
     type LarkClientPool,
 } from './sdk-lark-api';
 
-const post: PostContent = { content: [[{ tag: 'md', text: '你好' }]] };
+const post: PostContent = { content: [[{ tag: 'text', text: '你好' }]] };
 
 interface Recorded {
     sent: Array<{ receiveId: string; content: unknown; msgType: string }>;
