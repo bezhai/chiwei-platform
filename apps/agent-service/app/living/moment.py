@@ -16,16 +16,23 @@
 
 **所以醒来只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、手机上来了
 什么（:meth:`app.living.snapshot.MomentSnapshot.render_new`）。她此刻的样子（在哪、在做
-什么、上一次写下的那天、心里挂着什么、刚做过说过什么）读一百遍字字一样，上一轮读过的
-还在上下文里，所以它只在清理那一下作为新起点重铺一次
-（:func:`app.living.continuity.trim_for_round`）。"心里挂着没了结的事"那份清单由
-:func:`keep_in_mind` 重写（:mod:`app.living.loose_ends`）。
+什么、上一次写下的那天、心里挂着什么）读一百遍字字一样，上一轮读过的还在上下文里，所以
+它只在清理那一下作为新起点重铺一次（:func:`app.living.continuity.trim_for_round`），而
+且上下文里永远只留最新那一份。"心里挂着没了结的事"那份清单由 :func:`keep_in_mind` 重写
+（:mod:`app.living.loose_ends`）。
+
+**她自己说过的话，在她眼前只出现一次。** 上下文连着的时候，那就是她自己那次
+``say`` / ``send_message`` 调用：回执不抄原话（发出去的只给撤回编号），状态也不再附
+"你刚做过、说过"。那一段只在上下文接不住她最近说过的话时才给 —— 一天的第一轮、上一轮
+没存下来（:func:`app.living.continuity.holds_her_recent_words`）。2026-09-13 上下文
+连起来之后，同一批话在一轮输入里一度出现了几十次，她的说话方式跟着一天天收窄成同一个
+样子。
 
 **挂线头是独立的一件事，不绑在 ``switch_to`` 上。** 「是否换事」不等于「是否记住」：
 绫奈跟她说"周末陪我去祭典"，她手上的书没放下（这个 moment 答「继续」），但她记住了——这是
-真人每天都在做的事。把清单绑在换事情上，这条感知在游标推进之后就永久消失了：她自己
-最近那十二条里只有她**自己**说做的，别人说的话不在里面，谁也救不回来。而"跨 moment 因果
-延续"恰好是整个实验最想验证的东西。
+真人每天都在做的事。把清单绑在换事情上，这条感知在游标推进之后就永久消失了：上下文里
+那一段 4 小时就裁掉，状态里「你刚做过、说过」那一段只有她**自己**说做的，别人说的话不
+在里面，谁也救不回来。而"跨 moment 因果延续"恰好是整个实验最想验证的东西。
 
 **每个 moment 串行。** 一个人不能同时想两件事——这是物理事实，不是给她加冷却。用 T1 的
 :func:`app.living.serial.hold`，后到的排队等前一次做完（两条路：固定的钟，和
@@ -109,6 +116,7 @@ from app.living.anchor import anchor_on_grid
 from app.living.clock import living_lane
 from app.living.continuity import (
     commit_moment_transcript,
+    holds_her_recent_words,
     load_moment_transcript,
     load_trim_policy,
     moment_transcript_id,
@@ -604,7 +612,10 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
         medium=MEDIUM_IN_PERSON,
     )
     note_recorded(happening_id)
-    return f"记下了：{said}"
+    # 不把原话再抄一遍：它就在这次调用的参数里，而这条回执跟她的话一样在上下文里留
+    # 4 小时（:data:`app.living.continuity.KEPT_TOOLS`），抄一遍就是同一句话在她每一轮
+    # 的输入里多出现一次。当面说的话没有撤回编号，所以这里也没有编号可给。
+    return "记下了。"
 
 
 @tool
@@ -1049,12 +1060,18 @@ async def run_moment(
         # 这一轮新摆到她眼前的那条，接在连续上下文后面 —— 所以它永远是最后一条。
         #
         # **只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、手机上来了
-        # 什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里挂着什么、刚做过说
-        # 过什么）不在这里 —— 那份读一百遍字字一样，每轮重发就是把同一段话抄一遍，而她
-        # 上一轮读过的还在上下文里。它由清理那一下作为新起点重铺
+        # 什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里挂着什么）不在这里
+        # —— 那份读一百遍字字一样，每轮重发就是把同一段话抄一遍，而她上一轮读过的还在
+        # 上下文里。它由清理那一下作为新起点重铺
         # （:func:`app.living.continuity.trim_for_round`，默认一小时一次；一天的第一轮
         # 上下文是空的，那一下也会立一根界桩，所以冷启动她照样知道自己站在哪）。
-        state = snapshot.render_state()
+        #
+        # 「你刚做过、说过」那一段只在这份历史接不住她最近说过的话时才带：一根界桩都
+        # 没有（冷启动、硬顶全裁掉了），或者上一轮没存下来。判据问的是**这份历史**，不是
+        # 这一轮要立哪种界桩 —— 缺口撞上清理点、硬顶之后那一轮，立的都是清理那根。
+        state = snapshot.render_state(
+            her_words_in_view=holds_her_recent_words(history, lost_last_round=gap)
+        )
         stimulus = Message(
             role=Role.USER,
             content=f"{snapshot.render_new(previous_at=previous_at)}\n\n{envelope}",

@@ -46,9 +46,9 @@ _KINDS = frozenset({KIND_SPEECH, KIND_ACT})
 # ``mouth:<outbound_id>``。前缀之后那一串就是撤回要用的键
 # （``SpokenOutbound.outbound_id``）。
 #
-# **只许有这一处定义。** 拼它的是 :mod:`app.living.mouth`，把它剥掉、好让她在快照和
-# 日记材料里看见那个编号的是 :func:`app.living.happening.message_handle`，而她照抄那个
-# 编号调 :mod:`app.living.takeback` 时按等值查的就是同一个键。两边各写一份字面量的话，
+# **只许有这一处定义。** 拼它的是 :mod:`app.living.mouth`，把它剥掉、好让她在发送回执、
+# 快照和日记材料里看见那个编号的是 :func:`app.living.happening.message_handle`，而她照抄
+# 那个编号调 :mod:`app.living.takeback` 时按等值查的就是同一个键。两边各写一份字面量的话，
 # 改了一处就漂移，而漂移的表现是她照抄了却撤不掉 —— 一句报错都没有。
 #
 # 放在这里而不是 ``mouth`` 里：``mouth`` 和 ``happening`` 本来就都 import 这个模块，

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 
 import pytest
@@ -527,7 +528,8 @@ async def test_the_next_seam_is_a_new_seam_so_she_can_say_it_again(
         "下一轮她再说一次却被认领表拦下了 —— 那这句话就被系统判死了，"
         f"而这个决定不该由系统做。交出去 {len(attempts)} 次，发出 {len(spoken)} 条"
     )
-    assert isinstance(again, str) and _SAID in again
+    assert isinstance(again, str) and "发出去了" in again, again
+    assert _SAID not in again, f"回执又把她那句话抄了一遍。拿到：{again!r}"
     (h,) = await recent_own_happenings(lane=LANE, persona_id="akao")
     assert h.content == _SAID, "这一次真发出去了，记忆就该落下"
 
@@ -688,8 +690,11 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
             {"what": _SAID, "channel_id": str(_DM)}
         )
 
-    assert isinstance(outcome, str) and _SAID in outcome, outcome
     row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+    assert isinstance(outcome, str) and "发出去了" in outcome, outcome
+    assert _handles_in(outcome) == [row.outbound_id], (
+        f"收口被对账挤过一版，回执里的编号就不是这条了。拿到：{outcome!r}"
+    )
     assert row.state == STATE_HANDED_OFF, (
         "收口被对账那一版挤掉了 —— 这条永久停在「已落地、未收口」，对账下一拍也"
         f"不会再碰它，而且一句报错都没有。拿到：{row}"
@@ -768,6 +773,91 @@ async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
     )
     assert [v.ver for v in versions] == [1, 2], (
         f"抢输那一次也往认领链上写了。拿到：{[v.ver for v in versions]}"
+    )
+    # 抢输那一格提前返回，编号只能从认领表上那条记录派生 —— 跟抢赢那次是同一条消息
+    assert _SAID not in outcome, f"回执又把她那句话抄了一遍。拿到：{outcome!r}"
+    assert _handles_in(outcome) == [row.outbound_id], (
+        f"抢输那一格没把那条消息的编号交给她，她撤不了它。拿到：{outcome!r}"
+    )
+
+
+# --------------------------------------------------------------------------
+# 七 · 回执给编号，不给原文
+# --------------------------------------------------------------------------
+#
+# 原话就在紧挨着的那次调用参数里，回执再抄一遍是纯重复：2026-09-23 她一轮输入里自己
+# 的话出现了几十次，这是其中一处。编号必须给：状态块不再每小时列一遍她最近说过的话，
+# 刚发出去那句的撤回编号在别处拿不到（手机页要她自己再看一次才有）。
+
+
+def _handles_in(outcome: str) -> list[str]:
+    """回执里印着的撤回编号 —— 跟「你刚做过、说过」里同一个形状：全角方括号 + 32 位 hex。"""
+    return re.findall(r"［([0-9a-f]{32})］", outcome)
+
+
+@pytest.mark.integration
+async def test_a_sent_line_comes_back_as_its_handle_not_its_words(
+    mouth_db, in_a_moment, spoken, guard
+):
+    """发出去了：回执里是这条的撤回编号，印法跟她在「你刚做过、说过」里见到的一样。"""
+    from app.living.happening import own_line
+    from app.living.mouth import latest_outbound
+
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        outcome = await send_message.invoke({"what": _SAID, "channel_id": str(_DM)})
+
+    row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+    assert isinstance(outcome, str) and "发出去了" in outcome, outcome
+    assert _SAID not in outcome, f"回执又把她那句话抄了一遍。拿到：{outcome!r}"
+    assert _handles_in(outcome) == [row.outbound_id], (
+        f"回执里没有这条的撤回编号。拿到：{outcome!r}"
+    )
+    (h,) = await recent_own_happenings(lane=LANE, persona_id="akao")
+    assert f"［{row.outbound_id}］" in own_line(h), (
+        "回执和「你刚做过、说过」印出来的不是同一个形状 —— 她会以为那是两种编号"
+    )
+
+
+@pytest.mark.integration
+async def test_saying_it_again_in_the_same_round_hands_back_the_same_handle(
+    mouth_db, in_a_moment, spoken, guard
+):
+    """同一轮再说一遍同一句：预检查挡下，回执给的是已经发出去那条的编号。
+
+    这一格提前返回，没走到收口那一步，编号只能从认领表上那条记录派生。三种结局照样
+    分得开：这里说的是"已经说出去了"，不是"发出去了"。
+    """
+    from app.living.mouth import latest_outbound
+
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        first = await send_message.invoke({"what": _SAID, "channel_id": str(_DM)})
+        again = await send_message.invoke({"what": _SAID, "channel_id": str(_DM)})
+
+    row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+    assert len(spoken) == 1
+    assert isinstance(again, str), again
+    assert "已经说出去了" in again and "没有再发一遍" in again, again
+    assert "发出去了" not in again, f"跟真的发出去了那一格分不开了。拿到：{again!r}"
+    assert _SAID not in again, f"回执又把她那句话抄了一遍。拿到：{again!r}"
+    assert _handles_in(again) == _handles_in(first) == [row.outbound_id]
+
+
+def test_the_send_hand_tells_her_the_receipt_carries_the_handle():
+    """发送那只手的说明（``Returns`` 编进她看到的工具说明）说回执里有编号，不再说附原话。"""
+    desc = send_message.definition.description
+    assert "附上你那句话" not in desc, desc
+    assert "方括号" in desc and "take_back_message" in desc, (
+        f"说明里没告诉她回执里那串是拿去撤回的编号。拿到：\n{desc}"
     )
 
 

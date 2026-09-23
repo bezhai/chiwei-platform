@@ -345,6 +345,19 @@ def message_handle(happening_id: str) -> str | None:
     return happening_id[len(OUTBOUND_HAPPENING_PREFIX):]
 
 
+def printed_handle(happening_id: str) -> str:
+    """那个编号印在她眼前的样子：``［<编号>］``；不是她发出去的消息就是空串。
+
+    **印法只在这里写一次。** 她在两处见到这个形状 —— 「你刚做过、说过」那段
+    （:func:`own_line`）和发送回执（:func:`app.living.mouth.send_message`）—— 两处都走
+    它，所以她照抄给 :func:`app.living.takeback.take_back_message` 的是同一种东西。
+    手机那侧刻意不用这个印法（``take_back_id`` 属性，理由见
+    :func:`app.living.phone._one_message`）。
+    """
+    handle = message_handle(happening_id)
+    return f"［{handle}］" if handle is not None else ""
+
+
 def own_line(h: Happening) -> str:
     """她自己那条记录的样子；发出去的消息末尾带上它的编号。
 
@@ -362,8 +375,7 @@ def own_line(h: Happening) -> str:
     给她自己的话套上 ``&quot;`` 是拿她读自己记忆的清晰度，换一个这条路上根本不存在
     的威胁。完整判据写在 :func:`app.living.records.esc` 上。
     """
-    handle = message_handle(h.happening_id)
-    tail = f"［{handle}］" if handle is not None else ""
+    tail = printed_handle(h.happening_id)
     if h.kind != KIND_SPEECH:
         return f"你 {h.content}{tail}"
     if h.audience:

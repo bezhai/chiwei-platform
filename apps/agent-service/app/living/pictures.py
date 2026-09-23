@@ -36,10 +36,11 @@ runtime 不给任何 Data 自动加 lane，不显式带上就跟 prod 的行混�
   * :func:`look_through_your_pictures` 翻一翻她手上有哪些
   * :func:`look_at_a_picture`          拿出其中一张看
 
-**"看"为什么要拆成两只手。** 她这次 moment 只拿到快照和手机信封，**不继承上一次的工具结
-果**（:func:`app.living.moment.run_moment` 每次重建一份消息）；她自己近期做过的事也只
-有最近有限几条（:data:`app.living.snapshot.OWN_RECENT_LIMIT`）。所以句柄如果只出现在
-画图那一刻的返回值里，下一次它就永远消失了 —— 库里那一行还在，而她两手空空。先列出
+**"看"为什么要拆成两只手。** 上一次的工具结果在她的上下文里只留 4 小时
+（:mod:`app.living.continuity`，日界一到整段清空）；状态里「你刚做过、说过」那一段只在
+上下文接不住她最近说过的话时才给，而且只有最近有限几条
+（:data:`app.living.snapshot.OWN_RECENT_LIMIT`）。所以句柄如果只出现在画图那一刻的返回
+值里，过了那几个小时它就永远消失了 —— 库里那一行还在，而她两手空空。先列出
 来、再按句柄或名字点一张，形状跟 :mod:`app.living.reading` 那两只手对齐，她不用学第
 二套。
 

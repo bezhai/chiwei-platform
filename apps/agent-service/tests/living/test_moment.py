@@ -344,6 +344,34 @@ async def test_speaking_to_two_sisters_at_once_is_one_thing_not_two(
 
 
 @pytest.mark.integration
+async def test_saying_and_acting_hand_back_no_copy_of_her_words(
+    moment_db, stub_moment
+):
+    """说一句、做一件：回执不把她的原话再抄一遍。
+
+    原话就在紧挨着的那次调用参数里，而这两只手的回执跟她的话一样在上下文里留 4 小时
+    （:data:`app.living.continuity.KEPT_TOOLS`）—— 每抄一遍，同一句话就在她每一轮的
+    输入里多出现一次。
+    """
+    await _stand("akao", "家/客厅", "待着", _at(13))
+    runner = stub_moment(
+        ("say", {"what": "周末祭典我陪你去。", "to": ["ayana"]}),
+        ("act", {"what": "把胶片摊了一茶几"}),
+    )
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    said, acted = runner.results
+    assert isinstance(said, str) and said and "周末祭典我陪你去。" not in said, said
+    assert isinstance(acted, str) and acted and "把胶片摊了一茶几" not in acted, acted
+    from app.living.snapshot import recent_own_happenings
+
+    assert [h.content for h in await recent_own_happenings(
+        lane=LANE, persona_id="akao", limit=5
+    )] == ["周末祭典我陪你去。", "把胶片摊了一茶几"], "回执改了，记下来的那两件不能跟着少"
+
+
+@pytest.mark.integration
 async def test_speaking_to_a_name_that_is_nobody_is_refused(moment_db, stub_moment):
     """收件人写错会静默送不到（audience 谁也匹配不上）。挡在工具里，报错喂回去。"""
     await _stand("akao", "家/客厅", "待着", _at(13))
