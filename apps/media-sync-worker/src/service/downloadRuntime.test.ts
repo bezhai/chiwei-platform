@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { loadConsumerGuardConfig, loadDownloadDelayConfig } from './downloadRuntime';
+import {
+    loadConsumerGuardConfig,
+    loadDailyDownloadGuardConfig,
+    loadDownloadDelayConfig,
+} from './downloadRuntime';
 
 describe('loadDownloadDelayConfig', () => {
     it('defaults artificial waits to half of the old hard-coded values', () => {
@@ -106,6 +110,37 @@ describe('loadConsumerGuardConfig', () => {
         ).toEqual({
             cycleTimeoutMs: 1800000,
             runningTaskReclaimMs: 2700000,
+        });
+    });
+});
+
+describe('loadDailyDownloadGuardConfig', () => {
+    it('defaults the per-author watchdog to 10 minutes', () => {
+        expect(loadDailyDownloadGuardConfig({})).toEqual({
+            authorTimeoutMs: 10 * 60 * 1000,
+        });
+    });
+
+    it('accepts positive overrides and rejects zero, negative, or invalid values', () => {
+        expect(
+            loadDailyDownloadGuardConfig({
+                DOWNLOAD_AUTHOR_TIMEOUT_MS: '120000',
+            })
+        ).toEqual({ authorTimeoutMs: 120000 });
+        expect(loadDailyDownloadGuardConfig({ DOWNLOAD_AUTHOR_TIMEOUT_MS: '0' })).toEqual({
+            authorTimeoutMs: 10 * 60 * 1000,
+        });
+        expect(loadDailyDownloadGuardConfig({ DOWNLOAD_AUTHOR_TIMEOUT_MS: 'nope' })).toEqual({
+            authorTimeoutMs: 10 * 60 * 1000,
+        });
+        expect(loadDailyDownloadGuardConfig({ DOWNLOAD_AUTHOR_TIMEOUT_MS: '120000ms' })).toEqual({
+            authorTimeoutMs: 10 * 60 * 1000,
+        });
+        expect(loadDailyDownloadGuardConfig({ DOWNLOAD_AUTHOR_TIMEOUT_MS: '1.5' })).toEqual({
+            authorTimeoutMs: 10 * 60 * 1000,
+        });
+        expect(loadDailyDownloadGuardConfig({ DOWNLOAD_AUTHOR_TIMEOUT_MS: '2147483648' })).toEqual({
+            authorTimeoutMs: 10 * 60 * 1000,
         });
     });
 });

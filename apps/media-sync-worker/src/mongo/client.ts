@@ -2,6 +2,7 @@ import { Collection } from "mongodb";
 import { MongoService, MongoCollection, getMongoService } from "@inner/shared/mongo";
 import { loadMongoConfigFromEnv } from "./config";
 import { DownloadTask, PixivImageInfo, TranslateWord } from "./types";
+import { ensureDownloadTaskUniqueIndex } from "./downloadTaskRepository";
 
 // MongoDB 服务实例
 let mongoService: MongoService;
@@ -10,6 +11,7 @@ let mongoService: MongoService;
 export let ImgCollection: MongoCollection<PixivImageInfo>;
 export let DownloadTaskMap: MongoCollection<DownloadTask>;
 export let TranslateWordMap: MongoCollection<TranslateWord>;
+let downloadTaskUniqueIndexPromise: Promise<void> | undefined;
 
 // Bangumi Archive 集合实例（使用原生 Collection）
 export let BangumiSubjectCollection: Collection;
@@ -94,3 +96,18 @@ export const mongoInitPromise = (async () => {
     throw err;
   }
 })();
+
+export async function ensureDownloadTaskRepositoryReady(): Promise<void> {
+  await mongoInitPromise;
+  downloadTaskUniqueIndexPromise ??=
+    ensureDownloadTaskUniqueIndex(DownloadTaskMap);
+  const currentAttempt = downloadTaskUniqueIndexPromise;
+  try {
+    await currentAttempt;
+  } catch (error) {
+    if (downloadTaskUniqueIndexPromise === currentAttempt) {
+      downloadTaskUniqueIndexPromise = undefined;
+    }
+    throw error;
+  }
+}

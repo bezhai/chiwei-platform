@@ -16,7 +16,13 @@ import {
   TranslateWord,
     UploadImgV2Req,
 } from "./types";
-import { DownloadTaskMap, ImgCollection, TranslateWordMap } from "./client";
+import {
+  DownloadTaskMap,
+  ImgCollection,
+  TranslateWordMap,
+  ensureDownloadTaskRepositoryReady,
+} from "./client";
+import { insertDownloadTaskOnce } from "./downloadTaskRepository";
 import { loadConsumerGuardConfig } from "../service/downloadRuntime";
 
 /**
@@ -60,25 +66,8 @@ export async function getMaxIllustId(illustIds: number[]): Promise<number> {
  * @throws 如果在数据库操作中发生错误，将抛出错误
  */
 export async function insertDownloadTask(illustId: string): Promise<boolean> {
-  // 查询是否已经存在相同 illustId 的任务
-  const filter: Filter<DownloadTask> = { illust_id: illustId };
-
-  // 使用封装的 find 方法查找是否已经存在此任务
-  const existingTasks = await DownloadTaskMap.find(filter);
-
-  // 如果找到了现有任务，返回 false 表示未插入
-  if (existingTasks.length > 0) {
-    return false;
-  }
-
-  // 创建新的下载任务
-  const newTask = DownloadTask.createTask(illustId);
-
-  // 插入新任务
-  await DownloadTaskMap.insertOne(newTask);
-
-  // 返回 true 表示成功插入
-  return true;
+  await ensureDownloadTaskRepositoryReady();
+  return insertDownloadTaskOnce(DownloadTaskMap, illustId);
 }
 
 /**

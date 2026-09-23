@@ -2,9 +2,10 @@
 
 ## Problem
 
-当前 Pixiv 图片链路已经从作品发现贯通到本地 Mongo、MinIO、Tagger 和飞书发图，但五处状态边界会造成静默漏图或永久悬挂：
+当前 Pixiv 图片链路已经从作品发现贯通到本地 Mongo、MinIO、Tagger 和飞书发图，但六处状态边界会造成静默漏图或永久悬挂：
 
 - 关注作者分页会漏掉不足一整页的尾页。
+- 每日发现串行处理作者时，任一 Redis 或外部请求永久不 settle 都会阻塞剩余全部作者，而 Pod 仍保持 Ready。
 - 单页下载、元数据写入或下载后交接失败时，作品任务仍可能进入 Success。
 - 下载后镜像与 Tagger 入队是进程内后台任务，进程退出可丢失；已存在图片又绕过补偿。
 - channel-server 在抽中不可用本地候选后直接缩短结果，不继续补位。
@@ -15,6 +16,7 @@
 把 Pixiv 图片从发现到展示收敛为一条可重放、可观测、最终一致的链路：
 
 - 关注作者分页完整覆盖 Pixiv 返回的 total。
+- 单个作者或 Redis 命令超时后留下可定位日志并继续后续作者，整批不再因一个无界 await 永久悬挂。
 - 一个作品只有在所有选中页面都已下载或确认存在，并完成必要的耐久交接后，下载任务才进入 Success。
 - 下载后的本地镜像与 Tagger outbox 可幂等重放；进程在任意一步退出后，任务重试或有界对账都能继续推进。
 - 发图查询只选择具备展示入口的本地文档，并在候选处理失败时继续补位，直到达到请求数量或候选确实耗尽。
@@ -84,11 +86,16 @@
 
    每次在已有远端 task 失败后重新提交，图片 generation 单调增加；当前远端 `task_id` 是该 generation 的 owner token。task 记录其每张图片的 generation，callback、submitted 对账、重新入队、projection 完成和 lease 释放都必须同时匹配 generation、owner 与 lease fencing token。迟到 callback 可以保留为 task 事件，但只要不再拥有图片就标记为 stale，不得覆盖当前 result、重排当前图片或清除新 generation 的 pending projection。task commit marker 只在全部 row 已持久化或被 fencing 判定 stale 后写入。
 
+10. **每日作者发现以单作者故障隔离保证批次活性**
+
+   media-sync-worker 的 Redis 命令和单作者处理分别设置正数硬超时。单作者超时或普通异常都记录作者 ID、名称和错误并继续下一个作者。watchdog 超时会发出 `AbortSignal`，迟到 Promise 在后续外部 I/O 边界停止；已经发出的不可取消调用仍可能迟到完成，因此下载任务插入必须由 `download_task.illust_id` 唯一索引和原子 upsert 保证幂等。作者冷却时间只在作品发现与全部任务入队成功、watchdog 已清除后提交，失败和超时不能提前消费后续重试窗口。飞书通知必须有独立等待上限。超时只隔离作者，不把失败伪装成整批成功：批次结束日志必须带成功、失败和超时计数，部分失败还必须作为错误返回给 cron 重试。
+
 ## State and data impact
 
 继续使用现有数据库，不引入新基础设施：
 
 - 旧 `chiwei.img_map` 仍是图片源数据。
+- 旧 `chiwei.download_task` 增加 `illust_id` 唯一索引，发现阶段以原子 upsert 创建任务。
 - 本地 `chiwei_pixiv.pixiv_images` 增加 Tagger 原始结果、任务状态、独立更新时间和检索词；不改图片创建/更新时间来伪造“今日新图”。
 - `chiwei_tagger.tagger_image_results` 在原有 trigger 状态之外增加独立 projection 状态、尝试次数、lease 和下次执行时间；历史完成结果可自动进入投影。
 - `chiwei_tagger.tagger_tasks` 增加 `registering` 可恢复过渡态、每图 generation/processing lease、submitted 对账 lease、下次对账时间和错误信息；callback 最后更新 task，作为整批结果持久化或 stale 判定完成的 commit marker。
@@ -100,6 +107,8 @@
 
 - 新增历史 post-download reconciler 的 enabled、batch size 和 idle delay 配置，默认关闭。
 - 新增 Tagger submitted 对账等待时间、投影 retry/processing timeout 和 projection 历史 backfill 开关等运行参数；历史 backfill 默认关闭，Tagger 功能关闭时不启动对应 worker。
+- 新增 media-sync-worker 专用 Redis 命令超时与单作者处理超时配置；非法值回退安全默认值。
+- 每日发现运行前验证 `download_task.illust_id` 唯一索引；若存量重复导致索引无法创建，本轮必须失败并在人工处理数据后再重试，不允许静默退回非原子插入。
 - 新索引先以后台方式创建并验证完成，再允许开启存量扫描；存量扫描与投影的 batch 上限必须可配置，不能与下载高峰争抢无界资源。
 - media-sync-worker 发布会中断当前下载、trigger、projection 和 reconcile 循环；上线前必须确认在途任务并走独立 `coe-*` 泳道。
 - 该 worker 的测试泳道若复用生产源 Mongo/OSS/MinIO，会产生真实状态竞争和写入；验证必须使用隔离数据，或关闭 schedules、download consumer、Tagger trigger、projection 和历史 reconciler，仅做无副作用启动检查。
@@ -147,6 +156,11 @@
    - Verification：原始 row 字段逐项保留；旧 generation 不能覆盖新结果；重复本地文档全部更新；零匹配退避并告警；只有开启授权后旧 completed 结果才补投影；搜索能命中真实 v1 tag、描述和 OCR 文本。
 
 7. **整体验证与运维交接**
-   - Goal：确认五项修复覆盖所有调用方，并给出安全的隔离验证和历史启用方式。
+   - Goal：确认六项修复覆盖所有调用方，并给出安全的隔离验证和历史启用方式。
    - Deliverable：分层测试结果、类型检查、调用方反查、配置/README 更新和回滚说明。
    - Verification：依赖可用环境中相关 Bun 测试与 TypeScript 检查通过；tagger-service 任务查询契约测试通过；未执行未经授权的部署或生产写入。
+
+8. **每日作者发现故障隔离**
+   - Goal：单个作者卡住或 Redis 命令无响应时，其余关注作者仍能继续进入发现流程。
+   - Deliverable：有界 Redis 命令与飞书通知、带协作中止的单作者 watchdog、watchdog 清除后的冷却提交、唯一索引保护的原子入队、结构化批次计数和运行参数说明。
+   - Verification：永久 pending、普通拒绝和正常完成三类作者混合时，后续作者仍执行且结果计数准确；失败/超时不写冷却，迟到链路不继续发起新副作用，入队错误保留原始原因，并发 upsert 不产生重复任务，部分失败由 cron 感知；非法超时配置回退默认值。

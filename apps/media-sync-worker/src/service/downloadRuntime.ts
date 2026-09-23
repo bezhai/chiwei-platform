@@ -48,6 +48,23 @@ export interface ConsumerGuardConfig {
     runningTaskReclaimMs: number;
 }
 
+export interface DailyDownloadGuardConfig {
+    authorTimeoutMs: number;
+}
+
+const DEFAULT_AUTHOR_TIMEOUT_MS = 10 * 60 * 1000;
+
+export function loadDailyDownloadGuardConfig(
+    env: Record<string, string | undefined> = process.env
+): DailyDownloadGuardConfig {
+    return {
+        authorTimeoutMs: readPositiveMs(
+            env.DOWNLOAD_AUTHOR_TIMEOUT_MS,
+            DEFAULT_AUTHOR_TIMEOUT_MS
+        ),
+    };
+}
+
 // 60 分钟：最坏合法单轮 ≈ 20 页/并发 2 的大任务，每页代理请求最坏顶满 180s（10 批 ×
 // 180s = 30min）+ 前置 info/pages 请求各最坏 180s + 限流冷却 120s + 翻译与 Mongo 杂项
 // ≈ 40min；留余量后凡超过 60min 必是挂死而非慢。
@@ -105,8 +122,8 @@ function readNonNegativeMs(value: string | undefined, fallback: number): number 
     if (value === undefined || value === '') {
         return fallback;
     }
-    const parsed = Number.parseInt(value, 10);
-    if (!Number.isFinite(parsed) || parsed < 0) {
+    const parsed = parseTimerMs(value);
+    if (parsed === null || parsed < 0) {
         return fallback;
     }
     return parsed;
@@ -118,9 +135,20 @@ function readPositiveMs(value: string | undefined, fallback: number): number {
     if (value === undefined || value === '') {
         return fallback;
     }
-    const parsed = Number.parseInt(value, 10);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
+    const parsed = parseTimerMs(value);
+    if (parsed === null || parsed <= 0) {
         return fallback;
     }
     return parsed;
+}
+
+function parseTimerMs(value: string): number | null {
+    const normalized = value.trim();
+    if (!/^\d+$/.test(normalized)) {
+        return null;
+    }
+    const parsed = Number(normalized);
+    return Number.isSafeInteger(parsed) && parsed <= 2_147_483_647
+        ? parsed
+        : null;
 }
