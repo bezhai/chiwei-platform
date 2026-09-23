@@ -135,6 +135,18 @@ alertmanager:
   config:
     global:
       resolve_timeout: 5m
+    # 夜间静音窗口，供 LarkInboundEventsSilent 使用。
+    #
+    # 时间**刻意用 UTC 表示**：16:00-24:00 UTC = 次日 00:00-08:00 北京时间。
+    # 不写 location: Asia/Shanghai，因为一旦镜像里缺 tzdata，未知时区会让整份
+    # Alertmanager 配置加载失败——那是所有告警全哑，比夜间误报严重得多。
+    # 中国不实行夏令时，UTC+8 恒定，这个换算不会漂。
+    time_intervals:
+      - name: night-cn
+        time_intervals:
+          - times:
+              - start_time: '16:00'
+                end_time: '24:00'
     route:
       receiver: feishu
       group_by: ['alertname', 'namespace']
@@ -145,6 +157,21 @@ alertmanager:
         - matchers:
             - alertname =~ "InfoInhibitor|Watchdog"
           receiver: "null"
+        # 入站断流告警夜里不吵：0-8 点本来就可能真的没人说话，
+        # 45m 窗口在低峰期必然误报。连接类告警（ConnectFailure /
+        # ReconnectStorm）是确定性信号，不静音、全天有效。
+        #
+        # mute 的语义要清楚：它只抑制**通知**，不清除 firing 状态。所以
+        #   - 夜里一直没恢复的故障，08:00 后一个 group_interval 内会补发（符合预期）
+        #   - 夜里发生又自行恢复的故障，不会补报，早上什么都看不到
+        #   - 若告警在静音前已通知，其 resolved 落在静音窗口内会被吞掉，
+        #     群里可能留下一条永不消解的告警
+        # 这是拿「夜间不被误报吵醒」换来的，接受。
+        - matchers:
+            - alertname = "LarkInboundEventsSilent"
+          receiver: feishu
+          mute_time_intervals:
+            - night-cn
     receivers:
       - name: feishu
         webhook_configs:
