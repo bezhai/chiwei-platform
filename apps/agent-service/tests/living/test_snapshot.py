@@ -15,6 +15,9 @@
 第三层单独存在的理由：``read_perceived_by`` 抑制回声（``actor == persona_id`` 直接
 丢），所以她**看不见自己刚说过什么**。少了这一层，她上一轮答应姐姐的话下一轮就凭空
 消失，"接得上昨天"永远无从谈起。
+
+但它只在上下文接不住她最近说过的话时才渲染（一天的第一轮、上一轮没存下来）：上下文
+连着的时候她说过的话原样都在，状态里再抄一份就是同一句话在一轮输入里出现好几遍。
 """
 from __future__ import annotations
 
@@ -99,7 +102,7 @@ async def test_the_state_she_stands_in_carries_nothing_that_just_happened(snap_d
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
     )
-    state = snap.render_state()
+    state = snap.render_state(her_words_in_view=False)
 
     assert "看昨天拍的胶片" in state
     assert "周末陪绫奈去祭典" in state
@@ -233,7 +236,7 @@ async def test_the_snapshot_opens_with_what_is_in_her_hands(snap_db):
 
     assert snap.doing is not None
     assert (snap.doing.place, snap.doing.doing) == ("家/客厅", "看昨天拍的胶片")
-    assert "看昨天拍的胶片" in snap.render_state()
+    assert "看昨天拍的胶片" in snap.render_state(her_words_in_view=True)
 
 
 @pytest.mark.integration
@@ -242,7 +245,7 @@ async def test_she_can_be_nowhere_yet_and_the_snapshot_says_so_plainly(snap_db):
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(8))
 
     assert snap.doing is None
-    assert snap.render_state().strip() != ""
+    assert snap.render_state(her_words_in_view=False).strip() != ""
 
 
 # --------------------------------------------------------------------------
@@ -263,7 +266,7 @@ async def test_things_on_her_mind_ride_into_the_snapshot(snap_db):
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(20))
 
     assert [e.what for e in snap.open_ends] == ["周末陪绫奈去祭典"]
-    text = snap.render_state()
+    text = snap.render_state(her_words_in_view=True)
     assert "周末陪绫奈去祭典" in text
     assert _at(12).isoformat(timespec="minutes") in text, (
         "快照没告诉她这件事是从哪一轮带过来的 —— 光有钟点在跨天之后就分不清是哪一天"
@@ -289,7 +292,7 @@ async def test_a_thing_with_no_hour_reads_exactly_as_it_always_did(snap_db):
 
     assert (
         "- 周末陪绫奈去祭典 · 从 2026-07-25T12:00+08:00 那一刻起挂着"
-        in snap.render_state()
+        in snap.render_state(her_words_in_view=True)
     )
 
 
@@ -299,7 +302,7 @@ async def test_a_thing_she_should_do_at_a_certain_hour_shows_that_hour(snap_db):
     await _keep("[2026-07-25 15:00] 家属谈话会", at=_at(12))
 
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14))
-    text = snap.render_state()
+    text = snap.render_state(her_words_in_view=True)
 
     assert (
         "- [2026-07-25 15:00] 家属谈话会 · 还没到 · "
@@ -315,8 +318,10 @@ async def test_when_the_hour_has_come_the_snapshot_says_so(snap_db):
     early = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(14))
     due = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(15))
 
-    assert "还没到" in early.render_state() and "到点了" not in early.render_state()
-    assert "到点了" in due.render_state() and "还没到" not in due.render_state()
+    before = early.render_state(her_words_in_view=True)
+    after = due.render_state(her_words_in_view=True)
+    assert "还没到" in before and "到点了" not in before
+    assert "到点了" in after and "还没到" not in after
 
 
 @pytest.mark.integration
@@ -332,14 +337,14 @@ async def test_a_thing_that_came_due_stays_until_she_stops_listing_it(snap_db):
         later = await read_snapshot(
             lane=LANE, persona_id="akao", after_seq=0, now=_at(hour)
         )
-        assert "到点了" in later.render_state(), f"{hour} 点那一轮它自己消失了"
+        assert "到点了" in later.render_state(her_words_in_view=True), f"{hour} 点那一轮它自己消失了"
 
     await _keep(at=_at(23, 10))
 
     gone = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(23, 20)
     )
-    assert "家属谈话会" not in gone.render_state()
+    assert "家属谈话会" not in gone.render_state(her_words_in_view=True)
 
 
 @pytest.mark.integration
@@ -355,7 +360,7 @@ async def test_another_sisters_mind_never_leaks_into_hers(snap_db):
     snap = await read_snapshot(lane=LANE, persona_id="akao", after_seq=0, now=_at(13))
 
     assert snap.open_ends == []
-    assert "绫奈自己的心事" not in snap.render_state()
+    assert "绫奈自己的心事" not in snap.render_state(her_words_in_view=True)
 
 
 # --------------------------------------------------------------------------
@@ -374,8 +379,37 @@ async def test_she_can_see_what_she_herself_just_said(snap_db):
     )
 
     assert [h.content for h in snap.own_recent] == ["周末祭典我陪你去。"]
-    assert "周末祭典我陪你去。" in snap.render_state()
+    assert "周末祭典我陪你去。" in snap.render_state(her_words_in_view=False)
     assert snap.perceived.items == [], "自己说的话不该同时从感知那条路再来一遍"
+
+
+@pytest.mark.integration
+async def test_when_her_words_are_already_in_view_the_state_does_not_copy_them(
+    snap_db,
+):
+    """她自己的话还在上下文里时，状态不再抄一遍「你刚做过、说过」，其余三段照旧。
+
+    每小时清理那一下，历史里有界桩、上一轮也存下来了：她 4 小时内说过的话、发出去的
+    每一条都原样在上下文里。2026-09-23 每小时的状态块各带最近 12 句，同一句话在一轮
+    输入里出现了好几遍。这一段只在她自己的话不在眼前时给（一天的第一轮、重启、上一轮
+    没存下来）—— 判据不在这里，由组装那一层交进来
+    （:func:`app.living.continuity.holds_her_recent_words`）。
+    """
+    await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(14))
+    await _keep("周末陪绫奈去祭典", at=_at(12))
+    await _say("akao", "布丁我吃了。", _at(13, 50), place="家/客厅", to=["ayana"])
+
+    snap = await read_snapshot(
+        lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
+    )
+    in_view = snap.render_state(her_words_in_view=True)
+    out_of_view = snap.render_state(her_words_in_view=False)
+
+    assert "你刚做过、说过" not in in_view and "布丁我吃了。" not in in_view, in_view
+    for kept in ("看昨天拍的胶片", "你上一次写下的那一天", "周末陪绫奈去祭典"):
+        assert kept in in_view, f"「{kept}」那段跟着一起没了。拿到：\n{in_view}"
+    assert "你刚做过、说过" in out_of_view and "布丁我吃了。" in out_of_view
+    assert out_of_view.startswith(in_view), "两种渲染除了最后那一段之外应该一字不差"
 
 
 @pytest.mark.integration
@@ -416,7 +450,7 @@ async def test_a_message_she_sent_carries_the_handle_that_takes_it_back(snap_db)
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 40)
     )
-    text = snap.render_state()
+    text = snap.render_state(her_words_in_view=False)
 
     assert (
         f"- 14:32 CST 你对 bezhai 说：「你去过那家抹茶店吗？」［{oid}］" in text
@@ -435,7 +469,7 @@ async def test_what_she_said_face_to_face_carries_no_handle(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
     )
-    text = snap.render_state()
+    text = snap.render_state(her_words_in_view=False)
 
     assert "- 14:05 CST 你对 ayana 说：「布丁我吃了。」" in text
     assert "［" not in text, (
@@ -613,7 +647,7 @@ async def test_last_nights_line_does_not_read_as_tonight(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(23, 45)
     )
-    text = snap.render_state()
+    text = snap.render_state(her_words_in_view=False)
 
     assert "07-24 23:41" in text, (
         f"昨晚 23:41 那行渲染成了裸时分，跟今晚 23:41 一个形状 —— "
@@ -629,7 +663,7 @@ async def test_todays_own_lines_stay_undated(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", after_seq=0, now=_at(14, 10)
     )
-    text = snap.render_state()
+    text = snap.render_state(her_words_in_view=False)
 
     assert "- 14:05 CST 你 把胶片摊在茶几上" in text
     assert "07-25 14:05" not in text, f"当天的行不该带日期。拿到：\n{text}"

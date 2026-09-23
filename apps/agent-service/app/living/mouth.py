@@ -105,7 +105,7 @@ from app.domain.chat_dataflow import (
     PROACTIVE_MESSAGE_ID_PREFIX,
     ChatResponseSegment,
 )
-from app.living.happening import record_happening
+from app.living.happening import printed_handle, record_happening
 from app.living.phone import medium_for, reachable_conversation
 from app.living.pictures import her_picture, picture_id_in
 from app.living.records import (
@@ -272,6 +272,17 @@ async def unsettled_outbound(
     ]
 
 
+def _happening_id(outbound_id: str) -> str:
+    """她发出去这条在自己记录里的 id：``mouth:<outbound_id>``。
+
+    落记忆和印回执都从这里拼，印回执那一步再经
+    :func:`app.living.happening.printed_handle` 剥回编号 —— 所以回执上那串、「你刚做
+    过、说过」里那串、撤回收的那串，是同一个前缀常量推出来的同一个值
+    （:data:`app.living.records.OUTBOUND_HAPPENING_PREFIX` 那段注释说了为什么只许一处）。
+    """
+    return f"{OUTBOUND_HAPPENING_PREFIX}{outbound_id}"
+
+
 def _already_claimed(tried: SpokenOutbound) -> str:
     """这句话已经在认领表上了 —— 回给她的那句话。
 
@@ -281,11 +292,16 @@ def _already_claimed(tried: SpokenOutbound) -> str:
 
     两个地方用同一份措辞：出站前的预检查，和认领 CAS 被人抢走那一格。两格的事实
     是同一件（这一句已经有人交出去了、这一轮不会再发），所以话也只写一遍。
+
+    **说出去了的那一格给编号、不给原话**，跟真的发出去那一格同一个理由（见
+    :func:`send_message` 的收尾）：原话就在她这次调用里。两格都是提前返回、没走到落
+    记忆那一步，编号只能从认领表上这条记录的 ``outbound_id`` 派生。**没等到确认那一格
+    照旧带原话、不给编号**：那一格说的是"不知道"，措辞一个字都不动。
     """
     if tried.state == STATE_HANDED_OFF:
         return (
-            f"这句话你已经说出去了（「{tried.said}」），没有再发一遍 —— "
-            f"想说别的就换一句。"
+            f"这句话你已经说出去了{printed_handle(_happening_id(tried.outbound_id))}，"
+            f"没有再发一遍 —— 想说别的就换一句。"
         )
     return (
         f"这句话你已经交出去了（「{tried.said}」），但没等到确认，"
@@ -428,9 +444,11 @@ async def send_message(
         pictures: 要一起发出去的图的句柄。
 
     Returns:
-        这条的下场，附上你那句话。有时候只能告诉你"交出去了但不知道到没到"
-        —— 那就是真的不知道，别当成发出去了，也别当成没发。也可能这句话过不了、
-        压根没发出去，那就换个说法或者换件事说。
+        这条的下场。发出去了的话，后面方括号里那串是这条消息的编号：`发出去了［a1b2……］`，
+        想撤回就把它照抄给 take_back_message。你那句话就在你这次写下的 what 里，这里不再
+        抄一遍。有时候只能告诉你"交出去了但不知道到没到" —— 那就是真的不知道，别当成
+        发出去了，也别当成没发。也可能这句话过不了、压根没发出去，那就换个说法或者换件
+        事说。
     """
     lane, now, persona_id, moment_id = moment_scope()
     said = what.strip()
@@ -655,7 +673,7 @@ async def send_message(
     # 位置缺失不拦：手机隔着设备，旁边的人本来就一个字都感知不到，所以位置算不算得
     # 出来都不影响谁听得见（跟当面说话不一样，那条必须有位置）。
     where = await current_whereabouts(lane=lane, persona_id=persona_id)
-    happening_id = f"{OUTBOUND_HAPPENING_PREFIX}{outbound_id}"
+    happening_id = _happening_id(outbound_id)
     await record_happening(
         lane=lane,
         happening_id=happening_id,
@@ -673,7 +691,11 @@ async def send_message(
     # 记得 —— :func:`unsettled_outbound` 把这种捞出来给人看，**不自动重发**。
     # 对账钟可能已经在这条链上追过一版，所以收口是"合到最新一版上"，见 :func:`_settle`。
     await _settle(claim, at=now)
-    return f"发出去了：「{said}」"
+    # **回执给编号，不给原话。** 原话就在她这次调用的参数里，紧挨着这条回执；两样都
+    # 在上下文里留 4 小时（:data:`app.living.continuity.KEPT_TOOLS`），再抄一遍就是同一
+    # 句话在她每一轮的输入里多出现一次。编号必须给：状态块不再每小时列一遍她最近说过的
+    # 话，刚发出去这条的撤回编号在别处拿不到（手机页要她自己再看一次才有）。
+    return f"发出去了{printed_handle(happening_id)}"
 
 
 MOUTH_TOOLS = [send_message]

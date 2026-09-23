@@ -4,8 +4,8 @@
 
   * **只能撤自己的。** 认领表上按 ``lane`` + ``persona_id`` 找，别人那条链、别的泳道
     那条链一律不在候选里。
-  * **她指的是编号，不是内容。** 快照里她发出去的每条消息后面带着它的编号（``mouth:``
-    之后那串 ``outbound_id``），撤回收的就是那串、按等值找。**印出去的和收进来的必须
+  * **她指的是编号，不是内容。** 发送回执和快照里，她发出去的每条消息后面带着它的编号
+    （``mouth:`` 之后那串 ``outbound_id``），撤回收的就是那串、按等值找。**印出去的和收进来的必须
     是同一个东西** —— 两边各拼一份就会漂移，而漂移的表现是她照抄了却撤不掉。
   * **先把撤回交出去，成功之后才写台账。** 顺序反了的话，台账写下了而撤回没发出去
     —— 她以为自己撤过了，那条消息还在群里。
@@ -125,8 +125,9 @@ def recalls(monkeypatch):
 def her_mouth(monkeypatch):
     """让 :func:`app.living.mouth.send_message` 真的跑完，但不碰模型、不投 MQ。
 
-    只有这一条用例需要它：那条用例要的是**真的走一遍她开口那条路**，``happening_id``
-    由嘴自己拼、快照自己解析、撤回自己收 —— 中间任何一处各写一份拼接规则，它就红。
+    只有要**真的走一遍她开口那条路**的用例需要它（快照印的编号、回执印的编号各一条）：
+    ``happening_id`` 由嘴自己拼、快照和回执各自解析、撤回自己收 —— 中间任何一处各写
+    一份拼接规则，它们就红。
     """
     from app.capabilities.output_safety import OutputVerdict
     from app.living import mouth as mouth_mod
@@ -203,7 +204,7 @@ async def _somebody_said_something(*, at: dt.datetime) -> None:
     """真人在那条私聊里说了一句 —— 她开口那条路要求这条会话在她视野里。
 
     撤回不要它（那条路走的是未过滤的可达性），所以这个夹具只给真的要 ``send_message``
-    的那条用例用，别塞进 ``takeback_db``：本文件其余用例正好跑在"这条会话不在名单里"
+    的那几条用例用，别塞进 ``takeback_db``：本文件其余用例正好跑在"这条会话不在名单里"
     的状态上，那是撤回不跟随白名单的实证。
     """
     async with session_mod.get_session() as s:
@@ -286,7 +287,7 @@ async def test_a_handle_she_made_up_matches_nothing_and_it_says_so(
     assert recalls == [], (
         f"编号对不上却撤了一条 —— 撤掉的是她没想撤的话。发出去 {len(recalls)} 条"
     )
-    _refused(outcome, saying=[made_up])
+    _refused(outcome, saying=[made_up, "回执"])
     assert (await _latest(hers)).took_back_at is None
 
 
@@ -300,6 +301,9 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
     takeback_db, in_a_moment, recalls, her_mouth
 ):
     """整条设计成立的那一条：她照抄快照印出来那串，撤掉的就是那条消息。
+
+    快照那段只在她自己的话不在眼前的那一轮才印（一天的第一轮、上一轮没存下来），所以
+    这里取的是那一轮的渲染。
 
     这里走的是真的那条路 —— 嘴发一条（``happening_id`` 由 :mod:`app.living.mouth`
     自己拼）、快照把编号印出来（:mod:`app.living.snapshot` 自己解析）、撤回按等值
@@ -319,7 +323,7 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
         shown = await read_snapshot(
             lane=LANE, persona_id="akao", after_seq=0, now=_at(21, 30)
         )
-        rendered = shown.render_state()
+        rendered = shown.render_state(her_words_in_view=False)
         handles = re.findall(r"［([^］]+)］", rendered)
         assert len(handles) == 1, (
             f"快照没把她刚发出去那条的编号印出来（或者印了不止一个）—— "
@@ -341,6 +345,37 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
     (recall,) = recalls
     assert recall.outbound_id == spoke.outbound_id
     assert spoke.took_back_at == _at(21, 30)
+
+
+@pytest.mark.integration
+async def test_the_handle_on_the_send_receipt_takes_back_that_message(
+    takeback_db, in_a_moment, recalls, her_mouth
+):
+    """刚发出去那句，照抄发送回执里那串就撤得掉 —— 不用先去翻手机。
+
+    状态块不再每小时列一遍她最近说过的话，所以刚发出去那条的编号，眼前只有回执里这
+    一处。回执印的跟「你刚做过、说过」那段是同一个形状（全角方括号），撤回这只手不管
+    编号是从哪里抄来的，按等值找。
+    """
+    await _she_is_home()
+    await _somebody_said_something(at=_at(21, 0))
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        receipt = await send_message.invoke(
+            {"what": _SAID, "channel_id": str(_DM)}
+        )
+        assert isinstance(receipt, str), f"她这条没发出去，后面无从谈起。拿到：{receipt!r}"
+        handles = re.findall(r"［([^］]+)］", receipt)
+        assert len(handles) == 1, f"回执里没有（或者不止一个）编号。拿到：{receipt!r}"
+
+        outcome = await take_back_message.invoke({"message_id": handles[0]})
+
+    assert isinstance(outcome, str), (
+        f"照抄回执里那串却撤不掉 —— 回执印的不是撤回要的那个键。拿到：{outcome!r}"
+    )
+    spoke = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+    (recall,) = recalls
+    assert handles[0] == spoke.outbound_id == recall.outbound_id
 
 
 @pytest.mark.integration
@@ -736,6 +771,20 @@ def test_taking_something_back_takes_the_message_id_she_was_shown():
     """
     props = set(take_back_message.definition.parameters["properties"])
     assert props == {"message_id"}, props
+
+
+def test_the_take_back_hand_names_the_send_receipt_as_a_place_to_find_the_handle():
+    """编号她会在三处见到：「你刚做过、说过」、发送回执、打开会话时的 ``take_back_id``。
+
+    说明里少写一处，她就不知道那串能拿来撤 —— 而状态块不再每小时列一遍她说过的话之后，
+    刚发出去那条的编号眼前只有回执里那一处。说明、参数说明两处都得写到。
+    """
+    desc = take_back_message.definition.description
+    param = take_back_message.definition.parameters["properties"]["message_id"][
+        "description"
+    ]
+    assert "发出去了［" in desc, f"说明里没写发送回执那一处。拿到：\n{desc}"
+    assert "回执" in param, f"参数说明里没写发送回执那一处。拿到：{param!r}"
 
 
 # --------------------------------------------------------------------------

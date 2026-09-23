@@ -956,9 +956,9 @@ def _take_back_handle(row) -> str | None:
     **还没撤掉**（已经撤回的再撤一次只会撤了个空，那时留着编号等于同时说"这条撤回了"
     和"拿这串去撤它"）、**有这一列**（她回复别人的消息走另一条链，那条链不写它）。
 
-    印出去的写法是 32 位无短横的 hex —— 跟 :func:`app.living.happening.own_line` 在
-    「你刚做过、说过」那段里印的**是同一个值**（不是同一种印法：那边在全角方括号里，
-    这边在 ``take_back_id`` 属性里，理由见 :func:`_one_message`）。库里这一列是 uuid
+    印出去的写法是 32 位无短横的 hex —— 跟 :func:`app.living.happening.printed_handle`
+    在发送回执和「你刚做过、说过」那段里印的**是同一个值**（不是同一种印法：那边在全角
+    方括号里，这边在 ``take_back_id`` 属性里，理由见 :func:`_one_message`）。库里这一列是 uuid
     类型，两种写法之间的相等关系由两侧共读的成对向量钉住
     （``contracts/proactive-message-id.json`` 的 ``outbound_id_vector``）。
 

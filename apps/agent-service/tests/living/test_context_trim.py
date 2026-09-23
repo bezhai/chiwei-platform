@@ -25,12 +25,14 @@ from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.living.continuity import (
     CHECKPOINT_HEAD,
     DEFAULT_TRIM_POLICY,
+    GAP_HEAD,
     KEPT_TOOLS,
     MATERIAL_TOOLS,
     MATERIAL_TRIMMED,
     PICTURE_TRIMMED,
     TrimPolicy,
     estimate_tokens,
+    holds_her_recent_words,
     load_moment_transcript,
     load_trim_policy,
     moment_transcript_id,
@@ -353,9 +355,10 @@ def test_a_handle_outlives_the_material_window():
 def test_the_phone_page_keeps_its_handles_past_the_material_window():
     """「看手机」那一页带的两串凭据跟着她自己的话走 4 小时，不是 1 小时。
 
-    ``take_back_id`` 在状态快照"你刚做过、说过"那段确实有副本，但那段只有最近 12
-    条 —— 滚出去的旧消息就没有第二份了；``before=`` 更是从头到尾只出现在这一次返回
-    里，换掉整段载荷之后她就再也翻不回这条会话更早的地方。
+    ``take_back_id`` 在发送回执里有副本，但回执也只留 4 小时；状态快照"你刚做过、说过"
+    那段只在她自己的话不在眼前时才给，而且只有最近 12 条 —— 滚出去的旧消息就没有第二
+    份了；``before=`` 更是从头到尾只出现在这一次返回里，换掉整段载荷之后她就再也翻不回
+    这条会话更早的地方。
     """
     looked = {
         "13:30": [
@@ -523,6 +526,83 @@ async def test_the_trimmed_transcript_encodes_for_gemini():
     assert pending == 0, "最后还有调用没被回答"
 
 
+async def test_folded_checkpoints_still_encode_as_a_valid_gemini_request():
+    """折叠之后的上下文过真 adapter，逐项看实际请求的结构。
+
+    折叠只动界桩那几条 USER，但它们夹在工具调用组之间，所以要看的是整份请求：
+
+      * 每组工具调用后面紧跟**一个** user turn，响应的个数和名字跟调用逐个对上；
+      * 折叠后的表头是一个有内容的 user turn —— 空串会被编码成一个没有 parts 的
+        content，provider 直接拒掉；
+      * 带签名的那一轮原样回放：思考段和调用上的签名一个不少。
+
+    不要求角色严格交替：界桩和刺激本来就是两条相邻的 USER。
+    """
+    from app.agent.adapters.gemini import GeminiAdapter
+
+    call = ToolCall(
+        id="s1", name="send_message", arguments={"what": "在吗"}, signature=b"call-sig"
+    )
+    signed = Message.from_model_turn(
+        [TurnPart.from_thought("回他一句", signature=b"thought-sig"), TurnPart.from_tool_call(call)],
+        [call],
+    )
+    ctx = _round(
+        [],
+        _at(13, 5),
+        signed,
+        _result("s1", "发出去了［0f5a3b1c8e7d4a2b9c6f1e0d3a8b7c65］"),
+        _said("发了"),
+    )
+    ctx = _round(
+        ctx,
+        _at(13, 15),
+        _calls(("look_at_phone", "p1"), ("look_around", "p2")),
+        _result("p1", '<msg from="你">在吗</msg>'),
+        _result("p2", "你在客厅，这里没别人。"),
+        _said("没回"),
+    )
+    ctx = next_transcript(
+        trim_for_round(ctx, now=_at(13, 35), state="缺口那会儿", policy=POLICY, lost_last_round=True),
+        [_stim("现在 13:35。"), _call("say", "c3"), _result("c3", "记下了。"), _said("嗯")],
+        policy=POLICY,
+    )
+    ctx = _round(ctx, _at(14, 5), _said("继续"), state="14:05 那会儿")
+    assert [m.text() for m in _markers(ctx)[:-1]] == [
+        _header(CHECKPOINT_HEAD, _at(13)),
+        _header(GAP_HEAD, _at(13, 35)),
+    ], "这份上下文里的旧界桩还没折叠，下面验的就不是折叠之后的请求"
+    assert "14:05 那会儿" in _markers(ctx)[-1].text()
+
+    adapter = GeminiAdapter(model_name="gemini-2.5", api_key="k", base_url=None)
+    contents, _system = await adapter._to_wire_contents(ctx)
+
+    assert len(contents) == len(ctx) - sum(
+        1 for i, m in enumerate(ctx) if m.role is Role.TOOL and ctx[i - 1].role is Role.TOOL
+    ), "相邻的工具结果没合进同一个 user turn"
+    for i, content in enumerate(contents):
+        assert content.parts, f"第 {i} 个 content 没有 parts —— provider 会拒掉整个请求"
+        calls = [p.function_call.name for p in content.parts if p.function_call]
+        if not calls:
+            continue
+        answer = contents[i + 1]
+        assert answer.role == "user"
+        assert [p.function_response.name for p in answer.parts if p.function_response] == calls, (
+            "这一组调用的响应没在紧跟着的那一个 user turn 里逐个对上"
+        )
+        assert all(p.function_response for p in answer.parts), "响应那一轮里混进了别的东西"
+
+    headers = {m.text() for m in _markers(ctx)[:-1]}
+    folded = [c for c in contents if c.parts[0].text in headers]
+    assert [c.role for c in folded] == ["user", "user"]
+    assert all(len(c.parts) == 1 and c.parts[0].text for c in folded)
+
+    model_turn = next(c for c in contents if any(p.thought for p in c.parts))
+    assert model_turn.parts[0].thought_signature == b"thought-sig"
+    assert model_turn.parts[1].function_call.name == "send_message"
+    assert model_turn.parts[1].thought_signature == b"call-sig"
+
+
 # ---------------------------------------------------------------------------
 # 五 · 清理时重铺一次状态
 # ---------------------------------------------------------------------------
@@ -564,6 +644,140 @@ def test_the_first_round_of_a_day_starts_from_her_state():
     assert CHECKPOINT_HEAD in ctx[0].text()
     assert "手上：你在家/浴室，正在洗澡。" in ctx[0].text()
     assert _texts(ctx[1:]) == ["现在 09:05。", "继续"]
+
+
+def _markers(messages: list[Message]) -> list[Message]:
+    """上下文里的界桩，两种都算。"""
+    return [
+        m
+        for m in messages
+        if isinstance(m.content, str) and m.content.startswith((CHECKPOINT_HEAD, GAP_HEAD))
+    ]
+
+
+def _header(head: str, at: dt.datetime) -> str:
+    """折叠之后那根界桩剩下的全部：开头 + 时刻 + 收尾括号，一个字都不多。"""
+    return f"{head}{at.isoformat()}】"
+
+
+def test_a_new_checkpoint_folds_every_earlier_one_down_to_its_header():
+    """一天里清理了好几次：只有最新那根界桩带着她的状态，之前的只剩表头。
+
+    2026-09-23 prod 那一版上下文里全量状态叠了 5 份，每份都带着整页日记和她最近
+    12 句原话 —— 她自己说过的话在一轮输入里出现了几十次。表头留着不删：它同时是分代
+    的界桩，每条消息的年龄下界就是它右边第一个界桩的时刻。
+    """
+    ctx: list[Message] = []
+    at = _at(9, 5)
+    while at <= _at(12, 35):
+        ctx = _round(ctx, at, _said("继续"), state=f"手上：{at:%H:%M} 那会儿的样子。")
+        at += dt.timedelta(minutes=10)
+
+    markers = _markers(ctx)
+    assert [m.text() for m in markers[:-1]] == [
+        _header(CHECKPOINT_HEAD, _at(hour)) for hour in (9, 10, 11)
+    ], "旧界桩没折叠成只剩表头"
+    assert markers[-1].text().startswith(_header(CHECKPOINT_HEAD, _at(12)))
+    assert "手上：12:05 那会儿的样子。" in markers[-1].text()
+
+    joined = "\n".join(_texts(ctx))
+    for stale in ("09:05", "10:05", "11:05"):
+        assert f"手上：{stale} 那会儿的样子。" not in joined, (
+            f"{stale} 那份状态还在 —— 上下文里叠着不止一份全量状态"
+        )
+    assert joined.count("再往前的那一段不在你眼前了") == 1, (
+        "那句话只对最新那根界桩是实话，放在一根已经过时的界桩上就说错了"
+    )
+
+
+def test_a_gap_marker_also_folds_the_checkpoints_before_it():
+    """上一轮没存下来时立的那根也是新起点：之前那根清理界桩同样只剩表头。"""
+    ctx = _round([], _at(14, 5), _said("继续"), state="手上：14:05 那会儿的样子。")
+    ctx = _round(ctx, _at(14, 15), _said("继续"))
+
+    fed = trim_for_round(
+        ctx,
+        now=_at(14, 35),
+        state="手上：14:35 那会儿的样子。",
+        policy=POLICY,
+        lost_last_round=True,
+    )
+
+    first, gap = _markers(fed)
+    assert first.text() == _header(CHECKPOINT_HEAD, _at(14))
+    assert gap.text().startswith(_header(GAP_HEAD, _at(14, 35)))
+    assert "手上：14:35 那会儿的样子。" in gap.text()
+    assert "手上：14:05 那会儿的样子。" not in "\n".join(_texts(fed))
+    # 界桩之外一条不动：缺口那次往前那一段一条没少
+    assert _texts(fed)[1:-1] == _texts(ctx)[1:]
+
+
+def test_a_later_cleanup_folds_the_gap_marker_too():
+    """缺口那根也会在下一个清理点折叠 —— 它带进来的状态跟清理时的一样会过时。"""
+    ctx = _round([], _at(14, 5), _said("继续"))
+    ctx = next_transcript(
+        trim_for_round(
+            ctx,
+            now=_at(14, 35),
+            state="手上：14:35 那会儿的样子。",
+            policy=POLICY,
+            lost_last_round=True,
+        ),
+        [_stim("现在 14:35。"), _said("继续")],
+        policy=POLICY,
+    )
+    ctx = _round(ctx, _at(15, 5), _said("继续"), state="手上：15:05 那会儿的样子。")
+
+    assert [m.text() for m in _markers(ctx)[:-1]] == [
+        _header(CHECKPOINT_HEAD, _at(14)),
+        _header(GAP_HEAD, _at(14, 35)),
+    ]
+    assert "手上：14:35 那会儿的样子。" not in "\n".join(_texts(ctx))
+
+
+def test_her_recent_words_are_in_view_only_when_the_history_carries_on_unbroken():
+    """「你刚做过、说过」该不该给，判据是这份历史接不接得住她最近说过的话。
+
+    接得住 = 历史里至少有一根界桩（这一天一路连着写下来的）**而且**上一轮存下来了。
+    不按这一轮要立哪种界桩判：缺口和清理点重叠时立的是清理那根，硬顶把界桩全裁掉之后
+    下一轮立的也是清理那根 —— 这两种情况她同样看不全自己最近说过的话。
+    """
+    ctx = _round([], _at(14, 5), _said("我去洗澡了"))
+
+    assert holds_her_recent_words(ctx, lost_last_round=False)
+    assert not holds_her_recent_words(ctx, lost_last_round=True), (
+        "上一轮没存下来：那一轮说过的话比眼前剩下的都新，却不在眼前"
+    )
+    assert not holds_her_recent_words([], lost_last_round=False), (
+        "一天的第一轮 / 重启：眼前什么都没有"
+    )
+    assert not holds_her_recent_words(ctx[1:], lost_last_round=False), (
+        "硬顶把界桩全裁掉了：剩下的那一截说不清是从哪儿接上的"
+    )
+
+
+def test_a_transcript_stored_before_folding_existed_folds_at_the_next_cleanup():
+    """库里已经有的旧版本（几段完整状态叠着）不用迁移：下一个清理点一起折叠。"""
+    stacked = [
+        Message(
+            role=Role.USER,
+            content=(
+                f"{_header(CHECKPOINT_HEAD, _at(hour))}\n"
+                f"再往前的那一段不在你眼前了，只剩你自己记下来的。你现在：\n\n"
+                f"旧状态 {hour}"
+            ),
+        )
+        for hour in (11, 12, 13)
+    ]
+    history = [m for marker in stacked for m in (marker, _said("继续"))]
+
+    fed = trim_for_round(history, now=_at(14, 5), state="新状态", policy=POLICY)
+
+    assert [m.text() for m in _markers(fed)[:-1]] == [
+        _header(CHECKPOINT_HEAD, _at(hour)) for hour in (11, 12, 13)
+    ]
+    assert "旧状态" not in "\n".join(_texts(fed))
+    assert "新状态" in _markers(fed)[-1].text()
 
 
 # ---------------------------------------------------------------------------

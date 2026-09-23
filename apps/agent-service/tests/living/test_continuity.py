@@ -61,6 +61,10 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
     )
 
 
+# 状态里「你刚做过、说过」那一段的标题（:meth:`app.living.snapshot.MomentSnapshot.render_state`）。
+_OWN_HEAD = "你刚做过、说过"
+
+
 def _is_checkpoint(message: Message) -> bool:
     """这条是界桩吗 —— 固定时刻清理立的，或者上一轮丢了补的那根。"""
     return isinstance(message.content, str) and message.content.startswith(
@@ -491,6 +495,9 @@ async def test_a_lost_round_puts_her_state_back_in_front_of_her(
     assert "我去煮点抹茶。" in fed[-2].text(), (
         "重铺的那条里没有她上一轮做过的事"
     )
+    assert _OWN_HEAD in fed[-2].text(), (
+        "缺口那根没带「你刚做过、说过」—— 丢掉那一轮说过的话比眼前剩下的都新，却不在眼前"
+    )
     assert any("上一轮" in r.message for r in caplog.records), caplog.text
 
 
@@ -665,3 +672,203 @@ async def test_the_moment_record_and_the_context_land_together(
     tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14))
     _stored, ver = await load_moment_transcript(tid)
     assert ver == 1
+
+
+# ---------------------------------------------------------------------------
+# 六 · 「你刚做过、说过」只在她自己的话不在眼前时给
+#
+# 其余时候她 4 小时内说过的话、发出去的每一条都原样在上下文里；每小时的状态块再各抄
+# 一份最近 12 句，2026-09-23 她一轮输入里自己的话于是出现了几十次。判据由组装那一层
+# 给（:func:`app.living.continuity.holds_her_recent_words`）：这一轮的历史里没有任何
+# 界桩，或者上一轮没存下来。
+# ---------------------------------------------------------------------------
+
+
+def _everything_she_read(fed: list[Message]) -> str:
+    """她这一轮眼前的全部文字，连她自己那几次调用的参数一起。"""
+    import json
+
+    return "\n".join(
+        [m.text() for m in fed]
+        + [json.dumps(c.arguments, ensure_ascii=False) for m in fed for c in m.tool_calls]
+    )
+
+
+async def _she_said_last_night() -> None:
+    await _stand("akao", "家/我房间", "准备睡了", _at(23, 40))
+    await record_happening(
+        lane=LANE,
+        happening_id="akao-night",
+        actor="akao",
+        place="家/我房间",
+        kind=KIND_SPEECH,
+        content="晚安，明天见。",
+        occurred_at=_at(23, 50),
+        audience=["ayana"],
+    )
+
+
+@pytest.mark.integration
+async def test_the_first_round_of_the_day_shows_her_what_she_said_last_night(
+    moment_db, stub_moment
+):
+    """一天的第一轮上下文是空的，她昨晚说过的话只能从这一段来。
+
+    这是有意保留的：04:00 那一轮这几句就是她当天唯一的说话样本，会把前一晚的腔调带进
+    新的一天 —— 可她得记得昨晚说过什么。
+    """
+    await _she_said_last_night()
+
+    runner = stub_moment(said="继续")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(9, day=26))
+
+    first = runner.runs[0][0][0]
+    assert _is_checkpoint(first)
+    assert _OWN_HEAD in first.text() and "晚安，明天见。" in first.text(), first.text()
+
+
+@pytest.mark.integration
+async def test_an_hourly_cleanup_does_not_copy_her_words_again(
+    moment_db, stub_moment
+):
+    """每小时清理那一下不再带「你刚做过、说过」：她说过的话只以她自己那次调用出现一次。"""
+    await _stand("akao", "家/客厅", "待着", _at(13))
+    stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="去煮了")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 30))
+
+    runner = stub_moment(said="继续")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(15))
+
+    fed = runner.runs[0][0]
+    cleanup = fed[-2]
+    assert cleanup.text().startswith(f"{CHECKPOINT_HEAD}{_at(15).isoformat()}")
+    assert _OWN_HEAD not in cleanup.text(), (
+        f"每小时的清理又抄了一遍她最近说过的话。拿到：\n{cleanup.text()}"
+    )
+    assert _everything_she_read(fed).count("我去煮点抹茶。") == 1, (
+        "她这句话在这一轮眼前不止一处 —— 除了她自己那次调用，别处都是重复"
+    )
+
+
+@pytest.mark.integration
+async def test_a_lost_round_right_at_a_cleanup_still_shows_her_what_she_said(
+    moment_db, stub_moment, monkeypatch
+):
+    """缺口跟清理点撞在一起时立的是清理那根，照样带「你刚做过、说过」。
+
+    判据不看这一轮立的是哪种界桩：清理点先判，所以这一下立的是清理界桩，但丢掉那一轮
+    说过的话照样不在她眼前。
+    """
+    await _stand("akao", "家/客厅", "待着", _at(13))
+    await _stand("ayana", "家/客厅", "看书", _at(13))
+
+    from app.living import moment as moment_mod
+
+    stub_moment(said="第一轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 40))
+
+    real_commit = moment_mod.commit_moment_transcript
+
+    async def boom(*_a, **_kw):
+        raise RuntimeError("上下文写不进去")
+
+    monkeypatch.setattr(moment_mod, "commit_moment_transcript", boom)
+    stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="第二轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 50))
+
+    monkeypatch.setattr(moment_mod, "commit_moment_transcript", real_commit)
+    runner = stub_moment(said="第三轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(15))
+
+    marker = runner.runs[0][0][-2]
+    assert marker.text().startswith(CHECKPOINT_HEAD), "用例前提：清理那根赢了"
+    assert _OWN_HEAD in marker.text() and "我去煮点抹茶。" in marker.text(), (
+        f"缺口撞上清理点，丢掉那一轮说过的话就没人给了。拿到：\n{marker.text()}"
+    )
+
+
+@pytest.mark.integration
+async def test_after_the_hard_cap_took_every_marker_she_is_shown_what_she_said(
+    moment_db, stub_moment, monkeypatch
+):
+    """硬顶把界桩全裁掉之后，下一轮立的是清理那根，照样带「你刚做过、说过」。
+
+    剩下那一截历史说不清是从哪儿接上的 —— 硬顶从最老的组开始整组丢，丢掉的可能正是
+    她刚说过的话。
+    """
+    from app.living import moment as moment_mod
+    from app.living.continuity import TrimPolicy
+
+    tiny = TrimPolicy(
+        material_minutes=60,
+        own_minutes=240,
+        cleanup_minutes=60,
+        hard_cap_tokens=50,
+        trim_target_tokens=20,
+    )
+
+    async def fixed_policy() -> TrimPolicy:
+        return tiny
+
+    monkeypatch.setattr(moment_mod, "load_trim_policy", fixed_policy)
+    await _stand("akao", "家/客厅", "待着", _at(13))
+
+    stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="去煮了")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    stored, _ver = await load_moment_transcript(
+        moment_transcript_id(lane=LANE, persona_id="akao", now=_at(14))
+    )
+    assert not any(_is_checkpoint(m) for m in stored), "用例前提：硬顶把界桩裁掉了"
+
+    runner = stub_moment(said="继续")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 10))
+
+    marker = runner.runs[0][0][-2]
+    assert _is_checkpoint(marker)
+    assert _OWN_HEAD in marker.text() and "我去煮点抹茶。" in marker.text(), (
+        f"硬顶之后这一轮没带她最近说过的话。拿到：\n{marker.text()}"
+    )
+
+
+@pytest.mark.integration
+async def test_what_a_gap_marker_brought_back_goes_at_the_next_cleanup(
+    moment_db, stub_moment, monkeypatch
+):
+    """**有意接受的提前遗忘**：缺口那根补回来的话，下一个清理点连同正文一起折叠掉。
+
+    丢掉那一轮说过的话只在缺口那根的状态里有；下一个清理点那根折叠，新立的清理界桩又
+    不带「你刚做过、说过」（历史里有界桩、上一轮也存下来了），所以最早 50 分钟之后她就
+    看不到那几句了，而不是 4 小时。接受的理由：缺口只在上下文写失败或进程崩溃时出现；
+    那几句仍在世界账本和日记材料里，发出去的消息在手机页上也还有编号。为这种情况让缺口
+    正文不折叠，会重新引入重复和特例。
+    """
+    await _stand("akao", "家/客厅", "待着", _at(13))
+    await _stand("ayana", "家/客厅", "看书", _at(13))
+
+    from app.living import moment as moment_mod
+
+    stub_moment(said="第一轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+
+    real_commit = moment_mod.commit_moment_transcript
+
+    async def boom(*_a, **_kw):
+        raise RuntimeError("上下文写不进去")
+
+    monkeypatch.setattr(moment_mod, "commit_moment_transcript", boom)
+    stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="第二轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 10))
+
+    monkeypatch.setattr(moment_mod, "commit_moment_transcript", real_commit)
+    gap_round = stub_moment(said="第三轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 20))
+    assert "我去煮点抹茶。" in _everything_she_read(gap_round.runs[0][0]), (
+        "用例前提：缺口那根把丢掉那一轮说过的话补回来了"
+    )
+
+    runner = stub_moment(said="第四轮")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(15))
+
+    assert "我去煮点抹茶。" not in _everything_she_read(runner.runs[0][0]), (
+        "缺口那根的正文过了清理点还在 —— 那就又是一份叠着的状态"
+    )
