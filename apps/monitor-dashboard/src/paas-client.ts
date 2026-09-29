@@ -25,7 +25,7 @@ function getChannelConfig(): { baseURL: string; headers: Record<string, string> 
 }
 
 /**
- * agent-service：世界文档树的管理端点。
+ * agent-service 的管理端点：世界文档树 /admin/world-documents/*、通信机制的人工入口 /admin/messaging/*。
  *
  * 现有两个 client 都打不到它——paasClient 的 baseURL 是 paas-engine、channelClient 是
  * channel-server，而且两者用的都是 X-API-Key。agent-service 那几个端点的门认的是内网
@@ -76,11 +76,17 @@ export function createClient(
       return unwrap(res.data);
     },
 
-    async post(path: string, body?: unknown, extraHeaders?: Record<string, string>) {
+    /** options.timeoutMs：这一次调用的出站超时，默认 TIMEOUT。要等对方做完一件事的调用（提问）用它放宽。 */
+    async post(
+      path: string,
+      body?: unknown,
+      extraHeaders?: Record<string, string>,
+      options: { timeoutMs?: number } = {},
+    ) {
       const { baseURL, headers } = configFn();
       const config: AxiosRequestConfig = {
         headers: { ...headers, 'Content-Type': 'application/json', ...extraHeaders },
-        timeout: TIMEOUT,
+        timeout: options.timeoutMs ?? TIMEOUT,
       };
       const res = await axios.post(`${baseURL}${path}`, body, config);
       return unwrap(res.data);

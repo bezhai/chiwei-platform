@@ -124,3 +124,28 @@ describe('agentClient 不拆包', () => {
     }
   });
 });
+
+// 提问要等对方回答，默认的 15 秒出站超时会把一次正常的等待截断成"上游没回应"。
+describe('单次调用可以放宽出站超时', () => {
+  it('post 的 timeoutMs 生效：给得比上游慢就超时，给得够就拿到回答', async () => {
+    const server = Bun.serve({
+      port: 0,
+      async fetch() {
+        await Bun.sleep(300);
+        return Response.json({ lane: 'coe-msg', answered: true });
+      },
+    });
+    try {
+      process.env.DASHBOARD_AGENT_API = `http://127.0.0.1:${server.port}`;
+      process.env.INNER_HTTP_SECRET = 's3cr3t';
+
+      await expect(
+        agentClient.post('/admin/messaging/ask', {}, undefined, { timeoutMs: 50 }),
+      ).rejects.toThrow();
+      const data = await agentClient.post('/admin/messaging/ask', {}, undefined, { timeoutMs: 5000 });
+      expect(data).toEqual({ lane: 'coe-msg', answered: true });
+    } finally {
+      server.stop(true);
+    }
+  });
+});
