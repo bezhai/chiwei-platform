@@ -138,6 +138,11 @@ context 上限，``Agent.run`` 抛错、收尾不提交、下一拍读到同样�
 （:func:`_cleanup_instant`，按生活日 04:00 起算）。滑动窗口每轮都改上下文开头、前缀
 缓存每轮失效；固定时刻清理让两次清理之间的前缀一个字节都不动。
 
+**这五个数填多少不在这一层**（:class:`TrimPolicy` 只有形状）。world 和三姐妹各自在
+自己的模块里写死自己那一份：:data:`app.living.world.WORLD_TRIM_POLICY` 和
+:data:`app.living.moment.MOMENT_TRIM_POLICY`。一个是客观的世界，一个是人，该记多久
+本来就不是一种东西，两边的值可以独立调整。
+
 **"保留 1 小时"在整点清理下实际是 1–2 小时，这是设计不是 bug。** 刚过清理点写下的
 东西要等到下一个清理点才可能被裁：13:05 读到的网页在 15:00 那次清理才走（1 小时
 55 分），13:59 读到的同样在 15:00 走（1 小时 1 分）。验收按明确的截止线判断——
@@ -203,14 +208,11 @@ provider 拒掉整个请求，而且同一轮里多个调用和多个结果必�
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
-
-from inner_shared.dynamic_config import dynamic_config
 
 from app.agent.neutral import ContentBlock, Message, Role
 from app.agent.session import load_session, replace_session
@@ -315,14 +317,19 @@ async def commit_moment_transcript(
 # 分层裁剪
 # ---------------------------------------------------------------------------
 
-# **哪些工具的返回算素材、哪些留着，不在这一层。** 那是调用方的事：life 那 22 只手和
-# world 那几只手是两套完全不同的东西，而这里只认名字。life 那两张表住在
-# :data:`app.living.moment.MATERIAL_TOOLS` / :data:`app.living.moment.KEPT_TOOLS`，
-# world 的住在它自己那边，各自有用例钉住"两份合起来正好覆盖这一侧的全部工具"。
+# **裁多久、哪些返回算素材，都不在这一层。** 这一层只给形状（:class:`TrimPolicy`、
+# 两张分类表的类型）和裁剪动作本身；具体填什么是业务的事，因为 world 和三姐妹不是一种
+# 东西 —— 一个是客观的世界，一个是人，它们该记多久本来就不一样。两份策略各住在自己
+# 那边（:data:`app.living.world.WORLD_TRIM_POLICY` /
+# :data:`app.living.moment.MOMENT_TRIM_POLICY`），两张分类表同理
+# （:data:`app.living.moment.MATERIAL_TOOLS` / :data:`app.living.moment.KEPT_TOOLS`，
+# world 的住在它自己那边），各自有用例钉住"两份合起来正好覆盖这一侧的全部工具"。
 #
-# **这一层不给默认值**（:func:`trim_for_round` 的 ``material_tools`` 必填）：给了默认值
-# 的话，接进来的第二个调用方一只手都不在表里也照跑，全部走"留着"那一档完整保留 240
-# 分钟 —— 对一个每轮 read 一份文档的 loop，那正好是最贵的默认值，而且一句报错都没有。
+# **这一层一个默认值都不给**（:func:`trim_for_round` 的 ``policy`` 和 ``material_tools``
+# 都必填，:func:`next_transcript` 的 ``policy`` 也是）：给了默认值的话，接进来的下一个
+# 调用方一个阈值都不写、一只手都不分类也照跑，跑的是谁设计的那一套没人说得清 ——
+# 对一个每轮 read 一份文档的 loop，"一只手都不在素材表里、全部按整组档留满"正好是最贵
+# 的那个默认值，而且一句报错都没有。
 
 # 过期载荷换成的那句话。**代码写死，不是概括**：概括会留下一个可能已经错了的版本，
 # 而原文没了，错了没人知道（宪法原则 6：宁可不记，不可记错）。
@@ -341,13 +348,6 @@ PICTURE_URL_MINUTES = 90
 # （``living_life_moment_minutes``）。把它调到 30 分钟以上，这条余量就没了 ——
 # 那时候要一起把清理周期调下来。
 MAX_CLEANUP_MINUTES = 60
-
-# Dynamic Config key：五个阈值运行时都能改，不用重新部署。
-MATERIAL_MINUTES_KEY = "living_context_material_minutes"
-OWN_MINUTES_KEY = "living_context_own_minutes"
-CLEANUP_MINUTES_KEY = "living_context_cleanup_minutes"
-HARD_CAP_TOKENS_KEY = "living_context_hard_cap_tokens"
-TRIM_TARGET_TOKENS_KEY = "living_context_trim_target_tokens"
 
 # token 估算。没有能离线跑的 tokenizer（gemini 的 count_tokens 是一次网络调用，不能
 # 放在每轮写库的路上），所以按字节估，而且**一律往高了估**——估低了才会真的撞上模型
@@ -378,83 +378,25 @@ _CHECKPOINT_HEADS = (CHECKPOINT_HEAD, GAP_HEAD)
 
 @dataclass(frozen=True)
 class TrimPolicy:
-    """裁剪的五个阈值。运行时从 Dynamic Config 读（:func:`load_trim_policy`）。"""
+    """裁剪的五个阈值 —— 只有形状，值由调用方给。
+
+    **这里不放默认值，也不从任何地方读。** 这五个数不是运行时旋钮，是"这个 agent
+    是什么东西"的一部分：world 是客观的世界，三姐妹是人，它们该记多久本来就不一样。
+    所以两侧各自在自己的模块里写死自己那一份
+    （:data:`app.living.world.WORLD_TRIM_POLICY` /
+    :data:`app.living.moment.MOMENT_TRIM_POLICY`），两边的值可以独立调整。
+
+    五条约束由那两份常量各自的用例钉住（``tests/living/test_context_trim.py``
+    第七之二节）：两档时长都是正数；整组档不小于素材档（**不小于，不是严格大于**）；
+    清理周期落在 1 到 :data:`MAX_CLEANUP_MINUTES` 之间；硬顶和裁剪目标都是正数；
+    裁剪目标严格小于硬顶。值写死之后配不脏，所以这几条钉在测试里，不在运行时再判一遍。
+    """
 
     material_minutes: int
     own_minutes: int
     cleanup_minutes: int
     hard_cap_tokens: int
     trim_target_tokens: int
-
-
-DEFAULT_TRIM_POLICY = TrimPolicy(
-    material_minutes=60,
-    own_minutes=240,
-    cleanup_minutes=60,
-    hard_cap_tokens=200_000,
-    trim_target_tokens=100_000,
-)
-
-
-def _holds_together(policy: TrimPolicy) -> str | None:
-    """这套阈值自相矛盾在哪；没矛盾返回 ``None``。"""
-    if policy.material_minutes <= 0 or policy.own_minutes <= 0:
-        return "两档时长都得是正数"
-    if policy.own_minutes < policy.material_minutes:
-        return "她自己的话不能比素材留得还短 —— 那会留下没有结果的调用"
-    if not 0 < policy.cleanup_minutes <= MAX_CLEANUP_MINUTES:
-        return (
-            f"清理周期得在 1..{MAX_CLEANUP_MINUTES} 分钟之间 —— "
-            f"再长图片就会比它的地址（{PICTURE_URL_MINUTES} 分钟）活得久"
-        )
-    if policy.hard_cap_tokens <= 0 or policy.trim_target_tokens <= 0:
-        return "硬顶和裁剪目标都得是正数"
-    if policy.trim_target_tokens >= policy.hard_cap_tokens:
-        return "裁剪目标得小于硬顶，不然撞顶之后裁不下去"
-    return None
-
-
-async def load_trim_policy() -> TrimPolicy:
-    """这一轮按哪套阈值裁；配脏了整套退回 :data:`DEFAULT_TRIM_POLICY` 并记一行。
-
-    **退回是整套，不是逐项。** 几个阈值之间有约束（她自己的话不能比素材短、目标得小
-    于硬顶），逐项修补会拼出一套谁也没设计过的策略，而它会静默地裁错东西。
-
-    Dynamic Config 的拉取是同步 httpx（10s 缓存），走 ``asyncio.to_thread`` 避免缓存
-    刷新那一次阻塞事件循环（与 :func:`app.living.moment.life_moment_minutes` 同口径）。
-    """
-
-    def read() -> TrimPolicy:
-        return TrimPolicy(
-            material_minutes=dynamic_config.get_int(
-                MATERIAL_MINUTES_KEY, default=DEFAULT_TRIM_POLICY.material_minutes
-            ),
-            own_minutes=dynamic_config.get_int(
-                OWN_MINUTES_KEY, default=DEFAULT_TRIM_POLICY.own_minutes
-            ),
-            cleanup_minutes=dynamic_config.get_int(
-                CLEANUP_MINUTES_KEY, default=DEFAULT_TRIM_POLICY.cleanup_minutes
-            ),
-            hard_cap_tokens=dynamic_config.get_int(
-                HARD_CAP_TOKENS_KEY, default=DEFAULT_TRIM_POLICY.hard_cap_tokens
-            ),
-            trim_target_tokens=dynamic_config.get_int(
-                TRIM_TARGET_TOKENS_KEY,
-                default=DEFAULT_TRIM_POLICY.trim_target_tokens,
-            ),
-        )
-
-    policy = await asyncio.to_thread(read)
-    broken = _holds_together(policy)
-    if broken is not None:
-        logger.warning(
-            "上下文裁剪的动态配置不成立（%s）：%r；本次整套退回默认值 %r",
-            broken,
-            policy,
-            DEFAULT_TRIM_POLICY,
-        )
-        return DEFAULT_TRIM_POLICY
-    return policy
 
 
 def estimate_tokens(messages: list[Message]) -> int:
@@ -493,8 +435,8 @@ def _cleanup_instant(now: datetime, minutes: int) -> datetime:
     """``now`` 之前最近的那个清理点，按生活日 04:00 起算。
 
     按生活日而不是按 Unix 纪元取整，是为了让周期跟她那一天对齐：04:00 是整点，所以
-    60 分钟的周期落在每个整点上。取整让两次清理之间的截止线完全不动 —— 前缀因此逐字节
-    稳定，前缀缓存才有得命中。
+    整除一小时的周期落在每个整点上。取整让两次清理之间的截止线完全不动 —— 前缀因此
+    逐字节稳定，前缀缓存才有得命中。
     """
     start, _end = living_day_bounds(living_day_of(now))
     step = timedelta(minutes=minutes)

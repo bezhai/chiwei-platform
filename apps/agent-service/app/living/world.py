@@ -78,9 +78,9 @@ from app.infra.cst_time import dated_clock, to_cst_full
 from app.living.anchor import anchor_on_grid
 from app.living.continuity import (
     TranscriptConflict,
+    TrimPolicy,
     commit_moment_transcript,
     load_moment_transcript,
-    load_trim_policy,
     next_transcript,
     transcript_key,
     trim_for_round,
@@ -402,6 +402,31 @@ WORLD_KEPT_TOOLS = frozenset(
     {"write_document", "edit_document", "delete_document", "expect"}
 )
 
+# 它的上下文裁多久。**写死在这儿，不走 Dynamic Config**：这五个数不随运行时变化，
+# 它们是"world 是什么东西"的一部分，不是可调的旋钮。裁剪那一层只给形状，填什么归这里
+# （:class:`app.living.continuity.TrimPolicy`）。
+#
+# 跟三姐妹那一份（:data:`app.living.moment.MOMENT_TRIM_POLICY`）现在值相同，但**不是
+# 同一份**：一个是客观的世界，一个是人，该记多久本来就不是一种东西，两边从此各调各的。
+#
+#   * ``material_minutes`` 60   读回来的设定和外面那六样，过期了再读一次就有
+#   * ``own_minutes``     240   它自己改过什么、让什么发生 —— 这件事到底做成了没有的
+#     唯一记录
+#   * ``cleanup_minutes``  60   固定时刻清理，两次之间前缀逐字节不动
+#   * ``hard_cap_tokens`` 200k / ``trim_target_tokens`` 100k  兜底，不是主路
+#
+# ``cleanup_minutes`` 仍然受 :data:`app.living.continuity.MAX_CLEANUP_MINUTES` 约束
+# （用例钉住）。**但那条上限的依据只在三姐妹那边成立** —— 它是从图片预签名地址的寿命
+# 加一个 moment 间隔推出来的，而 world 这十二只手一只都不返回图片。调这个数的时候先
+# 处理这个不对称，别照着一条对它不成立的理由改。
+WORLD_TRIM_POLICY = TrimPolicy(
+    material_minutes=60,
+    own_minutes=240,
+    cleanup_minutes=60,
+    hard_cap_tokens=200_000,
+    trim_target_tokens=100_000,
+)
+
 
 @dataclass(frozen=True)
 class WorldPace:
@@ -609,7 +634,6 @@ async def run_world_round(*, lane: str, now: datetime) -> WorldRound | None:
 
         key = world_transcript_key(lane)
         history, history_ver = await load_moment_transcript(key)
-        trim_policy = await load_trim_policy()
         # 账本和文档目录读一百遍字字一样，所以只在界桩上重铺一次；每轮送到它眼前的
         # 只有新发生的事。跟她那边的状态快照是同一个位置。
         history = trim_for_round(
@@ -617,7 +641,7 @@ async def run_world_round(*, lane: str, now: datetime) -> WorldRound | None:
             material_tools=WORLD_MATERIAL_TOOLS,
             now=anchor,
             state=await world_state(lane=lane, now=anchor),
-            policy=trim_policy,
+            policy=WORLD_TRIM_POLICY,
         )
         stimulus = Message(
             role=Role.USER,
@@ -670,7 +694,9 @@ async def run_world_round(*, lane: str, now: datetime) -> WorldRound | None:
             try:
                 await commit_moment_transcript(
                     key,
-                    next_transcript(history, [stimulus, *produced], policy=trim_policy),
+                    next_transcript(
+                        history, [stimulus, *produced], policy=WORLD_TRIM_POLICY
+                    ),
                     expected_ver=history_ver,
                     session=session,
                 )

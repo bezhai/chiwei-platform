@@ -18,19 +18,18 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import logging
+from dataclasses import replace
 
 import pytest
 
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.living.continuity import (
     CHECKPOINT_HEAD,
-    DEFAULT_TRIM_POLICY,
     MATERIAL_TRIMMED,
     PICTURE_TRIMMED,
     TrimPolicy,
     estimate_tokens,
     load_moment_transcript,
-    load_trim_policy,
     next_transcript,
     transcript_key,
     trim_for_round,
@@ -39,9 +38,12 @@ from app.living.moment import (
     KEPT_TOOLS,
     MATERIAL_TOOLS,
     MOMENT_TOOLS,
+    MOMENT_TRIM_POLICY,
     run_moment,
 )
+from app.living.world import WORLD_MATERIAL_TOOLS, WORLD_TRIM_POLICY
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
+from tests.living.test_world import stub_round, world_db  # noqa: F401
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -56,7 +58,12 @@ _PNG = (
     ).decode()
 )
 
-POLICY = TrimPolicy(
+# 阈值搬到业务层**之前**线上跑的那一套。那五个 Dynamic Config key 线上一条都没配
+# （2026-09-29 查管理接口全量，跨全部泳道），所以当时每一轮拿到的就是这五个数。
+#
+# 本文件的默认策略就用它，等价性也以它为基准：搬完之后两侧各自那份跑出来的结果，
+# 必须跟拿这一份跑出来的逐条相同（见第七节）。
+BEFORE_THE_MOVE = TrimPolicy(
     material_minutes=60,
     own_minutes=240,
     cleanup_minutes=60,
@@ -106,7 +113,7 @@ def _round(
     at: dt.datetime,
     *produced: Message,
     state: str = "手上：你在家/客厅，正在发呆。",
-    policy: TrimPolicy = POLICY,
+    policy: TrimPolicy = BEFORE_THE_MOVE,
     material_tools: frozenset[str] = MATERIAL_TOOLS,
 ) -> list[Message]:
     """跑一轮：先按这一刻裁一遍历史，再把这一轮的输入和产出接上去。
@@ -127,7 +134,7 @@ def _play(
     start: dt.datetime,
     until: dt.datetime,
     events: dict[str, list[Message]] | None = None,
-    policy: TrimPolicy = POLICY,
+    policy: TrimPolicy = BEFORE_THE_MOVE,
     material_tools: frozenset[str] = MATERIAL_TOOLS,
     step: int = 10,
 ) -> list[Message]:
@@ -698,85 +705,362 @@ def test_what_she_thought_counts_toward_the_estimate():
 
 
 # ---------------------------------------------------------------------------
-# 七 · 阈值全部走动态配置
+# 七 · 两份策略：world 和三姐妹各写各的，基建层一个阈值都不留
+#
+# 一个是客观的世界，一个是人 —— 它们需要的阈值不是一种东西。基建层只给形状和裁剪
+# 动作，两侧各自在自己的模块里写死自己那份。这一节验四样：
+#
+#   1. **等价**：搬完之后，同一份历史、同一时刻、同一状态下，喂进模型的那一份和落盘
+#      的那一份跟搬之前逐条相同。四条边界各走一遍，两侧各跑一遍。值本身另钉一条，
+#      因为整点清理下裁剪结果对分钟级的差别不敏感；
+#   2. **分离**：两侧确实各读各的常量 —— 改掉一边，另一边照旧读自己那份；
+#   3. **约束**：原来那个运行时校验函数表达的五条约束，原样钉在两份常量上；
+#   4. **基建层只剩机制**：阈值、配置读取、一致性校验一样不留，策略参数也没有默认值。
+# ---------------------------------------------------------------------------
+
+_SIDES = ("world", "life")
+
+# 两侧各自那份策略，和各侧自己的素材表。
+_SIDE_POLICY = {"world": WORLD_TRIM_POLICY, "life": MOMENT_TRIM_POLICY}
+_SIDE_MATERIAL_TOOLS = {"world": WORLD_MATERIAL_TOOLS, "life": MATERIAL_TOOLS}
+
+# 各侧拿来验素材那一档的那只手，必须在**这一侧自己的**素材表里。
+_SIDE_MATERIAL_TOOL = {"world": "read_document", "life": "search_online"}
+
+
+def _replay_both(
+    *,
+    start: dt.datetime,
+    until: dt.datetime,
+    events: dict[str, list[Message]] | None = None,
+    policy: TrimPolicy,
+    material_tools: frozenset[str],
+    step: int = 10,
+) -> list[tuple[list[Message], list[Message]]]:
+    """照真实节奏跑过去，每一轮**喂进模型的那份**和**落盘的那份**都收下来。
+
+    :func:`_play` 只交回最后落盘的那一份，而等价承诺覆盖的是两份 —— 喂进去的那份
+    要是变了，她眼前的东西就变了，哪怕存下来的最终一样。
+    """
+    rounds: list[tuple[list[Message], list[Message]]] = []
+    ctx: list[Message] = []
+    at = start
+    while at <= until:
+        produced = (events or {}).get(f"{at:%H:%M}") or [_said("继续")]
+        fed = trim_for_round(
+            ctx,
+            now=at,
+            state="手上：你在家/客厅，正在发呆。",
+            policy=policy,
+            material_tools=material_tools,
+        )
+        stored = next_transcript(
+            fed, [_stim(f"现在 {at:%H:%M}。"), *produced], policy=policy
+        )
+        rounds.append((fed, stored))
+        ctx = stored
+        at += dt.timedelta(minutes=step)
+    return rounds
+
+
+def _verbatim(rounds: list[tuple[list[Message], list[Message]]]) -> list[list[dict]]:
+    """逐条比对用的形状：``to_replay_dict`` 是无损的，签名也在里面。"""
+    return [[m.to_replay_dict() for m in half] for both in rounds for half in both]
+
+
+def _boundary_rounds(
+    boundary: str, *, side: str, policy: TrimPolicy
+) -> list[tuple[list[Message], list[Message]]]:
+    """四条边界各自的那段历史。跑法只由 ``policy`` 决定，两次调用只换它。"""
+    material_tools = _SIDE_MATERIAL_TOOLS[side]
+    read_it = [
+        _call(_SIDE_MATERIAL_TOOL[side], "c1"),
+        _result("c1", "读到的那一段：抹茶店周一休息"),
+        _said("知道了"),
+    ]
+    plans = {
+        # 跨过素材那道线、没跨整组那道：载荷换成短语，调用和结果都还在
+        "素材折叠": {
+            "start": _at(13, 0),
+            "until": _at(15, 0),
+            "events": {"13:30": read_it},
+        },
+        # 跨过整组那道线：调用和它的全部结果一起走
+        "整组丢弃": {
+            "start": _at(13, 0),
+            "until": _at(18, 0),
+            "events": {"13:30": read_it},
+        },
+        # 跨过一个清理点：界桩插进去，往后那一段从它起算
+        "界桩插入": {
+            "start": _at(13, 50),
+            "until": _at(14, 10),
+            "events": None,
+        },
+        # 撑爆硬顶：线上离它很远，只能在这儿造出来。每段写死一个不同的开头，
+        # 兜底把最老那一段丢掉这件事才有得断言。
+        "token 硬顶": {
+            "start": _at(14, 0),
+            "until": _at(14, 30),
+            "events": {
+                "14:00": [_said("第一段，" + "很长" * 35_000)],
+                "14:10": [_said("第二段，" + "很长" * 35_000)],
+                "14:20": [_said("第三段，" + "很长" * 35_000)],
+                "14:30": [_said("第四段，" + "很长" * 35_000)],
+            },
+        },
+    }
+    return _replay_both(
+        **plans[boundary], policy=policy, material_tools=material_tools
+    )
+
+
+def _assert_boundary_was_hit(
+    boundary: str,
+    rounds: list[tuple[list[Message], list[Message]]],
+    *,
+    policy: TrimPolicy,
+) -> None:
+    """这段历史真的走到那条边界上了 —— 不然下面那句"两份相同"什么都没验。"""
+    stored = rounds[-1][1]
+    joined = "".join(_texts(stored))
+    if boundary == "素材折叠":
+        assert MATERIAL_TRIMMED in joined, "载荷没被换成短语"
+        assert any(m.tool_calls for m in stored), "调用本身也走了，那是整组丢弃"
+    elif boundary == "整组丢弃":
+        assert not any(m.tool_calls for m in stored), "调用还在，没走到整组那道线"
+        assert MATERIAL_TRIMMED not in joined
+        assert _orphans(stored) == []
+    elif boundary == "界桩插入":
+        assert sum(1 for t in _texts(stored) if CHECKPOINT_HEAD in t) == 2, (
+            "该有两根：一根是空历史那一下，一根是跨 14:00 那一下"
+        )
+    elif boundary == "token 硬顶":
+        assert "第一段" not in joined, "最老那一段还在，硬顶没兜住"
+        assert estimate_tokens(stored) <= policy.hard_cap_tokens
+    else:  # pragma: no cover - 参数写错时当场炸
+        raise AssertionError(boundary)
+
+
+@pytest.mark.parametrize("side", _SIDES)
+@pytest.mark.parametrize(
+    "boundary", ["素材折叠", "整组丢弃", "界桩插入", "token 硬顶"]
+)
+def test_moving_the_thresholds_changes_nothing_that_reaches_her(side, boundary):
+    """搬完之后喂进去的那份和落盘的那份跟搬之前逐条相同，四条边界各走一遍。
+
+    基准是 :data:`BEFORE_THE_MOVE`（搬之前线上每一轮实际拿到的那五个数）。先确认这段
+    历史真的走到了那条边界上，再逐条比 —— 不然"两份相同"可能只是两边都什么也没裁。
+    """
+    before = _boundary_rounds(boundary, side=side, policy=BEFORE_THE_MOVE)
+    _assert_boundary_was_hit(boundary, before, policy=BEFORE_THE_MOVE)
+
+    after = _boundary_rounds(boundary, side=side, policy=_SIDE_POLICY[side])
+    assert _verbatim(after) == _verbatim(before)
+
+
+@pytest.mark.parametrize("side", _SIDES)
+def test_neither_side_changed_a_number_in_the_move(side):
+    """两侧的五个数跟搬之前完全一致 —— 这一次只换位置，不调值。
+
+    上面那几条比的是**裁剪结果**，而整点清理下结果对分钟级的差别不敏感：把
+    ``own_minutes`` 从 240 改成 239，裁出来逐条一模一样。所以值本身在这里单独钉一遍。
+    这也是两边分开之后**唯一**要求它们相等的地方 —— 往后谁先调，改的就是这一条。
+    """
+    assert _SIDE_POLICY[side] == BEFORE_THE_MOVE
+
+
+# ---------------------------------------------------------------------------
+# 分离：两侧各读各的常量
 # ---------------------------------------------------------------------------
 
 
-class _FakeConfig:
-    def __init__(self, values: dict[str, int]) -> None:
-        self.values = values
-        self.asked: list[str] = []
+def test_the_two_sides_are_not_one_object_under_two_names():
+    """两份策略是**两个对象**，不是一个对象挂了两个名字。
 
-    def get_int(self, key: str, *, default: int = 0) -> int:
-        self.asked.append(key)
-        return self.values.get(key, default)
+    写成别名（``MOMENT_TRIM_POLICY = WORLD_TRIM_POLICY``）的话值当然逐项一致，等价、
+    数值对齐、五条约束一条都不会红 —— 而"改一边不动另一边"从此是做不到的事，这次
+    分层要换来的东西正好全没了。
+
+    **下面那两条 monkeypatch 的用例挡不住它**，所以这条必须单独存在：换掉一个模块的
+    属性只是重新绑定那个模块的名字，不会动到另一个模块里已经绑好的引用；两边于是仍然
+    各自拿着同一个原对象，``is`` 断言照样通过。
+    """
+    assert WORLD_TRIM_POLICY is not MOMENT_TRIM_POLICY
 
 
-async def test_every_threshold_comes_from_dynamic_config(monkeypatch):
-    """五个阈值运行时都能改，一个都不写死在源码里。"""
-    from app.living import continuity as mod
+def _spy_on_the_policy(monkeypatch, module) -> dict[str, list[TrimPolicy]]:
+    """记下这个模块裁剪和收尾**各自**实际传进去的那份策略，按调用点分开收。
 
-    fake = _FakeConfig(
-        {
-            mod.MATERIAL_MINUTES_KEY: 30,
-            mod.OWN_MINUTES_KEY: 120,
-            mod.CLEANUP_MINUTES_KEY: 20,
-            mod.HARD_CAP_TOKENS_KEY: 90_000,
-            mod.TRIM_TARGET_TOKENS_KEY: 40_000,
-        }
+    **分开收是必须的。** 合成一张单子的话，"只有裁剪走到了、收尾没走到"跟"两处都
+    走到了"长得一模一样（``all`` 对少了一项的单子照样成立），而收尾那次漏掉策略的
+    症状是落盘的那一份按另一套裁 —— 喂进去的和存下来的从此不是同一份前缀。
+    """
+    used: dict[str, list[TrimPolicy]] = {"trim": [], "next": []}
+    real_trim = module.trim_for_round
+    real_next = module.next_transcript
+
+    def trim(history, **kwargs):
+        used["trim"].append(kwargs["policy"])
+        return real_trim(history, **kwargs)
+
+    def nxt(history, produced, **kwargs):
+        used["next"].append(kwargs["policy"])
+        return real_next(history, produced, **kwargs)
+
+    monkeypatch.setattr(module, "trim_for_round", trim)
+    monkeypatch.setattr(module, "next_transcript", nxt)
+    return used
+
+
+def _assert_read_it_at_both_call_sites(
+    used: dict[str, list[TrimPolicy]], expected: TrimPolicy, *, whose: str
+) -> None:
+    """裁剪和收尾**各一次**，两次拿到的都是 ``expected`` 那个对象。
+
+    ``is`` 而不是 ``==``：替身跟原件逐项相等，值比不出"读的到底是哪个名字"。
+    """
+    counted = {site: len(seen) for site, seen in used.items()}
+    assert counted == {"trim": 1, "next": 1}, (
+        f"{whose}这一轮裁剪和收尾该各走一次，实际是 {counted}"
     )
-    monkeypatch.setattr(mod, "dynamic_config", fake)
-
-    policy = await load_trim_policy()
-    assert policy == TrimPolicy(
-        material_minutes=30,
-        own_minutes=120,
-        cleanup_minutes=20,
-        hard_cap_tokens=90_000,
-        trim_target_tokens=40_000,
-    )
-    assert set(fake.asked) == {
-        mod.MATERIAL_MINUTES_KEY,
-        mod.OWN_MINUTES_KEY,
-        mod.CLEANUP_MINUTES_KEY,
-        mod.HARD_CAP_TOKENS_KEY,
-        mod.TRIM_TARGET_TOKENS_KEY,
-    }
+    assert used["trim"][0] is expected, f"{whose}裁剪那次读的不是它自己那份"
+    assert used["next"][0] is expected, f"{whose}收尾那次读的不是它自己那份"
 
 
-async def test_nothing_configured_is_the_documented_default(monkeypatch):
-    from app.living import continuity as mod
-
-    monkeypatch.setattr(mod, "dynamic_config", _FakeConfig({}))
-    assert await load_trim_policy() == DEFAULT_TRIM_POLICY
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        {"living_context_own_minutes": 30},  # 她自己的话比素材还短
-        {"living_context_cleanup_minutes": 0},
-        {"living_context_cleanup_minutes": 600},  # 比签名寿命还长，图片会烂在里面
-        {"living_context_trim_target_tokens": 300_000},  # 目标比硬顶还大
-        {"living_context_material_minutes": -1},
-    ],
+# 一眼能认出来的另一套值：哪一侧漏用了别人那份，下面的断言当场红。
+_SOMEONE_ELSES = TrimPolicy(
+    material_minutes=7,
+    own_minutes=13,
+    cleanup_minutes=11,
+    hard_cap_tokens=9_000,
+    trim_target_tokens=3_000,
 )
-async def test_a_threshold_that_cannot_hold_falls_back(monkeypatch, bad, caplog):
-    """配脏了就退回默认值并说一声，不拿一个自相矛盾的策略去裁她的记忆。"""
+
+
+@pytest.mark.integration
+async def test_her_round_trims_by_her_own_policy(
+    moment_db, stub_moment, monkeypatch
+):
+    """她这一轮裁剪和收尾各一次，两次读的都是 **moment 模块里那个名字**。
+
+    她那份换成一个同值但不同一的替身：断言的是换进去的那个对象，所以"她其实一直
+    拿着 world 那份"会红。同时把 world 那份换成一套认得出来的别的值 —— 真拿错了
+    连值都对不上。
+    """
+    from app.living import moment as moment_mod
+    from app.living import world as world_mod
+
+    hers = replace(MOMENT_TRIM_POLICY)  # 同值，不同对象
+    monkeypatch.setattr(moment_mod, "MOMENT_TRIM_POLICY", hers)
+    monkeypatch.setattr(world_mod, "WORLD_TRIM_POLICY", _SOMEONE_ELSES)
+    used = _spy_on_the_policy(monkeypatch, moment_mod)
+
+    stub_moment(said="继续")
+    await run_moment(lane=LANE, persona_id="akao", now=_at(13, 50))
+
+    _assert_read_it_at_both_call_sites(used, hers, whose="她")
+
+
+@pytest.mark.integration
+async def test_the_world_round_trims_by_its_own_policy(
+    world_db, stub_round, monkeypatch
+):
+    """反过来也一样：world 这一轮裁剪和收尾各一次，两次读的都是它自己那个名字。"""
+    from app.living import moment as moment_mod
+    from app.living import world as world_mod
+
+    its_own = replace(WORLD_TRIM_POLICY)  # 同值，不同对象
+    monkeypatch.setattr(world_mod, "WORLD_TRIM_POLICY", its_own)
+    monkeypatch.setattr(moment_mod, "MOMENT_TRIM_POLICY", _SOMEONE_ELSES)
+    used = _spy_on_the_policy(monkeypatch, world_mod)
+
+    stub_round()
+    await world_mod.run_world_round(lane=LANE, now=_at(10))
+
+    _assert_read_it_at_both_call_sites(used, its_own, whose="world ")
+
+
+# ---------------------------------------------------------------------------
+# 约束：原来那个运行时校验表达的五条，一条不增一条不减
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("side", _SIDES)
+def test_both_windows_are_positive(side):
+    """一 · 素材档和整组档两个时长都是正数。"""
+    policy = _SIDE_POLICY[side]
+    assert policy.material_minutes > 0
+    assert policy.own_minutes > 0
+
+
+@pytest.mark.parametrize("side", _SIDES)
+def test_the_own_window_is_not_shorter_than_the_material_one(side):
+    """二 · 整组档**不小于**素材档 —— 不是严格大于，两个数相等是允许的。
+
+    比素材短的话，载荷已经换掉的那一组会比调用先走，留下没有结果的调用。
+    """
+    policy = _SIDE_POLICY[side]
+    assert policy.own_minutes >= policy.material_minutes
+
+
+@pytest.mark.parametrize("side", _SIDES)
+def test_the_cleanup_period_stays_inside_the_bound(side):
+    """三 · 清理周期落在 1 到上限之间（上限是基建层那条从图片地址寿命派生的事实）。"""
+    from app.living.continuity import MAX_CLEANUP_MINUTES
+
+    policy = _SIDE_POLICY[side]
+    assert 0 < policy.cleanup_minutes <= MAX_CLEANUP_MINUTES
+
+
+@pytest.mark.parametrize("side", _SIDES)
+def test_the_cap_and_the_target_are_positive(side):
+    """四 · 硬顶和裁剪目标都是正数。"""
+    policy = _SIDE_POLICY[side]
+    assert policy.hard_cap_tokens > 0
+    assert policy.trim_target_tokens > 0
+
+
+@pytest.mark.parametrize("side", _SIDES)
+def test_the_target_is_strictly_below_the_cap(side):
+    """五 · 裁剪目标**严格**小于硬顶，不然撞顶之后裁不下去。"""
+    policy = _SIDE_POLICY[side]
+    assert policy.trim_target_tokens < policy.hard_cap_tokens
+
+
+# ---------------------------------------------------------------------------
+# 基建层：只剩机制
+# ---------------------------------------------------------------------------
+
+
+def test_the_trim_layer_holds_no_thresholds_and_reads_no_config():
+    """裁剪这一层不持有业务阈值、不读任何外部配置，策略参数也没有默认值。
+
+    给了默认值的话，接进来的下一个调用方一个阈值都不写也照跑 —— 跑的是谁设计的那套
+    没人说得清，而且一句报错都没有。这跟分类表那条纪律是同一条。
+    """
+    import inspect
+
     from app.living import continuity as mod
 
-    monkeypatch.setattr(mod, "dynamic_config", _FakeConfig(bad))
-    with caplog.at_level(logging.WARNING, logger="app.living.continuity"):
-        assert await load_trim_policy() == DEFAULT_TRIM_POLICY
-    assert caplog.records
+    for gone in (
+        "dynamic_config",
+        "load_trim_policy",
+        "DEFAULT_TRIM_POLICY",
+        "_holds_together",
+        "MATERIAL_MINUTES_KEY",
+        "OWN_MINUTES_KEY",
+        "CLEANUP_MINUTES_KEY",
+        "HARD_CAP_TOKENS_KEY",
+        "TRIM_TARGET_TOKENS_KEY",
+    ):
+        assert not hasattr(mod, gone), f"{gone} 还在基建层里"
 
-
-def test_the_defaults_are_the_shape_the_design_asked_for():
-    assert DEFAULT_TRIM_POLICY.material_minutes == 60
-    assert DEFAULT_TRIM_POLICY.own_minutes == 240
-    assert DEFAULT_TRIM_POLICY.cleanup_minutes == 60
-    assert DEFAULT_TRIM_POLICY.hard_cap_tokens == 200_000
-    assert DEFAULT_TRIM_POLICY.trim_target_tokens == 100_000
+    for fn in (mod.trim_for_round, mod.next_transcript):
+        param = inspect.signature(fn).parameters["policy"]
+        assert param.default is inspect.Parameter.empty, (
+            f"{fn.__name__} 的 policy 有默认值"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -785,20 +1069,11 @@ def test_the_defaults_are_the_shape_the_design_asked_for():
 
 
 @pytest.mark.integration
-async def test_a_cleanup_lands_in_the_stored_transcript(
-    moment_db, stub_moment, monkeypatch
-):
+async def test_a_cleanup_lands_in_the_stored_transcript(moment_db, stub_moment):
     """真跑三个 moment 跨过一个清理点：存下来的那一份里状态重铺过、素材换成了短语。
 
     第二个 moment 立起第一根界桩，第三个才有得算年龄 —— 这就是一天头几轮的样子。
     """
-    from app.living import moment as moment_mod
-
-    async def fixed_policy() -> TrimPolicy:
-        return POLICY
-
-    monkeypatch.setattr(moment_mod, "load_trim_policy", fixed_policy)
-
     stub_moment(("look_around", {}), said="继续")
     await run_moment(lane=LANE, persona_id="akao", now=_at(13, 50))
 
@@ -818,22 +1093,14 @@ async def test_a_cleanup_lands_in_the_stored_transcript(
 
 
 @pytest.mark.integration
-async def test_a_picture_is_gone_before_she_is_fed_again(
-    moment_db, stub_moment, monkeypatch
-):
+async def test_a_picture_is_gone_before_she_is_fed_again(moment_db, stub_moment):
     """停机跨过签名寿命再起来：喂给模型的那份里已经没有图片块了。
 
     裁剪如果只发生在收尾，这条路永远走不到 —— adapter 会在模型请求之前拿 403 抛错，
     每一轮都炸在同一个地方，收尾轮不上。所以裁必须在喂之前。
     """
     from app.data.session import get_session
-    from app.living import moment as moment_mod
     from app.living.continuity import commit_moment_transcript
-
-    async def fixed_policy() -> TrimPolicy:
-        return POLICY
-
-    monkeypatch.setattr(moment_mod, "load_trim_policy", fixed_policy)
 
     # 先塞一段带图片的历史，模拟上一个进程 13:00 那一轮画过一张
     tid = transcript_key(lane=LANE, actor="akao")
@@ -1016,7 +1283,7 @@ def test_trimming_the_pictures_changes_the_content_and_nothing_else():
 # ---------------------------------------------------------------------------
 
 
-def _days(start: dt.datetime, days: int, *, policy: TrimPolicy = POLICY) -> list[Message]:
+def _days(start: dt.datetime, days: int, *, policy: TrimPolicy = BEFORE_THE_MOVE) -> list[Message]:
     """连着跑 ``days`` 天，每天每 10 分钟一轮，中途穿插素材和图片。"""
     ctx: list[Message] = []
     at = start
@@ -1042,7 +1309,7 @@ def test_running_for_days_does_not_grow_without_bound():
     one = _days(_at(9), 1)
     five = _days(_at(9), 5)
 
-    assert estimate_tokens(five) <= DEFAULT_TRIM_POLICY.hard_cap_tokens
+    assert estimate_tokens(five) <= BEFORE_THE_MOVE.hard_cap_tokens
     assert estimate_tokens(five) < estimate_tokens(one) * 2, (
         f"一天 {estimate_tokens(one)} token，五天 {estimate_tokens(five)} —— "
         "它在按天累积，裁剪没有收敛"
@@ -1092,10 +1359,10 @@ def test_the_cleanup_line_never_goes_backwards_across_the_day_boundary():
     from app.living.continuity import _cleanup_instant
 
     at = _at(0, 0, day=26)
-    last = _cleanup_instant(at, POLICY.cleanup_minutes)
+    last = _cleanup_instant(at, BEFORE_THE_MOVE.cleanup_minutes)
     for _ in range(60):  # 00:00 → 10:00，每 10 分钟看一次
         at += dt.timedelta(minutes=10)
-        now = _cleanup_instant(at, POLICY.cleanup_minutes)
+        now = _cleanup_instant(at, BEFORE_THE_MOVE.cleanup_minutes)
         assert now >= last, f"{at} 的清理点 {now} 比上一个 {last} 还早"
         last = now
 

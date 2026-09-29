@@ -113,9 +113,9 @@ from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import now_cst
 from app.living.anchor import anchor_on_grid
 from app.living.continuity import (
+    TrimPolicy,
     commit_moment_transcript,
     load_moment_transcript,
-    load_trim_policy,
     next_transcript,
     transcript_key,
     trim_for_round,
@@ -210,8 +210,7 @@ LIFE_MOMENT_PROMPT_ID = "living_life_moment"
 # 话说完（见 :func:`app.agent.core._run_loop`）。
 #
 # **往上调之前先看它乘在哪里**：每轮新增的 token 跟着它走（实测每轮 5k–10k），而上下文
-# 的硬顶是 200k（:data:`app.living.continuity.DEFAULT_TRIM_POLICY`）。翻倍这个数等于把
-# 撞硬顶的时间减半。
+# 的硬顶是 200k（:data:`MOMENT_TRIM_POLICY`）。翻倍这个数等于把撞硬顶的时间减半。
 _MOMENT_CFG = AgentConfig(
     LIFE_MOMENT_PROMPT_ID,
     "life-model",
@@ -1019,6 +1018,26 @@ KEPT_TOOLS = frozenset(
     }
 )
 
+# 她的上下文裁多久。**写死在这儿，不走 Dynamic Config**：这五个数不随运行时变化，
+# 它们是"她是什么东西"的一部分，不是可调的旋钮。裁剪那一层只给形状，填什么归这里
+# （:class:`app.living.continuity.TrimPolicy`）。
+#
+# 跟 world 那一份（:data:`app.living.world.WORLD_TRIM_POLICY`）现在值相同，但**不是
+# 同一份**：一个是客观的世界，一个是人，该记多久本来就不是一种东西，两边从此各调各的。
+#
+#   * ``material_minutes`` 60   她读到的东西，过期了再看一次就有
+#   * ``own_minutes``     240   她自己说的话和动作回执 —— 那是她那段经历读得懂的骨架
+#   * ``cleanup_minutes``  60   固定时刻清理。它跟 moment 间隔一起受
+#     :data:`app.living.continuity.MAX_CLEANUP_MINUTES` 约束：一张图最长活一个清理
+#     周期加一个间隔，再长就比它的预签名地址活得久了（用例钉住）
+#   * ``hard_cap_tokens`` 200k / ``trim_target_tokens`` 100k  兜底，不是主路
+MOMENT_TRIM_POLICY = TrimPolicy(
+    material_minutes=60,
+    own_minutes=240,
+    cleanup_minutes=60,
+    hard_cap_tokens=200_000,
+    trim_target_tokens=100_000,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1323,9 +1342,6 @@ async def run_moment(
                 last.moment_id if last is not None else "",
                 last.context_ver if last is not None else 0,
             )
-        # 这一轮按哪套阈值裁。读在模型调用之前：它是一次带缓存的 HTTP，不该发生在
-        # 收尾那个事务里。
-        trim_policy = await load_trim_policy()
         snapshot = await read_snapshot(
             lane=lane, persona_id=persona_id, after_seq=after_seq, now=began_at
         )
@@ -1393,7 +1409,7 @@ async def run_moment(
             material_tools=MATERIAL_TOOLS,
             now=began_at,
             state=state,
-            policy=trim_policy,
+            policy=MOMENT_TRIM_POLICY,
             lost_last_round=gap,
         )
         # 这一轮模型产出的每一条（她的每次发言、每次工具调用和工具返回）都收在这里，
@@ -1458,7 +1474,7 @@ async def run_moment(
         # 之前就算好：算它是纯函数，但放在提交和写入之间的任何一步出错都会变成"记录落了
         # 而这一段连试都没试过写"。
         remembered = next_transcript(
-            history, [stimulus, *produced], policy=trim_policy
+            history, [stimulus, *produced], policy=MOMENT_TRIM_POLICY
         )
         async with get_session() as s:
             await insert_idempotent(moment, session=s)
