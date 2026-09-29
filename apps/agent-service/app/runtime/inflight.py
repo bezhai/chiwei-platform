@@ -97,6 +97,10 @@ class ClaimOutcome:
     action: Literal["run", "skip"]
     attempts: int  # 0 if action == 'skip'
     fresh: bool    # True iff inflight row was just inserted this call
+    # Set only when skipping because another worker holds a live lease: the
+    # moment that lease runs out. A skip with ``None`` means the key reached a
+    # terminal state (succeeded / review) and never needs another look.
+    locked_until: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -147,7 +151,9 @@ async def claim_inflight(
         now = datetime.now(UTC)
         locked_until = row["locked_until"]
         if state == "processing" and locked_until is not None and locked_until > now:
-            return ClaimOutcome(action="skip", attempts=0, fresh=False)
+            return ClaimOutcome(
+                action="skip", attempts=0, fresh=False, locked_until=locked_until
+            )
 
         # processing-expired or failed: take over
         new_attempts = (row["attempts"] or 0) + 1
@@ -183,26 +189,48 @@ async def mark_history_backfill(
         ), {"e": edge_id, "k": idempotent_key})
 
 
-async def mark_succeeded(*, edge_id: str, idempotent_key: str) -> None:
+# ``worker_id`` guard for the two marks below: with it, the update only lands
+# while the row is still ``processing`` under that exact claim. A worker whose
+# lease ran out and was taken over then finds its mark refused (returns False)
+# instead of overwriting the new holder's outcome. Callers that don't pass it
+# keep the unconditional update.
+_HELD_BY = " AND state='processing' AND worker_id=:w"
+
+
+async def mark_succeeded(
+    *, edge_id: str, idempotent_key: str, worker_id: str | None = None
+) -> bool:
+    params = {"e": edge_id, "k": idempotent_key, "w": worker_id}
     async with get_session() as s:
-        await s.execute(text(
+        result = await s.execute(text(
             "UPDATE runtime_inflight "
             "SET state='succeeded', locked_until=NULL, worker_id=NULL, "
             "    updated_at=now() "
             "WHERE edge_id=:e AND idempotent_key=:k"
-        ), {"e": edge_id, "k": idempotent_key})
+            + (_HELD_BY if worker_id is not None else "")
+        ), params)
+    return bool(getattr(result, "rowcount", 0))
 
 
 async def mark_failed(
-    *, edge_id: str, idempotent_key: str, last_error: str
-) -> None:
+    *,
+    edge_id: str,
+    idempotent_key: str,
+    last_error: str,
+    worker_id: str | None = None,
+) -> bool:
+    params = {
+        "err": last_error[:8000], "e": edge_id, "k": idempotent_key, "w": worker_id,
+    }
     async with get_session() as s:
-        await s.execute(text(
+        result = await s.execute(text(
             "UPDATE runtime_inflight "
             "SET state='failed', locked_until=NULL, worker_id=NULL, "
             "    last_error=:err, updated_at=now() "
             "WHERE edge_id=:e AND idempotent_key=:k"
-        ), {"err": last_error[:8000], "e": edge_id, "k": idempotent_key})
+            + (_HELD_BY if worker_id is not None else "")
+        ), params)
+    return bool(getattr(result, "rowcount", 0))
 
 
 async def mark_review(

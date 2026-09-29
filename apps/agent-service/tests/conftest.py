@@ -58,16 +58,19 @@ def _clear_model_cache():
 # —— 跟 autouse 的清理顺序兼容。
 @pytest.fixture(autouse=True)
 def _reset_runtime_registries():
+    from app.messaging.receiving import clear_inboxes
     from app.runtime.emit import reset_emit_runtime
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
 
     clear_wiring()
     clear_bindings()
+    clear_inboxes()
     reset_emit_runtime()
     yield
     clear_wiring()
     clear_bindings()
+    clear_inboxes()
     reset_emit_runtime()
 
 

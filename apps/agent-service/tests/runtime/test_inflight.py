@@ -68,6 +68,7 @@ class TestClaimInflightSucceededSkip:
         )
         assert outcome.action == "skip"
         assert outcome.fresh is False
+        assert outcome.locked_until is None  # 做完了，不必再看
 
 
 class TestClaimInflightLeaseLive:
@@ -88,6 +89,9 @@ class TestClaimInflightLeaseLive:
             worker_id="host:1", lease_ms=60_000,
         )
         assert outcome.action == "skip"
+        # 跳过的理由是"别人正拿着"，不是"已经做完"：调用方要知道等到什么时候再看，
+        # 否则那个 worker 半路死掉时这条消息会被当成重复丢掉。
+        assert outcome.locked_until == future
 
         row = await _row("E::c", "k1")
         assert row["worker_id"] == "host:other"  # 不接管
@@ -207,3 +211,48 @@ class TestEdgeIdIsolation:
         assert outcome_a.action == "run"
         assert outcome_b.action == "run"
         assert outcome_b.fresh is True  # B 是首次创建
+
+
+class TestMarkOnlyByTheHolder:
+    """租约被别人接管之后，旧处理者的标记不能覆盖新持有者的结果。"""
+
+    async def test_a_stale_holder_cannot_mark_failed_over_a_success(
+        self, inflight_db: object
+    ) -> None:
+        async with get_session() as s:
+            await s.execute(text(
+                "INSERT INTO runtime_inflight "
+                "(edge_id, idempotent_key, data_table, state, attempts, worker_id) "
+                "VALUES ('E::c', 'k1', 'foo', 'succeeded', 2, 'host:new')"
+            ))
+
+        applied = await mark_failed(
+            edge_id="E::c", idempotent_key="k1", last_error="late", worker_id="host:old"
+        )
+
+        assert applied is False
+        assert (await _row("E::c", "k1"))["state"] == "succeeded"
+
+    async def test_the_holder_marks_its_own_claim(self, inflight_db: object) -> None:
+        await claim_inflight(
+            edge_id="E::c", idempotent_key="k1", data_table="foo",
+            worker_id="host:1#a", lease_ms=60_000,
+        )
+
+        assert await mark_succeeded(
+            edge_id="E::c", idempotent_key="k1", worker_id="host:1#a"
+        ) is True
+        assert (await _row("E::c", "k1"))["state"] == "succeeded"
+
+    async def test_a_stale_holder_cannot_mark_succeeded_over_a_live_takeover(
+        self, inflight_db: object
+    ) -> None:
+        await claim_inflight(
+            edge_id="E::c", idempotent_key="k1", data_table="foo",
+            worker_id="host:1#new", lease_ms=60_000,
+        )
+
+        assert await mark_succeeded(
+            edge_id="E::c", idempotent_key="k1", worker_id="host:1#old"
+        ) is False
+        assert (await _row("E::c", "k1"))["state"] == "processing"

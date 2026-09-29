@@ -3,12 +3,14 @@
 Three helpers, all meant to be called from any process that participates
 in the dataflow runtime:
 
-  * :func:`load_dataflow_graph` runs the side-effect imports of
-    ``app.deployment`` and ``app.wiring`` (which populate the placement
-    binding map and ``WIRING_REGISTRY``), then calls ``compile_graph``
-    to validate the result. Without this step a process that ``emit()``s
-    sees an empty registry and silently no-ops — the exact bug the
-    FastAPI main process had before this module existed.
+  * :func:`load_dataflow_graph` imports the wiring modules of ONE app —
+    the ones ``app.deployment.APP_WIRING`` lists for it — which populate
+    ``WIRING_REGISTRY`` (and, through their own imports, the Data / node /
+    inbox registries), then calls ``compile_graph`` to validate the result.
+    Another app's wiring is never imported, so its code never enters this
+    process. Without this step a process that ``emit()``s sees an empty
+    registry and silently no-ops — the exact bug the FastAPI main process
+    had before this module existed.
 
   * :func:`declare_durable_topology` declares the RabbitMQ queue +
     binding for every ``.durable()`` wire's ``(data, consumer)`` route
@@ -27,8 +29,8 @@ in the dataflow runtime:
     contract. It composes the phases that previously lived open-coded
     in two places:
 
-      1. ``load_dataflow_graph()`` — Phase 1+2: register wiring +
-         deployment side-effects, then compile_graph to validate.
+      1. ``load_dataflow_graph(app_name)`` — Phase 1+2: import that app's
+         wiring, then compile_graph to validate.
       2. ``register_runtime_trigger_wire(app)`` — Phase 1.5: append the
          runtime-internal delayed-trigger wire into ``WIRING_REGISTRY``
          BEFORE downstream consumers freeze a snapshot. Skips silently
@@ -51,6 +53,7 @@ in the dataflow runtime:
 
 from __future__ import annotations
 
+import importlib
 import logging
 
 from app.runtime.graph import CompiledGraph, compile_graph
@@ -58,14 +61,28 @@ from app.runtime.graph import CompiledGraph, compile_graph
 logger = logging.getLogger(__name__)
 
 
-def load_dataflow_graph() -> CompiledGraph:
-    """Side-effect import wiring/deployment, then compile + validate."""
-    import app.deployment  # noqa: F401 — registers @node -> app bindings
-    import app.wiring  # noqa: F401 — registers wire() declarations
+def load_dataflow_graph(app_name: str) -> CompiledGraph:
+    """Import ``app_name``'s wiring modules (and nothing else), then compile + validate.
+
+    An app that ``app.deployment.APP_WIRING`` doesn't declare fails here,
+    before anything starts — a typo'd or unset ``APP_NAME`` must not boot a
+    process that looks healthy while serving nothing.
+    """
+    from app.deployment import APP_WIRING
+
+    modules = APP_WIRING.get(app_name)
+    if modules is None:
+        raise RuntimeError(
+            f"app {app_name!r} is not declared in app.deployment.APP_WIRING "
+            f"(declared: {sorted(APP_WIRING)})"
+        )
+    for module in modules:
+        importlib.import_module(module)
 
     graph = compile_graph()
     logger.info(
-        "dataflow graph loaded: %d wires, %d nodes, %d data types",
+        "dataflow graph loaded for app=%s: %d wires, %d nodes, %d data types",
+        app_name,
         len(graph.wires),
         len(graph.nodes),
         len(graph.data_types),
@@ -137,9 +154,10 @@ async def prepare_for_run(
 
     dynamic_config.set_lane_provider(current_deployment_lane)
 
-    # Phase 1+2: register all @node / wire() / bind() side-effects, then
-    # compile_graph to validate the topology.
-    load_dataflow_graph()
+    # Phase 1+2: import this app's wiring (its @node / wire() / bind() /
+    # inbox() side-effects, nothing of any other app), then compile_graph to
+    # validate the topology.
+    load_dataflow_graph(app_name)
 
     # Phase 1.5: append the runtime-internal trigger wire BEFORE any
     # consumer freezes a WIRING_REGISTRY snapshot. Apps that don't have

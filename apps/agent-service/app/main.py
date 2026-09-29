@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -15,6 +16,7 @@ from app.api.routes import router as api_router
 from app.data.bootstrap import ensure_business_schema
 from app.infra.config import settings
 from app.runtime.outbox_dispatcher import dispatcher_loop
+from app.runtime.placement import DEFAULT_APP
 
 load_dotenv()
 setup_logging(log_dir="/logs/agent-service", log_file="app.log")
@@ -24,7 +26,14 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifecycle — init resources, start consumers, teardown."""
+    """Application lifecycle — init resources, start consumers, teardown.
+
+    The app this process serves is ``APP_NAME`` (injected by PaaS per
+    Deployment); only that app's wiring is loaded and only its consumers,
+    sources and inboxes start.
+    """
+    app_name = os.getenv("APP_NAME") or DEFAULT_APP
+
     # Phase 2: ensure business schema exists before any downstream operation
     # (RabbitMQ topology, sources, consumers)
     await ensure_business_schema()
@@ -39,7 +48,7 @@ async def lifespan(app: FastAPI):
     from app.runtime.bootstrap import prepare_for_run
 
     await prepare_for_run(
-        "agent-service",
+        app_name,
         declare_topology=bool(settings.rabbitmq_url),
     )
 
@@ -49,13 +58,12 @@ async def lifespan(app: FastAPI):
     from app.runtime.engine import Runtime
 
     runtime_for_sources = Runtime(
-        app_name="agent-service",
+        app_name=app_name,
         migrate_schema_on_run=False,  # we drive migrate explicitly below
     )
     await runtime_for_sources.migrate_schema()
 
     # Load skill definitions
-    import os
     from pathlib import Path
 
     from app.skills.registry import SkillRegistry, skill_reload_loop
@@ -76,13 +84,16 @@ async def lifespan(app: FastAPI):
         # start_post_consumer 删除（替代为 wire(PostSafetyRequest)
         # .to(run_post_safety).durable()）；runtime 自动按 placement.bind
         # 过滤启动属于本 app 的 consumer。
+        from app.messaging.lifecycle import start_messaging
         from app.runtime.debounce import start_debounce_consumers
         from app.runtime.durable import start_consumers
 
-        await start_consumers(app_name="agent-service")
-        logger.info("Runtime durable consumers started for agent-service")
-        await start_debounce_consumers(app_name="agent-service")
-        logger.info("Runtime debounce consumers started for agent-service")
+        await start_consumers(app_name=app_name)
+        logger.info("Runtime durable consumers started for %s", app_name)
+        await start_messaging()
+        logger.info("messaging started for %s (inboxes + scheduled delivery)", app_name)
+        await start_debounce_consumers(app_name=app_name)
+        logger.info("Runtime debounce consumers started for %s", app_name)
 
     from app.runtime.http_source import register_http_sources
 
@@ -117,10 +128,12 @@ async def lifespan(app: FastAPI):
     # Phase 2: stop runtime durable consumers cleanly before tearing
     # down RabbitMQ connection (otherwise late deliveries race with close).
     if settings.rabbitmq_url:
+        from app.messaging.lifecycle import stop_messaging
         from app.runtime.debounce import stop_debounce_consumers
         from app.runtime.durable import stop_consumers
 
         await stop_debounce_consumers()
+        await stop_messaging()
         await stop_consumers()
 
     # Cancel skill reload task

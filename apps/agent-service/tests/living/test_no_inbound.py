@@ -204,6 +204,54 @@ _OPS_ONLY_EXTERNAL_SOURCES = frozenset({
         requires_inner_secret=True,
         answers_with_lane=True,
     ),
+    # 通信机制的人工参与者入口（``app.messaging.operator``）。
+    #
+    # **它们的消费者不在 app.living 里，也到不了 living。** 这六条把消息投进具名收件箱、
+    # 读通信记录、看或重放本泳道的死信，而 living 这一侧一个收件箱都没有开设——第一期里 life 不接入
+    # 通信机制。发给三姐妹名字的消息按"没开设"处理：不投递、只记一行。等第二期 life
+    # 开设收件箱时，这份名单要跟着重新判断：那时候外面的请求就能送到她那里了。
+    _ops_http(
+        "app.messaging.operator.OperatorSendRequest",
+        "POST", "/admin/messaging/send",
+        "app.messaging.operator.operator_send_node",
+        requires_inner_secret=True,
+        answers_with_lane=True,
+    ),
+    _ops_http(
+        "app.messaging.operator.OperatorAskRequest",
+        "POST", "/admin/messaging/ask",
+        "app.messaging.operator.operator_ask_node",
+        requires_inner_secret=True,
+        answers_with_lane=True,
+    ),
+    _ops_http(
+        "app.messaging.operator.OperatorSendAtRequest",
+        "POST", "/admin/messaging/send-at",
+        "app.messaging.operator.operator_send_at_node",
+        requires_inner_secret=True,
+        answers_with_lane=True,
+    ),
+    _ops_http(
+        "app.messaging.operator.OperatorRecordRequest",
+        "GET", "/admin/messaging/record",
+        "app.messaging.operator.operator_record_node",
+        requires_inner_secret=True,
+        answers_with_lane=True,
+    ),
+    _ops_http(
+        "app.messaging.operator.OperatorDeadLettersRequest",
+        "GET", "/admin/messaging/dead-letters",
+        "app.messaging.operator.operator_dead_letters_node",
+        requires_inner_secret=True,
+        answers_with_lane=True,
+    ),
+    _ops_http(
+        "app.messaging.operator.OperatorReplayRequest",
+        "POST", "/admin/messaging/dead-letters/replay",
+        "app.messaging.operator.operator_replay_node",
+        requires_inner_secret=True,
+        answers_with_lane=True,
+    ),
 })
 
 

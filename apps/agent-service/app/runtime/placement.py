@@ -60,11 +60,17 @@ def nodes_for_app(app_name: str) -> set[Callable]:
 
 
 def known_apps() -> set[str]:
-    """All app names a process can legitimately boot as: DEFAULT_APP plus
-    every app some @node has been ``bind()``-ed to.
+    """All app names a process can legitimately boot as: every app declared in
+    ``app.deployment.APP_WIRING`` (DEFAULT_APP among them) plus every app some
+    @node has been ``bind()``-ed to.
+
+    An app is known because it is declared, not because it happens to own a
+    node: an app that runs only inboxes has no @node at all.
 
     Used by ``Runtime`` at startup to fail-fast on a typo'd / unset
     ``APP_NAME`` env — otherwise the worker would silently come up with
     zero sources + zero consumers and look healthy while doing nothing.
     """
-    return {DEFAULT_APP} | set(_BINDINGS.values())
+    from app.deployment import APP_WIRING
+
+    return set(APP_WIRING) | set(_BINDINGS.values())

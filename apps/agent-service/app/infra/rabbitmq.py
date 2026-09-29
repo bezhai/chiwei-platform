@@ -13,6 +13,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, NamedTuple
 
 import aio_pika
+import aiormq
 from aio_pika import DeliveryMode, ExchangeType, Message
 from aio_pika.abc import AbstractIncomingMessage
 
@@ -26,6 +27,12 @@ logger = logging.getLogger(__name__)
 EXCHANGE_NAME = "post_processing"
 DLX_NAME = "post_processing_dlx"
 DLQ_NAME = "dead_letters"
+# isolated 队列的死信：每条泳道一条，prod 也是自己一条（见 ``Route.isolated``）。
+ISOLATED_DEAD_LETTERS = "isolated_dead_letters"
+
+# x-delayed-message 的 x-delay 是 int32 毫秒（约 24.8 天）。超过这个数 broker 不接受，
+# 需要更长延时的使用方自己分段（通信机制的定时送达就是这么做的）。
+X_DELAY_MAX_MS = 2_147_483_647
 
 # Non-prod queues auto-expire after 24 h of inactivity
 _NON_PROD_EXPIRES_MS = 86_400_000
@@ -37,9 +44,20 @@ _LANE_FALLBACK_TTL_MS = 10_000
 # Routes — one queue + routing-key pair per logical stage
 # ---------------------------------------------------------------------------
 class Route(NamedTuple):
+    """一条队列 + 它在主交换机上的 routing key。
+
+    ``isolated=True`` 的队列只属于一条泳道、一个拥有者：
+      * 没有消费者时不转回 prod（不设 TTL 回退）；
+      * 闲置不过期（不设 x-expires）；
+      * 死信进它自己那条泳道的 ``ISOLATED_DEAD_LETTERS``，不进各泳道共用的 ``dead_letters``；
+      * 只由拥有者经 ``declare_route`` 声明，发布时从不顺带创建它——队列不存在就说明
+        拥有者没开设，发布方要自己先判断（``queue_exists``）。
+    """
+
     queue: str
     rk: str
     lane_fallback: bool = True   # debounce route 用 False；默认 True 不破坏现有 Route("queue", "rk") 调用
+    isolated: bool = False
 
 
 CHAT_RESPONSE = Route("chat_response", "chat.response")
@@ -232,9 +250,13 @@ def _lane_rk(base: str, lane: str | None) -> str:
 
 
 def _build_queue_args(prod_rk: str, lane: str | None,
-                     lane_fallback: bool = True) -> dict[str, Any]:
+                     lane_fallback: bool = True,
+                     isolated: bool = False) -> dict[str, Any]:
     """Build queue arguments.
 
+    - isolated queues (any lane, prod included): dead-letter straight into the
+      lane's own ``ISOLATED_DEAD_LETTERS`` queue via the default exchange; no
+      TTL fallback, no idle expiry
     - prod queues: dead-letter to DLX
     - lane queues with lane_fallback=True: TTL -> main exchange with prod
       routing-key (fallback), plus auto-expire after 24 h idle
@@ -242,6 +264,11 @@ def _build_queue_args(prod_rk: str, lane: str | None,
       dead_letters), but no ttl-back-to-prod (long-delay messages 留在
       自己 lane 上等到期；codex review round-1 M5 + round-5 H1)
     """
+    if isolated:
+        return {
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": lane_queue(ISOLATED_DEAD_LETTERS, lane),
+        }
     extra: dict[str, Any] = {}
     if lane:
         extra["x-expires"] = _NON_PROD_EXPIRES_MS
@@ -255,6 +282,29 @@ def _build_queue_args(prod_rk: str, lane: str | None,
         "x-dead-letter-routing-key": prod_rk,
         **extra,
     }
+
+
+def dead_letter_origin(headers: dict[str, Any] | None) -> Route | None:
+    """一条被 broker 送进死信的 isolated 消息原本要去哪：队列名和完整 routing key。
+
+    读 broker 自己加的 ``x-death`` 头（最近一次死信那一项）。读到的队列名和 routing key
+    都带着泳道后缀。读不全就返回 ``None``——不猜目的地。这是头里写的东西，不是可以直接
+    发过去的地方：重放方要自己确认它属于本部署的泳道。
+    """
+    deaths = (headers or {}).get("x-death")
+    if not isinstance(deaths, list) or not deaths:
+        return None
+    latest = deaths[0]
+    if not isinstance(latest, dict):
+        return None
+    queue = latest.get("queue")
+    rks = latest.get("routing-keys")
+    if not isinstance(queue, str) or not isinstance(rks, list) or not rks:
+        return None
+    rk = rks[0].decode() if isinstance(rks[0], bytes) else rks[0]
+    if not isinstance(rk, str) or not rk:
+        return None
+    return Route(queue, rk, isolated=True)
 
 
 # ---------------------------------------------------------------------------
@@ -323,13 +373,19 @@ class _RabbitMQ:
             q = await self._channel.declare_queue(
                 lane_queue(route.queue, lane),
                 durable=True,
-                arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
+                arguments=_build_queue_args(
+                    route.rk, lane, route.lane_fallback, route.isolated
+                ),
             )
             await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
         logger.info("RabbitMQ topology declared (lane=%s)", lane or "prod")
 
-    async def declare_route(self, route: Route) -> None:
+    async def declare_route(
+        self,
+        route: Route,
+        lane: str | None = ...,  # type: ignore[assignment]
+    ) -> None:
         """Declare a single route's queue + binding on the main exchange.
 
         Used by the dataflow runtime to register durable wires dynamically on
@@ -342,19 +398,39 @@ class _RabbitMQ:
         decide whether the lane queue gets x-message-ttl-back-to-prod fallback.
         debounce routes set ``lane_fallback=False`` so 300s delays don't get
         short-circuited to prod (spec §3.4.4 / codex review round-5 H1).
+
+        *lane* defaults to ``current_lane()``; pass it explicitly (``None`` for
+        prod) when the queue belongs to the process's deployment lane rather
+        than to whatever request happens to be in context. An isolated route
+        also gets its lane's dead-letter queue declared first, so a message it
+        dead-letters always has somewhere to land.
         """
         if self._channel is None or self._exchange is None:
             raise RuntimeError("must call connect() + declare_topology() first")
-        lane = current_lane()
+        if lane is ...:
+            lane = current_lane()
+        if lane == "prod":
+            lane = None
+        if route.isolated:
+            await self._channel.declare_queue(
+                lane_queue(ISOLATED_DEAD_LETTERS, lane), durable=True, arguments=None
+            )
         q = await self._channel.declare_queue(
             lane_queue(route.queue, lane),
             durable=True,
-            arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
+            arguments=_build_queue_args(
+                route.rk, lane, route.lane_fallback, route.isolated
+            ),
         )
         await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
     async def _ensure_lane_queue(self, route: Route, lane: str) -> None:
-        """Lazily declare a lane queue on first publish (reads route.lane_fallback)."""
+        """Lazily declare a lane queue on first publish (reads route.lane_fallback).
+
+        Isolated routes are skipped: only their owner declares them.
+        """
+        if route.isolated:
+            return
         cache_key = f"{route.queue}_{lane}"
         if cache_key in self._declared_lane_queues:
             return
@@ -363,7 +439,9 @@ class _RabbitMQ:
         q = await self._channel.declare_queue(
             lane_queue(route.queue, lane),
             durable=True,
-            arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
+            arguments=_build_queue_args(
+                route.rk, lane, route.lane_fallback, route.isolated
+            ),
         )
         await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
         self._declared_lane_queues.add(cache_key)
@@ -470,6 +548,49 @@ class _RabbitMQ:
                 actual_rk,
             )
             return False
+
+    async def queue_exists(self, name: str) -> bool:
+        """Whether queue ``name`` exists on the broker, without creating it.
+
+        A passive declare of a missing queue makes the broker close the channel
+        it ran on, so the check runs on a throwaway channel and never touches
+        the shared publisher channel.
+        """
+        if self._connection is None:
+            raise RuntimeError("must call connect() first")
+        channel = await self._connection.channel()
+        try:
+            await channel.declare_queue(name, passive=True)
+            return True
+        except aiormq.exceptions.ChannelNotFoundEntity:
+            return False
+        finally:
+            if not channel.is_closed:
+                await channel.close()
+
+    async def open_channel(
+        self, prefetch_count: int = 10
+    ) -> aio_pika.abc.AbstractChannel:
+        """A dedicated channel for one consumer, so its back-pressure (prefetch)
+        and its failures stay away from the shared publisher channel."""
+        if self._connection is None:
+            raise RuntimeError("must call connect() first")
+        channel = await self._connection.channel()
+        await channel.set_qos(prefetch_count=prefetch_count)
+        return channel
+
+    async def declare_private_queue(
+        self,
+        channel: aio_pika.abc.AbstractChannel,
+        route: Route,
+        lane: str | None,
+    ) -> aio_pika.abc.AbstractQueue:
+        """A server-named, exclusive, auto-delete queue on ``channel``, bound to
+        the main exchange at ``route.rk`` (lane-suffixed). It lives exactly as
+        long as this connection — for replies addressed to this one process."""
+        queue = await channel.declare_queue(exclusive=True, auto_delete=True)
+        await queue.bind(EXCHANGE_NAME, routing_key=_lane_rk(route.rk, lane))
+        return queue
 
     async def consume(
         self, queue_name: str, callback: MessageHandler

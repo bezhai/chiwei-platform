@@ -128,6 +128,7 @@ class Runtime:
         # Always apply runtime-internal DDL (idempotent IF NOT EXISTS),
         # regardless of whether the Data plan is empty — these tables are
         # framework state, not Data, and aren't tracked by plan_migration.
+        from app.messaging.record import MESSAGE_RECORD_DDL
         from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
         from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
         from app.runtime.outbox import RUNTIME_OUTBOX_DDL
@@ -136,6 +137,7 @@ class Runtime:
             list(RUNTIME_INFLIGHT_DDL)
             + list(RUNTIME_DLQ_AUDIT_DDL)
             + list(RUNTIME_OUTBOX_DDL)
+            + list(MESSAGE_RECORD_DDL)
         )
 
         if not plan.stmts and not runtime_internal_stmts:
@@ -186,6 +188,15 @@ class Runtime:
                 self.app_name,
             )
         await start_consumers(app_name=self.app_name)
+        # Messaging (this app's inboxes + the lane's scheduled delivery) runs
+        # wherever a broker is configured — same condition, same place as the
+        # FastAPI entry in app.main, so the two entries can't drift apart.
+        from app.infra import config
+        from app.messaging import lifecycle as messaging
+
+        messaging_on = bool(config.settings.rabbitmq_url)
+        if messaging_on:
+            await messaging.start_messaging()
         # Outbox dispatcher needs DB. Tests opting out via
         # migrate_schema_on_run=False are signalling "no DB in this
         # process" and must also opt out of the dispatcher.
@@ -209,6 +220,8 @@ class Runtime:
                 except asyncio.CancelledError:
                     pass
             await self.stop_source_loops()
+            if messaging_on:
+                await messaging.stop_messaging()
             await stop_consumers()
 
         if self._source_error is not None:

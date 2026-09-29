@@ -346,3 +346,130 @@ async def test_ensure_lane_queue_passes_lane_fallback_through_and_caches():
     # 二次调用短路：declare_queue 调用次数仍为 1
     await mq._ensure_lane_queue(route, lane="dev")
     assert mq._channel.declare_queue.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Route.isolated —— 通信机制的收件箱用的那种队列
+#
+# 平台原有的泳道队列三件事对收件箱都是错的：没人消费 10 秒就转回 prod、闲置 24 小时
+# 被删、死信全部泳道共用一条。isolated 队列把这三样全部关掉或者按泳道隔开，并且
+# 只由拥有者声明——发送方永远不会顺带把它建出来。
+# ---------------------------------------------------------------------------
+class TestIsolatedQueueArgs:
+    def test_lane_queue_never_falls_back_to_prod(self):
+        args = _build_queue_args("inbox.world", "coe-x", isolated=True)
+        assert "x-message-ttl" not in args
+        assert args.get("x-dead-letter-routing-key") != "inbox.world"
+        assert args["x-dead-letter-exchange"] != EXCHANGE_NAME
+
+    def test_lane_queue_never_expires_when_idle(self):
+        args = _build_queue_args("inbox.world", "coe-x", isolated=True)
+        assert "x-expires" not in args
+
+    def test_lane_queue_dead_letters_into_its_own_lane(self):
+        from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS
+
+        args = _build_queue_args("inbox.world", "coe-x", isolated=True)
+        assert args == {
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": f"{ISOLATED_DEAD_LETTERS}_coe-x",
+        }
+
+    def test_prod_queue_does_not_share_the_common_dead_letter_queue(self):
+        from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS
+
+        args = _build_queue_args("inbox.world", None, isolated=True)
+        assert args == {
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": ISOLATED_DEAD_LETTERS,
+        }
+        assert DLX_NAME not in args.values()
+
+
+def _client_with_fake_channel():
+    from app.infra.rabbitmq import _RabbitMQ
+
+    client = _RabbitMQ()
+    client._channel = MagicMock()
+    client._exchange = MagicMock()
+    client._exchange.publish = AsyncMock()
+    declared: dict[str, dict | None] = {}
+
+    async def fake_declare_queue(name, durable=True, arguments=None):
+        declared[name] = arguments
+        q = MagicMock()
+        q.bind = AsyncMock()
+        return q
+
+    client._channel.declare_queue = AsyncMock(side_effect=fake_declare_queue)
+    return client, declared
+
+
+@pytest.mark.asyncio
+async def test_publishing_never_creates_an_isolated_queue():
+    """发送方不能顺带把收件箱建出来：那样"没开设"这件事就不存在了。"""
+    client, declared = _client_with_fake_channel()
+    route = Route("inbox_world", "inbox.world", isolated=True)
+
+    assert await client.publish_with_confirm(route, {"a": 1}, lane="coe-x")
+    await client.publish(route, {"a": 1}, lane="coe-x")
+
+    assert declared == {}
+    rks = [c.kwargs["routing_key"] for c in client._exchange.publish.await_args_list]
+    assert rks == ["inbox.world.coe-x", "inbox.world.coe-x"]
+
+
+@pytest.mark.asyncio
+async def test_declaring_an_isolated_route_declares_its_lanes_dead_letter_queue():
+    from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS
+
+    client, declared = _client_with_fake_channel()
+    route = Route("inbox_world", "inbox.world", isolated=True)
+
+    await client.declare_route(route, lane="coe-x")
+
+    assert declared[f"{ISOLATED_DEAD_LETTERS}_coe-x"] is None
+    assert declared["inbox_world_coe-x"] == _build_queue_args(
+        "inbox.world", "coe-x", isolated=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_declare_route_takes_an_explicit_lane():
+    """拥有者开设收件箱时按进程自己的部署泳道，不看请求上下文。"""
+    client, declared = _client_with_fake_channel()
+    with patch("app.api.middleware.get_lane", return_value="ppe-other"):
+        await client.declare_route(Route("q", "rk", isolated=True), lane="coe-x")
+    assert "q_coe-x" in declared
+    assert "q_ppe-other" not in declared
+
+
+def test_x_delay_upper_bound_lives_with_the_broker_client():
+    """x-delay 是 int32 毫秒，这个上限只在一处定义。"""
+    import app.runtime.emit as emit_mod
+    from app.infra.rabbitmq import X_DELAY_MAX_MS
+
+    assert X_DELAY_MAX_MS == 2_147_483_647
+    assert not hasattr(emit_mod, "_X_DELAY_MAX_MS")
+
+
+def test_a_dead_lettered_isolated_message_knows_where_it_was_headed():
+    """重放要把死信送回它原来去的那条队列：从 broker 加的 x-death 读，读不到就不猜。"""
+    from app.infra.rabbitmq import dead_letter_origin
+
+    headers = {
+        "x-death": [
+            {
+                "count": 1,
+                "reason": "rejected",
+                "queue": "inbox_world_coe-x",
+                "exchange": EXCHANGE_NAME,
+                "routing-keys": ["inbox.world.coe-x"],
+            }
+        ],
+        "x-first-death-queue": "inbox_world_coe-x",
+    }
+    origin = dead_letter_origin(headers)
+    assert origin == Route("inbox_world_coe-x", "inbox.world.coe-x", isolated=True)
+    assert dead_letter_origin({}) is None
+    assert dead_letter_origin({"x-death": [{"queue": "q"}]}) is None

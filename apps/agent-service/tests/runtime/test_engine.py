@@ -155,3 +155,47 @@ async def test_runtime_rejects_unknown_app_name() -> None:
 
     with pytest.raises(RuntimeError, match="totally-not-a-real-app.*known"):
         await rt.run()
+
+
+async def test_runtime_runs_messaging_when_a_broker_is_configured(monkeypatch) -> None:
+    """worker 入口跟 FastAPI 入口一样启停通信机制：两个入口不能一个有一个没有。"""
+    import dataclasses
+    from unittest.mock import AsyncMock
+
+    from app.infra import config
+    from app.messaging import lifecycle
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        config, "settings", dataclasses.replace(config.settings, rabbitmq_url="amqp://x")
+    )
+    monkeypatch.setattr(
+        lifecycle, "start_messaging", AsyncMock(side_effect=lambda: calls.append("start"))
+    )
+    monkeypatch.setattr(
+        lifecycle, "stop_messaging", AsyncMock(side_effect=lambda: calls.append("stop"))
+    )
+
+    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    await _run_for(rt, seconds=0.2)
+
+    assert calls == ["start", "stop"]
+
+
+async def test_runtime_leaves_messaging_alone_without_a_broker(monkeypatch) -> None:
+    import dataclasses
+    from unittest.mock import AsyncMock
+
+    from app.infra import config
+    from app.messaging import lifecycle
+
+    monkeypatch.setattr(
+        config, "settings", dataclasses.replace(config.settings, rabbitmq_url=None)
+    )
+    start = AsyncMock()
+    monkeypatch.setattr(lifecycle, "start_messaging", start)
+
+    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    await _run_for(rt, seconds=0.1)
+
+    start.assert_not_called()

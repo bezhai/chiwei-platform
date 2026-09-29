@@ -315,12 +315,6 @@ async def _mq_publish_for_source(src, data: Data) -> None:
 # emit_delayed / emit_at — Phase 7a Gap 9
 # ---------------------------------------------------------------------------
 
-# RabbitMQ x-delayed-message exchange uses int32 ms (~24 days). Reject
-# anything beyond so the ValueError surfaces at the call site rather than
-# silently saturating to broker behavior.
-_X_DELAY_MAX_MS = 2_147_483_647
-
-
 async def emit_delayed(
     data: Data,
     *,
@@ -347,7 +341,9 @@ async def emit_delayed(
     explicitly.
 
     Negative delay clamps to 0 (immediate await emit). delay_ms above
-    _X_DELAY_MAX_MS raises ValueError (broker x-delay header is int32).
+    X_DELAY_MAX_MS raises ValueError (broker x-delay header is int32) —
+    the ValueError surfaces at the call site rather than silently
+    saturating to broker behavior.
     """
     if durability not in ("durable", "best_effort"):
         raise ValueError(
@@ -356,10 +352,12 @@ async def emit_delayed(
         )
     if delay_ms < 0:
         delay_ms = 0
-    if delay_ms > _X_DELAY_MAX_MS:
+    from app.infra.rabbitmq import X_DELAY_MAX_MS
+
+    if delay_ms > X_DELAY_MAX_MS:
         raise ValueError(
             f"delay_ms={delay_ms} exceeds RabbitMQ x-delay int32 max "
-            f"({_X_DELAY_MAX_MS} ms ≈ 24 days)"
+            f"({X_DELAY_MAX_MS} ms ≈ 24 days)"
         )
 
     if delay_ms == 0:

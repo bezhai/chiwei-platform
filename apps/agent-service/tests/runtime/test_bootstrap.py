@@ -34,8 +34,8 @@ class _Probe(Data):
 
 
 def test_load_dataflow_graph_returns_compiled_graph_with_real_wiring():
-    """load_dataflow_graph() picks up the production wires + bindings,
-    not an empty graph.
+    """load_dataflow_graph("agent-service") picks up the production wires +
+    bindings, not an empty graph.
 
     Uses clear + reload idiom to get a clean slate before checking that
     real production wires are present.
@@ -52,7 +52,7 @@ def test_load_dataflow_graph_returns_compiled_graph_with_real_wiring():
     importlib.reload(lw)
     importlib.reload(d)
 
-    g = load_dataflow_graph()
+    g = load_dataflow_graph("agent-service")
     # living 的钟骑在生产 wiring 上
     assert {n.__name__ for n in g.nodes} >= {
         "calendar_tick",
@@ -149,8 +149,8 @@ async def test_prepare_for_run_loads_graph_then_registers_trigger_wire():
     """
     calls: list[str] = []
 
-    def _fake_load() -> object:
-        calls.append("load_dataflow_graph")
+    def _fake_load(app_name: str) -> object:
+        calls.append(f"load_dataflow_graph:{app_name}")
         return MagicMock()
 
     def _fake_register(app: str) -> None:
@@ -164,7 +164,7 @@ async def test_prepare_for_run_loads_graph_then_registers_trigger_wire():
         await prepare_for_run("agent-service")
 
     assert calls == [
-        "load_dataflow_graph",
+        "load_dataflow_graph:agent-service",
         "register_runtime_trigger_wire:agent-service",
     ]
 
