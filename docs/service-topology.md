@@ -1,7 +1,7 @@
 # 赤尾平台 · 服务拓扑现状
 
-> 最后更新:2026-09-04。
-> 范围:`apps/` 下 15 个应用目录 → 15 个 K8s Deployment(口径:lark-service 一镜像产出 2 个,channel-server 一镜像产出 2 个,lane-sidecar 与 tagger-service 不产出 Deployment,其余 11 个目录各 1 个)+ 1 个注入式 sidecar(lane-sidecar)+ 1 个裸机 GPU 服务(tagger-service,不进 K8s)+ `packages/` 4 个共享包。
+> 最后更新:2026-09-30。
+> 范围:`apps/` 下 15 个应用目录 → 16 个 K8s Deployment(口径:lark-service 一镜像产出 2 个,channel-server 一镜像产出 2 个,agent-service 一镜像产出 2 个(agent-service + world),lane-sidecar 与 tagger-service 不产出 Deployment,其余 10 个目录各 1 个)+ 1 个注入式 sidecar(lane-sidecar)+ 1 个裸机 GPU 服务(tagger-service,不进 K8s)+ `packages/` 4 个共享包。
 > 这是**现状**梳理,不含目标架构和改造方案。术语在文中随用随解释。
 
 ---
@@ -42,6 +42,7 @@ flowchart TB
         QGW["qq-gateway<br/>QQ 协议 ↔ 通用协议"]
         CS["channel-server<br/>QQ 入站 + 渠道核心 + 规则引擎"]
         AS["agent-service<br/>AI 对话 + life 引擎"]
+        WLD["world<br/>world 引擎:只经通信机制交流"]
         CRW["chat-response-worker<br/>QQ 出站:发回复"]
     end
 
@@ -81,12 +82,15 @@ flowchart TB
     AS --> SB
     AS --> TS
     AS --> LLM
+    AS -. 通信机制 · 具名收件箱 .-> WLD
+    WLD -->|私有记录| WV[("world 私有卷<br/>只挂给 world")]
+    WLD --> LLM
     Prom --> AW --> Feishu
     MS --> TAG
     REG -. 下发路由表 .-> LS
 ```
 
-虚线箭头是 RabbitMQ 消息队列(异步,飞书那条长连除外),实线是直接 HTTP 调用或读写数据库。**入站方向没有队列**:两个渠道服务把收到的消息投影成公共层口径写进 `common_message` 就结束,agent-service 每次醒来(默认十分钟一次,Dynamic Config 可调;私聊和群里点名会把她提前叫来)自己去查未读、自己决定要不要开口。出站仍走队列,而且 agent-service 不直接发平台消息——它把回复丢进队列,由持有平台凭证的那个服务代发:飞书归 lark-outbound,QQ 归 chat-response-worker(再经 qq-gateway)。lane-sidecar / lite-registry 不在某条线性调用链上,它们横切所有服务间调用(见第五节)。tagger-service 是图里唯一不跑在 K8s 上的服务:裸机 GPU 主机 + systemd 托管,media-sync-worker 通过 HTTP 提交打标任务、用回调收结果。
+虚线箭头是 RabbitMQ 消息队列(异步,飞书那条长连除外),实线是直接 HTTP 调用或读写数据库。**入站方向没有队列**:两个渠道服务把收到的消息投影成公共层口径写进 `common_message` 就结束,agent-service 每次醒来(默认十分钟一次,Dynamic Config 可调;私聊和群里点名会把她提前叫来)自己去查未读、自己决定要不要开口。出站仍走队列,而且 agent-service 不直接发平台消息——它把回复丢进队列,由持有平台凭证的那个服务代发:飞书归 lark-outbound,QQ 归 chat-response-worker(再经 qq-gateway)。agent-service 和 world 之间那条虚线是通信机制(具名收件箱 + RabbitMQ),两者之间没有别的连接,也不共读共写任何表(见第三节末、第四节)。lane-sidecar / lite-registry 不在某条线性调用链上,它们横切所有服务间调用(见第五节)。tagger-service 是图里唯一不跑在 K8s 上的服务:裸机 GPU 主机 + systemd 托管,media-sync-worker 通过 HTTP 提交打标任务、用回调收结果。
 
 ---
 
@@ -133,7 +137,7 @@ world(推演客观世界的那个引擎)不在 agent-service 这个 App 里,也�
 
 ## 四、RabbitMQ 队列地图
 
-**跨服务的队列只剩出站方向。** 生产者只有 agent-service 一个,消费方是各渠道自己的出站进程。入站不在这张表里,因为入站根本没有队列:渠道服务投影落库,agent-service 自己查(见第三节)。**「把入站消息交给它该去的泳道」也不在这张表里**:那一跳走内部 HTTP + lane-sidecar(见第五节)。
+**渠道相关的跨服务队列只剩出站方向。** 生产者只有 agent-service 一个,消费方是各渠道自己的出站进程。入站不在这张表里,因为入站根本没有队列:渠道服务投影落库,agent-service 自己查(见第三节)。**「把入站消息交给它该去的泳道」也不在这张表里**:那一跳走内部 HTTP + lane-sidecar(见第五节)。
 
 **出站队列按 channel 分区**:队列名和 routing key 都揉进 channel(`chat_response` → `chat_response_lark`,`chat.response` → `chat.response.lark`)。分区维度必须跟消费者的所有权维度一致——飞书的回复只能由持飞书凭证的 lark-outbound 发,一条都不能被别的服务领走。
 
@@ -155,6 +159,8 @@ flowchart LR
 | `chat_response_qq` | agent-service | chat-response-worker | 「这是赤尾说的话,帮我发 QQ」 |
 
 `chat_response` / `recall` 两条不带 channel 后缀的 base 队列也声明着,但**没有生产者也没有消费者**:它们在代码里只当逻辑 sink 的名字用(`Sink.mq("chat_response")`),真实 routing key 由出站时按 payload 的 channel 现算。同理 `recall_qq` 声明了但 QQ 侧没起 recall 消费者,`proactive_eval` 两头都没有,都是空队列。
+
+通信机制(`apps/agent-service/app/messaging/`)的队列也不在上表,它们连接的是参与者而不是渠道:收件箱 `inbox_<名字>_<泳道>` 由开设它的 App 消费(`inbox_world_*` 归 world,`inbox_operator_*` 归 agent-service),定时送达 `messaging_scheduled_<泳道>` 由开着通信机制的进程共同消费,死信进 `isolated_dead_letters_<泳道>`。发送方是任何用通信机制的进程:world 给自己排下次醒来,运维经 agent-service 的人工入口(`/admin/messaging/*`)发给任何收件箱。这几条都按进程的部署泳道隔离,没有消费者时不退回 prod。
 
 agent-service 进程内还有两类队列不在上表:一是 durable 边(当前只有一条——她拿起一个文件 → 读一程)底下的队列,由 runtime 框架按 Data 类型和消费者名自动声明(`durable_<data>_<consumer>`);二是 `runtime_delayed_trigger_agent-service`,框架自己的延迟自触发回投。两者的生产者和消费者都在同一个进程里。
 
@@ -230,7 +236,7 @@ flowchart LR
 
 ## 七、部署拓扑:一镜像多服务
 
-一个 Docker 镜像可以产出多个独立的 K8s Deployment(不同进程、不同 pod)。这是排查问题时最容易踩坑的地方——查 lark-outbound 的日志不能用 lark-service 的服务名,查 chat-response-worker 的日志不能用 channel-server 的服务名。全平台共 15 个 K8s Deployment:
+一个 Docker 镜像可以产出多个独立的 K8s Deployment(不同进程、不同 pod)。这是排查问题时最容易踩坑的地方——查 lark-outbound 的日志不能用 lark-service 的服务名,查 chat-response-worker 的日志不能用 channel-server 的服务名,查 world 的日志不能用 agent-service 的服务名。全平台共 16 个 K8s Deployment:
 
 | 镜像 | 产出的 Deployment | 角色 |
 |---|---|---|
@@ -238,10 +244,11 @@ flowchart LR
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark`,发飞书回复与撤回 |
 | channel-server | **channel-server** | HTTP,QQ 入站(`POST /api/internal/qq/inbound`) |
 | channel-server | **chat-response-worker** | 消费 `chat_response_qq`,经 qq-gateway 发 QQ 回复 |
-| agent-service | **agent-service** | 单 Deployment:HTTP(健康检查 + admin/DLQ + 通信机制人工入口)+ dataflow runtime(五条时间源 + 一条 durable 边)+ life 引擎 |
-| 其余 11 个 | 各自 1 个同名 Deployment | — |
+| agent-service | **agent-service** | HTTP(健康检查 + admin/DLQ + 通信机制人工入口)+ dataflow runtime(五条时间源 + 一条 durable 边)+ life 引擎;不挂 world 的卷 |
+| agent-service | **world** | world 引擎:只通过通信机制跟其他参与者交流(收件箱 `world` + 定时送达),私有记录放在只挂给它的卷上;HTTP 上是健康检查和记录的人工读写接口 `/admin/world/records*`。不是 sibling,单独发布(`make deploy APP=world`) |
+| 其余 10 个 | 各自 1 个同名 Deployment | — |
 
-15 = lark-service 2 + channel-server 2 + 其余 11 个目录各 1。两个不在此表的例外:`lane-sidecar` 不是独立 Deployment,而是注入到上面每个业务 pod 里的容器;`tagger-service` 完全不在 K8s 里,跑在裸机 GPU 主机上由 systemd 托管。这两个目录不产出 Deployment,所以 15 个应用目录对应 15 个 Deployment。
+16 = lark-service 2 + channel-server 2 + agent-service 2 + 其余 10 个目录各 1。两个不在此表的例外:`lane-sidecar` 不是独立 Deployment,而是注入到上面每个业务 pod 里的容器;`tagger-service` 完全不在 K8s 里,跑在裸机 GPU 主机上由 systemd 托管。这两个目录不产出 Deployment,所以 15 个应用目录对应 16 个 Deployment。
 
 ---
 
@@ -251,7 +258,7 @@ flowchart LR
 
 | 存储 | 谁在用 |
 |---|---|
-| PostgreSQL · 业务库(chiwei) | lark-service / lark-outbound、channel-server / chat-response-worker、agent-service、tool-service、monitor-dashboard、qq-gateway,以及 paas-engine 的 ops 网关(读 + DDL/DML 审批) |
+| PostgreSQL · 业务库(chiwei) | lark-service / lark-outbound、channel-server / chat-response-worker、agent-service、world(自己的连续上下文、通信机制的 `message_record`、成本记录)、tool-service、monitor-dashboard、qq-gateway,以及 paas-engine 的 ops 网关(读 + DDL/DML 审批) |
 | PostgreSQL · paas_engine 库 | paas-engine 自己 |
 | MongoDB | lark-service(飞书原始报文 `lark_event`)、media-sync-worker(媒体)、monitor-dashboard。**channel-server 拆分后不再连 Mongo** |
 | Redis | lark-service、lark-outbound(图片注册表)、channel-server、chat-response-worker(图片注册表)、agent-service、tool-service、media-sync-worker、qq-gateway |
@@ -259,6 +266,7 @@ flowchart LR
 | MinIO(对象存储) | media-sync-worker(素材入库)、tagger-service(打标取图)、lark-service(本地 pixiv 图源) |
 | Harbor(镜像仓库) | paas-engine(Kaniko 构建产物) |
 | K8s API | paas-engine、lite-registry、lane-sidecar |
+| world 私有卷(hostPath,固定在单节点) | 只有 world:记录和下次醒来的时刻,按泳道分目录(`$WORLD_DATA_DIR/<泳道>/`)。agent-service 不挂 |
 
 ---
 
@@ -272,6 +280,7 @@ flowchart LR
 | chat-response-worker | Bun/TS | 数据面 | 消费 `chat_response_qq`,经 qq-gateway 发 QQ 回复 + 存储 |
 | qq-gateway | Bun/TS | 数据面 | QQ 官方 bot 协议 ↔ channel-server 通用协议的双向适配 |
 | agent-service | Python | 数据面 | 赤尾的生活引擎(自研 agent 工具循环 + dataflow runtime 的五条时间源);她开口也发生在她的 moment 里 |
+| world | Python | 数据面 | world 引擎:同一镜像单独发布的 App,只经通信机制交流,被消息或自己定的时刻叫醒,记录在只挂给它的私有卷上 |
 | sandbox-worker | Python | AI 工具 | 隔离环境跑 bash / 技能脚本 |
 | tool-service | Python | AI 工具 | 图像管道(下载→压缩→TOS)+ jieba 关键词 |
 | paas-engine | Go | 控制面 | 构建+部署+网关规则+动态配置+CI+日志+业务库 ops |

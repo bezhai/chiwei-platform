@@ -28,7 +28,7 @@ packages/
   ts-shared/             # TS 共享基建（中间件 / 缓存 / 日志 / HTTP / LaneRouter SDK）
 ```
 
-一个镜像可以产出多个独立的 K8s Deployment（lark-service 一镜像出 lark-service / lark-outbound，channel-server 一镜像出 channel-server / chat-response-worker），查日志和排查必须按实际服务名来；映射表以 [CLAUDE.md](CLAUDE.md) 为单一来源。
+一个镜像可以产出多个独立的 K8s Deployment（lark-service 一镜像出 lark-service / lark-outbound，channel-server 一镜像出 channel-server / chat-response-worker，agent-service 一镜像出 agent-service / world），查日志和排查必须按实际服务名来；映射表以 [CLAUDE.md](CLAUDE.md) 为单一来源。
 
 ## 文档
 

@@ -17,7 +17,7 @@ apps/
   lark-service/   # 飞书渠道服务 (Bun/TS) - 入站 + 出站，同一镜像产出 2 个独立 Deployment（见下方映射表）
   channel-server/ # QQ 渠道服务 (Bun/TS) - 同一镜像产出 2 个独立 Deployment（见下方映射表）
   qq-gateway/     # QQ 官方 bot 适配 (Bun/TS) - QQ 协议 ↔ channel-server 通用协议
-  agent-service/  # 生活引擎 (Python) - 她自己醒、自己看、自己决定说不说
+  agent-service/  # 生活引擎 (Python) - 她自己醒、自己看、自己决定说不说；同一镜像另出独立的 world App（world 引擎）
   api-gateway/    # 反向代理入口 (Go)
 ```
 
@@ -31,9 +31,10 @@ apps/
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark` 两条出站队列，发飞书消息与撤回 |
 | channel-server | **channel-server** | HTTP 服务，QQ 入站（`POST /api/internal/qq/inbound`，由 qq-gateway 投递） |
 | channel-server | **chat-response-worker** | 消费 RabbitMQ 回复队列，经 qq-gateway 发 QQ 消息 |
-| agent-service | **agent-service** | 生活引擎：五条钟自己跑，每次醒来查库决定要不要开口。**不消费任何入站队列**。另有运维 HTTP（health、admin DLQ） |
+| agent-service | **agent-service** | 生活引擎：五条钟自己跑，每次醒来查库决定要不要开口。**不消费任何渠道入站队列**。另有运维 HTTP（health、admin DLQ）和通信机制的人工入口（`/admin/messaging/*` + `operator` 收件箱）。不挂 world 的卷 |
+| agent-service | **world** | world 引擎：只通过通信机制（具名收件箱 `world` + 定时送达）和其他参与者交流，被收到的消息或自己定的时刻叫醒；私有记录放在只挂给它的卷上（`$WORLD_DATA_DIR/<泳道>/`），人工读写走 `/admin/world/records*`。**不是 sibling**，单独发布：`make deploy APP=world` |
 
-**常见错误：查 chat-response-worker 的日志时用 `make logs APP=channel-server`，这是错的。** chat-response-worker 是独立 Deployment，必须用 `make logs APP=chat-response-worker`。同理 lark-outbound 也是独立服务，飞书发不出消息要查 `make logs APP=lark-outbound`，不是 `APP=lark-service`。
+**常见错误：查 chat-response-worker 的日志时用 `make logs APP=channel-server`，这是错的。** chat-response-worker 是独立 Deployment，必须用 `make logs APP=chat-response-worker`。同理 lark-outbound 也是独立服务，飞书发不出消息要查 `make logs APP=lark-outbound`，不是 `APP=lark-service`；world 的日志用 `make logs APP=world`，不在 `APP=agent-service` 里。
 
 ## 核心数据流
 
