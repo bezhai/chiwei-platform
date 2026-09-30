@@ -15,14 +15,14 @@
    私有状态里的最新唤醒）。
 
 任何一步失败都往外抛，这一轮按失败重跑。重跑是安全的：它改过的记录留在盘上，下一次读得到；
-上下文和下次醒来都只在最后才落地。叫醒这一轮的自定消息在第 3 步记下新唤醒之前一直是状态里的
+上下文和下次醒来都只在最后才写下。叫醒这一轮的自定消息在第 3 步记下新唤醒之前一直是状态里的
 最新唤醒，所以重投时不会被当成旧消息，失败了也不限次数重试、不进死信；哪一处失败、进程死在
 哪里，各自怎么接上见 :mod:`app.world.wake`。先存上下文、后定时刻，是因为定时刻做完之后这一轮
 就不该再重跑——否则会多出一个被取代的自定消息，而上下文里又少了这一轮。
 
 **它眼前摆着什么。** 一条 USER 消息：现在几点、这一次是什么叫醒了它；被别人叫醒时再加上
-它原来定的下次醒来，提醒它这一轮结束前要重新定。它的记录目录只在上下文清理那一下铺进
-界桩（每轮都一样的东西不每轮重发）。prompt 在 Langfuse（:data:`ROUND_PROMPT_ID`），正文不
+它原来定的下次醒来，提醒它这一轮结束前要重新定。它的记录目录只在上下文清理时写进那条带
+时刻的标记消息（:mod:`app.agent.continuity`；每轮都一样的东西不每轮重发）。prompt 在 Langfuse（:data:`ROUND_PROMPT_ID`），正文不
 引用任何变量。
 
 **模型和工具预算走 Dynamic Config**（:data:`WORLD_MODEL_KEY`、:data:`WORLD_RECURSION_LIMIT_KEY`），
@@ -131,7 +131,7 @@ def build_round_runner(config: AgentConfig) -> AgentRunner:
 
 
 def _render_state() -> str:
-    """铺在上下文清理界桩上的那段"你现在"：它有哪些记录。"""
+    """写进上下文清理标记消息的那段"你现在"：它有哪些记录。"""
     entries = records.listing()
     if not entries:
         return "你还没有任何记录。"
@@ -141,7 +141,7 @@ def _render_state() -> str:
     )
 
 
-def _render_stimulus(trigger: Message, *, now: datetime, planned: NextWake | None) -> str:
+def _render_round_input(trigger: Message, *, now: datetime, planned: NextWake | None) -> str:
     lines = [f"【现在】{_when(now)}"]
     if trigger.kind is Kind.MESSAGE and trigger.sender == WORLD:
         lines.append(f"【叫醒你的】你给自己排的一次醒来（排在 {_when(trigger.time)}）：")
@@ -186,9 +186,9 @@ async def run_round(trigger: Message) -> None:
         policy=TRIM_POLICY,
         material_tools=MATERIAL_TOOLS,
     )
-    stimulus = Turn(
+    round_input = Turn(
         role=Role.USER,
-        content=_render_stimulus(trigger, now=now, planned=read_next_wake()),
+        content=_render_round_input(trigger, now=now, planned=read_next_wake()),
     )
     scope = RoundScope()
     context = AgentContext(session_id=key, features={ROUND_SCOPE: scope})
@@ -196,7 +196,7 @@ async def run_round(trigger: Message) -> None:
     runner = build_round_runner(await round_config())
     with collect_usage() as usage:
         reply = await runner.run(
-            [*history, stimulus],
+            [*history, round_input],
             context=context,
             max_retries=1,
             transcript_sink=produced,
@@ -213,7 +213,7 @@ async def run_round(trigger: Message) -> None:
         )
     await commit_transcript(
         key,
-        next_transcript(history, [stimulus, *produced], policy=TRIM_POLICY),
+        next_transcript(history, [round_input, *produced], policy=TRIM_POLICY),
         expected_ver=ver,
         session=None,
     )

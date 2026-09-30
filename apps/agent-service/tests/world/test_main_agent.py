@@ -17,7 +17,7 @@ from app.world import main_agent, wake
 from .conftest import LANE, self_message, sets_nothing, sets_wake
 
 
-def _stimulus(world_handle, run: int = -1) -> str:
+def _round_input(world_handle, run: int = -1) -> str:
     return world_handle.runner.runs[run][-1].content
 
 
@@ -34,8 +34,8 @@ async def test_a_message_from_someone_wakes_it(world):
     await main_agent.on_world_message(message)
 
     assert len(world.runner.runs) == 1
-    stimulus = _stimulus(world)
-    assert "operator" in stimulus and "有人把窗户打开了。" in stimulus
+    round_input = _round_input(world)
+    assert "operator" in round_input and "有人把窗户打开了。" in round_input
     assert world.loaded_key == f"world:{LANE}"
 
 
@@ -46,8 +46,8 @@ async def test_its_own_time_wakes_it(world):
     await main_agent.on_world_message(self_message(current.message_id, "该看看外面了。"))
 
     assert len(world.runner.runs) == 1
-    stimulus = _stimulus(world)
-    assert "你给自己排的一次醒来" in stimulus and "该看看外面了。" in stimulus
+    round_input = _round_input(world)
+    assert "你给自己排的一次醒来" in round_input and "该看看外面了。" in round_input
 
 
 async def test_a_wake_replaced_by_a_later_one_is_skipped_without_a_round(world):
@@ -69,9 +69,9 @@ async def test_woken_by_someone_else_it_sees_the_wake_it_had_planned(world):
         new_message(sender="operator", recipient="world", body="下雨了。", kind=Kind.MESSAGE)
     )
 
-    stimulus = _stimulus(world)
-    assert "傍晚再看。" in stimulus
-    assert "重新定" in stimulus
+    round_input = _round_input(world)
+    assert "傍晚再看。" in round_input
+    assert "重新定" in round_input
     assert wake.read_next_wake() != planned
 
 
@@ -94,8 +94,8 @@ async def test_a_round_ends_by_recording_scheduling_and_remembering(world):
     [commit] = world.committed
     assert commit["key"] == f"world:{LANE}"
     assert commit["expected_ver"] == 3
-    stimulus = world.runner.runs[0][-1]
-    assert commit["messages"][-2:] == [stimulus, commit["messages"][-1]]
+    round_input = world.runner.runs[0][-1]
+    assert commit["messages"][-2:] == [round_input, commit["messages"][-1]]
     assert commit["messages"][-1].content == "这一轮看完了。"
     assert world.costs[0]["actor"] == "world"
 

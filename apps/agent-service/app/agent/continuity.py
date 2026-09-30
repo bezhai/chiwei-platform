@@ -12,12 +12,12 @@
     版本号原样带到写入这一步。
   * **裁剪**：:func:`trim_for_round`（喂给模型之前）和 :func:`next_transcript`（存下去
     之前）。按调用方给的 :class:`TrimPolicy` 和素材工具表裁。
-  * **界桩**：清理点和"上一轮没存下来"各立一根 USER 消息，带时刻和调用方渲染好的那段
-    状态，作为往后那一段的新起点。
+  * **标记消息**：到了清理点、或者上一轮没存下来时，插入一条带时刻的 USER 消息，内容是
+    那个时刻加调用方渲染好的状态，作为往后那一段的新起点。
 
 **调用方自己定的**：存储键（带不带泳道、分不分人）、五个阈值、哪些工具的返回算素材、
-界桩上铺的那段状态、写失败之后这一轮算不算数。这一层对这些一个默认值都不给：给了默认
-值的话，接进来的下一个调用方一个阈值都不写、一只手都不分类也照跑，跑的是谁设计的那一套
+标记消息里写的那段状态、写失败之后这一轮算不算数。这一层对这些一个默认值都不给：给了默认
+值的话，接进来的下一个调用方一个阈值都不写、一个工具都不分类也照跑，跑的是谁设计的那一套
 没人说得清，而且一句报错都没有。
 
 存储
@@ -30,7 +30,7 @@
 的东西，而调用方拿到的返回值一切正常，排查时看不出来。
 
 **写入是 CAS。** 调用方要保证同一条上下文不会有两轮同时在跑；:class:`TranscriptConflict`
-是这个保证破了之后的一道门，把"看不见的互相覆盖"变成一行看得见的错误。它不是多副本并发
+是这个保证破了之后的检查，把"看不见的互相覆盖"变成一行看得见的错误。它不是多副本并发
 写的许可证。
 
 **写入跑在调用方给的事务里**（``session`` 必须显式给）。它跟调用方的哪些写入一起提交，
@@ -46,7 +46,7 @@ Unix 纪元起算、每格 ``cleanup_minutes`` 分钟的固定网格（:func:`_c
 上下文开头。周期整除 60 时清理点落在整点上（任何整小时偏移的时区里都是）。
 
 **"保留 1 小时"在整点清理下实际是 1–2 小时，这是设计不是 bug。** 年龄的下界是一条消息
-右边第一根界桩的时刻，所以刚过清理点写下的东西要等到下一个清理点之后才可能被裁。
+之后第一条标记消息的时刻，所以刚过清理点写下的东西要等到下一个清理点之后才可能被裁。
 
 **以一次完整的工具调用为单位裁。** 没有结果的工具调用会被 provider 拒掉整个请求，同一
 轮里多个调用和多个结果也必须逐个对上。所以调用还在保留期内时只把过期的**载荷**换成一句
@@ -56,16 +56,16 @@ Unix 纪元起算、每格 ``cleanup_minutes`` 分钟的固定网格（:func:`_c
 
 **图片块比文本先走。** 图片地址是有寿命的预签名 URL（:data:`PICTURE_URL_MINUTES`），
 adapter 回放历史时会把 http(s) 地址重新下载，过期就在模型请求之前抛错。所以图片块只活在
-最新那一代：一根界桩立起来，它之前那一代的图片就换成 :data:`PICTURE_TRIMMED`，同一条
+最新那一代：插入一条标记消息，它之前那一代的图片就换成 :data:`PICTURE_TRIMMED`，同一条
 消息里的文字照留。一张图最长活一个清理周期加一轮间隔，:data:`MAX_CLEANUP_MINUTES` 守住
 它和 :data:`PICTURE_URL_MINUTES` 之间的余量。
 
-**每次清理立一根界桩，把调用方给的状态铺进去。** 旧东西被裁掉之后那段经历只剩调用方自己
-的记录里还有，界桩把"现在"重铺成新起点。空历史（第一次跑、刚清过库）也立一根。界桩同时
-是**分代的边界**：每条消息的年龄下界就是它右边第一根界桩的时刻，不需要给每条消息单独存
-时刻。界桩之前那一代（还没有任何界桩时写下的东西）没有上界，一律留着。
+**每次清理插入一条标记消息，把调用方给的状态写进去。** 旧东西被裁掉之后那段经历只剩调用方
+自己的记录里还有，标记消息把"现在"重新交代一遍，作为新起点。空历史（第一次跑、刚清过库）也
+插入一条。标记消息同时是**分代的边界**：每条消息的年龄下界就是它之后第一条标记消息的时刻，
+不需要给每条消息单独存时刻。第一条标记消息之前写下的东西没有上界，一律留着。
 
-**上一轮没存下来时立的是另一种界桩**（:data:`GAP_HEAD`）。历史一条不丢，少的是中间那一
+**上一轮没存下来时插入的是另一种标记消息**（:data:`GAP_HEAD`）。历史一条不丢，少的是中间那一
 轮的经过；文案因此跟清理那种分开，说的是"接不上"而不是"看不到"。判据由调用方给
 （``lost_last_round``）。
 
@@ -114,7 +114,7 @@ async def commit_transcript(
 
     ``messages`` 是**完整的新上下文**（:func:`next_transcript` 的结果），不是增量。
     ``expected_ver`` 是 :func:`app.agent.session.load_session` 读到的那一版；库里已经
-    不是它了就抛 :class:`TranscriptConflict`，一行都不写。写失败（CAS 没落地、或者 PG
+    不是它了就抛 :class:`TranscriptConflict`，一行都不写。写失败（CAS 没写成、或者 PG
     抛错）一律往外抛，怎么处理由调用方定。``session`` 是调用方的事务；``None`` 表示单独
     提交。
     """
@@ -151,12 +151,12 @@ _BYTES_PER_TOKEN = 3
 _PICTURE_TOKENS = 2600
 _FRAME_TOKENS = 8
 
-# 界桩那条消息的开头，两种。只有这里写 USER 消息用这两个开头：
+# 标记消息的开头，两种。只有这里写 USER 消息用这两个开头：
 #
 #   * :data:`CHECKPOINT_HEAD`  固定时刻的清理，往前那一段真的不在了；
-#   * :data:`GAP_HEAD`         上一轮的上下文没落地，往前那一段还在、中间少了一轮。
+#   * :data:`GAP_HEAD`         上一轮的上下文没存下来，往前那一段还在、中间少了一轮。
 #
-# 两种在结构上是同一回事 —— 都带一个时刻、都重铺一遍状态 —— 所以都算这一代的界桩。
+# 两种在结构上是同一回事 —— 都带一个时刻、都重新写一遍状态 —— 所以都算这一代的边界。
 # 文案必须分开：缺口那次眼前的历史一条没少，套用"再往前的那一段不在你眼前了"就是
 # 往它眼前塞一句假话。
 CHECKPOINT_HEAD = "【上下文清理 "
@@ -219,7 +219,7 @@ def _message_tokens(message: Message) -> int:
 def _cleanup_instant(now: datetime, minutes: int) -> datetime:
     """``now`` 之前最近的那个清理点：从纪元起算的 ``minutes`` 分钟网格，时区沿用 ``now``。
 
-    时区沿用调用方的，界桩上印出来的时刻才跟调用方其余地方的时刻是同一种写法。
+    时区沿用调用方的，标记消息里写出来的时刻才跟调用方其余地方的时刻是同一种写法。
     """
     step = timedelta(minutes=minutes)
     instant = _GRID_ORIGIN + (now - _GRID_ORIGIN) // step * step
@@ -227,7 +227,7 @@ def _cleanup_instant(now: datetime, minutes: int) -> datetime:
 
 
 def _marker(head: str, at: datetime, what_happened: str, state: str) -> Message:
-    """一根界桩：发生了什么 + 那个时刻 + 此刻的状态，作为往后那一段的新起点。"""
+    """一条标记消息：发生了什么 + 那个时刻 + 此刻的状态，作为往后那一段的新起点。"""
     return Message(
         role=Role.USER,
         content=(
@@ -237,14 +237,14 @@ def _marker(head: str, at: datetime, what_happened: str, state: str) -> Message:
 
 
 def _checkpoint(at: datetime, state: str) -> Message:
-    """固定时刻清理立的那根：再往前的东西这一下真的从眼前走了。"""
+    """固定时刻清理时插入的那条：再往前的东西这一下真的从眼前走了。"""
     return _marker(
         CHECKPOINT_HEAD, at, "再往前的那一段不在你眼前了，只剩你自己记下来的。", state
     )
 
 
 def _gap_marker(at: datetime, state: str) -> Message:
-    """上一轮的上下文没落地时立的那根：往前那一段一条没少，少的是中间那一轮的经过。"""
+    """上一轮的上下文没存下来时插入的那条：往前那一段一条没少，少的是中间那一轮的经过。"""
     return _marker(
         GAP_HEAD,
         at,
@@ -255,7 +255,7 @@ def _gap_marker(at: datetime, state: str) -> Message:
 
 
 def _marker_at(message: Message) -> datetime | None:
-    """这条是界桩吗（两种都算）；是就给出它的时刻。"""
+    """这条是标记消息吗（两种都算）；是就给出它的时刻。"""
     if message.role is not Role.USER or not isinstance(message.content, str):
         return None
     head = next((h for h in _MARKER_HEADS if message.content.startswith(h)), None)
@@ -292,7 +292,7 @@ def _groups(messages: list[Message]) -> list[list[int]]:
 
 
 def _bounds(messages: list[Message]) -> list[datetime | None]:
-    """每条消息的"最晚写于"：它右边第一根界桩的时刻；``None`` = 在最新那一代里。"""
+    """每条消息的"最晚写于"：它之后第一条标记消息的时刻；``None`` = 在最新那一代里。"""
     nearest: datetime | None = None
     out: list[datetime | None] = [None] * len(messages)
     for i in range(len(messages) - 1, -1, -1):
@@ -400,7 +400,7 @@ def _under_cap(
 
 
 def _crossed(history: list[Message], at: datetime) -> bool:
-    """这一轮跨过清理点了吗 —— 最后一根界桩比这个清理点早就是跨过了；一根都没有也算。"""
+    """这一轮跨过清理点了吗 —— 最后一条标记消息比这个清理点早就是跨过了；一条都没有也算。"""
     for message in reversed(history):
         last = _marker_at(message)
         if last is not None:
@@ -419,27 +419,27 @@ def trim_for_round(
 ) -> list[Message]:
     """这一轮该喂给模型的那份历史。
 
-    跨过清理点（或者历史是空的）：立一根清理界桩，再按两档时长裁一遍。没跨过但
-    ``lost_last_round``：立一根时刻为 ``now`` 的缺口界桩，历史一条不丢。两样都没有：
+    跨过清理点（或者历史是空的）：插入一条清理标记消息，再按两档时长裁一遍。没跨过但
+    ``lost_last_round``：插入一条时刻为 ``now`` 的缺口标记消息，历史一条不丢。两样都没有：
     原样还回来，一个字节都不动（硬顶除外）。
 
-    ``state`` 是调用方渲染好的"此刻的状态"，只铺在界桩上。``material_tools`` 是哪些工具
-    的返回算素材。``lost_last_round`` 是"上一轮的上下文没落地"，判据归调用方。
+    ``state`` 是调用方渲染好的"此刻的状态"，只写进标记消息。``material_tools`` 是哪些工具
+    的返回算素材。``lost_last_round`` 是"上一轮的上下文没存下来"，判据归调用方。
 
-    界桩先立再裁：它同时是这一代的上界，立完再裁，这一代的图片当场就走。刚立的那根不许
-    被硬顶裁掉：它是这一轮唯一一份"你现在"。
+    先插入标记消息再裁：它同时是这一代的上界，插入之后再裁，这一代的图片当场就换掉。刚插入
+    的那条不许被硬顶裁掉：它是这一轮唯一一份"你现在"。
     """
     at = _cleanup_instant(now, policy.cleanup_minutes)
     staged = list(history)
-    laid = _crossed(history, at)
-    if laid:
+    inserted = _crossed(history, at)
+    if inserted:
         staged.append(_checkpoint(at, state))
     elif lost_last_round:
-        # 跨清理点那根已经重铺过状态了，两根一起立没有意义。
+        # 跨清理点插入的那条已经重新写过状态了，两条一起插入没有意义。
         staged.append(_gap_marker(now, state))
-        laid = True
+        inserted = True
     cleaned = _clean(staged, at=at, policy=policy, material_tools=material_tools)
-    return _under_cap(cleaned, floor=1 if laid else 0, policy=policy)
+    return _under_cap(cleaned, floor=1 if inserted else 0, policy=policy)
 
 
 def next_transcript(

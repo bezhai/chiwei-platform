@@ -37,10 +37,10 @@ class ScriptedRunner:
 
     def __init__(self, wake_in_seconds: list[float]):
         self.plan = list(wake_in_seconds)
-        self.stimuli: list[str] = []
+        self.round_inputs: list[str] = []
 
     async def run(self, messages, *, context, transcript_sink, **_):
-        self.stimuli.append(messages[-1].content)
+        self.round_inputs.append(messages[-1].content)
         seconds = self.plan.pop(0)
         with agent_context(context):
             at = now_cst() + timedelta(seconds=seconds)
@@ -84,12 +84,12 @@ async def test_world_wakes_on_start_on_its_own_time_and_on_messages_and_skips_re
 
     # 启动：私有状态里什么都没有 → 立刻醒一次。
     await start_messaging()
-    await eventually(lambda: len(runner.stimuli) >= 1, timeout=10)
-    assert "进程刚启动" in runner.stimuli[0]
+    await eventually(lambda: len(runner.round_inputs) >= 1, timeout=10)
+    assert "进程刚启动" in runner.round_inputs[0]
 
     # 那一轮定了 2 秒后醒 → 到点醒了第二轮。
-    await eventually(lambda: len(runner.stimuli) >= 2, timeout=10)
-    assert "你给自己排的一次醒来" in runner.stimuli[1]
+    await eventually(lambda: len(runner.round_inputs) >= 2, timeout=10)
+    assert "你给自己排的一次醒来" in runner.round_inputs[1]
 
     # 第二轮收完尾（1.5 秒后那次记进了状态）再往下走：替身模型开始跑时这一轮还没定时刻。
     def second_round_done():
@@ -101,9 +101,9 @@ async def test_world_wakes_on_start_on_its_own_time_and_on_messages_and_skips_re
 
     # 在那之前有人发来消息 → 第三轮，定到一天后，1.5 秒那条被取代。
     delivery = await send(sender="operator", recipient="world", body="有人敲门。")
-    await eventually(lambda: len(runner.stimuli) >= 3, timeout=10)
-    assert "有人敲门。" in runner.stimuli[2]
-    assert "1.5 秒后" in runner.stimuli[2]  # 它看得到自己原来定的那次
+    await eventually(lambda: len(runner.round_inputs) >= 3, timeout=10)
+    assert "有人敲门。" in runner.round_inputs[2]
+    assert "1.5 秒后" in runner.round_inputs[2]  # 它看得到自己原来定的那次
 
     # 被取代的那条照样送到了，但没有再跑一轮。
     async def replaced_was_delivered():
@@ -112,7 +112,7 @@ async def test_world_wakes_on_start_on_its_own_time_and_on_messages_and_skips_re
 
     await eventually(replaced_was_delivered, timeout=10)
     await asyncio.sleep(1.0)
-    assert len(runner.stimuli) == 3
+    assert len(runner.round_inputs) == 3
     current = wake.read_next_wake()
     assert current.message_id != replaced.message_id
     assert current.at > now_cst() + timedelta(seconds=30)
@@ -132,17 +132,17 @@ async def test_world_wakes_on_start_on_its_own_time_and_on_messages_and_skips_re
 
 
 class RunnerFailingOn:
-    """``fails(stimulus)`` 为真的那一轮抛错；其余按顺序取一个"再过几秒醒"。"""
+    """``fails(round_input)`` 为真的那一轮抛错；其余按顺序取一个"再过几秒醒"。"""
 
     def __init__(self, fails, wake_in_seconds: list[float]):
         self.fails = fails
         self.plan = list(wake_in_seconds)
-        self.stimuli: list[str] = []
+        self.round_inputs: list[str] = []
 
     async def run(self, messages, *, context, transcript_sink, **_):
-        stimulus = messages[-1].content
-        self.stimuli.append(stimulus)
-        if self.fails(stimulus):
+        round_input = messages[-1].content
+        self.round_inputs.append(round_input)
+        if self.fails(round_input):
             raise RuntimeError("这一轮跑不完")
         seconds = self.plan.pop(0)
         with agent_context(context):
@@ -186,10 +186,10 @@ async def test_someone_elses_message_dead_lettered_leaves_world_waking_on_its_pl
     assert wake.read_next_wake() == planned, "别人的消息最终失败不该另排醒来"
 
     await eventually(
-        lambda: sum("你给自己排的一次醒来" in s for s in runner.stimuli) >= 1, timeout=10
+        lambda: sum("你给自己排的一次醒来" in s for s in runner.round_inputs) >= 1, timeout=10
     )
-    assert runner.stimuli[-1].count("4.0 秒后") == 1
-    assert sum("发来一条消息" in s for s in runner.stimuli) == 3
+    assert runner.round_inputs[-1].count("4.0 秒后") == 1
+    assert sum("发来一条消息" in s for s in runner.round_inputs) == 3
 
 
 async def test_the_latest_wake_failing_again_and_again_is_never_dead_lettered(
@@ -201,7 +201,7 @@ async def test_the_latest_wake_failing_again_and_again_is_never_dead_lettered(
     _fast_retry(monkeypatch)
     failures = {"left": 5}
 
-    def fails(stimulus):
+    def fails(round_input):
         if failures["left"]:
             failures["left"] -= 1
             return True
@@ -224,7 +224,7 @@ async def test_the_latest_wake_failing_again_and_again_is_never_dead_lettered(
         timeout=30,
     )
 
-    assert len(runner.stimuli) == 6
+    assert len(runner.round_inputs) == 6
     assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0
     rows = await read_record(message_id=started.message_id)
     assert [r["outcome"] for r in rows].count("retrying") == 5

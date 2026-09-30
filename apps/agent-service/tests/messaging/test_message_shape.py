@@ -26,7 +26,7 @@ def test_participant_names_that_are_refused(name):
         participant(name)
 
 
-def test_the_envelope_carries_exactly_id_sender_recipient_time_and_kind():
+def test_a_message_has_exactly_id_sender_recipient_time_kind_and_body():
     """外层只有这五样加正文，没有地点编号、没有房间 id。"""
     assert [f.name for f in dataclasses.fields(Message)] == [
         "message_id",

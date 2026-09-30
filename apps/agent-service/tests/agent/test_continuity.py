@@ -1,16 +1,16 @@
-"""跨轮连续的上下文，基础层那一半：存下去、裁一遍、立界桩。
+"""跨轮连续的上下文，基础层那一半：存下去、裁一遍、插入带时刻的标记消息。
 
 这一层给任何 App 的 agent 用，所以这里的用例不借任何一个 App 的东西：工具名、阈值、
 状态文字都是用例自己编的。钉的是五条：
 
   1. **不认识任何业务上的时间。** 清理点是一张从 Unix 纪元起算的固定网格，不按谁的
-     "一天"对齐；界桩上的时刻沿用调用方给的时区。
+     "一天"对齐；标记消息里的时刻沿用调用方给的时区。
   2. **不 import 任何 App 的代码。**
-  3. **写入带版本 CAS。** 别人在中间写过就抛 :class:`TranscriptConflict`，一行都不落；
+  3. **写入带版本 CAS。** 别人在中间写过就抛 :class:`TranscriptConflict`，一行都不写；
      写入跑在调用方的事务里。
   4. **阈值和素材表都由调用方给**，这一层一个默认值都没有，也不读任何配置。
   5. **裁剪的规则对任意工具名成立**：素材载荷过期换短语、整组过期整组删、图片只活在
-     最新那一代、上一轮没落地就补一根缺口界桩、硬顶从最老的组开始丢。
+     最新那一代、上一轮没存下来就补一条缺口标记消息、硬顶从最老的组开始丢。
 
 她那一侧怎么用这一层（她的阈值、她的素材表、她一轮跑下来存了什么）在
 ``tests/living/test_context_trim.py`` 和 ``tests/living/test_continuity.py``。
@@ -79,7 +79,7 @@ def _said(text: str) -> Message:
 
 def _marker_time(message: Message, head: str) -> dt.datetime:
     text = message.text()
-    assert text.startswith(head), f"不是这种界桩：{text[:40]!r}"
+    assert text.startswith(head), f"不是这种标记消息：{text[:40]!r}"
     return dt.datetime.fromisoformat(text[len(head) : text.index("】")])
 
 
@@ -93,8 +93,8 @@ def _round(
     fed = trim_for_round(
         history, now=at, state=STATE, policy=policy, material_tools=material_tools
     )
-    stimulus = Message(role=Role.USER, content=f"现在 {at:%H:%M}。")
-    return next_transcript(fed, [stimulus, *produced], policy=policy)
+    round_input = Message(role=Role.USER, content=f"现在 {at:%H:%M}。")
+    return next_transcript(fed, [round_input, *produced], policy=policy)
 
 
 def _play(
@@ -133,15 +133,15 @@ def _orphans(messages: list[Message]) -> list[str]:
 def test_the_cleanup_grid_counts_from_the_epoch_not_from_anyones_day():
     """周期不整除一天时最能看出网格从哪儿起算：45 分钟一格，跨过凌晨 4 点照样是 45 分钟。
 
-    按某个"一天从 04:00 起"对齐的话，04:10 那一轮的界桩会落在 04:00 上 —— 离纪元
+    按某个"一天从 04:00 起"对齐的话，04:10 那一轮的标记消息时刻会是 04:00 —— 离纪元
     1200 分钟，不是 45 的倍数。
     """
     every_45 = dataclasses.replace(POLICY, cleanup_minutes=45)
     for now in (_at(3, 50), _at(4, 10), _at(4, 40), _at(0, 5), _at(23, 59)):
-        laid = trim_for_round(
+        fed = trim_for_round(
             [], now=now, state=STATE, policy=every_45, material_tools=MATERIAL
         )
-        at = _marker_time(laid[0], CHECKPOINT_HEAD)
+        at = _marker_time(fed[0], CHECKPOINT_HEAD)
         assert (at - _EPOCH) % dt.timedelta(minutes=45) == dt.timedelta(0), (
             f"{now} 的清理点 {at} 不在从纪元起算的 45 分钟网格上"
         )
@@ -149,23 +149,23 @@ def test_the_cleanup_grid_counts_from_the_epoch_not_from_anyones_day():
 
 
 def test_an_hourly_grid_lands_on_whole_hours_in_the_callers_zone():
-    """一小时一格落在整点上，界桩上的时刻沿用调用方给的时区。"""
-    laid = trim_for_round(
+    """一小时一格落在整点上，标记消息里的时刻沿用调用方给的时区。"""
+    fed = trim_for_round(
         [], now=_at(14, 20), state=STATE, policy=POLICY, material_tools=MATERIAL
     )
 
-    assert laid[0].text().startswith(f"{CHECKPOINT_HEAD}2026-07-25T14:00:00+08:00】")
+    assert fed[0].text().startswith(f"{CHECKPOINT_HEAD}2026-07-25T14:00:00+08:00】")
 
 
 def test_the_cleanup_line_never_goes_backwards():
-    """清理点只往前走。倒回去的话"跨没跨过清理点"会判错，一整段时间一根界桩都不立。"""
+    """清理点只往前走。倒回去的话"跨没跨过清理点"会判错，一整段时间一条标记消息都不插入。"""
     last = None
     at = _at(0, 0)
     while at < _at(0, 0, day=27):
-        laid = trim_for_round(
+        fed = trim_for_round(
             [], now=at, state=STATE, policy=POLICY, material_tools=MATERIAL
         )
-        now = _marker_time(laid[0], CHECKPOINT_HEAD)
+        now = _marker_time(fed[0], CHECKPOINT_HEAD)
         assert last is None or now >= last, f"{at} 的清理点 {now} 比上一个 {last} 还早"
         last = now
         at += dt.timedelta(minutes=7)
@@ -252,7 +252,7 @@ async def test_the_write_rides_the_callers_transaction(transcript_db):
 
 
 def test_the_layer_gives_no_default_policy_and_reads_no_config():
-    """给了默认值的话，下一个调用方一个阈值都不写、一只手都不分类也照跑，跑的是谁设计
+    """给了默认值的话，下一个调用方一个阈值都不写、一个工具都不分类也照跑，跑的是谁设计
     的那一套没人说得清，而且一句报错都没有。"""
     import app.agent.continuity as mod
 
@@ -314,7 +314,7 @@ def test_a_whole_group_goes_past_the_own_window_and_leaves_no_orphan():
 
 
 def test_a_picture_only_lives_in_the_newest_generation():
-    """图片块在它那一代之后的第一根界桩立起来时就换成短语；同一条里的文字照留。"""
+    """它那一代之后插入第一条标记消息时，图片块就换成短语；同一条里的文字照留。"""
     picture = _result(
         "c1",
         [
@@ -335,7 +335,7 @@ def test_a_picture_only_lives_in_the_newest_generation():
 
 
 def test_a_lost_round_gets_a_gap_marker_and_keeps_the_history():
-    """上一轮没落地：没跨清理点也补一根缺口界桩，时刻是这一轮，往前的历史一条不丢。"""
+    """上一轮没存下来：没跨清理点也补一条缺口标记消息，时刻是这一轮，往前的历史一条不丢。"""
     history = _play(start=_at(13, 0), until=_at(13, 20), events={})
 
     fed = trim_for_round(

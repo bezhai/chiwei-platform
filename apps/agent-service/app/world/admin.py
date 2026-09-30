@@ -8,7 +8,7 @@ world。接线在 :mod:`app.world.wiring`，挂在 world App 的进程里：
   PUT    /admin/world/records/document  {path, text, fingerprint?}  写一份
   DELETE /admin/world/records/document?path=...&fingerprint=...     删一份
 
-四条跟通信机制的人工入口是同一套门：要内网凭据、请求要去的泳道不是这个进程的泳道就一步
+四条跟通信机制的人工入口做同样的检查：要内网凭据、请求要去的泳道不是这个进程的泳道就一步
 都不做、每个回答都带执行它的进程所在的泳道。从开发机过来走 monitor-dashboard 的
 ``/dashboard/api/ops/world/records*`` 转发，那一侧认 PAAS_TOKEN、落审计、把调用者作为
 ``X-Operator`` 带过来；这里写和删各记一行日志，带上操作人。
