@@ -154,3 +154,77 @@ async def test_a_question_still_being_answered_at_stop_is_never_answered_again(
     await asyncio.sleep(1.5)
     assert answered == [answer.question_id], "同一个问题的回答函数被调了不止一次"
 
+
+async def test_a_question_cancelled_while_being_marked_handled_is_never_answered_again(
+    broker, monkeypatch
+):
+    """停下时正卡在"记为已处理"那一步的问题：确认掉之后，同 id 的副本等租约过了再来，也不再答。"""
+    from datetime import UTC, datetime
+    from datetime import timedelta as td
+
+    from app.infra.rabbitmq import Route, mq
+    from app.messaging import receiving
+    from app.messaging.message import Kind, Message
+    from app.messaging.receiving import clear_inboxes
+    from app.messaging.sending import ANSWER_BY_HEADER, REPLY_RK_HEADER, ask
+    from app.runtime.wire import RetryPolicy
+
+    monkeypatch.setattr(receiving, "STOP_GRACE_SECONDS", 0.3)
+    monkeypatch.setattr(
+        receiving,
+        "PROCESSING_RETRY",
+        RetryPolicy(n=3, backoff="linear", base_delay_ms=200, max_delay_ms=300, lease_ms=1_000),
+    )
+    real_mark = receiving.mark_succeeded
+    marking = asyncio.Event()
+
+    async def slow_mark(**kw):
+        marking.set()
+        await asyncio.sleep(5)
+        return await real_mark(**kw)
+
+    monkeypatch.setattr(receiving, "mark_succeeded", slow_mark)
+    answers: list[str] = []
+
+    async def answer(question) -> str:
+        answers.append(question.message_id)
+        return "在。"
+
+    async def on_message(message) -> None:  # pragma: no cover - not used
+        raise AssertionError
+
+    inbox("world", on_message=on_message, on_question=answer)
+    await start_messaging()
+    asking = asyncio.create_task(
+        ask(sender="operator", recipient="world", body="在吗？", timeout_seconds=30)
+    )
+    await marking.wait()
+    await asyncio.wait_for(stop_messaging(), timeout=10)
+    question_id = (await asking).question_id
+
+    monkeypatch.setattr(receiving, "mark_succeeded", real_mark)
+    await asyncio.sleep(1.5)  # 租约过了
+    clear_inboxes()
+    inbox("world", on_message=on_message, on_question=answer)
+    await start_messaging()
+    duplicate = Message(
+        message_id=question_id,
+        sender="operator",
+        recipient="world",
+        time=datetime.now(UTC),
+        kind=Kind.QUESTION,
+        body="在吗？",
+    )
+    assert await mq.publish_with_confirm(
+        Route("inbox_world", "inbox.world", isolated=True),
+        duplicate.to_json(),
+        headers={
+            REPLY_RK_HEADER: "messaging.reply.nobody",
+            ANSWER_BY_HEADER: (datetime.now(UTC) + td(seconds=30)).isoformat(),
+        },
+        lane=LANE,
+    )
+    await asyncio.sleep(1.5)
+
+    assert len(answers) <= 1, "同一个问题被答了不止一次"
+    assert await broker.depth(f"inbox_world_{LANE}") == 0

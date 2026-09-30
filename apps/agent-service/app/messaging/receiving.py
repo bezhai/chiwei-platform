@@ -51,10 +51,11 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
 ``consume_while`` 的收件箱：还在等着进上下文的，停止时直接放弃等待；已经在消费的，等上面这些
 都做完才退出上下文。
 
-**问题不重试。** 问题的处理函数抛异常、返回空、或者收件箱不接受提问，都立刻给提问方
-回一个"没有回答"。问题这条路径上的任何失败——回复发不出去、去重状态读写失败、消息
-本身解不开——都只记一笔日志、确认掉：不重投，不进死信。提问方已经不等了（过了它带来
-的截止时刻）的问题直接跳过。
+**问题不重试，至多答一次。** 问题的处理函数抛异常、返回空、或者收件箱不接受提问，都立刻给
+提问方回一个"没有回答"。问题这条路径上的任何失败——回复发不出去、去重状态读写失败、消息
+本身解不开——都只记一笔日志、确认掉：不重投，不进死信。领到一个问题先把占位收成"处理过"再
+答（:func:`_answer_question`），所以确认之后再来的同 id 副本也不会被答第二遍。提问方已经不等了
+（过了它带来的截止时刻）的问题直接跳过。
 
 **定时送达。** 定时队列里的消息到点才被送到这里：先看时刻到了没有——没到（延时被
 broker 上限截成了几段）就按剩下的时长再排一段；到了，就在这一刻判断对方开设了收件箱
@@ -703,7 +704,13 @@ async def _deliver_to_owner(
 async def _answer_question(
     spec: InboxSpec, route, edge_id: str, incoming: AbstractIncomingMessage
 ) -> Verdict:
-    """一个问题：领取、回答、记为已处理。任何失败都由 :func:`_consumer` 确认掉——问题不重试。"""
+    """一个问题：至多答一次。
+
+    **先记为已处理，再答。** 领到之后立刻把占位收成"处理过"，然后才调回答函数。这样"回答已经
+    执行"和"记为已处理"之间没有缝：不管回答时失败、进程停下被取消，还是确认之后又来了同 id
+    的副本，这个问题都不会被再领一次。代价是记不成的时候（抛出去，最外层确认掉）这一次就不答
+    ——问题本来就不重试，提问方拿到"没有回答"。
+    """
     message = _decode(incoming)
     if message is None:
         return Verdict.ACK
@@ -720,10 +727,10 @@ async def _answer_question(
         )
         if claim.action == "skip":
             return Verdict.ACK
-        await _answer(spec, message, received)
-        await mark_succeeded(
+        if await mark_succeeded(
             edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
-        )
+        ):
+            await _answer(spec, message, received)
     return Verdict.ACK
 
 
