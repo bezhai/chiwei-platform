@@ -189,12 +189,13 @@ def in_a_moment():
     from app.agent.runtime_context import agent_context
     from app.living.scope import (
         FEATURE_GLANCES,
+        FEATURE_LANE,
         FEATURE_MOMENT,
+        FEATURE_NOW,
         FEATURE_PERSONA,
         FEATURE_RECORDED,
         FEATURE_SWITCHES,
     )
-    from app.living.world import FEATURE_LANE, FEATURE_NOW
 
     cst = dt.timezone(dt.timedelta(hours=8))
 

@@ -287,7 +287,7 @@ async def test_a_moment_outside_the_window_is_refused(world_db, stub_round, minu
 def agent_context_for(lane: str, now: dt.datetime):
     """手工搭一个跟 ``run_world_round`` 同款的工具 context（只给上面那条用例用）。"""
     from app.agent.context import AgentContext
-    from app.living.world import FEATURE_LANE, FEATURE_NOW
+    from app.living.scope import FEATURE_LANE, FEATURE_NOW
 
     return agent_context(
         AgentContext(features={FEATURE_LANE: lane, FEATURE_NOW: now.isoformat()})

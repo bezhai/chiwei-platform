@@ -93,6 +93,7 @@ from app.living.happening import (
 )
 from app.living.place import PLACE_SHAPE
 from app.living.records import WORLD_ACTOR, Happening, _require_aware, esc
+from app.living.scope import FEATURE_LANE, FEATURE_NOW
 from app.living.serial import hold
 from app.living.upcoming import list_upcoming_between, schedule_upcoming
 from app.runtime.data import Data, Key
@@ -149,9 +150,8 @@ LEDGER_LOOK_AHEAD = timedelta(minutes=EXPECT_MAX_MINUTES)
 
 # 工具体从 ambient context 读这两样：lane 是泳道隔离的硬约束，now 是**本轮的时间锚**。
 # now 必须来自 context 而不是工具体自己 ``datetime.now()``——派生 id 里带着 due_at，
-# 整轮重放时若各次取各自的"现在"，同一件事会落成两条不同的 item。
-FEATURE_LANE = "living_lane"
-FEATURE_NOW = "living_now"
+# 整轮重放时若各次取各自的"现在"，同一件事会落成两条不同的 item。两个 key 定义在
+# :mod:`app.living.scope`。
 # 本轮真的写上账的 item_id（round-scoped，engine 每轮新建）。数它而不是数工具调用
 # 次数：模型重复调同一件事只该算一件，而"调了几次 expect"跟"世界多了几件事"不是
 # 一回事；也不能靠前后数账本条数——expect 能排到 3 天后，早就出了账本窗口。

@@ -15,9 +15,6 @@
 （moment）、手机（phone）、嘴（mouth）三个模块的工具都要读同一份。放在 moment 里会
 让 phone / mouth 反过来 import moment，而 moment 又要 import 它们的工具——一个必然的
 循环。这四个 key 只允许在这里定义一次。
-
-``lane`` / ``now`` 两个 key 的名字定义在 :mod:`app.living.world`（world 的轮次也用
-同一份），这里不再声明同名常量。
 """
 
 from __future__ import annotations
@@ -26,8 +23,9 @@ from datetime import datetime
 
 from app.agent.runtime_context import get_context
 
-# 这两个 ambient key 是整个 living 包共用的一份定义。
-from app.living.world import FEATURE_LANE, FEATURE_NOW
+# 哪个泳道、本次 moment 的时间锚。
+FEATURE_LANE = "living_lane"
+FEATURE_NOW = "living_now"
 
 # 谁在跑这次 moment、这是哪个 moment。
 FEATURE_PERSONA = "living_persona"

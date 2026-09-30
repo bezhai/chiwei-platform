@@ -170,7 +170,9 @@ from app.living.records import (
 # 是同一份；放在这里会让它们反过来 import 本模块，成环）。
 from app.living.scope import (
     FEATURE_GLANCES,
+    FEATURE_LANE,
     FEATURE_MOMENT,
+    FEATURE_NOW,
     FEATURE_PERSONA,
     FEATURE_RECORDED,
     FEATURE_SWITCHES,
@@ -182,10 +184,6 @@ from app.living.snapshot import all_whereabouts, read_snapshot
 from app.living.takeback import TAKEBACK_TOOLS
 from app.living.web import WEB_TOOLS
 from app.living.whereabouts import current_whereabouts, note_whereabouts
-
-# 这两个 ambient key 是整个 living 包共用的一份定义（world 的轮次也从这里取
-# lane / 时间锚），不在这里再声明一遍同名常量。
-from app.living.world import FEATURE_LANE, FEATURE_NOW
 from app.runtime.data import Data, Key
 from app.runtime.migrator import _table_name
 from app.runtime.node import node
