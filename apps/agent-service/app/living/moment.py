@@ -93,7 +93,6 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Annotated
 
 from inner_shared.dynamic_config import dynamic_config
@@ -120,13 +119,11 @@ from app.living.continuity import (
     transcript_key,
     trim_for_round,
 )
-from app.living.documents import _read as read_document_at
-from app.living.documents import documents_root, resolve_within
 
 # 她手边那几份写好的说明：两只手，外加"有哪些可读"那一份清单（清单只能从 prompt
 # 变量进，见本模块最后一段 docstring）。
 from app.living.guides import GUIDE_TOOLS, GUIDES_VAR, guides_she_can_read
-from app.living.happening import ongoing_at, record_happening
+from app.living.happening import record_happening
 from app.living.loose_ends import (
     format_entry,
     list_open_loose_ends,
@@ -151,7 +148,6 @@ from app.living.place import (
     PLACE_IS_EVERYONES,
     PLACE_SHAPE,
     Reach,
-    building_of,
     reach_between_people,
 )
 from app.living.reading import READING_TOOLS
@@ -159,9 +155,7 @@ from app.living.records import (
     KIND_ACT,
     KIND_SPEECH,
     MEDIUM_IN_PERSON,
-    WORLD_ACTOR,
     _require_aware,
-    esc,
     legacy_null_is,
     living_lane,
 )
@@ -355,15 +349,12 @@ def _derive(*parts: str) -> str:
     return uuid.uuid5(_ID_NS, "\x1f".join(parts)).hex
 
 
-PLACES_DIR = "地方"
-
 # ---------------------------------------------------------------------------
 # place 这个参数交给她的字
 #
 # 说形状那两句（:data:`~app.living.place.PLACE_SHAPE` /
-# :data:`~app.living.place.PLACE_IS_EVERYONES`）定义在 :mod:`app.living.place`，world
-# 那只 :func:`app.living.world.expect` 引的是同一份 —— 两边写的是同一套地名空间，一个
-# 地方裂成两个的代价和那里一个样本都不给的原委，都写在它们上方那段。
+# :data:`~app.living.place.PLACE_IS_EVERYONES`）定义在 :mod:`app.living.place`：路径怎么
+# 比对写在那儿，说它长什么样的措辞跟规则住在一起。一个样本都不给的原委写在它们上方那段。
 #
 # 这儿只剩把它们拼成**她这两只手**要说的话：落位置的参数怎么问、空 place 怎么回绝。
 # ---------------------------------------------------------------------------
@@ -376,208 +367,6 @@ PLACE_CANNOT_BE_EMPTY = (
     "place 不能是空的：位置是别人能不能感知到你的全部依据，"
     "空位置会让你从此谁也听不见、也没人听得见你。" + PLACE_SHAPE
 )
-
-
-def _place_names_in_the_same_building(place: str) -> str:
-    """她写的地名在设定集上找不到时，报出**同一栋里确实写过的那些地名**。
-
-    **为什么要有这一档。** ``place`` 是自由字符串，而她的输入里从来没有"有哪些地方"
-    这份东西——她唯一见过的样本就是工具参数说明里那几个举例，每次换地方都是现编一个。
-    写对了走进去看得见描述，写错了走进沉默，**而沉默跟"这地方还没被写过"长得一模一样**，
-    她没有任何途径分辨，也就没有任何途径改回来。实测：coe-living 同一间浴室出现
-    ``家/浴室`` 和 ``家/二楼/洗手间`` 两种写法；prod 上 ``家/楼上/我房间`` 被绫奈和
-    千凪两个人同时用，2026-09-13 21:00 两人同一分钟落在这个地名上，各自在自己卧室、
-    判定却是同处一室。
-
-    **这跟"不编造那个地方长什么样"不冲突**（见 :func:`arriving_at`）：那条管的是不许
-    无中生有一段描述，这条是把树里确实有的地名如实报给她。给的是事实，不是猜她想去哪，
-    也不命令她改——她自己判断。
-
-    **只报同一栋。** 整棵树倒出来是一堵墙，而她要的那条就在这一栋里。
-
-    **那一栋本身也不存在的时候，报的是有哪几栋。** 这一档是实测补上的：千凪写
-    ``超市``（树上那处叫 ``街区/生鲜超市``）拿回来的是纯粹的沉默。而按
-    :func:`app.living.place.reach_between`，凭空一个顶层地名是一栋独立的楼——家里
-    三个人跟她互相够不着，发生在 ``街区`` 上的事她一件也收不到，代价比写错一个房间名
-    重得多。她说不出这一栋叫什么的时候，要的恰恰是"这世界分哪几处"：几个词，她自己
-    就能把「超市」接回「街区/生鲜超市」。**但只报栋名，不报别栋的内部地名**——那是
-    另一栋的词表，跟她要去的地方无关，倒给她才是真把她劝回去。
-    """
-    try:
-        return _scan_for_place_names(place)
-    except Exception:
-        # **整段扫描失败一律当没提示**，不能让它把她钉在原地：这个函数跑在
-        # :func:`arriving_at` 的 except 分支里，而那条 except 的全部意义就是"卷没挂上
-        # 也不该让她挪不了地方"。实测（codex T3）：第一段 300 个字符时 ``OSError``
-        # 会一路抛出去，这只手返回「挪个地方失败」—— 而位置那一刻已经写进库了，
-        # 她收到一句失败，连 ``ongoing_at`` 那段都被跳过。
-        #
-        # ``except Exception`` 不吃 ``CancelledError``（它是 BaseException），
-        # 轮次被掐断时照旧往外传。
-        logger.debug("living arriving 报地名失败，当没提示：%s", place, exc_info=True)
-        return ""
-
-
-def _scan_for_place_names(place: str) -> str:
-    """:func:`_place_names_in_the_same_building` 的正文，异常由外层统一兜住。"""
-    building = building_of(place)
-    if not building:
-        return ""
-    root = documents_root()
-    places_root = (root / PLACES_DIR).resolve()
-    base = resolve_within(root, f"{PLACES_DIR}/{building}")
-    # **这一栋必须正好是 ``地方/`` 底下的一层。** 判父目录而不是黑名单 ``.`` / ``..``：
-    # ``building_of`` 保证不含分隔符，但 ``.`` 这种段经文件路径解析后会退回 ``地方/``
-    # 自己，于是整棵树的地名一起倒给她 —— 实测 ``./不存在`` 会同时列出家里和学校的地名，
-    # 而感知规则判这条路径对两边都是够不着。
-    if base.parent != places_root:
-        return ""
-    # **读得出来就不是"没有这个地方"。** 这个函数只在读文档失败之后被调用，而那条
-    # except 捕的是所有读取失败：文件在、只是读不动（权限、卷掉线）也会走到这儿。
-    # 实测：让真实存在的 ``家/浴室.md`` 抛 PermissionError，输出是「设定集上没有
-    # 「家/浴室」这个地方。家里已经写下来的是：家/浴室。」—— 同一句话自己否定自己。
-    if resolve_within(root, f"{PLACES_DIR}/{place}.md").exists():
-        return ""
-    if base.is_dir():
-        return _names_under_the_building(place, building, base, places_root)
-    return _buildings_in_the_tree(place, places_root)
-
-
-def _names_under_the_building(
-    place: str, building: str, base: Path, places_root: Path
-) -> str:
-    """这一栋底下已经写过的那些地名。**写了几个就报几个，没有上限。**
-
-    这儿原来有个 ``len(names) > 30 → 返回空串``。它是这套东西里被明令禁止的那个形状：
-    一个拍出来的数字 + 静默失败。她拿到的"什么都没说"跟"这地方还没被写过"长得一模
-    一样，而地名越多她自己蒙对的概率越低 —— 正是名字多的时候更需要把树上有什么如实
-    说出来。换一个更大的数字不算修，那个数字照旧是拍的。
-
-    **扫描量因此也没有上限，代价量过再决定的。** 本地磁盘、页缓存热、5 次取中位数，
-    一栋楼底下 N 份文档跑完这个函数：
-
-    ==========  ========  ==================
-    一栋里几份   扫描耗时   交给她的字数
-    ==========  ========  ==================
-    10          0.56 ms   120
-    100         3.6 ms    1 020
-    1 000       34 ms     11 420
-    10 000      348 ms    133 420
-    50 000      1.7 s     733 420
-    ==========  ========  ==================
-
-    **耗时这一侧没有问题。** 这条链持着她自己那条 moment 轴的占用
-    （:func:`life_moment_lock_key`，每人一条），拖的是她下一次醒来的排队时间，不阻塞
-    别人也不阻塞世界写树；那条轴的硬顶是 900 秒（:data:`app.living.serial.HELD_SECONDS`），
-    5 万份文档用掉的是它的 0.19%。
-
-    **真正先撑不住的是交给她的字数**，不是时间：一栋一千个地方就是一万多字进她这一轮，
-    一万个地方直接把她的上下文顶爆。但那时候该修的是"一栋楼里有一万个地方"这件事本身
-    —— 而且上下文顶爆是一声响的失败，跟这儿原来那个上限不一样：静默不报换来的沉默，
-    跟"这地方还没被写过"在她眼里完全一致，她连有过一次失败都不知道。
-    """
-    names = [
-        found.relative_to(places_root).as_posix().removesuffix(".md")
-        for found in base.rglob("*.md")
-        if found.is_file()
-    ]
-    if not names:
-        return ""
-    names.sort()
-    # 说的是"这一份还没写过"，不是"你写错了"：同一栋里也可能真有个没被写下来的新地方，
-    # 这句话不该替她下判断，列出来的只是树上确实有的那些。
-    #
-    # 地名过 :func:`~app.living.records.esc`，理由跟正文同一条（见 :func:`arriving_at`）：
-    # 文件名也是 world 定的，而文件系统对名字里的尖括号和引号没有任何意见 —— 起个文件名
-    # 比写一段正文还省事。``place`` 不过：那是她自己这一轮写下的字。
-    return (
-        f"（设定集上还没有「{place}」这一份。"
-        f"{building}里已经写下来的是：{'、'.join(esc(n) for n in names)}。）"
-    )
-
-
-def _buildings_in_the_tree(place: str, places_root: Path) -> str:
-    """树上一共有哪几栋 —— 她写的那一栋本身就不存在时给的。
-
-    一栋可以是目录（``地方/家/`` 底下还有房间），也可以是 ``地方/公园.md`` 这种一段
-    就到头的地方 —— 后者按 :func:`app.living.place.building_of` 同样是一栋，漏掉它
-    等于让树上真有的一处从这份清单里消失，而她照着这份清单改名字。
-
-    **世界分几处就报几处，同栋那档为什么没有上限，这里同理** —— 而且这一档的代价更
-    重：栋名写错按 :func:`app.living.place.reach_between` 是一栋独立的楼，她跟所有人
-    互相够不着。这一档只 ``iterdir`` 一层（不是 ``rglob``），扫描量本来就是"有几栋"。
-    """
-    names: set[str] = set()
-    for found in places_root.iterdir():
-        if found.is_dir():
-            names.add(found.name)
-        elif found.is_file() and found.suffix == ".md":
-            names.add(found.stem)
-    if not names:
-        return ""
-    # 栋名同样过 esc，理由见上一档。
-    return (
-        f"（设定集上还没有「{place}」这一份。"
-        f"已经写下来的地方分在这几处：{'、'.join(esc(n) for n in sorted(names))}。）"
-    )
-
-
-async def arriving_at(place: str, *, lane: str, now: datetime) -> str:
-    """走进 ``place`` 的时候看到的：这地方什么样 + 此刻这儿还在发生什么。
-
-    **她不读文档**（那是 world 的工作产物），地方的样子只以这种形式到达她 —— 走进厨房
-    看到的是"桌上还堆着没洗的碗"，不是一份可以 grep 的设定集。
-
-    **每次进去都给，不记"她来过没有"。** 换成第一次才给的话：第一次那段描述几小时后
-    被裁掉，过几天她再进厨房，因为"来过"而什么都没有、又不能去读文档 —— 那时候她没有
-    任何途径知道厨房什么样。这条管的是信息可达性，不规定她怎么反应。停留期间不会重复
-    注入，因为只有"走进去"这个动作才走这条路。
-
-    **没写过的地方就是没写过**：不报错，也不编一段出来（宪法原则 6：宁可不记，不可
-    记错）。文档读失败同理 —— 卷没挂上不该让她挪不了地方。
-
-    **但不编一段描述，不等于一个字都不说。** 找不到那一份时，会报出同一栋里确实写过的
-    那些地名（:func:`_place_names_in_the_same_building`）—— 那是树里的事实，不是对这个
-    地方的想象。没有这一档的话，"名字写歪了"和"这地方还没被写过"给她的是同一片沉默，
-    而前者的代价是她从此站在一个谁也够不着的地名上。
-
-    ``ongoing_at`` 那一段是另一件事：它答的是"这儿现在正在发生什么"。感知走游标，
-    下雨开始时她在家、游标早越过了那一条，而地方文档只写不变的部分 —— 不从这儿给，
-    她走进学校永远不知道正在下雨。
-
-    **正文过** :func:`app.living.records.esc`。这条路跟 ``Happening.content`` 上那两处
-    是同一条转写通道，而且它绕过了那两处：正文不经过任何一张表，直接从文件系统进她
-    这一轮。world 够得着六个真实数据源（:data:`app.living.world.OUTSIDE_SOURCE_TOOLS`），
-    上游原样的字节进它的上下文，它把一个活动名抄进地方文档，那段字节就落到了她眼前 ——
-    而她这段文本里 ``rel="owner"`` 是唯一说得出身份的东西。护栏"这六只不在她手上"只
-    挡得住直接调用，挡不住这一跳；而**她不读文档**是既定契约，所以也不能靠"别给她读
-    文档的手"来堵，堵点只能在这里。
-
-    代价是正文里真出现 ``& < > "`` 时她读到的是实体（``(>_<)`` 这种颜文字会变形）。
-    书名号、引号、撇号、颜文字的其余部分一个字节不动 —— :func:`~app.living.records.esc`
-    只挡那四个，判据写在它自己那儿。
-    """
-    seen: list[str] = []
-    try:
-        seen.append(
-            esc(
-                await asyncio.to_thread(
-                    read_document_at, documents_root(), f"{PLACES_DIR}/{place}.md"
-                )
-            )
-        )
-    except Exception:
-        # 没有这一份、卷没挂上、路径她写成了别的形状 —— 都只是"这儿没什么好描述的"。
-        logger.debug("living arriving lane=%s 地方没有文档：%s", lane, place)
-        # 但同一栋里写过哪些地名是能告诉她的。同样放进线程：这一步要走文件系统，
-        # 而这只手在她每一次换地方的路径上。
-        offered = await asyncio.to_thread(_place_names_in_the_same_building, place)
-        if offered:
-            seen.append(offered)
-    for h in await ongoing_at(lane=lane, place=place, now=now):
-        who = "" if h.actor == WORLD_ACTOR else f"{h.actor} "
-        seen.append(f"{who}{esc(h.content)}")
-    return "\n\n".join(seen)
 
 
 @tool
@@ -630,12 +419,7 @@ async def switch_to(
     get_context().features.setdefault(FEATURE_SWITCHES, []).append(
         {"doing": what, "because": because.strip()}
     )
-    # 落了位置就看得见那个地方，跟 move_to 同一条规则（:func:`arriving_at`）。**不按
-    # "地点变没变"分叉**：这只手还是她唯一的第一次落位入口，而那个判断要拿旧位置比一次，
-    # 比错的症状是她站在一个自己看不见的地方。
-    said = f"你在 {where}，{what}。"
-    seen = await arriving_at(where, lane=lane, now=now)
-    return f"{said}\n\n{seen}" if seen else said
+    return f"你在 {where}，{what}。"
 
 
 @tool
@@ -684,9 +468,7 @@ async def move_to(
     )
     # **不进 FEATURE_SWITCHES**：走一步不是"什么把你从这件事里带走了"。混进去会让
     # 逐个 moment 复盘里的换事率把单纯的走动也算成换事情。
-    said = f"你在 {where}，还在{current.doing}。"
-    seen = await arriving_at(where, lane=lane, now=now)
-    return f"{said}\n\n{seen}" if seen else said
+    return f"你在 {where}，还在{current.doing}。"
 
 
 @tool
