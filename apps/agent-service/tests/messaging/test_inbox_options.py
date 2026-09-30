@@ -402,7 +402,7 @@ async def test_when_the_retry_copy_cannot_be_published_the_message_is_put_back_n
     from app.messaging.message import SendFailed
 
     _fast_retry(monkeypatch)
-    monkeypatch.setattr(receiving, "PUT_BACK_DELAY_SECONDS", 0.1)
+    monkeypatch.setattr(receiving, "PUT_BACK_BASE_SECONDS", 0.1)
     real = receiving.publish
     broken = {"left": 1}
 

@@ -12,10 +12,14 @@
 函数仍然可能在极端情况下看到同一条消息两次（处理完、还没来得及标记成功就崩了），
 所以它拿到的 ``Message`` 带着 ``message_id``，自己据此去重。
 
-**处理失败：有限次重试，然后进死信。** 普通消息的处理函数抛异常 → 按
-:data:`PROCESSING_RETRY` 延时重投；次数用完 → 拒收，broker 把它送进本泳道的
-``isolated_dead_letters_<泳道>``，原样保留消息体和消息头，可以查看、重放回原收件箱
-（:mod:`app.messaging.dead_letters`，入口是 ``/admin/messaging/dead-letters*``）。
+**进死信的原因只有一个：业务处理函数本身失败，有限次重试已经用完，拥有者也没要求不限次数
+重试。** 普通消息的处理函数抛异常 → 按 :data:`PROCESSING_RETRY` 延时重投；次数用完 → 拒收，
+broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保留消息体和消息头，可以查看、
+重放回原收件箱（:mod:`app.messaging.dead_letters`，入口是 ``/admin/messaging/dead-letters*``）。
+（消息本身解不开的也进死信：处理函数根本没法跑。）领取、标记成功或失败、租约冲突后的重投、
+重投那一份的发布、定时转交、分段发布失败，都是基础设施失败，不是消息的问题：普通消息停一会儿
+放回原队列（停的时长翻倍、封顶 :data:`PUT_BACK_CAP_SECONDS`，不限次数），问题确认掉。结论
+只在 :func:`_settle` 一处交给 broker，见下面"一条消息的处理"那一节。
 
 **拥有者开设时可以多声明三件事**（:func:`inbox`）：
 
@@ -31,9 +35,8 @@
 * ``retry_without_limit`` —— 拥有者对一条处理失败的普通消息的判断：交回一个时长，表示这条
   不限次数重试、永不进死信，退避按指数翻倍、封顶在这个时长；交回 ``None``，照常有限次重试后
   进死信。不限次数重试的每一次失败都让人看得到：记录者里记一行 ``retrying``（错误和下一次的
-  延时），日志里一条 warning。重投那一份发不出去时，原消息不确认也不进死信，过
-  :data:`PUT_BACK_DELAY_SECONDS` 放回原队列再来。判断本身出错按"不限次数"算，封顶用
-  :data:`PROCESSING_RETRY` 的上限——宁可多试，不能把拥有者要保住的那条送进死信。
+  延时），日志里一条 warning。判断本身出错按"不限次数"算，封顶用 :data:`PROCESSING_RETRY`
+  的上限——宁可多试，不能把拥有者要保住的那条送进死信。
 * ``consume_while`` —— 只在持有它（一个异步上下文，比如一把跨进程的独占锁）期间消费。
   开设时不在启动流程里等它：队列照常建好，启动照常返回，后台等到进了这个上下文，才跑
   ``on_open``、开始消费；停止时等正在处理的消息处理完（见下面"停下时"）之后才退出这个
@@ -57,12 +60,13 @@
 broker 上限截成了几段）就按剩下的时长再排一段；到了，就在这一刻判断对方开设了收件箱
 没有，投递或者记 ``not_delivered`` 并给原发送方发一条 ``not_delivered`` 告知。告知是原
 发送方自己的消息被退回，所以发送方和接收方都是原发送方。告知的 id 由原消息 id 推出来，
-这一步失败重试时再发的告知还是同一个 id，发送方按 id 去重。这一步失败同样按重试、
-死信处理。
+这一步失败重试时再发的告知还是同一个 id，发送方按 id 去重。定时通道上的一切失败（分段、
+转交、写记录、发告知）都是基础设施失败，一直放回重试，不进死信。
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -72,6 +76,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import Any
 
 from aio_pika.abc import AbstractIncomingMessage
@@ -140,8 +145,10 @@ OnQuestion = Callable[[Message], Awaitable[str | None]]
 OnOpen = Callable[[], Awaitable[None]]
 RetryWithoutLimit = Callable[[Message], Awaitable[timedelta | None]]
 
-# 不限次数重试的那条消息，重投那一份发不出去时，隔多久把原消息放回原队列（秒）。
-PUT_BACK_DELAY_SECONDS = 5.0
+# 基础设施失败时，停多久把原消息放回原队列（秒）：第一次停这么久，之后每次翻倍，封顶
+# PUT_BACK_CAP_SECONDS。不用立即重投的 nack，避免 broker 和这里空转。
+PUT_BACK_BASE_SECONDS = 1.0
+PUT_BACK_CAP_SECONDS = 60.0
 ConsumeWhile = Callable[[], AbstractAsyncContextManager[None]]
 
 # 声明了 consume_while 的收件箱：进了上下文之后开设失败，隔多久再来一次（秒）。
@@ -198,10 +205,6 @@ def inbox(
         consume_while=consume_while,
         retry_without_limit=retry_without_limit,
     )
-
-
-class _PutBack(Exception):
-    """这条消息要原样放回原队列（不确认、不进死信），过一会儿再处理。"""
 
 
 def _lease_ms(spec: InboxSpec) -> int:
@@ -327,7 +330,8 @@ async def stop_receiving() -> None:
             logger.warning("messaging: cancel %s failed", queue.name, exc_info=True)
 
     unfinished: set[asyncio.Task] = set()
-    running = {t for t in _in_flight if not t.done()}
+    # 停在"放回之前等一会儿"的那几条不用等：下面关了通道，它们自然回到原队列。
+    running = {t for t in _in_flight if not t.done() and t not in _putting_back}
     if running:
         _, unfinished = await asyncio.wait(running, timeout=STOP_GRACE_SECONDS)
 
@@ -352,6 +356,7 @@ async def stop_receiving() -> None:
                 await channel.close()
             except Exception:
                 logger.warning("messaging: close channel failed", exc_info=True)
+    unfinished |= {t for t in _putting_back if not t.done()}
 
     if unfinished:
         logger.warning(
@@ -375,88 +380,150 @@ async def stop_receiving() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 一条消息的处理：去重、重试、死信
+# 一条消息的处理：业务处理和记账分开，最外层统一决定确认、放回还是进死信
 # ---------------------------------------------------------------------------
+#
+# 进死信的原因只有一个：**业务处理函数（收件箱的 on_message）本身失败，有限次重试已经用完，
+# 拥有者也没要求不限次数重试**（:func:`_after_owner_failure`）。消息解不开也进死信——那是它
+# 本身坏了，处理函数根本没法跑。除此之外，领取、标记成功或失败、租约冲突后的重投、重投那一份
+# 的发布、定时转交、分段发布，这些环节抛出来的都是基础设施失败：由 :func:`_consumer` 统一接住，
+# 普通消息放回原队列（:data:`Verdict.PUT_BACK`，停一会儿再放，停的时长按次数翻倍、有上限，
+# 不限次数），问题确认掉（问题不重试）。结论只在 :func:`_settle` 一处交给 broker；
+# ``reject(requeue=False)`` 在整个模块里只出现在那里。
 
 
-async def _run_once(
+class Verdict(Enum):
+    """一条消息处理到最后交给 broker 的结论。"""
+
+    # 处理完了：成功、跳过、问题答完或者没答成、重投那一份已经排出去。
+    ACK = "ack"
+    # 基础设施失败：停一会儿，原样放回原队列。不进死信，不限次数。
+    PUT_BACK = "put_back"
+    # 业务处理失败到头（或者消息本身解不开）：进本泳道的死信，人工查看、重放。
+    DEAD_LETTER = "dead_letter"
+
+
+Decide = Callable[[AbstractIncomingMessage], Awaitable[Verdict]]
+
+# 按消息体数的连续放回次数，决定下一次停多久；确认或进死信时清掉。
+_put_backs: dict[str, int] = {}
+# 正停在"放回之前等一会儿"的任务。停止消费时不等它们，直接取消（通道关了，消息自然回队列）。
+_putting_back: set[asyncio.Task] = set()
+
+
+def _put_back_delay(key: str) -> float:
+    count = _put_backs.get(key, 0) + 1
+    _put_backs[key] = count
+    return min(PUT_BACK_BASE_SECONDS * 2 ** (count - 1), PUT_BACK_CAP_SECONDS)
+
+
+async def _settle(incoming: AbstractIncomingMessage, verdict: Verdict) -> None:
+    """把结论交给 broker。**进死信只有这里的 DEAD_LETTER 一条路。**"""
+    key = hashlib.sha256(incoming.body).hexdigest()
+    if verdict is Verdict.ACK:
+        _put_backs.pop(key, None)
+        await incoming.ack()
+        return
+    if verdict is Verdict.PUT_BACK:
+        delay = _put_back_delay(key)
+        task = asyncio.current_task()
+        _putting_back.add(task)
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            _putting_back.discard(task)
+        await incoming.reject(requeue=True)
+        return
+    _put_backs.pop(key, None)
+    await incoming.reject(requeue=False)
+
+
+def _consumer(on_message: Decide, on_question: Decide | None = None):
+    """一条队列的消费回调：业务处理和记账交给 ``on_message`` / ``on_question``，这里接住它们
+    抛出来的基础设施失败，再把结论交给 :func:`_settle`。"""
+
+    async def handler(incoming: AbstractIncomingMessage) -> None:
+        is_question = on_question is not None and _is_question(incoming.body)
+        task = asyncio.current_task()
+        if is_question:
+            _answering.add(task)
+        try:
+            try:
+                verdict = await (on_question if is_question else on_message)(incoming)
+            except asyncio.CancelledError:
+                # 进程在停（:func:`stop_receiving`）。问题：确认掉，不退回队列。普通消息：通道
+                # 已经关了，broker 把它放回原队列。
+                if is_question and not incoming.channel.is_closed:
+                    await incoming.ack()
+                raise
+            except Exception:
+                logger.warning(
+                    "messaging: bookkeeping or hand-over for a delivery on %s failed; %s",
+                    incoming.routing_key,
+                    "acknowledged, a question is never handled twice"
+                    if is_question
+                    else "putting it back",
+                    exc_info=True,
+                )
+                verdict = Verdict.ACK if is_question else Verdict.PUT_BACK
+            await _settle(incoming, verdict)
+        finally:
+            _answering.discard(task)
+
+    return handler
+
+
+def _decode(incoming: AbstractIncomingMessage) -> Message | None:
+    try:
+        return Message.from_json(json.loads(incoming.body))
+    except Exception:
+        logger.exception("messaging: undecodable delivery on %s", incoming.routing_key)
+        return None
+
+
+async def _handle(
     message: Message,
     received: dict[str, Any],
     *,
     route,
     edge_id: str,
-    run: Callable[[Message, dict[str, Any]], Awaitable[None]],
-    lease_ms: int | None = None,
-    retry_without_limit: RetryWithoutLimit | None = None,
-) -> None:
-    """按消息 id 去重后跑 ``run``；普通消息失败按 :data:`PROCESSING_RETRY` 重投，用完就抛。
+    lease_ms: int,
+    run: Callable[[], Awaitable[None]],
+    after_failure: Callable[[Message, dict[str, Any], Any, str, Exception], Awaitable[Verdict]],
+) -> Verdict:
+    """领取 → 业务处理 → 标记。只有 ``run`` 的失败算业务失败，交给 ``after_failure``；别的步骤
+    抛出去，由 :func:`_consumer` 按基础设施失败处理。
 
-    ``lease_ms`` 是占位的租约，不给就是 :data:`PROCESSING_RETRY` 的。``retry_without_limit``
-    判定为不限次数重试的消息不走下面的有限次重试（见模块说明）。
-
-    调用方把这一步包在 ``incoming.process(requeue=False)`` 里：这里抛出去，broker 按队列
-    参数把消息送进本泳道的死信队列。重投的发布没被确认时同样抛——宁可进死信，不能丢。
-
-    **问题不走这条重试路径。** 问题处理中的任何失败都只记一笔、确认掉，不重投也不进
-    死信：提问方那边早就按"没有回答"处理了。别的进程正拿着的问题也不再排回去。
-
-    每次占位用一个只属于这一次的标记：租约过期被别人接管之后，这里的成功或失败都
-    不再改那一行（:func:`app.runtime.inflight.mark_failed` 的 ``worker_id`` 条件），
-    也不再重投——消息已经归接管的那一方负责。
+    按消息 id 去重：处理成功过的不再处理；另一个进程正拿着（租约没过期）的，按剩下的租约延时
+    重新排回去——那个进程要是半路死了，租约过期后由这里接管。每次占位用一个只属于这一次的
+    标记：租约过期被别人接管之后，这里的成功或失败都不再改那一行，也不再重投。
     """
-    is_question = message.kind is Kind.QUESTION
     claim_token = f"{WORKER_ID}#{uuid.uuid4().hex[:12]}"
     claim = await claim_inflight(
         edge_id=edge_id,
         idempotent_key=message.message_id,
         data_table=route.queue,
         worker_id=claim_token,
-        lease_ms=lease_ms if lease_ms is not None else PROCESSING_RETRY.lease_ms,
+        lease_ms=lease_ms,
         trace_id=extract_context(received).trace_id,
     )
     if claim.action == "skip":
-        if claim.locked_until is not None and not is_question:
+        if claim.locked_until is not None:
             wait_ms = hop_delay_ms(claim.locked_until, datetime.now(UTC))
             await publish(
-                route,
-                message.to_json(),
-                headers=received,
-                delay_ms=wait_ms + _LEASE_MARGIN_MS,
+                route, message.to_json(), headers=received, delay_ms=wait_ms + _LEASE_MARGIN_MS
             )
             logger.info(
                 "messaging: %s %s is held by another worker; re-queued",
                 edge_id,
                 message.message_id,
             )
-        return
+        return Verdict.ACK
 
     try:
-        await run(message, received)
+        await run()
     except asyncio.CancelledError:
-        # 进程在停（:func:`stop_receiving`）。普通消息：放开占位，重投的那一份马上有人接；
-        # 不重投、不进死信——通道已经关了，broker 会把这条放回原队列。问题：不重试，占位
-        # 收成"处理过"，同 id 的再来一份也不再答。
-        try:
-            if is_question:
-                await mark_succeeded(
-                    edge_id=edge_id,
-                    idempotent_key=message.message_id,
-                    worker_id=claim_token,
-                )
-            else:
-                await mark_failed(
-                    edge_id=edge_id,
-                    idempotent_key=message.message_id,
-                    last_error="cancelled while the process was stopping",
-                    worker_id=claim_token,
-                )
-        except Exception:
-            logger.warning(
-                "messaging: could not release %s %s after cancelling it",
-                edge_id,
-                message.message_id,
-                exc_info=True,
-            )
+        await _release(edge_id, message, claim_token)
         raise
     except Exception as exc:
         still_mine = await mark_failed(
@@ -465,37 +532,85 @@ async def _run_once(
             last_error=f"{type(exc).__name__}: {exc}",
             worker_id=claim_token,
         )
-        if is_question or not still_mine:
-            logger.exception(
-                "messaging: %s %s failed; %s",
-                edge_id,
-                message.message_id,
-                "questions are never retried"
-                if is_question
-                else "its claim was taken over, the new holder owns the outcome",
-            )
-            return
-        if retry_without_limit is not None:
-            try:
-                cap = await retry_without_limit(message)
-            except Exception:
-                logger.exception(
-                    "messaging: the retry judgement of %s failed for %s; retrying without limit",
-                    edge_id,
-                    message.message_id,
-                )
-                cap = timedelta(milliseconds=PROCESSING_RETRY.max_delay_ms)
-            if cap is not None:
-                await _retry_without_limit(message, received, route, edge_id, exc, cap)
-                return
-        decision = decide_retry(headers=received, policy=PROCESSING_RETRY)
-        if decision.action != "retry":
-            logger.exception(
-                "messaging: %s %s failed for good; dead-lettered",
+        if not still_mine:
+            logger.warning(
+                "messaging: %s %s failed after its claim was taken over; the new holder "
+                "owns the outcome",
                 edge_id,
                 message.message_id,
             )
-            raise
+            return Verdict.ACK
+        return await after_failure(message, received, route, edge_id, exc)
+
+    if not await mark_succeeded(
+        edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
+    ):
+        logger.warning(
+            "messaging: %s %s finished after its claim was taken over",
+            edge_id,
+            message.message_id,
+        )
+    return Verdict.ACK
+
+
+async def _release(edge_id: str, message: Message, claim_token: str) -> None:
+    """进程在停，这条被取消了：放开占位，重投的那一份马上有人接。放不开只记一笔。"""
+    try:
+        await mark_failed(
+            edge_id=edge_id,
+            idempotent_key=message.message_id,
+            last_error="cancelled while the process was stopping",
+            worker_id=claim_token,
+        )
+    except Exception:
+        logger.warning(
+            "messaging: could not release %s %s after cancelling it",
+            edge_id,
+            message.message_id,
+            exc_info=True,
+        )
+
+
+async def _after_owner_failure(
+    spec: InboxSpec,
+    message: Message,
+    received: dict[str, Any],
+    route,
+    edge_id: str,
+    exc: Exception,
+) -> Verdict:
+    """拥有者的处理函数失败了一次：点名不限次数的按封顶退避再排；否则有限次重试，用完进死信。"""
+    cap = await _unlimited_cap(spec, message, edge_id)
+    if cap is not None:
+        attempt = delivery_count(received) + 1
+        delay_ms = RetryPolicy(
+            n=attempt + 1,
+            backoff="exponential",
+            base_delay_ms=PROCESSING_RETRY.base_delay_ms,
+            max_delay_ms=max(1, int(cap.total_seconds() * 1000)),
+            lease_ms=PROCESSING_RETRY.lease_ms,
+        ).delay_for_attempt(attempt)
+        reason = (
+            f"第 {attempt} 次处理失败（{type(exc).__name__}: {exc}），"
+            f"{delay_ms / 1000:g} 秒后再试"
+        )
+        logger.warning(
+            "messaging: %s %s failed; retrying without limit: %s",
+            edge_id,
+            message.message_id,
+            reason,
+        )
+        await _note_retrying(message, reason)
+        await publish(
+            route,
+            message.to_json(),
+            headers={**received, DELIVERY_COUNT_HEADER: attempt},
+            delay_ms=delay_ms,
+        )
+        return Verdict.ACK
+
+    decision = decide_retry(headers=received, policy=PROCESSING_RETRY)
+    if decision.action == "retry":
         logger.warning(
             "messaging: %s %s failed (%r); retry %d in %d ms",
             edge_id,
@@ -510,64 +625,38 @@ async def _run_once(
             headers={**received, DELIVERY_COUNT_HEADER: decision.attempt},
             delay_ms=decision.delay_ms,
         )
-        return
-    if not await mark_succeeded(
-        edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
-    ):
-        logger.warning(
-            "messaging: %s %s finished after its claim was taken over",
+        return Verdict.ACK
+    logger.error(
+        "messaging: %s %s failed for good (%r); dead-lettered",
+        edge_id,
+        message.message_id,
+        exc,
+    )
+    return Verdict.DEAD_LETTER
+
+
+async def _unlimited_cap(spec: InboxSpec, message: Message, edge_id: str) -> timedelta | None:
+    """拥有者对这条的判断。判断本身出错按"不限次数"算——宁可多试，不能把它要保住的那条送进死信。"""
+    if spec.retry_without_limit is None:
+        return None
+    try:
+        return await spec.retry_without_limit(message)
+    except Exception:
+        logger.exception(
+            "messaging: the retry judgement of %s failed for %s; retrying without limit",
             edge_id,
             message.message_id,
         )
+        return timedelta(milliseconds=PROCESSING_RETRY.max_delay_ms)
 
 
-async def _retry_without_limit(
-    message: Message,
-    received: dict[str, Any],
-    route,
-    edge_id: str,
-    exc: BaseException,
-    cap: timedelta,
-) -> None:
-    """拥有者点名的那条消息：记一行、警告一声，按封顶的指数退避再排一次。永不进死信。"""
-    attempt = delivery_count(received) + 1
-    policy = RetryPolicy(
-        n=attempt + 1,
-        backoff="exponential",
-        base_delay_ms=PROCESSING_RETRY.base_delay_ms,
-        max_delay_ms=max(1, int(cap.total_seconds() * 1000)),
-        lease_ms=PROCESSING_RETRY.lease_ms,
-    )
-    delay_ms = policy.delay_for_attempt(attempt)
-    reason = (
-        f"第 {attempt} 次处理失败（{type(exc).__name__}: {exc}），{delay_ms / 1000:g} 秒后再试"
-    )
-    logger.warning(
-        "messaging: %s %s failed; retrying without limit: %s",
-        edge_id,
-        message.message_id,
-        reason,
-    )
+async def _note_retrying(message: Message, reason: str) -> None:
+    """在记录者里记一行 ``retrying``。这一行只是把已经定了的重试记下来给人看：写不进去只记
+    日志，不改这条消息的去向——为了它把消息放回去，等于记录者坏着的时候让处理函数空跑。"""
     try:
         await record(message, Outcome.RETRYING, reason=reason)
     except SendFailed:
-        logger.exception(
-            "messaging: could not record the failure of %s %s", edge_id, message.message_id
-        )
-    try:
-        await publish(
-            route,
-            message.to_json(),
-            headers={**received, DELIVERY_COUNT_HEADER: attempt},
-            delay_ms=delay_ms,
-        )
-    except SendFailed as publish_error:
-        logger.warning(
-            "messaging: the retry copy of %s %s could not be published; putting it back",
-            edge_id,
-            message.message_id,
-        )
-        raise _PutBack() from publish_error
+        logger.exception("messaging: could not record the failure of %s", message.message_id)
 
 
 def _edge(base: str) -> str:
@@ -576,73 +665,80 @@ def _edge(base: str) -> str:
 
 
 def _is_question(body: bytes) -> bool:
-    """只看 ``kind``，解不开就不是问题。用来在完整解码之前决定走哪条失败处理。"""
+    """只看 ``kind``，解不开就不是问题。用来在完整解码之前决定走哪条路。"""
     try:
         return json.loads(body).get("kind") == str(Kind.QUESTION)
     except Exception:
         return False
 
 
+async def _run_owner(spec: InboxSpec, message: Message) -> None:
+    if spec.processing_timeout is None:
+        await spec.on_message(message)
+        return
+    # 超时抛 TimeoutError，跟处理函数自己抛异常一样按处理失败重试。
+    async with asyncio.timeout(spec.processing_timeout.total_seconds()):
+        await spec.on_message(message)
+
+
+async def _deliver_to_owner(
+    spec: InboxSpec, route, edge_id: str, incoming: AbstractIncomingMessage
+) -> Verdict:
+    message = _decode(incoming)
+    if message is None:
+        return Verdict.DEAD_LETTER
+    received = dict(incoming.headers or {})
+    async with bind_context(extract_context(received)):
+        return await _handle(
+            message,
+            received,
+            route=route,
+            edge_id=edge_id,
+            lease_ms=_lease_ms(spec),
+            run=lambda: _run_owner(spec, message),
+            after_failure=lambda *args: _after_owner_failure(spec, *args),
+        )
+
+
+async def _answer_question(
+    spec: InboxSpec, route, edge_id: str, incoming: AbstractIncomingMessage
+) -> Verdict:
+    """一个问题：领取、回答、记为已处理。任何失败都由 :func:`_consumer` 确认掉——问题不重试。"""
+    message = _decode(incoming)
+    if message is None:
+        return Verdict.ACK
+    received = dict(incoming.headers or {})
+    async with bind_context(extract_context(received)):
+        claim_token = f"{WORKER_ID}#{uuid.uuid4().hex[:12]}"
+        claim = await claim_inflight(
+            edge_id=edge_id,
+            idempotent_key=message.message_id,
+            data_table=route.queue,
+            worker_id=claim_token,
+            lease_ms=PROCESSING_RETRY.lease_ms,
+            trace_id=extract_context(received).trace_id,
+        )
+        if claim.action == "skip":
+            return Verdict.ACK
+        await _answer(spec, message, received)
+        await mark_succeeded(
+            edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
+        )
+    return Verdict.ACK
+
+
 def _inbox_handler(spec: InboxSpec):
     route = inbox_route(spec.name)
     edge_id = _edge(f"inbox:{spec.name}")
-
-    async def run(message: Message, received: dict[str, Any]) -> None:
-        if message.kind is Kind.QUESTION:
-            await _answer(spec, message, received)
-        elif spec.processing_timeout is None:
-            await spec.on_message(message)
-        else:
-            # 超时抛 TimeoutError，跟处理函数自己抛异常一样按处理失败重试。
-            async with asyncio.timeout(spec.processing_timeout.total_seconds()):
-                await spec.on_message(message)
-
-    async def process(incoming: AbstractIncomingMessage) -> None:
-        received = dict(incoming.headers or {})
-        message = Message.from_json(json.loads(incoming.body))
-        async with bind_context(extract_context(received)):
-            await _run_once(
-                message,
-                received,
-                route=route,
-                edge_id=edge_id,
-                run=run,
-                lease_ms=_lease_ms(spec),
-                retry_without_limit=spec.retry_without_limit,
-            )
-
-    async def handler(incoming: AbstractIncomingMessage) -> None:
-        async with incoming.process(requeue=False, ignore_processed=True):
-            if not _is_question(incoming.body):
-                try:
-                    await process(incoming)
-                except _PutBack:
-                    await asyncio.sleep(PUT_BACK_DELAY_SECONDS)
-                    await incoming.reject(requeue=True)
-                return
-            # 问题：整条路径上的任何失败（包括去重状态读写、解码）都在这里收住并确认。
-            task = asyncio.current_task()
-            _answering.add(task)
-            try:
-                await process(incoming)
-            except asyncio.CancelledError:
-                # 进程在停，这个问题没答完（:func:`stop_receiving`）：确认掉，不退回队列。
-                if not incoming.channel.is_closed:
-                    await incoming.ack()
-                raise
-            except Exception:
-                logger.exception(
-                    "messaging: a question to %s failed; acknowledged, never redelivered",
-                    spec.name,
-                )
-            finally:
-                _answering.discard(task)
-
-    return handler
+    return _consumer(
+        lambda incoming: _deliver_to_owner(spec, route, edge_id, incoming),
+        lambda incoming: _answer_question(spec, route, edge_id, incoming),
+    )
 
 
 async def _answer(spec: InboxSpec, question: Message, received: dict[str, Any]) -> None:
-    """回答一个问题，或者告诉提问方没有回答。这里不抛异常，所以问题永远不会被重试。"""
+    """回答一个问题，或者告诉提问方没有回答。回答函数失败、回答记不下来都在这里收住；最后那
+    一次告知发不出去才会抛出去，由 :func:`_consumer` 确认掉——问题不重试。"""
     reply_rk = received.get(REPLY_RK_HEADER)
     answer_by = received.get(ANSWER_BY_HEADER)
     if not isinstance(reply_rk, str) or not isinstance(answer_by, str):
@@ -703,31 +799,47 @@ async def _answer(spec: InboxSpec, question: Message, received: dict[str, Any]) 
 # ---------------------------------------------------------------------------
 
 
-async def _on_scheduled(incoming: AbstractIncomingMessage) -> None:
-    """定时队列上的一条：没到时刻就再排一段；到了就在这一刻投递。
+async def _hand_over(incoming: AbstractIncomingMessage) -> Verdict:
+    """定时队列上的一条：没到时刻就再排一段；到了就在这一刻转交给接收方的收件箱。
 
-    "再排一段"不经过去重：同一条消息分段时每一段都会到这里一次，它们不是重复。
+    这里没有业务处理函数：分段、转交、写记录、发"没有送达"告知，失败都是基础设施失败，一直
+    放回重试，不进死信（:func:`_hand_over_again`）。"再排一段"不经过去重：同一条消息分段时
+    每一段都会到这里一次，它们不是重复。
     """
-    async with incoming.process(requeue=False, ignore_processed=True):
-        received = dict(incoming.headers or {})
-        message = Message.from_json(json.loads(incoming.body))
-        now = datetime.now(UTC)
-        if message.time > now:
-            await publish(
-                SCHEDULED,
-                message.to_json(),
-                headers=received,
-                delay_ms=hop_delay_ms(message.time, now),
-            )
-            return
-        async with bind_context(extract_context(received)):
-            await _run_once(
-                message,
-                received,
-                route=SCHEDULED,
-                edge_id=_edge("messaging:scheduled"),
-                run=_deliver_due,
-            )
+    message = _decode(incoming)
+    if message is None:
+        return Verdict.DEAD_LETTER
+    received = dict(incoming.headers or {})
+    now = datetime.now(UTC)
+    if message.time > now:
+        await publish(
+            SCHEDULED, message.to_json(), headers=received, delay_ms=hop_delay_ms(message.time, now)
+        )
+        return Verdict.ACK
+    async with bind_context(extract_context(received)):
+        return await _handle(
+            message,
+            received,
+            route=SCHEDULED,
+            edge_id=_edge("messaging:scheduled"),
+            lease_ms=PROCESSING_RETRY.lease_ms,
+            run=lambda: _deliver_due(message),
+            after_failure=_hand_over_again,
+        )
+
+
+async def _hand_over_again(
+    message: Message, received: dict[str, Any], route, edge_id: str, exc: Exception
+) -> Verdict:
+    logger.warning(
+        "messaging: handing over %s failed (%r); putting it back",
+        message.message_id,
+        exc,
+    )
+    return Verdict.PUT_BACK
+
+
+_on_scheduled = _consumer(_hand_over)
 
 
 def _notice_id(message: Message) -> str:
@@ -735,7 +847,7 @@ def _notice_id(message: Message) -> str:
     return uuid.uuid5(uuid.NAMESPACE_URL, f"messaging:not_delivered:{message.message_id}").hex
 
 
-async def _deliver_due(message: Message, received: dict[str, Any]) -> None:
+async def _deliver_due(message: Message) -> None:
     delivery = await deliver(message)
     if delivery.delivered:
         return

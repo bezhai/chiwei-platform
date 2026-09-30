@@ -153,3 +153,4 @@ async def test_a_question_still_being_answered_at_stop_is_never_answered_again(
     )
     await asyncio.sleep(1.5)
     assert answered == [answer.question_id], "同一个问题的回答函数被调了不止一次"
+
