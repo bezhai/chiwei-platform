@@ -17,6 +17,18 @@
 ``isolated_dead_letters_<泳道>``，原样保留消息体和消息头，可以查看、重放回原收件箱
 （:mod:`app.messaging.dead_letters`，入口是 ``/admin/messaging/dead-letters*``）。
 
+**拥有者开设时可以多声明三件事**（:func:`inbox`）：
+
+* ``processing_timeout`` —— 一条消息最多处理多久。超过就取消，算一次处理失败（按上面的
+  重试、死信处理）；这条消息的去重占位租约相应放长到它之上
+  （:data:`LEASE_OVER_TIMEOUT_MS`），所以处理还没完时到的重复副本不会把它当成"前一个
+  进程死了"接管过去。不声明就是默认的 15 分钟租约、不限时。
+* ``one_at_a_time`` —— 一次只处理一条：这个收件箱的消费通道 prefetch 为 1，broker 在上一
+  条确认之前不送下一条。租约从真正开始处理那一刻起算，排队等的那几条不占租约。
+* ``on_open`` —— 收件箱开设（队列建好）之后、开始消费之前调一次。拥有者在这里按自己的
+  状态做启动时该做的事，可以往自己的收件箱里发消息，它们等这一步结束才被处理。它抛
+  异常，启动就失败。
+
 **问题不重试。** 问题的处理函数抛异常、返回空、或者收件箱不接受提问，都立刻给提问方
 回一个"没有回答"。问题这条路径上的任何失败——回复发不出去、去重状态读写失败、消息
 本身解不开——都只记一笔日志、确认掉：不重投，不进死信。提问方已经不等了（过了它带来
@@ -31,6 +43,7 @@ broker 上限截成了几段）就按剩下的时长再排一段；到了，就�
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -38,7 +51,7 @@ import socket
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from aio_pika.abc import AbstractIncomingMessage
@@ -78,7 +91,8 @@ logger = logging.getLogger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 
 # 一条消息最多处理 4 次（首次 + 3 次重试），退避 30 秒起、翻倍、封顶 10 分钟。
-# 租约 15 分钟：比一次处理可能花的最长时间长，另一个进程在这期间不会接管它。
+# 租约 15 分钟：另一个进程在这期间不会接管它。处理可能比这更久的收件箱在开设时声明
+# ``processing_timeout``，租约按它放长（:func:`_lease_ms`）。
 PROCESSING_RETRY = RetryPolicy(
     n=4,
     backoff="exponential",
@@ -90,8 +104,16 @@ PROCESSING_RETRY = RetryPolicy(
 # 另一个进程正拿着这条消息时，等它的租约到期后再多等这么久才重新看。
 _LEASE_MARGIN_MS = 1_000
 
+# 声明了处理时限的收件箱：租约比时限多出这么久。超时取消之后还要把这次失败记下来、
+# 排好重试，这段时间里占位仍然归这个进程，别的进程不该接管。
+LEASE_OVER_TIMEOUT_MS = 60_000
+
+# 消费通道一次最多拿几条没确认的消息（:meth:`app.infra.rabbitmq.MQ.open_channel` 的默认）。
+_PREFETCH = 10
+
 OnMessage = Callable[[Message], Awaitable[None]]
 OnQuestion = Callable[[Message], Awaitable[str | None]]
+OnOpen = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -99,24 +121,51 @@ class InboxSpec:
     name: str
     on_message: OnMessage
     on_question: OnQuestion | None
+    processing_timeout: timedelta | None = None
+    one_at_a_time: bool = False
+    on_open: OnOpen | None = None
 
 
 INBOX_REGISTRY: dict[str, InboxSpec] = {}
 
 
 def inbox(
-    name: str, *, on_message: OnMessage, on_question: OnQuestion | None = None
+    name: str,
+    *,
+    on_message: OnMessage,
+    on_question: OnQuestion | None = None,
+    processing_timeout: timedelta | None = None,
+    one_at_a_time: bool = False,
+    on_open: OnOpen | None = None,
 ) -> None:
     """声明本 App 拥有名为 ``name`` 的收件箱。在 App 的接线模块里调，进程启动时开设。
 
     ``on_message`` 处理普通消息和 ``not_delivered`` 告知，抛异常即处理失败（会重试）。
     ``on_question`` 回答问题，返回回答正文；返回 ``None`` 表示没有回答。不给它的
     收件箱不接受提问，问它的一律拿到"没有回答"。
+
+    ``processing_timeout`` / ``one_at_a_time`` / ``on_open`` 见模块说明。
     """
     participant(name)
     if name in INBOX_REGISTRY:
         raise RuntimeError(f"inbox {name!r} is already declared in this process")
-    INBOX_REGISTRY[name] = InboxSpec(name, on_message, on_question)
+    if processing_timeout is not None and processing_timeout <= timedelta(0):
+        raise ValueError("processing_timeout must be positive")
+    INBOX_REGISTRY[name] = InboxSpec(
+        name,
+        on_message,
+        on_question,
+        processing_timeout=processing_timeout,
+        one_at_a_time=one_at_a_time,
+        on_open=on_open,
+    )
+
+
+def _lease_ms(spec: InboxSpec) -> int:
+    """这个收件箱的消息占位多久。声明了处理时限的，放长到时限之上。"""
+    if spec.processing_timeout is None:
+        return PROCESSING_RETRY.lease_ms
+    return int(spec.processing_timeout.total_seconds() * 1000) + LEASE_OVER_TIMEOUT_MS
 
 
 def clear_inboxes() -> None:
@@ -127,8 +176,8 @@ def clear_inboxes() -> None:
 _consumers: list[tuple[Any, Any, str]] = []
 
 
-async def _consume(route, handler) -> None:
-    channel = await mq.open_channel()
+async def _consume(route, handler, *, prefetch_count: int = _PREFETCH) -> None:
+    channel = await mq.open_channel(prefetch_count=prefetch_count)
     queue = await channel.get_queue(lane_queue(route.queue, lane()))
     tag = await queue.consume(handler)
     _consumers.append((channel, queue, tag))
@@ -142,7 +191,13 @@ async def start_receiving() -> None:
     for spec in INBOX_REGISTRY.values():
         route = inbox_route(spec.name)
         await mq.declare_route(route, lane=lane())
-        await _consume(route, _inbox_handler(spec))
+        if spec.on_open is not None:
+            await spec.on_open()
+        await _consume(
+            route,
+            _inbox_handler(spec),
+            prefetch_count=1 if spec.one_at_a_time else _PREFETCH,
+        )
 
 
 async def stop_receiving() -> None:
@@ -171,8 +226,11 @@ async def _run_once(
     route,
     edge_id: str,
     run: Callable[[Message, dict[str, Any]], Awaitable[None]],
+    lease_ms: int | None = None,
 ) -> None:
     """按消息 id 去重后跑 ``run``；普通消息失败按 :data:`PROCESSING_RETRY` 重投，用完就抛。
+
+    ``lease_ms`` 是占位的租约，不给就是 :data:`PROCESSING_RETRY` 的。
 
     调用方把这一步包在 ``incoming.process(requeue=False)`` 里：这里抛出去，broker 按队列
     参数把消息送进本泳道的死信队列。重投的发布没被确认时同样抛——宁可进死信，不能丢。
@@ -191,7 +249,7 @@ async def _run_once(
         idempotent_key=message.message_id,
         data_table=route.queue,
         worker_id=claim_token,
-        lease_ms=PROCESSING_RETRY.lease_ms,
+        lease_ms=lease_ms if lease_ms is not None else PROCESSING_RETRY.lease_ms,
         trace_id=extract_context(received).trace_id,
     )
     if claim.action == "skip":
@@ -282,14 +340,25 @@ def _inbox_handler(spec: InboxSpec):
     async def run(message: Message, received: dict[str, Any]) -> None:
         if message.kind is Kind.QUESTION:
             await _answer(spec, message, received)
-        else:
+        elif spec.processing_timeout is None:
             await spec.on_message(message)
+        else:
+            # 超时抛 TimeoutError，跟处理函数自己抛异常一样按处理失败重试。
+            async with asyncio.timeout(spec.processing_timeout.total_seconds()):
+                await spec.on_message(message)
 
     async def process(incoming: AbstractIncomingMessage) -> None:
         received = dict(incoming.headers or {})
         message = Message.from_json(json.loads(incoming.body))
         async with bind_context(extract_context(received)):
-            await _run_once(message, received, route=route, edge_id=edge_id, run=run)
+            await _run_once(
+                message,
+                received,
+                route=route,
+                edge_id=edge_id,
+                run=run,
+                lease_ms=_lease_ms(spec),
+            )
 
     async def handler(incoming: AbstractIncomingMessage) -> None:
         async with incoming.process(requeue=False, ignore_processed=True):
