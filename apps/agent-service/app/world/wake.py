@@ -32,14 +32,24 @@
 **进程启动时按状态补醒**（:func:`wake_on_start`，挂在收件箱开设时）：有"待定"就按上面补完；
 没有"当前"（第一次启动、状态文件读不出来）或者"当前"的时刻已经过了，立刻醒一次；"当前"
 还没到，按原 id、原时刻再排一次（同样靠按 id 去重，不会醒两次）。
+
+**一轮最终进了死信**（:func:`wake_after_failure`，挂在收件箱的 ``on_final_failure`` 上）：叫醒
+那一轮的是状态里还算数的自定消息（"当前"或"待定"）时，它进死信之后就再没有别的东西会叫醒
+world。所以这时给自己排一次"退避时长之后再醒"（Dynamic Config :data:`WAKE_BACKOFF_MINUTES_KEY`，
+默认 :data:`DEFAULT_WAKE_BACKOFF_MINUTES` 分钟），照常走上面三步。这不是心跳：只在自定唤醒
+最终失败时触发一次；退避之后那一轮又失败，就再退避一次。别人发来的消息、已经被取代的自定
+消息最终失败，不做任何事——状态里原定的下次醒来还在，world 本来就会按时醒。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from inner_shared.dynamic_config import dynamic_config
 
 from app.infra.cst_time import now_cst, to_cst_full
 from app.messaging.message import Kind, Message
@@ -52,6 +62,10 @@ logger = logging.getLogger(__name__)
 WORLD = "world"
 
 _STATE_FILE = "next_wake.json"
+
+# Dynamic Config：自定唤醒那一轮最终失败之后，隔多久再醒一次。改它不用重新部署。
+WAKE_BACKOFF_MINUTES_KEY = "world_wake_backoff_minutes"
+DEFAULT_WAKE_BACKOFF_MINUTES = 60
 
 
 @dataclass(frozen=True)
@@ -190,3 +204,42 @@ async def wake_on_start() -> None:
             state.current.at,
         )
         await _schedule(state.current)
+
+
+async def _backoff_minutes() -> int:
+    minutes = await asyncio.to_thread(
+        dynamic_config.get_int,
+        WAKE_BACKOFF_MINUTES_KEY,
+        default=DEFAULT_WAKE_BACKOFF_MINUTES,
+    )
+    if minutes <= 0:
+        logger.warning(
+            "dynamic config %s = %r is not a positive integer; using %d",
+            WAKE_BACKOFF_MINUTES_KEY,
+            minutes,
+            DEFAULT_WAKE_BACKOFF_MINUTES,
+        )
+        return DEFAULT_WAKE_BACKOFF_MINUTES
+    return minutes
+
+
+async def wake_after_failure(message: Message, error: BaseException) -> None:
+    """收件箱里一条消息最终处理失败、即将进死信时：还算数的自定唤醒失败了，就退避之后再醒。"""
+    if message.kind is not Kind.MESSAGE or message.sender != WORLD:
+        return
+    if is_stale_wake(message):
+        return
+    minutes = await _backoff_minutes()
+    at = now_cst() + timedelta(minutes=minutes)
+    chosen = await set_next_wake(
+        at,
+        f"上一次醒来（排在 {to_cst_full(message.time.isoformat())}）的那一轮重试几次都没能"
+        f"跑完，最后一次的错误是：{type(error).__name__}: {error}。隔了 {minutes} 分钟，"
+        f"再醒一次。",
+    )
+    logger.warning(
+        "world: wake %s failed for good; backing off to wake %s at %s",
+        message.message_id,
+        chosen.message_id,
+        at.isoformat(),
+    )

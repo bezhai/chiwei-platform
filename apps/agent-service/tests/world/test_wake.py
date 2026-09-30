@@ -163,3 +163,106 @@ async def test_an_unreadable_state_counts_as_no_wake(volume, scheduled):
 
     assert len(scheduled) == 1
     assert wake.read_next_wake().message_id == scheduled[0]["message_id"]
+
+
+# ---------------------------------------------------------------------------
+# 一轮最终进了死信
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def backoff_minutes(monkeypatch):
+    """Dynamic Config 的替身：默认什么都没配；测试可以往 ``values`` 里放值。"""
+    from inner_shared.dynamic_config import dynamic_config
+
+    values: dict[str, int] = {}
+    monkeypatch.setattr(
+        dynamic_config, "get_int", lambda key, default=0: values.get(key, default)
+    )
+    return values
+
+
+def _self(message_id):
+    return new_message(
+        sender="world", recipient="world", body="x", kind=Kind.MESSAGE, message_id=message_id
+    )
+
+
+async def test_the_due_wake_failing_for_good_arms_one_wake_after_the_backoff(
+    volume, scheduled, backoff_minutes
+):
+    due = await wake.set_next_wake(now_cst(), "到点了。")
+    scheduled.clear()
+
+    await wake.wake_after_failure(_self(due.message_id), RuntimeError("模型一直报错"))
+
+    after = wake.read_next_wake()
+    assert after.message_id != due.message_id
+    expected = now_cst() + timedelta(minutes=wake.DEFAULT_WAKE_BACKOFF_MINUTES)
+    assert abs((after.at - expected).total_seconds()) < 5
+    assert "模型一直报错" in after.reason
+    assert [s["message_id"] for s in scheduled] == [after.message_id]
+
+
+async def test_the_backoff_comes_from_dynamic_config(volume, scheduled, backoff_minutes):
+    backoff_minutes[wake.WAKE_BACKOFF_MINUTES_KEY] = 5
+    due = await wake.set_next_wake(now_cst(), "到点了。")
+
+    await wake.wake_after_failure(_self(due.message_id), RuntimeError("x"))
+
+    expected = now_cst() + timedelta(minutes=5)
+    assert abs((wake.read_next_wake().at - expected).total_seconds()) < 5
+
+
+@pytest.mark.parametrize("configured", [0, -3])
+async def test_a_backoff_that_is_not_positive_falls_back_to_the_default(
+    volume, scheduled, backoff_minutes, configured
+):
+    backoff_minutes[wake.WAKE_BACKOFF_MINUTES_KEY] = configured
+    due = await wake.set_next_wake(now_cst(), "到点了。")
+
+    await wake.wake_after_failure(_self(due.message_id), RuntimeError("x"))
+
+    expected = now_cst() + timedelta(minutes=wake.DEFAULT_WAKE_BACKOFF_MINUTES)
+    assert abs((wake.read_next_wake().at - expected).total_seconds()) < 5
+
+
+async def test_the_backoff_wake_failing_again_backs_off_again(
+    volume, scheduled, backoff_minutes
+):
+    due = await wake.set_next_wake(now_cst(), "到点了。")
+    await wake.wake_after_failure(_self(due.message_id), RuntimeError("第一次"))
+    first_backoff = wake.read_next_wake()
+
+    await wake.wake_after_failure(_self(first_backoff.message_id), RuntimeError("第二次"))
+
+    second_backoff = wake.read_next_wake()
+    assert second_backoff.message_id != first_backoff.message_id
+    assert "第二次" in second_backoff.reason
+
+
+async def test_someone_elses_message_failing_for_good_leaves_the_planned_wake(
+    volume, scheduled, backoff_minutes
+):
+    """那时私有状态里原定的下次醒来还在，world 本来就会按时醒：不另排。"""
+    planned = await wake.set_next_wake(now_cst() + timedelta(hours=2), "原定的。")
+    scheduled.clear()
+    from_operator = new_message(
+        sender="operator", recipient="world", body="有人敲门。", kind=Kind.MESSAGE
+    )
+
+    await wake.wake_after_failure(from_operator, RuntimeError("x"))
+
+    assert scheduled == []
+    assert wake.read_state() == wake.WakeState(current=planned)
+
+
+async def test_a_replaced_wake_failing_for_good_does_nothing(volume, scheduled, backoff_minutes):
+    replaced = await wake.set_next_wake(now_cst(), "被取代的。")
+    current = await wake.set_next_wake(now_cst() + timedelta(hours=1), "后来定的。")
+    scheduled.clear()
+
+    await wake.wake_after_failure(_self(replaced.message_id), RuntimeError("x"))
+
+    assert scheduled == []
+    assert wake.read_next_wake() == current

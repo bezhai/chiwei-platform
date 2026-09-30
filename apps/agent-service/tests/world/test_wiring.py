@@ -17,7 +17,7 @@ def test_the_world_app_loads_the_world_wiring():
 def test_world_opens_one_inbox_that_takes_one_long_round_at_a_time():
     from app.messaging.receiving import INBOX_REGISTRY, PROCESSING_RETRY, _lease_ms
     from app.world.main_agent import ROUND_TIMEOUT, on_world_message
-    from app.world.wake import wake_on_start
+    from app.world.wake import wake_after_failure, wake_on_start
 
     load_world_wiring()
 
@@ -26,6 +26,7 @@ def test_world_opens_one_inbox_that_takes_one_long_round_at_a_time():
     assert spec.on_question is None, "第一期 world 不回答问题（应答 agent 是 T4）"
     assert spec.one_at_a_time
     assert spec.on_open is wake_on_start
+    assert spec.on_final_failure is wake_after_failure
     assert spec.processing_timeout == ROUND_TIMEOUT
     # 一轮可能比通信机制默认的 15 分钟租约还久：租约要放长到一轮的上限之上。
     assert ROUND_TIMEOUT > timedelta(milliseconds=PROCESSING_RETRY.lease_ms)

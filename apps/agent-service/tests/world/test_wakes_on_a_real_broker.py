@@ -18,7 +18,12 @@ from app.messaging.record import read_record
 from app.messaging.sending import send
 from app.world import main_agent, wake
 from app.world.tools import wake_me_at
-from tests.messaging.conftest import broker, delayed_broker, messaging_db  # noqa: F401
+from tests.messaging.conftest import (  # noqa: F401
+    LANE,
+    broker,
+    delayed_broker,
+    messaging_db,
+)
 from tests.messaging.helpers import eventually
 from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
 
@@ -123,3 +128,98 @@ async def test_world_wakes_on_start_on_its_own_time_and_on_messages_and_skips_re
     ]
     assert delivery.message_id in [r["message_id"] for r in delivered_to_world]
     assert len({r["message_id"] for r in delivered_to_world}) == 4  # 启动、自定、消息、被取代的
+
+
+# ---------------------------------------------------------------------------
+# 一轮最终进了死信
+# ---------------------------------------------------------------------------
+
+
+class RunnerFailingOn:
+    """``fails(stimulus)`` 为真的那一轮抛错；其余按顺序取一个"再过几秒醒"。"""
+
+    def __init__(self, fails, wake_in_seconds: list[float]):
+        self.fails = fails
+        self.plan = list(wake_in_seconds)
+        self.stimuli: list[str] = []
+
+    async def run(self, messages, *, context, transcript_sink, **_):
+        stimulus = messages[-1].content
+        self.stimuli.append(stimulus)
+        if self.fails(stimulus):
+            raise RuntimeError("这一轮跑不完")
+        seconds = self.plan.pop(0)
+        with agent_context(context):
+            at = now_cst() + timedelta(seconds=seconds)
+            await wake_me_at.invoke({"at": at.isoformat(), "reason": f"{seconds} 秒后"})
+        reply = Turn(role=Role.ASSISTANT, content="好。")
+        transcript_sink.append(reply)
+        return reply
+
+
+def _fast_retry(monkeypatch):
+    from app.messaging import receiving
+    from app.runtime.wire import RetryPolicy
+
+    monkeypatch.setattr(
+        receiving,
+        "PROCESSING_RETRY",
+        RetryPolicy(n=3, backoff="linear", base_delay_ms=200, max_delay_ms=300, lease_ms=60_000),
+    )
+
+
+async def test_someone_elses_message_dead_lettered_leaves_world_waking_on_its_planned_time(
+    world_process, broker, monkeypatch  # noqa: F811
+):
+    """别人的消息那一轮最终失败：不另排；状态里原定的下次醒来还在，world 到点照常醒。"""
+    from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS
+
+    _fast_retry(monkeypatch)
+    runner = RunnerFailingOn(lambda s: "发来一条消息" in s, [4.0, 86_400.0])
+    monkeypatch.setattr(main_agent, "build_round_runner", lambda config: runner)
+
+    await start_messaging()
+    await eventually(
+        lambda: (s := wake.read_state()).pending is None
+        and s.current is not None
+        and "4.0 秒后" in s.current.reason,
+        timeout=10,
+    )
+    planned = wake.read_next_wake()
+
+    await send(sender="operator", recipient="world", body="有人敲门。")
+    await eventually(lambda: broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}"), timeout=15)
+    assert wake.read_next_wake() == planned, "别人的消息最终失败不该另排醒来"
+
+    await eventually(
+        lambda: sum("你给自己排的一次醒来" in s for s in runner.stimuli) >= 1, timeout=10
+    )
+    assert runner.stimuli[-1].count("4.0 秒后") == 1
+    assert sum("发来一条消息" in s for s in runner.stimuli) == 3
+
+
+async def test_the_due_wake_dead_lettered_arms_one_wake_after_the_backoff(
+    world_process, broker, monkeypatch  # noqa: F811
+):
+    from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS
+
+    _fast_retry(monkeypatch)
+    runner = RunnerFailingOn(lambda s: True, [])
+    monkeypatch.setattr(main_agent, "build_round_runner", lambda config: runner)
+
+    await start_messaging()  # 启动补醒：那一轮一直失败
+    await eventually(lambda: broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}"), timeout=15)
+    await eventually(lambda: wake.read_state().pending is None, timeout=5)
+
+    backoff = wake.read_next_wake()
+    expected = now_cst() + timedelta(minutes=wake.DEFAULT_WAKE_BACKOFF_MINUTES)
+    assert abs((backoff.at - expected).total_seconds()) < 30
+    assert len(runner.stimuli) == 3
+    rows = await read_record(message_id=backoff.message_id)
+    assert [r["outcome"] for r in rows] == ["sending", "scheduled"]
+    scheduled_self = [
+        r
+        for r in await read_record(participant="world", limit=200)
+        if r["sender"] == "world" and r["outcome"] == "scheduled"
+    ]
+    assert len(scheduled_self) == 2  # 启动补醒那一次 + 一次退避
