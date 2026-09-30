@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'bun:test';
-import { getAgentConfig, agentClient, createClient } from './paas-client';
+import { getAgentConfig, agentClient, createClient, getWorldConfig, worldClient } from './paas-client';
 
 // 钉死打 agent-service 那个出站 client 的配置：地址来自 DASHBOARD_AGENT_API，
 // 凭据是内网互信那把 INNER_HTTP_SECRET，走 Authorization: Bearer。
@@ -7,6 +7,7 @@ import { getAgentConfig, agentClient, createClient } from './paas-client';
 
 const saved = {
   api: process.env.DASHBOARD_AGENT_API,
+  worldApi: process.env.DASHBOARD_WORLD_API,
   secret: process.env.INNER_HTTP_SECRET,
   paasApi: process.env.DASHBOARD_PAAS_API,
   paasToken: process.env.DASHBOARD_PAAS_TOKEN,
@@ -15,6 +16,8 @@ const saved = {
 afterEach(() => {
   if (saved.api === undefined) delete process.env.DASHBOARD_AGENT_API;
   else process.env.DASHBOARD_AGENT_API = saved.api;
+  if (saved.worldApi === undefined) delete process.env.DASHBOARD_WORLD_API;
+  else process.env.DASHBOARD_WORLD_API = saved.worldApi;
   if (saved.secret === undefined) delete process.env.INNER_HTTP_SECRET;
   else process.env.INNER_HTTP_SECRET = saved.secret;
   if (saved.paasApi === undefined) delete process.env.DASHBOARD_PAAS_API;
@@ -143,6 +146,67 @@ describe('单次调用可以放宽出站超时', () => {
       ).rejects.toThrow();
       const data = await agentClient.post('/admin/messaging/ask', {}, undefined, { timeoutMs: 5000 });
       expect(data).toEqual({ lane: 'coe-msg', answered: true });
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+// world 是同一个镜像上的另一个 App，服务名是 world，不是 agent-service。它的人工接口认的
+// 是同一把内网凭据；泳道照样靠 x-ctx-lane 交给 sidecar 选路（world-<泳道>）。
+describe('world 出站 client', () => {
+  it('默认打 world 服务的 8000 端口，带 Bearer；DASHBOARD_WORLD_API 覆盖地址', () => {
+    delete process.env.DASHBOARD_WORLD_API;
+    process.env.INNER_HTTP_SECRET = 's3cr3t';
+    expect(getWorldConfig()).toEqual({
+      baseURL: ['http:', '', 'world:8000'].join('/'),
+      headers: { Authorization: 'Bearer s3cr3t' },
+    });
+    process.env.DASHBOARD_WORLD_API = 'http://elsewhere:1';
+    expect(getWorldConfig().baseURL).toBe('http://elsewhere:1');
+  });
+
+  it('没有 INNER_HTTP_SECRET 时直接报错，不发裸请求', () => {
+    delete process.env.INNER_HTTP_SECRET;
+    expect(() => getWorldConfig()).toThrow('INNER_HTTP_SECRET');
+  });
+
+  it('真发出去的删除请求带着 Bearer、x-ctx-lane、X-Operator 和查询参数，响应不拆包', async () => {
+    const seen: Array<{ method: string; url: string; auth: string | null; lane: string | null; operator: string | null }> = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        seen.push({
+          method: req.method,
+          url: url.pathname + url.search,
+          auth: req.headers.get('authorization'),
+          lane: req.headers.get('x-ctx-lane'),
+          operator: req.headers.get('x-operator'),
+        });
+        return Response.json({ lane: 'coe-world', path: '甲.md', fingerprint: 'f1', data: 'x' });
+      },
+    });
+    try {
+      process.env.DASHBOARD_WORLD_API = `http://127.0.0.1:${server.port}`;
+      process.env.INNER_HTTP_SECRET = 's3cr3t';
+
+      const data = await worldClient.del(
+        '/admin/world/records/document',
+        { path: '甲.md', fingerprint: 'f1' },
+        { 'x-ctx-lane': 'coe-world', 'X-Operator': 'claude-code' },
+      );
+
+      expect(seen).toEqual([
+        {
+          method: 'DELETE',
+          url: '/admin/world/records/document?path=%E7%94%B2.md&fingerprint=f1',
+          auth: 'Bearer s3cr3t',
+          lane: 'coe-world',
+          operator: 'claude-code',
+        },
+      ]);
+      expect(data).toEqual({ lane: 'coe-world', path: '甲.md', fingerprint: 'f1', data: 'x' });
     } finally {
       server.stop(true);
     }

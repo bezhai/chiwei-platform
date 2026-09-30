@@ -20,6 +20,7 @@ import activityRoutes from './routes/activity';
 import dynamicConfigRoutes from './routes/dynamic-config';
 import skillsRoutes from './routes/skills';
 import messagingRoutes from './routes/messaging';
+import worldRecordRoutes from './routes/world-records';
 
 /**
  * 组装整个 dashboard：中间件顺序、挂载前缀、路由注册。
@@ -72,6 +73,7 @@ export function createDashboardApp(): Hono {
   dashboard.route('/', dynamicConfigRoutes);
   dashboard.route('/', skillsRoutes);
   dashboard.route('/', messagingRoutes);
+  dashboard.route('/', worldRecordRoutes);
 
   app.route('/dashboard', dashboard);
 

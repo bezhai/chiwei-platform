@@ -26,6 +26,9 @@ export function deriveAction(method: string, path: string): string {
     [/^\/api\/ops\/builds\/[^/]+\/latest$/, 'ops.builds.read'],
     [/^\/api\/ops\/db-query$/, 'ops.db-query'],
     [/^\/api\/ops\/lane-bindings$/, method === 'GET' ? 'ops.lane-bindings.read' : method === 'POST' ? 'ops.lane-bindings.create' : 'ops.lane-bindings.delete'],
+    // world 的记录：动作名里不放记录路径（变长、多段），路径进 params.record_path。
+    [/^\/api\/ops\/world\/records$/, 'ops.world-records.list'],
+    [/^\/api\/ops\/world\/records\/document$/, method === 'PUT' ? 'ops.world-records.write' : method === 'DELETE' ? 'ops.world-records.delete' : 'ops.world-records.read'],
     [/^\/api\/ops\/trigger-diary$/, 'ops.trigger-diary'],
     [/^\/api\/ops\/trigger-weekly-review$/, 'ops.trigger-weekly-review'],
     [/^\/api\/audit-logs$/, 'audit-logs.read'],

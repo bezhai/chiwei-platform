@@ -46,6 +46,25 @@ export function getAgentConfig(): { baseURL: string; headers: Record<string, str
   };
 }
 
+/**
+ * world 的管理端点：记录的人工读写 /admin/world/records*。
+ *
+ * world 跟 agent-service 是同一个镜像上的两个 App，服务名不同：agentClient 打不到它。
+ * 凭据是同一把内网互信 Bearer（INNER_HTTP_SECRET）；泳道照样由调用方带 x-ctx-lane，
+ * sidecar 选 world-<泳道>。
+ */
+export function getWorldConfig(): { baseURL: string; headers: Record<string, string> } {
+  const worldApi = process.env.DASHBOARD_WORLD_API || 'http://world:8000';
+  const secret = process.env.INNER_HTTP_SECRET;
+  if (!secret) {
+    throw new Error('INNER_HTTP_SECRET not configured');
+  }
+  return {
+    baseURL: worldApi,
+    headers: { Authorization: `Bearer ${secret}` },
+  };
+}
+
 const TIMEOUT = 15000;
 
 /** paas-engine 的信封口径：{data: ...} 只取 data。 */
@@ -119,3 +138,4 @@ export function createClient(
 export const paasClient = createClient(getConfig);
 export const channelClient = createClient(getChannelConfig);
 export const agentClient = createClient(getAgentConfig, { envelope: false });
+export const worldClient = createClient(getWorldConfig, { envelope: false });
