@@ -1,9 +1,9 @@
 """收件箱拥有者开设时可以声明的几件事：一条最多处理多久、一次只处理一条、开设时先做一件事、
-一条消息最终处理失败时做一件事、只在持有某样东西期间消费。
+只在持有某样东西期间消费、点名哪条消息失败时不限次数重试。
 
 world 的主 agent 一轮可能跑得比默认的 15 分钟租约还久，一次只能想一件事，进程启动时
-要按自己的私有状态决定要不要立刻醒一次，一轮最终失败时要自己安排再醒。这些都落在 broker
-和去重租约上，所以跟 ``test_contract.py`` 一样跑在真 broker + 真 Postgres 上。
+要按自己的私有状态决定要不要立刻醒一次，只有拿着卷的写锁才消费，最新那次唤醒永不进死信。
+这些都落在 broker 和去重租约上，所以跟 ``test_contract.py`` 一样跑在真 broker + 真 Postgres 上。
 """
 from __future__ import annotations
 
@@ -204,78 +204,6 @@ async def test_a_failing_on_open_fails_the_start(broker):
     inbox("world", on_message=on_message, on_open=on_open)
     with pytest.raises(RuntimeError, match="启动检查失败"):
         await start_messaging()
-
-
-# ---------------------------------------------------------------------------
-# 一条消息最终处理失败时
-# ---------------------------------------------------------------------------
-
-
-async def test_the_final_failure_hook_runs_once_after_the_last_attempt(broker, monkeypatch):
-    """重试用完、即将进死信时调一次，带着那条消息和最后那次的异常；消息照常进死信。"""
-    _fast_retry(monkeypatch)
-    attempts: list[str] = []
-    given_up: list[tuple[str, str, int]] = []
-
-    async def always_fails(message) -> None:
-        attempts.append(message.message_id)
-        raise RuntimeError(f"第 {len(attempts)} 次失败")
-
-    async def on_final_failure(message, error) -> None:
-        given_up.append((message.message_id, str(error), len(attempts)))
-
-    inbox("world", on_message=always_fails, on_final_failure=on_final_failure)
-    await start_messaging()
-
-    delivery = await send(sender="operator", recipient="world", body="一直失败。")
-
-    dead_letters = f"{ISOLATED_DEAD_LETTERS}_{LANE}"
-    await eventually(lambda: broker.depth(dead_letters), timeout=15)
-    assert given_up == [(delivery.message_id, "第 3 次失败", 3)]
-    assert await broker.depth(dead_letters) == 1
-
-
-async def test_a_failing_final_failure_hook_still_dead_letters_the_message(broker, monkeypatch):
-    _fast_retry(monkeypatch)
-
-    async def always_fails(message) -> None:
-        raise RuntimeError("处理失败")
-
-    async def broken_hook(message, error) -> None:
-        raise RuntimeError("钩子也失败了")
-
-    inbox("world", on_message=always_fails, on_final_failure=broken_hook)
-    await start_messaging()
-
-    await send(sender="operator", recipient="world", body="x")
-
-    dead_letters = f"{ISOLATED_DEAD_LETTERS}_{LANE}"
-    await eventually(lambda: broker.depth(dead_letters), timeout=15)
-    assert await broker.depth(dead_letters) == 1
-
-
-async def test_the_hook_is_not_called_while_retries_remain(broker, monkeypatch):
-    _fast_retry(monkeypatch)
-    calls = {"n": 0}
-    given_up: list[str] = []
-    done: list[str] = []
-
-    async def fails_twice(message) -> None:
-        calls["n"] += 1
-        if calls["n"] <= 2:
-            raise RuntimeError("还有重试")
-        done.append(message.message_id)
-
-    async def on_final_failure(message, error) -> None:
-        given_up.append(message.message_id)
-
-    inbox("world", on_message=fails_twice, on_final_failure=on_final_failure)
-    await start_messaging()
-
-    await send(sender="operator", recipient="world", body="第三次成功。")
-
-    await eventually(lambda: done, timeout=10)
-    assert given_up == []
 
 
 # ---------------------------------------------------------------------------

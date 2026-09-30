@@ -28,9 +28,6 @@
 * ``on_open`` —— 收件箱开设（队列建好）之后、开始消费之前调一次。拥有者在这里按自己的
   状态做启动时该做的事，可以往自己的收件箱里发消息，它们等这一步结束才被处理。它抛
   异常，启动就失败。
-* ``on_final_failure`` —— 一条普通消息最后一次重试也失败、即将进死信时调一次，带着那条
-  消息和最后那次的异常。消息照常进死信（人工可查看、可重放）；钩子只是让拥有者知道这件
-  事并自己做点什么。钩子本身失败只记一笔日志，消息照样进死信。问题不走这条路径。
 * ``retry_without_limit`` —— 拥有者对一条处理失败的普通消息的判断：交回一个时长，表示这条
   不限次数重试、永不进死信，退避按指数翻倍、封顶在这个时长；交回 ``None``，照常有限次重试后
   进死信。不限次数重试的每一次失败都让人看得到：记录者里记一行 ``retrying``（错误和下一次的
@@ -141,7 +138,6 @@ STOP_GRACE_SECONDS = 20.0
 OnMessage = Callable[[Message], Awaitable[None]]
 OnQuestion = Callable[[Message], Awaitable[str | None]]
 OnOpen = Callable[[], Awaitable[None]]
-OnFinalFailure = Callable[[Message, BaseException], Awaitable[None]]
 RetryWithoutLimit = Callable[[Message], Awaitable[timedelta | None]]
 
 # 不限次数重试的那条消息，重投那一份发不出去时，隔多久把原消息放回原队列（秒）。
@@ -160,7 +156,6 @@ class InboxSpec:
     processing_timeout: timedelta | None = None
     one_at_a_time: bool = False
     on_open: OnOpen | None = None
-    on_final_failure: OnFinalFailure | None = None
     consume_while: ConsumeWhile | None = None
     retry_without_limit: RetryWithoutLimit | None = None
 
@@ -176,7 +171,6 @@ def inbox(
     processing_timeout: timedelta | None = None,
     one_at_a_time: bool = False,
     on_open: OnOpen | None = None,
-    on_final_failure: OnFinalFailure | None = None,
     consume_while: ConsumeWhile | None = None,
     retry_without_limit: RetryWithoutLimit | None = None,
 ) -> None:
@@ -186,8 +180,8 @@ def inbox(
     ``on_question`` 回答问题，返回回答正文；返回 ``None`` 表示没有回答。不给它的
     收件箱不接受提问，问它的一律拿到"没有回答"。
 
-    ``processing_timeout`` / ``one_at_a_time`` / ``on_open`` / ``on_final_failure`` /
-    ``consume_while`` / ``retry_without_limit`` 见模块说明。
+    ``processing_timeout`` / ``one_at_a_time`` / ``on_open`` / ``consume_while`` /
+    ``retry_without_limit`` 见模块说明。
     """
     participant(name)
     if name in INBOX_REGISTRY:
@@ -201,7 +195,6 @@ def inbox(
         processing_timeout=processing_timeout,
         one_at_a_time=one_at_a_time,
         on_open=on_open,
-        on_final_failure=on_final_failure,
         consume_while=consume_while,
         retry_without_limit=retry_without_limit,
     )
@@ -394,13 +387,12 @@ async def _run_once(
     edge_id: str,
     run: Callable[[Message, dict[str, Any]], Awaitable[None]],
     lease_ms: int | None = None,
-    on_final_failure: OnFinalFailure | None = None,
     retry_without_limit: RetryWithoutLimit | None = None,
 ) -> None:
     """按消息 id 去重后跑 ``run``；普通消息失败按 :data:`PROCESSING_RETRY` 重投，用完就抛。
 
-    ``lease_ms`` 是占位的租约，不给就是 :data:`PROCESSING_RETRY` 的。``on_final_failure``
-    在重试用完、抛出去进死信之前调一次（见模块说明）。
+    ``lease_ms`` 是占位的租约，不给就是 :data:`PROCESSING_RETRY` 的。``retry_without_limit``
+    判定为不限次数重试的消息不走下面的有限次重试（见模块说明）。
 
     调用方把这一步包在 ``incoming.process(requeue=False)`` 里：这里抛出去，broker 按队列
     参数把消息送进本泳道的死信队列。重投的发布没被确认时同样抛——宁可进死信，不能丢。
@@ -503,15 +495,6 @@ async def _run_once(
                 edge_id,
                 message.message_id,
             )
-            if on_final_failure is not None:
-                try:
-                    await on_final_failure(message, exc)
-                except Exception:
-                    logger.exception(
-                        "messaging: the final-failure hook of %s failed for %s",
-                        edge_id,
-                        message.message_id,
-                    )
             raise
         logger.warning(
             "messaging: %s %s failed (%r); retry %d in %d ms",
@@ -625,7 +608,6 @@ def _inbox_handler(spec: InboxSpec):
                 edge_id=edge_id,
                 run=run,
                 lease_ms=_lease_ms(spec),
-                on_final_failure=spec.on_final_failure,
                 retry_without_limit=spec.retry_without_limit,
             )
 
