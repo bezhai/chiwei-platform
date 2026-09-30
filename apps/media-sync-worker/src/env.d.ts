@@ -10,11 +10,13 @@ declare namespace NodeJS {
     PROXY_HTTP_SECRET: string;
     REDIS_HOST: string;
     REDIS_PORT: string;
+    REDIS_COMMAND_TIMEOUT_MS: string;
     BANGUMI_ACCESS_TOKEN: string;
     MONGO_HOST: string;
     MONGO_PORT: string;
     MONGO_CONNECT_TIMEOUT_MS: string;
     DOWNLOAD_CRON: string;
+    DOWNLOAD_AUTHOR_TIMEOUT_MS: string;
     DOWNLOAD_AFTER_ILLUST_INFO_DELAY_MS: string;
     DOWNLOAD_BEFORE_PAGE_DOWNLOAD_DELAY_MS: string;
     DOWNLOAD_AFTER_TASK_DELAY_MS: string;
