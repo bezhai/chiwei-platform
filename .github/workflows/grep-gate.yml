@@ -207,15 +207,9 @@ jobs:
           # 那一层（openai / gemini 的 ModelClient 实现），跟 app/capabilities/
           # 同级。Gap 11 已经按同样理由豁免了 capabilities/。要求适配层不碰
           # httpx 等于要求它别干自己的活。
-          #
-          # app/agent/tools/external_sources.py 排除在外，临时：那是业务代码，
-          # 每个查询自己 new 一个 AsyncClient，确实绕开了 capability 层。它现在
-          # 零调用方（工具带随上一版实现整批摘掉，等重写"每日底料"时接回），
-          # 改了没有任何调用路径能验证。所以它进 gap_16_business_owns_http
-          # baseline 盯着不许变多，接回来的那次一起改成走 capability。
           c=$(grep -rnE "import httpx|from httpx" "${BUSINESS[@]}" 2>/dev/null \
               | grep -v "__pycache__\|/test_" \
-              | grep -v "agent/adapters/\|agent/tools/external_sources.py" | wc -l) || true
+              | grep -v "agent/adapters/" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c httpx imports in business"; exit 1; }
           c=$(grep -rnE "from app\.capabilities\.http import|from app\.capabilities import http" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
@@ -269,9 +263,8 @@ jobs:
                   [],
               ),
               # 业务代码自己 new httpx client 的残留。app/agent/adapters/ 不在
-              # 这里数（它们是适配层本身，理由写在 Gap 16 那个 step 里）；剩下
-              # 的 1 处是 external_sources.py，零调用方、等接回工具带时改成走
-              # capability 层。在那之前这个数不许变多 —— 新工具一律走 capability。
+              # 这里数（它们是适配层本身，理由写在 Gap 16 那个 step 里）。现在是 0，
+              # 新工具一律走 capability。
               "gap_16_business_owns_http": (
                   r"import httpx|from httpx",
                   BUSINESS,

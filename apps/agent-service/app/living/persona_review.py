@@ -201,7 +201,7 @@ async def review_persona(
     """让她读上一周自己写的那几页，重写一版「我是谁」；这一拍不该跑 / 没写成返回
     ``None``。
 
-    **"本周写过没有"到落库为止在排他占用里**（每人一条轴），理由同 world 的轮次和
+    **"本周写过没有"到落库为止在排他占用里**（每人一条轴），理由同
     day_page：两条拍打到同一个人时，各自读到"本周还没写"就会双双烧一次模型，最后链
     上多出一版语义重复的正文（版本链是 append-only，没有任何东西会拦第二次）。窗口
     那一道判在占用**外面**：它只看传进来的 ``now``，不读任何共享状态，等锁没有意义
@@ -275,7 +275,7 @@ async def review_persona(
             persona_id=persona_id,
             session_id=f"living-persona-review:{lane}:{persona_id}",
         )
-        # 用量落 durable PG，理由同 moment 和 world 轮次（见 app.agent.trace）：langfuse
+        # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
         # 会系统性丢 trace，"这一周花了多少"只能从 PG 数。
         with collect_usage() as usage:
             reply = await build_persona_review_runner().run(

@@ -443,11 +443,9 @@ def test_an_act_does_not_get_to_declare_what_the_world_is_like():
 
     上一代 prod 审计（06-11..08-30）里每一条"家人生病"剧情都是同一个起法：life 在
     ``act`` 里顺带塞一句关于世界的断言（别人的身体、外面出的事、测出来的结果），
-    下游把它当既成事实吃进去。旧引擎至少还有 world 那一环能按自己的记录不认
-    （#321 给 ``world_deliberate`` 划的那条边界）；这一版**没有任何人能否认**——
-    ``app.living.world`` 根本不读姐妹之间发生了什么，:func:`_record` 也不裁定，
-    渲染出来更是逐字原话，落在别人快照的"这段时间你感知到的"里。传播路径比旧引擎
-    还直，所以这条边界只能立在喂给模型的那份工具描述上。
+    下游把它当既成事实吃进去。这一版**没有任何人能否认**——:func:`_record` 不裁定，
+    渲染出来更是逐字原话，落在别人快照的"这段时间你感知到的"里，所以这条边界只能立在
+    喂给模型的那份工具描述上。
 
     两层都得在，少一层就坏一边：动作**直接**造成的结果仍要照写（掐掉的话她的动作
     描述只剩半句），只有不由动作直接产生的世界断言不许她在这里宣布。而且得给她一
@@ -767,9 +765,8 @@ async def test_a_thing_she_hung_an_hour_on_comes_due_in_front_of_her(
 ):
     """**验收正条**：她挂一件该在几点的事，还没到的时候它在她眼前，到点那一下当场说到了。
 
-    她的安排不进 ``Upcoming``——那是世界的客观时刻表（快递到门口、天黑），到期交付
-    一次就被消费掉。"我该去开的那个会"在她真的去之前不会因为时间过了就不算数，而且
-    把她的安排塞进世界的账本等于 life 单方面替世界宣布将要发生什么。
+    她的安排是她自己心里挂着的事，不是一张到期交付一次就被消费掉的时刻表。"我该去开的
+    那个会"在她真的去之前不会因为时间过了就不算数。
 
     **"到点了"必须在到点那一个 moment 就送到她手上**，不能等下一次重铺。挂着的清单跟
     着状态走、清理时才重铺（默认一小时），所以"刚到点的"单独走每轮的增量
@@ -1877,7 +1874,7 @@ async def test_refusing_an_empty_place_hands_her_no_place_name(
 async def test_landing_somewhere_hands_back_only_where_she_is(
     moment_db, in_a_moment, tmp_path, monkeypatch
 ):
-    """旧世界层留下的东西都摆着（地方文档、一件还在持续的事），两只手也一个字都不带出来。"""
+    """那儿有地方文档、刚有人在那儿做过事，两只手也一个字都不带出来。"""
     from app.living.happening import record_happening
 
     monkeypatch.setenv("WORLD_DOCS_DIR", str(tmp_path / "mount"))
@@ -1887,13 +1884,12 @@ async def test_landing_somewhere_hands_back_only_where_she_is(
     kitchen.write_text("桌上还堆着没洗的碗。", encoding="utf-8")
     await record_happening(
         lane=LANE,
-        happening_id="rain",
-        actor="world",
-        place="学校",
+        happening_id="ayana-on-the-field",
+        actor="ayana",
+        place="学校/操场",
         kind="act",
-        content="外面下着雨",
+        content="在操场边上跑圈",
         occurred_at=_at(9),
-        lasts_until=_at(12),
     )
 
     async with in_a_moment("akao", now=_at(10)):

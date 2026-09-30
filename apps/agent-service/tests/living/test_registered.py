@@ -29,7 +29,6 @@ from app.living.records import (
     KIND_SPEECH,
     MEDIUM_IN_PERSON,
     Happening,
-    Upcoming,
     Whereabouts,
 )
 from app.runtime.schema_types import pg_type
@@ -61,15 +60,6 @@ _VALID: dict[type, dict] = {
         "place": "家/客厅",
         "doing": "待着",
         "noted_at": _AWARE,
-    },
-    Upcoming: {
-        "lane": "coe-x",
-        "item_id": "i1",
-        "ver": 1,
-        "what": "天亮",
-        "due_at": _AWARE,
-        "place": None,
-        "consumed_at": _AWARE,
     },
     FileRead: {
         "lane": "coe-x",
@@ -132,7 +122,6 @@ _PINNED: dict[type, dict[str, str]] = {
         "audience": "JSONB",
         "who_was_where": "JSONB",
         "channel_id": "TEXT",
-        "lasts_until": "TIMESTAMPTZ",
     },
     Whereabouts: {
         "lane": "TEXT",
@@ -142,16 +131,6 @@ _PINNED: dict[type, dict[str, str]] = {
         "place": "TEXT",
         "doing": "TEXT",
         "noted_at": "TIMESTAMPTZ",
-    },
-    Upcoming: {
-        "lane": "TEXT",
-        "item_id": "TEXT",
-        "ver": "BIGINT",
-        "what": "TEXT",
-        "due_at": "TIMESTAMPTZ",
-        "place": "TEXT",
-        "consumed_at": "TIMESTAMPTZ",
-        "lasts_until": "TIMESTAMPTZ",
     },
     FileRead: {
         "lane": "TEXT",
@@ -233,7 +212,6 @@ def test_living_data_reaches_the_registry_via_app_wiring():
     for name in (
         "Happening",
         "Whereabouts",
-        "Upcoming",
         "FileRead",
         "FilePickedUp",
         "Picture",
@@ -290,7 +268,7 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
     """不带 tzinfo 的时刻在写入前就被拒 —— 四个字段一视同仁，不许挡一半。
 
     落进 TIMESTAMPTZ 的 naive datetime 会被按服务器时区解释，静默偏 8 小时：
-    ``due_at`` 是整个日历的基准，偏了就是日历全错、而且一句报错都没有。跟
+    按时刻开窗的读取会整段错位，而且一句报错都没有。跟
     ``medium`` 写成 ``"in-person"`` 是同一类静默毒化，所以挡在同一个位置。
 
     这条按 ``_PINNED`` 遍历，新加一个 TIMESTAMPTZ 字段却忘了校验就会红。
@@ -308,13 +286,9 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
 
     assert sorted(checked) == [
         ("FileRead", "read_at"),
-        ("Happening", "lasts_until"),
         ("Happening", "occurred_at"),
         ("LivingDayPage", "written_at"),
         ("Picture", "made_at"),
-        ("Upcoming", "consumed_at"),
-        ("Upcoming", "due_at"),
-        ("Upcoming", "lasts_until"),
         ("Whereabouts", "noted_at"),
     ]
 

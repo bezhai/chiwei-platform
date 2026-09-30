@@ -1,7 +1,5 @@
-"""Wiring: living 引擎的 Data 注册、七条时间源与那条出站边。
+"""Wiring: living 引擎的 Data 注册、五条时间源与那条出站边。
 
-  interval 60s  -> CalendarTick      -> calendar_tick       （日历，不花模型钱）
-  interval 300s -> WorldRoundTick    -> world_round_tick    （world 稀疏轮次，门在节点里）
   interval 60s  -> LifeMomentTick    -> life_moment_tick    （三个 life 共用的这一轮，门在节点里）
   interval 60s  -> PhoneNudgeTick    -> phone_nudge_tick    （有人叫她就提前叫醒她一次）
   interval 300s -> LandingTick       -> landing_tick        （她那次开口落地成哪一行）
@@ -10,19 +8,19 @@
 
   ChatResponseSegment -> Sink.mq("chat_response")        （她开口，出 graph）
 
-七条钟都直接挂在单字段 ``ts`` 的 tick 上，没有中间翻译节点：泳道由节点自己从进程
-环境读（``app.living.clock.living_lane``），tick 本身不需要携带任何内容。挂时间源的
+五条钟都直接挂在单字段 ``ts`` 的 tick 上，没有中间翻译节点：泳道由节点自己从进程
+环境读（:func:`app.living.records.living_lane`），tick 本身不需要携带任何内容。挂时间源的
 Data 多一个必填字段就会在源循环 ``_build_payload`` 处 ValidationError **直接杀
-Pod**，所以这七个 Data 的形状由 ``tests/wiring/test_time_source_payload_contract.py``
-（按生产图自动发现每一条钟）加 ``tests/living/test_clock.py``、
-``tests/living/test_moment.py`` 和 ``tests/living/test_no_inbound.py`` 钉住。
+Pod**，所以这五个 Data 的形状由 ``tests/wiring/test_time_source_payload_contract.py``
+（按生产图自动发现每一条钟）加 ``tests/living/test_moment.py`` 和
+``tests/living/test_no_inbound.py`` 钉住。
 
-后四条钟拍得都比它们真正的间隔密（world 五分钟拍、一小时跑一轮；life 一分钟拍、
-十分钟醒一次；日记和每周回看五分钟拍、各自只在一个两小时的窗口里做事），因为
-``Source.interval`` 的秒数在 import 时就固定了——想让间隔成为可调的业务参数
-（Dynamic Config），只能让钟拍得比最密的间隔更密、然后在节点里判"够不够久"。
+后三条钟和 life 那条拍得都比它们真正的间隔密（life 一分钟拍、十分钟醒一次；日记和每周
+回看五分钟拍、各自只在一个两小时的窗口里做事），因为 ``Source.interval`` 的秒数在
+import 时就固定了——想让间隔成为可调的业务参数（Dynamic Config），只能让钟拍得比最密的
+间隔更密、然后在节点里判"够不够久"。
 
-**这里没有、也不会有任何入站边。** 七条钟全是 interval，一条 ``Source.mq`` /
+**这里没有、也不会有任何入站边。** 五条钟全是 interval，一条 ``Source.mq`` /
 ``Source.http`` 都没有：chat 是嘴，没有耳朵，而这件事靠"根本没有接消息的地方"来
 保证，不靠哪个分支里的 if。她收消息走的是每一轮直接查 ``common_message``
 （``app.living.phone``），不碰队列。
@@ -35,15 +33,14 @@ Pod**，所以这七个 Data 的形状由 ``tests/wiring/test_time_source_payloa
 出站方向的回执也走这条口径：``LandingTick`` 那条钟是**自己去查**公共层对账，不是
 让渠道回调进来（那就是第一只耳朵）。
 
-除七条钟之外还有一条 durable 边（``FilePickedUp -> read_a_round``，她拿起一个文件
+除五条钟之外还有一条 durable 边（``FilePickedUp -> read_a_round``，她拿起一个文件
 读一程）。它**同样不是入站口**：``.durable()`` 只是 ``WireBuilder`` 上的标志位，不
 产生任何 ``Source``，边上跑的只有她自己刚在某一轮里 emit 的那个信号。
 
 ``app.living.records`` 的 import 不能删：Data 类要被 ``app.wiring`` 的 side-effect
 import 链拉到才会进 ``DATA_REGISTRY``，否则 ``Runtime.migrate_schema()`` 静默不建表、
-一路跑到真读写才炸。``WorldRound`` 由 ``clock`` -> ``world`` 的 import 链带进来，
-``LivingDayPage`` 由下面挂钟那行的 ``living.day_page`` 带进来（同时也在
-``moment`` -> ``snapshot`` -> ``day_page`` 这条链上），
+一路跑到真读写才炸。``LivingDayPage`` 由下面挂钟那行的 ``living.day_page`` 带进来
+（同时也在 ``moment`` -> ``snapshot`` -> ``day_page`` 这条链上），
 ``LooseEnd`` 由 ``moment`` -> ``loose_ends`` 带进来，``PhoneRead`` 由 ``moment`` ->
 ``phone`` 带进来，``PersonaVersion``（「她是谁」那份正文的版本链）由 ``moment`` ->
 ``persona`` 带进来，``FileRead`` / ``FilePickedUp`` 由下面那行 ``living.reading`` 直接
@@ -59,14 +56,6 @@ from __future__ import annotations
 
 from app.domain.chat_dataflow import ChatResponseSegment
 from app.living import pictures, records  # noqa: F401
-from app.living.clock import (
-    CALENDAR_TICK_SECONDS,
-    WORLD_ROUND_TICK_SECONDS,
-    CalendarTick,
-    WorldRoundTick,
-    calendar_tick,
-    world_round_tick,
-)
 from app.living.day_page import (
     DAY_PAGE_TICK_SECONDS,
     DayPageTick,
@@ -95,10 +84,6 @@ from app.living.persona_review import (
 from app.living.reading import FilePickedUp, read_a_round
 from app.runtime import Sink, Source, wire
 
-wire(CalendarTick).from_(Source.interval(CALENDAR_TICK_SECONDS)).to(calendar_tick)
-wire(WorldRoundTick).from_(Source.interval(WORLD_ROUND_TICK_SECONDS)).to(
-    world_round_tick
-)
 wire(LifeMomentTick).from_(Source.interval(LIFE_MOMENT_TICK_SECONDS)).to(
     life_moment_tick
 )
@@ -106,17 +91,16 @@ wire(PhoneNudgeTick).from_(Source.interval(PHONE_NUDGE_TICK_SECONDS)).to(
     phone_nudge_tick
 )
 # 对账：把她说出去的那些跟公共层落下的那一行接回来。单独一条钟，不塞进上面任何
-# 一条 —— 那几条钟各有各的节奏理由（日历的到期误差、world 的轮次分辨率、life 醒来的
-# 提前延迟），把一件跟它们无关的事挂上去就是职责混淆，而且从此改不动其中任何
-# 一个的频率。
+# 一条 —— 那几条钟各有各的节奏理由（life 醒来的间隔、被叫醒的提前延迟），把一件跟它们
+# 无关的事挂上去就是职责混淆，而且从此改不动其中任何一个的频率。
 wire(LandingTick).from_(Source.interval(LANDING_TICK_SECONDS)).to(landing_tick)
 
 # 跨天沉淀：每天凌晨那阵子把刚过去那个生活日摆给她，让她自己写一页
 # （``app.living.day_page``）。同样是"拍得比它真正要做的事密"——真正的窗口是
 # 04:00～06:00，判在节点里；窗口外每一拍在读库之前就返回了。
 #
-# **单独一条钟，不塞进上面任何一条。** 它跟 world 的轮次一样低频、却是完全不同的一件
-# 事，挂上去就是从此改不动其中任何一个的频率。
+# **单独一条钟，不塞进上面任何一条。** 它跟上面几条是完全不同的一件事，挂上去就是
+# 从此改不动其中任何一个的频率。
 wire(DayPageTick).from_(Source.interval(DAY_PAGE_TICK_SECONDS)).to(day_page_tick)
 
 # 每周回看：周一早上把上一周她自己写的那几页摆给她，让她重写一版「我是谁」

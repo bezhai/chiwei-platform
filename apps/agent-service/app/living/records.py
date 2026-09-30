@@ -1,13 +1,9 @@
-"""living 的三类持久数据。
+"""living 的两类持久数据：发生过的事、她在哪。
 
 :class:`Happening` 和 :class:`Whereabouts` 是纯 append + 自然键幂等
 （``insert_idempotent``），不声明 Version：它们记的是"已经发生过的事"和"某一轮她在
 哪"，没有"改一条旧记录"的语义，重放（工具重试 / durable 重投）用同一个自然键再写
 一次就该是无害的 no-op。
-
-:class:`Upcoming` **有版本链**，因为它有一个真实的状态变化：写下 → 被拿走。理由写在
-它自己的 docstring 里。用的是 framework 的 ``Version`` + ``insert_append`` CAS，不是
-另起一张影子表——"这条拿走过没有"是这条日历项的状态，不是另一件事。
 
 **字段一次想清楚**：migrator 是 additive-only，加列随时可以（``ALTER TABLE ADD
 COLUMN``），删列 / 改类型会 ``MigrationError`` 崩启动。所以这里宁可少写一个字段
@@ -19,7 +15,7 @@ lane 进 Key 是硬约束：runtime 持久化不给任何 Data 自动加 lane，
 和 prod 的行混在一张表里。
 
 **本模块还住着几样跨模块的共用东西**（:data:`OUTBOUND_HAPPENING_PREFIX`、
-:data:`WORLD_ACTOR`、:func:`esc`、:func:`living_lane`）。它们不在各自"该在"的模块里，是因为读它的和写
+:func:`esc`、:func:`living_lane`）。它们不在各自"该在"的模块里，是因为读它的和写
 它的都 import 本模块，反过来会绕成一个环 —— 而这几样各写一份的下场都是静默漂移。
 """
 
@@ -31,21 +27,18 @@ from typing import Annotated
 
 from pydantic import field_validator
 
-from app.runtime.data import Data, Key, Version
+from app.runtime.data import Data, Key
 from app.runtime.lane_policy import current_deployment_lane
 
 
 def living_lane() -> str:
     """本进程所在的泳道；prod 部署上是 ``"prod"``。
 
-    lane 进 living 三张表的 Key 是硬约束（runtime 不给任何 Data 自动加 lane）。
+    lane 进 living 每张表的 Key 是硬约束（runtime 不给任何 Data 自动加 lane）。
     拿不到泳道时必须落到 ``"prod"`` 而不是空串：空串会开一条谁也读不到的影子轴——
     写进去的行查不出来，而她那边一片安静，什么报错都没有。
 
-    **住在这儿而不是 clock 里**，理由跟本模块其余共用件同一条。而且这一条是硬的：
-    ``day_page`` 在 ``continuity`` 之下、``world`` 在 ``continuity`` 之上，它待在
-    ``clock`` 里的时候 ``world → continuity → day_page → clock → world`` 是一个真的
-    环（``clock`` 要 import ``world`` 那一轮）。
+    住在这儿，理由跟本模块其余共用件同一条：用它的模块都 import 本模块。
     """
     return current_deployment_lane() or "prod"
 
@@ -53,8 +46,7 @@ def living_lane() -> str:
 # happening 的形态。机制层硬定的两类，不是让模型自由发挥的字符串：
 #   * ``speech``  说出口的话。``content`` 是原话。
 #   * ``act``     做的事。``content`` 是一句自然语言描述（"我去厨房煮抹茶"）。
-# 两者共用一张表，是因为「谁在哪对谁做了什么说了什么」在读取侧是同一件事——
-# 旧引擎把说话和做事拆成两条通道，结果 world 看不见姐妹之间发生了什么。
+# 两者共用一张表，是因为「谁在哪对谁做了什么说了什么」在读取侧是同一件事。
 KIND_SPEECH = "speech"
 KIND_ACT = "act"
 _KINDS = frozenset({KIND_SPEECH, KIND_ACT})
@@ -71,22 +63,6 @@ _KINDS = frozenset({KIND_SPEECH, KIND_ACT})
 # 放在这里而不是 ``mouth`` 里：``mouth`` 和 ``happening`` 本来就都 import 这个模块，
 # 而反过来会绕成一个环。
 OUTBOUND_HAPPENING_PREFIX = "mouth:"
-
-# 日历项、world 排的新东西、"外面今天什么样"都不是谁做的，是世界自己发生的。用一个
-# 绝不会跟 persona_id 撞的 actor，让回声抑制（:func:`app.living.happening.perceive`
-# 里 ``actor == persona_id`` 那一条）永远不会把世界的事从谁眼前抹掉。
-WORLD_ACTOR = "world"
-
-# 没绑地点的事（天黑、停电、今天什么节气）用 :data:`app.living.place.EVERYWHERE`，
-# 定义在 ``place`` 里 —— 判它的规则在那儿，值跟规则不该分家。
-#
-# 这儿原来有一个 ``AMBIENT_PLACE = "家"``：不绑地点的事被写在"这个家这一整片"上。
-# 那是在没有全局这一档时唯一能做的事，代价是实测 19.1% 的记录发生在 ``家`` 以外的根
-# （学校 723、小区 156、老街 48），她在那些地方时一条日历事件都收不到。已删。
-
-# 这个常量放在这里而不是 ``calendar`` 里，理由跟 :data:`OUTBOUND_HAPPENING_PREFIX`
-# 同一条：写它的（``calendar`` / ``outside``）和读它的（``happening`` 的渲染）都
-# import 本模块，反过来会绕成一个环。
 
 # 通过什么渠道。这是**客观事实**——她是当面说的，还是拿手机发的，还是发在群里的。
 # 不是给她的行为分优先级，也不是强度分级：三个值之间没有高低，只有"声音能不能传到
@@ -119,12 +95,10 @@ def esc(s: str | None) -> str:
     **哪些要过、哪些不要：判据是"逐字通道"，不是"谁写的"。**
 
     要过的是第三方能决定确切字节的那些：真人的昵称和消息正文、群名、文件名、网页
-    的标题 / 链接 / 摘要、图片站的标题。**world 从六个真实数据源抄进世界的那些字**
-    （天气、番名）也过这一道：中间虽然隔着一个模型，但转写正是它最容易被劝着做的事，
-    而 ``Happening.content`` 上这一道没有代价。
+    的标题 / 链接 / 摘要、图片站的标题。
 
     不过的是经过模型的那些：她自己说的话（:func:`app.living.happening.own_line`）、
-    姐姐说的话、日页、读完一本书留下的印象。那些字节是某个模型写出来的，第三方最多
+    日页、读完一本书留下的印象。那些字节是某个模型写出来的，第三方最多
     只能"劝"它去写；而一旦模型能被劝着写出任意字节，转义也拦不住下一步 —— 它可以被
     劝着写别的。**那条路上要挡的是输出审计，不是转义**，而给她自己的话套上
     ``&quot;`` 是拿她读自己记忆的清晰度换一个挡不住的东西。
@@ -185,7 +159,7 @@ def _require_aware(name: str, v: datetime | None) -> datetime | None:
     """时刻必须带时区；不带就当场炸。
 
     落进 TIMESTAMPTZ 的 naive datetime 会被按服务器时区解释，静默偏 8 小时——
-    ``due_at`` 是整个日历的基准，偏了就是日历全错、而且一句报错都没有。跟
+    按时刻开窗的读取（比如一整个生活日）会整段错位，而且一句报错都没有。跟
     ``medium`` 写成 ``"in-person"`` 是同一类静默毒化，所以挡在同一个位置。
     """
     if v is not None and v.tzinfo is None:
@@ -218,8 +192,7 @@ class Happening(Data):
     存"当时谁在哪"这个事实而不是存裁好的结果，是因为事实不会变、而三档规则可能改。
 
     ``channel_id`` 是**哪一条会话**（``common_conversation.common_conversation_id``），
-    只有 ``phone`` / ``group_chat`` 这两个 medium 有；当面说的话和世界自己发生的事
-    是 ``None``。形状定成 common 口径的会话 id 而不是渠道裸 id（飞书 ``oc_*``），
+    只有 ``phone`` / ``group_chat`` 这两个 medium 有；当面说的话是 ``None``。形状定成 common 口径的会话 id 而不是渠道裸 id（飞书 ``oc_*``），
     理由跟出站契约同一条：出站段的 ``chat_id`` 就是这个 id，接 QQ 时不用换形状。
     不带它的话，她下一轮只知道"我说过这句话"，不知道说给哪条会话——于是"你上次在
     这个群开口是什么时候"这条事实根本算不出来。
@@ -236,33 +209,19 @@ class Happening(Data):
     occurred_at: datetime  # 发生时刻，展示用，**不当游标**
     audience: list[str]  # 说给谁（可以多个）；空 = 没有特定对象
     who_was_where: dict[str, str]  # 发生时各人在哪的快照
-    # 哪条会话上说的（common_conversation_id）；None = 不在任何会话上（当面 / 世界）。
+    # 哪条会话上说的（common_conversation_id）；None = 不在任何会话上（当面）。
     # 可空而不是空串：这是后加的列，``ALTER TABLE ADD COLUMN`` 给已有行留的是 NULL，
     # 声明成 ``str`` 会让那些行一读出来就 ValidationError。
     channel_id: str | None = None
-    # 这件事持续到什么时候；``None`` = 一瞬间的事（说话、动作、日历上那些时刻）。
-    #
-    # 只有"还在持续"这一类才填：下雨、停电、街上在办庙会。它管的是
-    # :func:`app.living.happening.ongoing_at` —— **在这件事开始之后才到场的人**，
-    # 走进来时还能知道这儿现在是什么样。没有这一列的话，感知只有游标一条路：下雨开始
-    # 的时候她在家、游标越过了那一条，她随后走进学校就永远不知道正在下雨，而地方文档
-    # 只写不变的部分，这件事没有任何别的途径能知道。
-    #
-    # 存"持续到什么时候"而不是"持续多少分钟"：读侧问的永远是"现在还算不算数"，
-    # 存绝对时刻的话那是一次比大小，存时长则每次都要再算一遍 ``occurred_at + 时长``。
-    lasts_until: datetime | None = None
 
     class Meta:
-        # 三种读侧形状：
+        # 两种读侧形状：
         #   * (lane, seq)          某 lane 下 seq 之后的一段（每一轮都走这条）
         #   * (lane, occurred_at)  某一整个生活日（日记材料，一天三次）
-        #   * (lane, lasts_until)  此刻还在持续的（她每换一次地方走一次）
         # 第二条按**发生时刻**开窗，跟游标那条不是同一个问题：一天的边界是钟点，
         # 而 seq 是提交序，两者跨 persona 并发时对不上。频率低但扫的是整张表，
         # 没有索引的话它会随着这张表一起变慢，而症状只是"日记这一轮有点久"。
-        # 第三条几乎全是 NULL（绝大多数事是一瞬间的），但她换地方比写日记频繁得多，
-        # 没有它每次 move_to 都是一次全表扫。
-        indexes = (("lane", "seq"), ("lane", "occurred_at"), ("lane", "lasts_until"))
+        indexes = (("lane", "seq"), ("lane", "occurred_at"))
 
     # ``kind`` / ``medium`` 上面写着"机制层硬定的枚举"，这里让它真的是。
     # 不用 ``Literal`` 是因为 migrator 会把它映成 JSONB 列（``pg_type_for_annotation``
@@ -288,11 +247,6 @@ class Happening(Data):
     @classmethod
     def _aware_occurred_at(cls, v: datetime) -> datetime:
         return _require_aware("occurred_at", v)
-
-    @field_validator("lasts_until")
-    @classmethod
-    def _aware_lasts_until(cls, v: datetime | None) -> datetime | None:
-        return _require_aware("lasts_until", v)
 
 
 class Whereabouts(Data):
@@ -323,47 +277,3 @@ class Whereabouts(Data):
     @classmethod
     def _aware_noted_at(cls, v: datetime) -> datetime:
         return _require_aware("noted_at", v)
-
-
-class Upcoming(Data):
-    """将要发生的一件客观事：什么时候、什么事、在哪、被谁消费掉了没有。
-
-    自然键 ``(lane, item_id)``。日出日落、三餐、店关门这类客观时刻是数据、不是
-    模型判断——写下来就行。
-
-    ``due_at`` 是**真正的时间类型**，不是任意文本。文本的代价是双份的：一条
-    "下午三点"能顺利落库，然后整个窗口的 cast 一起失败，她那一轮一条日历项都读
-    不到；而且索引撑不起范围查询。类型 additive-only，改不回来，所以只能一开始就定对。
-
-    这张表**没有 seq，有版本链**，跟另外两张不一样。它的消费不是"读到哪了"而是
-    "这条拿走过没有"：``(after, until]`` 开窗只在"所有项必定提前写入"这个从没被
-    编码过的假设下才对，重启补种 / 重试 / world 晚提交一条已经过了游标的 item 都
-    会被永久越过。所以交付条件是 ``consumed_at IS NULL AND due_at <= now``，消费方
-    拿走后 append 一版把 ``consumed_at`` 填上（``ver`` 由 framework 维护，CAS 保证
-    并发下只有一个人标得掉）。到期之后要变成她能感知到的东西，是 T3 的事（形态上
-    就是往 :class:`Happening` 里 append 一行）。
-    """
-
-    lane: Annotated[str, Key]
-    item_id: Annotated[str, Key]
-    ver: Annotated[int, Version]  # framework 维护的版本号，v1 = 写下，之后 = 消费掉
-    what: str
-    due_at: datetime     # 到期时刻
-    place: str | None = None       # 在哪发生；None = 不绑定地点（天黑这种，交付成全局）
-    consumed_at: datetime | None = None  # 被拿走的时刻；None = 还没被拿走
-    # 这件事持续到什么时候；None = 一瞬间的事（日历上那些时刻全是这一类）。
-    # 到期时原样搬进 :class:`Happening` 的同名列，语义见那一条。
-    #
-    # 存的是**绝对时刻不是时长**，而且跟 ``due_at`` 一样在排它的那一刻就定死：
-    # 交付晚了几十秒不该让这场雨多下几十秒 —— 跟 ``occurred_at`` 取 ``due_at``
-    # 而不是取 ``now`` 是同一条。
-    lasts_until: datetime | None = None
-
-    # 不声明 Meta.indexes：读取形状是"每个 item 的最新一版"，先 DISTINCT ON
-    # (lane, item_id) ORDER BY ver DESC 再筛 due_at —— 走的是 migrator 给 Version
-    # 类自动建的 ix_key_ver。一条 (lane, due_at) 索引落在子查询外面，谁也用不上。
-
-    @field_validator("due_at", "consumed_at", "lasts_until")
-    @classmethod
-    def _aware_instant(cls, v: datetime | None) -> datetime | None:
-        return _require_aware("due_at / consumed_at / lasts_until", v)

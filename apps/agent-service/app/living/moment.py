@@ -190,8 +190,8 @@ LIFE_MOMENT_PROMPT_ID = "living_life_moment"
 
 # life-model：这个 moment 要的是对自己处境的判断（有没有什么把我带走），不是对话能力。
 # 用 life-model 而不是 offline-model，是因为**量级不一样**：life 一天 432 个 moment × 三个
-# 人，world 一天二十几轮。life-model 这个别名本来就是给 life 这种高频线选的，world
-# 那条留在 offline-model 上，两条线的档位不该互相牵动。
+# 人。life-model 这个别名本来就是给 life 这种高频线选的，跟低频的离线调用（日记、每周
+# 回看，走 offline-model）档位不该互相牵动。
 # recursion_limit 12 = **她一口气能做几件事**，不是"一次思考多深"。上下文连续之后这两个
 # 问题分开了：一件完整的事要三四次模型调用（搜一下拿到结果 → 读进去 → 说出来 / 做出
 # 来），12 给的是三件的余量。8 只够两件，而 2026-09-11 实测 5 小时 66 个 moment 里，那
@@ -215,7 +215,7 @@ LIVING_LIFE_MOMENT_MINUTES_KEY = "living_life_moment_minutes"
 DEFAULT_LIFE_MOMENT_MINUTES = 10
 
 # 钟拍得比最密的 moment 还密，间隔判在节点里 —— ``Source.interval`` 的秒数在 import 时
-# 就固定了，想让间隔可调只能这么做（跟 :mod:`app.living.clock` 同一条理由）。
+# 就固定了，想让间隔可调只能这么做（理由写在 :mod:`app.wiring.living`）。
 # 一分钟一拍的代价只有一次读库 + 比大小。
 LIFE_MOMENT_TICK_SECONDS = 60
 
@@ -607,8 +607,8 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     里：world 写得出"许阿姨下午来敲门"，而她对许阿姨物理上开不了口——门一关，世界
     往前走一步，代码就离世界远一步。世界里有谁由 world 说了算。
 
-    换成"查一遍树上有没有这个人"同样不对：树是 world 写的，它可能还没来得及写，而
-    那会把这只手和文档树耦上。说给一个没人接的名字，那句话就落在世界里没人接（定向
+    换成"去 world 那边查一遍有没有这个人"同样不对：life 不读 world 的存储，而且 world
+    可能还没来得及记下这个人。说给一个没人接的名字，那句话就落在世界里没人接（定向
     送达那条路匹配不上，只剩位置旁听，见 :func:`app.living.happening.perceive`）——
     这本身是真实的，不是错误。
     """
@@ -802,9 +802,6 @@ KEPT_TOOLS = frozenset(
 # 它们是"她是什么东西"的一部分，不是可调的旋钮。裁剪那一层只给形状，填什么归这里
 # （:class:`app.living.continuity.TrimPolicy`）。
 #
-# 跟 world 那一份（:data:`app.living.world.WORLD_TRIM_POLICY`）现在值相同，但**不是
-# 同一份**：一个是客观的世界，一个是人，该记多久本来就不是一种东西，两边从此各调各的。
-#
 #   * ``material_minutes`` 60   她读到的东西，过期了再看一次就有
 #   * ``own_minutes``     240   她自己说的话和动作回执 —— 那是她那段经历读得懂的骨架
 #   * ``cleanup_minutes``  60   固定时刻清理。它跟 moment 间隔一起受
@@ -829,7 +826,7 @@ async def life_moment_minutes() -> int:
     """两个 moment 之间至少隔多少分钟；没配 / 配脏退回默认值。
 
     Dynamic Config 的拉取是同步 httpx（10s 缓存），走 ``asyncio.to_thread`` 避免
-    缓存刷新那一次阻塞事件循环（与 :mod:`app.living.world` 同口径）。
+    缓存刷新那一次阻塞事件循环。
     """
     minutes = await asyncio.to_thread(
         dynamic_config.get_int,

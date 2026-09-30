@@ -55,9 +55,9 @@ def test_load_dataflow_graph_returns_compiled_graph_with_real_wiring():
     g = load_dataflow_graph("agent-service")
     # living 的钟骑在生产 wiring 上
     assert {n.__name__ for n in g.nodes} >= {
-        "calendar_tick",
-        "world_round_tick",
         "life_moment_tick",
+        "phone_nudge_tick",
+        "day_page_tick",
     }
 
 

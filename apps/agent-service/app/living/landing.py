@@ -29,9 +29,7 @@
 记录本身就是要给人看的事实（那次 ``emit`` 的结果未知，或者投递方压根没写成），
 而不是一个要被计数器消化掉的失败。
 
-**补一版走 append，不是 UPDATE。** 照
-:func:`app.living.upcoming.mark_upcoming_consumed` 那个模板：读最新一版 → 走构造函数
-造新版（**不是** ``model_copy(update=...)``，那个在 pydantic v2 上完全跳过校验，naive
+**补一版走 append，不是 UPDATE。** 读最新一版 → 走构造函数造新版（**不是** ``model_copy(update=...)``，那个在 pydantic v2 上完全跳过校验，naive
 datetime 会从缝里溜进 TIMESTAMPTZ 列）→ ``insert_append(expected_current_ver=...)``
 → **看返回值**。
 

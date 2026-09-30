@@ -79,8 +79,8 @@ DAY_PAGE_TICK_SECONDS = 300
 # Langfuse prompt id。
 DAY_PAGE_PROMPT_ID = "living_day_page"
 
-# offline-model：一天三次（三个人各一次），跟 world 的轮次同一个量级，不该占 life
-# 那条高频线的档位。
+# offline-model：一天三次（三个人各一次），是低频的离线调用，不该占 life 那条高频线的
+# 档位。
 #
 # recursion_limit 1：这一轮**没有工具**，一次生成就完。这不是省钱，是把一整类失败
 # 从存在里去掉——有工具的话"她调了工具但正文写空了"是一种既没报错、也没有页的状态，
@@ -324,7 +324,7 @@ async def write_day_page(
 ) -> LivingDayPage | None:
     """让她把刚过去那个生活日写成一页；这一拍不该写 / 没写成就返回 ``None``。
 
-    **"这天写过没有"到落库为止在排他占用里**（每人一条轴），理由同 world 的轮次：两
+    **"这天写过没有"到落库为止在排他占用里**（每人一条轴）：两
     条拍打到同一个人时，各自读到"这天还没写"就会双双烧一次模型，最后还有一条被
     ``insert_idempotent`` 丢掉。窗口那一道判在占用**外面**：它只看传进来的 ``now``，
     不读任何共享状态，等锁没有意义——一天里 288 拍中的绝大多数在这里就返回了。
@@ -374,7 +374,7 @@ async def write_day_page(
             persona_id=persona_id,
             session_id=f"living-day-page:{lane}:{persona_id}",
         )
-        # 用量落 durable PG，理由同 moment 和 world 轮次（见 app.agent.trace）：langfuse
+        # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
         # 会系统性丢 trace，"这一天花了多少"只能从 PG 数。
         with collect_usage() as usage:
             reply = await build_day_page_runner().run(

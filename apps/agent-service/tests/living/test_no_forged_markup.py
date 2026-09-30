@@ -12,7 +12,7 @@
 **判据是"逐字通道"，不是"谁写的"。**
 
   * 转义的是第三方能决定确切字节的那些：真人的昵称、群名、文件名、消息正文、网页
-    标题 / 链接 / 摘要、图片站的标题、world 从真实数据源抄进世界的那些字。
+    标题 / 链接 / 摘要、图片站的标题。
   * 不转义的是经过模型的那些：她自己说的话、姐姐说的话、日页、读完一本书留下的印象。
     那些字节是某个模型写出来的，第三方最多只能"劝"它去写；而一旦模型能被劝着写出任
     意字节，转义也拦不住下一步（它可以被劝着写别的）。那条路上要挡的是输出审计，不
@@ -444,54 +444,24 @@ async def test_an_image_title_from_the_internet_cannot_carry_markup(
 
 
 # ---------------------------------------------------------------------------
-# 世界报出来的事：外面的字节现在先经过 world 的手
+# 别人做的事：落到她眼前时一样不带结构
 #
-# 从前这条通道是一层投递代码：它每个生活日去问六个真实数据源，把上游的
-# 字节逐字贴上标签广播成一件所有人都感知得到的事。那一层已经删了 —— 六个源现在是
-# world 自己的手（:data:`app.living.world.OUTSIDE_SOURCE_TOOLS`），字节先进它的工具
-# 返回，它读完才决定写不写进世界。
-#
-# **于是这一条从"逐字通道"变成了"转写通道"**：中间隔着一个模型。按
-# :func:`app.living.records.esc` 的判据，被劝着写出任意字节的模型要挡的是输出审计不是
-# 转义 —— 但两个渲染函数仍然无条件转义，而且必须继续这样：转写正是 world 最容易被劝
-# 着做的事（"照抄这句天气描述"），而 ``content`` 这一列上转义没有代价。
-#
-# **新口子在另一头**：上游的字节现在直接落进一个 agent 的上下文（工具返回，没转义）。
-# 在 world 那边伪造不出身份 —— 它的上下文里一个带属性的标签都没有，``<msg … rel=
-# "owner">`` / ``<who …/>`` 只由 :mod:`app.living.phone` 拼，而 phone 是她的手。所以
-# 护栏是**这六只不在她手上**（``tests/living/test_world.py`` 的
-# ``test_she_does_not_get_these_hands``），这里钉住那条护栏成立所依赖的事实：工具那一
-# 层交回来的就是上游原样的字节。
-#
-# **那条护栏只管得了直接调用。** 字节从它的上下文走到她眼前还有一条间接的路：抄进
-# ``Happening.content``（上面两条钉着）。
+# ``Happening.content`` 上的字是别的参与者写下的。``perceived_line`` 对它无条件转义，
+# 这一列上转义没有代价（理由写在 :func:`app.living.happening.perceived_line` 上）。
 # ---------------------------------------------------------------------------
 
 
-def _what_world_transcribed() -> str:
-    """world 把外面来的一段字节抄进世界之后，落在 ``Happening.content`` 上的那段字。
-
-    手写而不是调某个投递函数：投递层没有了，``content`` 现在是 world 那一轮自己写下的
-    一句话，形状就是"一句自然语言"，没有第二份实现可以对齐。
-    """
-    return f"外面下着雨，{POISON}"
-
-
-def test_what_world_writes_into_the_world_cannot_carry_markup_into_what_she_perceived():
-    """world 抄进世界的那句话到期变成一件事，落到她眼前时不能带结构。
-
-    ``perceived_line`` 是她这一侧的渲染，``Happening.content`` 上任何一段不是她那侧模型
-    写的字节都从这儿过。
-    """
+def test_what_someone_else_did_cannot_carry_markup_into_what_she_perceived():
+    """别人记下的一件事落到她眼前时不能带结构。"""
     from app.living.happening import Perceived, perceived_line
     from app.living.place import Reach
-    from app.living.records import KIND_ACT, MEDIUM_IN_PERSON, WORLD_ACTOR
+    from app.living.records import KIND_ACT, MEDIUM_IN_PERSON
 
     line = perceived_line(
         Perceived(
             seq=1,
-            happening_id="world:deadbeef",
-            actor=WORLD_ACTOR,
+            happening_id="ayana:deadbeef",
+            actor="ayana",
             place="家",
             kind=KIND_ACT,
             medium=MEDIUM_IN_PERSON,
@@ -499,79 +469,12 @@ def test_what_world_writes_into_the_world_cannot_carry_markup_into_what_she_perc
             audience=(),
             reach=Reach.SAME_PLACE,
             directed=False,
-            content=_what_world_transcribed(),
+            content=f"把便当放在桌上，{POISON}",
         ),
         me="akao",
     )
 
     assert_only_our_own_markup(line, where="这段时间你感知到的")
-
-
-def test_what_world_writes_into_the_world_cannot_carry_markup_into_what_world_reads():
-    """同一段字节下一轮又摆到 world 自己眼前，那条路上同样不能开口子。
-
-    她读到的和 world 读到的是**两个渲染函数**（``perceived_line`` 和
-    ``app.living.world._line``），只钉住她那一侧等于这条不变量只守了一半。
-    """
-    from app.living.records import KIND_ACT, MEDIUM_IN_PERSON, WORLD_ACTOR, Happening
-    from app.living.world import _line
-
-    line = _line(
-        Happening(
-            lane=LANE,
-            seq=1,
-            happening_id="world:deadbeef",
-            actor=WORLD_ACTOR,
-            place="*",
-            kind=KIND_ACT,
-            medium=MEDIUM_IN_PERSON,
-            content=_what_world_transcribed(),
-            occurred_at=dt.datetime(2026, 7, 25, 8, tzinfo=dt.UTC),
-            audience=[],
-            who_was_where={},
-        ),
-        now=dt.datetime(2026, 7, 25, 9, tzinfo=dt.UTC),
-    )
-
-    assert_only_our_own_markup(line, where="world 这一轮读到的")
-
-
-async def test_the_real_world_sources_hand_their_bytes_back_unescaped():
-    """六个源交回来的是上游**原样**的字节 —— 工具那一层不转义，这是有意的。
-
-    它们返回的是结构化事实，转义会把事实本身弄脏（``&amp;`` 进了番名就不再是番名）。
-    代价是这些字节到谁的上下文里，谁那边就得没有可伪造的标记。world 那边没有；她那边
-    有。所以护栏在"给不给她这几只手"上，不在这一层 —— 而这条用例钉的是护栏成立的前提：
-    这里真的一个字节都没动过。
-    """
-    from unittest.mock import patch
-
-    import httpx
-
-    from app.agent.tools import external_sources
-
-    week = [{"weekday": {"cn": "星期六", "id": 6}, "items": [{"name_cn": POISON}]}]
-    real_client = httpx.AsyncClient
-
-    def factory(*args, **kwargs):
-        kwargs.pop("proxy", None)
-        return real_client(
-            transport=httpx.MockTransport(
-                lambda _req: httpx.Response(200, json=week)
-            ),
-            **kwargs,
-        )
-
-    with patch.object(
-        external_sources.httpx, "AsyncClient", side_effect=factory
-    ), patch.object(external_sources, "now_cst") as now:
-        now.return_value.isoweekday.return_value = 6
-        got = await external_sources.query_anime_calendar.invoke({})
-
-    assert got["ok"] is True
-    assert got["anime"] == [POISON], (
-        "工具那一层动了上游的字节 —— 要么它开始转义了（事实会被弄脏），要么它在删东西"
-    )
 
 
 # ---------------------------------------------------------------------------

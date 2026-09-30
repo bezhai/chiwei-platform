@@ -2,8 +2,8 @@
 
 框架硬约定（runtime/engine.py ``_build_payload``）：cron / interval 源每次 tick
 **只用 ``w.data_type(ts=<iso>)`` 构造** payload —— 时间源的 Data 必须是带
-``ts: str`` 字段的单字段 tick（正例见 ``app/living/clock.py`` 的
-``CalendarTick(ts: Annotated[str, Key])``）。
+``ts: str`` 字段的单字段 tick（正例见 ``app/living/moment.py`` 的
+``LifeMomentTick(ts: Annotated[str, Key])``）。
 
 ``compile_graph()`` 不跑源循环，所以一条时间源的 Data 形态不对（缺 ts / 有其他
 必填字段）编译期检测不到——整张图照样编译过、集成测试照样过，但生产源循环第一次

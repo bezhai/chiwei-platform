@@ -257,8 +257,7 @@ def _open_end_line(end: LooseEnd, *, now: datetime) -> str:
 
     **"到点了"在这里当场算，库里没有这个状态。** 有个东西替她把"挂着"改成"到点了"
     就是替她做决定；而且到点之后这条**继续显示**，直到她自己不再列它——时间过了，那个
-    会她还是没去开。这跟 :class:`~app.living.records.Upcoming` 到期交付一次就被消费
-    掉是两种东西，理由见 :mod:`app.living.loose_ends`。
+    会她还是没去开。理由见 :mod:`app.living.loose_ends`。
 
     ``opened_moment_id`` 而不是只给钟点：跨天之后"12:00 那一轮"分不清是哪一天，而这条
     正是"指得出它是从哪一轮带过来的"这个验收的落点。

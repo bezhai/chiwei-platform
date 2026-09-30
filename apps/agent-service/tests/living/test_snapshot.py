@@ -324,10 +324,9 @@ async def test_when_the_hour_has_come_the_snapshot_says_so(snap_db):
 
 @pytest.mark.integration
 async def test_a_thing_that_came_due_stays_until_she_stops_listing_it(snap_db):
-    """到期交付一次就被消费掉是 ``Upcoming`` 的语义。
-
-    她自己的安排不是那样：时间过了，那个会她还是没去开。所以到点之后那条继续挂在她
-    眼前，直到她自己不再列它——了结与否是她的判断，不是钟的。
+    """她自己的安排不是一张到期交付一次就被消费掉的时刻表：时间过了，那个会她还是
+    没去开。所以到点之后那条继续挂在她眼前，直到她自己不再列它——了结与否是她的判断，
+    不是钟的。
     """
     await _keep("[2026-07-25 15:00] 家属谈话会", at=_at(12))
 

@@ -128,7 +128,7 @@ async def load_pinned_groups() -> frozenset[str]:
     """读固定加白的那几个群。
 
     Dynamic Config 的拉取是同步 httpx（10s 缓存），走 ``asyncio.to_thread`` 避免缓存
-    刷新那一次阻塞事件循环（与 :mod:`app.living.calendar` 同口径）。SDK 拉不到时静默
+    刷新那一次阻塞事件循环。SDK 拉不到时静默
     返回 default，所以"paas-engine 挂了"和"就是没配"在这里长得一样 —— 两种都当空名单
     处理，这正是 fail-closed 那一侧。
     """

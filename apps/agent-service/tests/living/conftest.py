@@ -113,7 +113,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     from app.living.persona import PersonaVersion
     from app.living.phone import PhoneRead
     from app.living.pictures import Picture
-    from app.living.records import Happening, Upcoming, Whereabouts
+    from app.living.records import Happening, Whereabouts
     from tests.runtime.conftest import migrate
 
     # ``LivingDayPage`` 跟手机那几张一样建在这里：**每一轮都读那一页**（``read_snapshot``
@@ -123,7 +123,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     # ``SessionTranscript`` 也是：每一轮开头读连续上下文、结尾写回下一版
     # （``app.living.continuity``），少了它 ``run_moment`` 第一步就炸。
     for cls in (
-        Happening, Whereabouts, Upcoming, PhoneRead, SpokenOutbound, Picture,
+        Happening, Whereabouts, PhoneRead, SpokenOutbound, Picture,
         LivingDayPage, PersonaVersion, SessionTranscript,
     ):
         await migrate(cls, test_db)
