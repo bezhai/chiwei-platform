@@ -21,7 +21,7 @@ from app.messaging.sending import ask, send, send_at
 from app.runtime.wire import RetryPolicy
 
 from .conftest import LANE
-from .helpers import Inbox, eventually, outcomes
+from .helpers import Inbox, eventually, outcomes, outcomes_become
 
 pytestmark = pytest.mark.usefixtures("messaging_db")
 
@@ -258,8 +258,9 @@ async def test_send_at_delivers_at_the_designated_time_even_to_oneself(broker):
     m = world.got[0]
     assert (m.message_id, m.sender, m.recipient, m.time) == (message_id, "world", "world", at)
     assert world.received_at[0] >= at
+    expected = ["sending", "scheduled", "sending", "delivered"]
+    assert await outcomes_become(message_id, expected) == expected
     rows = await read_record(message_id=message_id)
-    assert outcomes(rows) == ["sending", "scheduled", "sending", "delivered"]
     assert rows[1]["recorded_at"] < at <= rows[3]["recorded_at"]
 
 
@@ -276,12 +277,8 @@ async def test_send_at_decides_about_the_inbox_when_it_is_due(broker):
     await start_messaging()
 
     await eventually(lambda: ayana.got, timeout=10)
-    assert outcomes(await read_record(message_id=message_id)) == [
-        "sending",
-        "scheduled",
-        "sending",
-        "delivered",
-    ]
+    expected = ["sending", "scheduled", "sending", "delivered"]
+    assert await outcomes_become(message_id, expected) == expected
 
 
 async def test_send_at_to_an_inbox_still_missing_when_due_tells_the_sender(broker):

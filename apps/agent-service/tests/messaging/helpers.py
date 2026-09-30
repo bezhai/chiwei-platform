@@ -49,3 +49,19 @@ async def eventually(predicate, *, timeout: float = 10.0, step: float = 0.05):
 
 def outcomes(rows: list[dict]) -> list[str]:
     return [r["outcome"] for r in rows]
+
+
+async def outcomes_become(message_id: str, expected: list[str], *, timeout: float = 10.0) -> list[str]:
+    """等记录者里这条消息的各行写齐到 ``expected``，交回最后读到的那一串。
+
+    "送达"那一行是在 broker 确认之后才写的，接收方可能先拿到消息：拿到消息那一刻去读记录，
+    最后一行可能还没落下。等不到就交回最后读到的，让调用方的断言把差别打印出来。
+    """
+    from app.messaging.record import read_record
+
+    deadline = time.monotonic() + timeout
+    while True:
+        got = outcomes(await read_record(message_id=message_id))
+        if got == expected or time.monotonic() >= deadline:
+            return got
+        await asyncio.sleep(0.05)
