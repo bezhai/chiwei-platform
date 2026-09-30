@@ -382,3 +382,125 @@ async def test_a_failing_on_open_while_held_lets_go_and_tries_again(broker, monk
     await eventually(lambda: handled, timeout=10)
     assert gate.events[:3] == ["entered", "left", "entered"]
     assert attempts["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 拥有者点名的消息：失败时不限次数重试，永不进死信
+# ---------------------------------------------------------------------------
+
+
+def _capture_retry_delays(monkeypatch) -> list[int]:
+    """记下每一次失败重投排的延时（毫秒），重投照常发出去。"""
+    from app.messaging import receiving
+
+    real = receiving.publish
+    delays: list[int] = []
+
+    async def publish(route, body, *, headers, delay_ms=None):
+        if headers.get("x-delivery-count"):
+            delays.append(delay_ms)
+        return await real(route, body, headers=headers, delay_ms=delay_ms)
+
+    monkeypatch.setattr(receiving, "publish", publish)
+    return delays
+
+
+async def test_a_singled_out_message_is_retried_past_the_limit_and_never_dead_lettered(
+    broker, monkeypatch, caplog
+):
+    """重试次数上限是 3：它失败了 6 次，照样一直重试，第 7 次成功；每次失败记录者里有一行、日志里有 warning。"""
+    import logging
+
+    from app.messaging.record import read_record
+
+    _fast_retry(monkeypatch)
+    delays = _capture_retry_delays(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="app.messaging.receiving")
+    calls = {"n": 0}
+    done: list[str] = []
+
+    async def fails_six_times(message) -> None:
+        calls["n"] += 1
+        if calls["n"] <= 6:
+            raise RuntimeError(f"第 {calls['n']} 次失败")
+        done.append(message.message_id)
+
+    async def always(message):
+        return timedelta(milliseconds=400)
+
+    inbox("world", on_message=fails_six_times, retry_without_limit=always)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="会失败六次。")
+
+    await eventually(lambda: done, timeout=20)
+    assert calls["n"] == 7
+    assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0
+    # 指数退避，封顶在拥有者给的上限：200、400、400……
+    assert delays == [200, 400, 400, 400, 400, 400]
+    rows = [r for r in await read_record(message_id=delivery.message_id) if r["outcome"] == "retrying"]
+    assert len(rows) == 6
+    assert "第 6 次失败" in rows[-1]["reason"]
+    warnings = [r for r in caplog.records if "retrying without limit" in r.getMessage()]
+    assert len(warnings) == 6
+
+
+async def test_messages_the_owner_does_not_single_out_keep_the_limited_retries(
+    broker, monkeypatch
+):
+    _fast_retry(monkeypatch)
+    calls = {"n": 0}
+
+    async def always_fails(message) -> None:
+        calls["n"] += 1
+        raise RuntimeError("失败")
+
+    async def never(message):
+        return None
+
+    inbox("world", on_message=always_fails, retry_without_limit=never)
+    await start_messaging()
+    await send(sender="operator", recipient="world", body="普通消息。")
+
+    dead_letters = f"{ISOLATED_DEAD_LETTERS}_{LANE}"
+    await eventually(lambda: broker.depth(dead_letters), timeout=15)
+    assert calls["n"] == 3
+
+
+async def test_when_the_retry_copy_cannot_be_published_the_message_is_put_back_not_acked(
+    broker, monkeypatch
+):
+    """延迟重投发不出去：原消息不能被确认丢掉，也不能进死信——放回队列，过一会儿再处理。"""
+    from app.messaging import receiving
+    from app.messaging.message import SendFailed
+
+    _fast_retry(monkeypatch)
+    monkeypatch.setattr(receiving, "PUT_BACK_DELAY_SECONDS", 0.1)
+    real = receiving.publish
+    broken = {"left": 1}
+
+    async def publish(route, body, *, headers, delay_ms=None):
+        if headers.get("x-delivery-count") and broken["left"]:
+            broken["left"] -= 1
+            raise SendFailed("broker did not confirm the retry copy")
+        return await real(route, body, headers=headers, delay_ms=delay_ms)
+
+    monkeypatch.setattr(receiving, "publish", publish)
+    calls = {"n": 0}
+    done: list[str] = []
+
+    async def fails_once(message) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("第一次失败")
+        done.append(message.message_id)
+
+    async def always(message):
+        return timedelta(seconds=1)
+
+    inbox("world", on_message=fails_once, retry_without_limit=always)
+    await start_messaging()
+    await send(sender="operator", recipient="world", body="重投发不出去。")
+
+    await eventually(lambda: done, timeout=15)
+    assert broken["left"] == 0, "故障没注入上"
+    assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0

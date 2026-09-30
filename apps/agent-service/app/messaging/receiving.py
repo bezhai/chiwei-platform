@@ -31,6 +31,12 @@
 * ``on_final_failure`` —— 一条普通消息最后一次重试也失败、即将进死信时调一次，带着那条
   消息和最后那次的异常。消息照常进死信（人工可查看、可重放）；钩子只是让拥有者知道这件
   事并自己做点什么。钩子本身失败只记一笔日志，消息照样进死信。问题不走这条路径。
+* ``retry_without_limit`` —— 拥有者对一条处理失败的普通消息的判断：交回一个时长，表示这条
+  不限次数重试、永不进死信，退避按指数翻倍、封顶在这个时长；交回 ``None``，照常有限次重试后
+  进死信。不限次数重试的每一次失败都让人看得到：记录者里记一行 ``retrying``（错误和下一次的
+  延时），日志里一条 warning。重投那一份发不出去时，原消息不确认也不进死信，过
+  :data:`PUT_BACK_DELAY_SECONDS` 放回原队列再来。判断本身出错按"不限次数"算，封顶用
+  :data:`PROCESSING_RETRY` 的上限——宁可多试，不能把拥有者要保住的那条送进死信。
 * ``consume_while`` —— 只在持有它（一个异步上下文，比如一把跨进程的独占锁）期间消费。
   开设时不在启动流程里等它：队列照常建好，启动照常返回，后台等到进了这个上下文，才跑
   ``on_open``、开始消费；停止时等正在处理的消息处理完（见下面"停下时"）之后才退出这个
@@ -91,7 +97,7 @@ from app.messaging.message import (
     new_message,
     participant,
 )
-from app.messaging.record import Outcome
+from app.messaging.record import Outcome, record
 from app.messaging.sending import (
     ANSWER_BY_HEADER,
     REPLY_RK_HEADER,
@@ -100,7 +106,7 @@ from app.messaging.sending import (
 )
 from app.runtime.inflight import claim_inflight, mark_failed, mark_succeeded
 from app.runtime.propagation import bind_context, extract_context
-from app.runtime.retry import DELIVERY_COUNT_HEADER, decide_retry
+from app.runtime.retry import DELIVERY_COUNT_HEADER, decide_retry, delivery_count
 from app.runtime.wire import RetryPolicy
 
 logger = logging.getLogger(__name__)
@@ -136,6 +142,10 @@ OnMessage = Callable[[Message], Awaitable[None]]
 OnQuestion = Callable[[Message], Awaitable[str | None]]
 OnOpen = Callable[[], Awaitable[None]]
 OnFinalFailure = Callable[[Message, BaseException], Awaitable[None]]
+RetryWithoutLimit = Callable[[Message], Awaitable[timedelta | None]]
+
+# 不限次数重试的那条消息，重投那一份发不出去时，隔多久把原消息放回原队列（秒）。
+PUT_BACK_DELAY_SECONDS = 5.0
 ConsumeWhile = Callable[[], AbstractAsyncContextManager[None]]
 
 # 声明了 consume_while 的收件箱：进了上下文之后开设失败，隔多久再来一次（秒）。
@@ -152,6 +162,7 @@ class InboxSpec:
     on_open: OnOpen | None = None
     on_final_failure: OnFinalFailure | None = None
     consume_while: ConsumeWhile | None = None
+    retry_without_limit: RetryWithoutLimit | None = None
 
 
 INBOX_REGISTRY: dict[str, InboxSpec] = {}
@@ -167,6 +178,7 @@ def inbox(
     on_open: OnOpen | None = None,
     on_final_failure: OnFinalFailure | None = None,
     consume_while: ConsumeWhile | None = None,
+    retry_without_limit: RetryWithoutLimit | None = None,
 ) -> None:
     """声明本 App 拥有名为 ``name`` 的收件箱。在 App 的接线模块里调，进程启动时开设。
 
@@ -175,7 +187,7 @@ def inbox(
     收件箱不接受提问，问它的一律拿到"没有回答"。
 
     ``processing_timeout`` / ``one_at_a_time`` / ``on_open`` / ``on_final_failure`` /
-    ``consume_while`` 见模块说明。
+    ``consume_while`` / ``retry_without_limit`` 见模块说明。
     """
     participant(name)
     if name in INBOX_REGISTRY:
@@ -191,7 +203,12 @@ def inbox(
         on_open=on_open,
         on_final_failure=on_final_failure,
         consume_while=consume_while,
+        retry_without_limit=retry_without_limit,
     )
+
+
+class _PutBack(Exception):
+    """这条消息要原样放回原队列（不确认、不进死信），过一会儿再处理。"""
 
 
 def _lease_ms(spec: InboxSpec) -> int:
@@ -378,6 +395,7 @@ async def _run_once(
     run: Callable[[Message, dict[str, Any]], Awaitable[None]],
     lease_ms: int | None = None,
     on_final_failure: OnFinalFailure | None = None,
+    retry_without_limit: RetryWithoutLimit | None = None,
 ) -> None:
     """按消息 id 去重后跑 ``run``；普通消息失败按 :data:`PROCESSING_RETRY` 重投，用完就抛。
 
@@ -465,6 +483,19 @@ async def _run_once(
                 else "its claim was taken over, the new holder owns the outcome",
             )
             return
+        if retry_without_limit is not None:
+            try:
+                cap = await retry_without_limit(message)
+            except Exception:
+                logger.exception(
+                    "messaging: the retry judgement of %s failed for %s; retrying without limit",
+                    edge_id,
+                    message.message_id,
+                )
+                cap = timedelta(milliseconds=PROCESSING_RETRY.max_delay_ms)
+            if cap is not None:
+                await _retry_without_limit(message, received, route, edge_id, exc, cap)
+                return
         decision = decide_retry(headers=received, policy=PROCESSING_RETRY)
         if decision.action != "retry":
             logger.exception(
@@ -507,6 +538,55 @@ async def _run_once(
         )
 
 
+async def _retry_without_limit(
+    message: Message,
+    received: dict[str, Any],
+    route,
+    edge_id: str,
+    exc: BaseException,
+    cap: timedelta,
+) -> None:
+    """拥有者点名的那条消息：记一行、警告一声，按封顶的指数退避再排一次。永不进死信。"""
+    attempt = delivery_count(received) + 1
+    policy = RetryPolicy(
+        n=attempt + 1,
+        backoff="exponential",
+        base_delay_ms=PROCESSING_RETRY.base_delay_ms,
+        max_delay_ms=max(1, int(cap.total_seconds() * 1000)),
+        lease_ms=PROCESSING_RETRY.lease_ms,
+    )
+    delay_ms = policy.delay_for_attempt(attempt)
+    reason = (
+        f"第 {attempt} 次处理失败（{type(exc).__name__}: {exc}），{delay_ms / 1000:g} 秒后再试"
+    )
+    logger.warning(
+        "messaging: %s %s failed; retrying without limit: %s",
+        edge_id,
+        message.message_id,
+        reason,
+    )
+    try:
+        await record(message, Outcome.RETRYING, reason=reason)
+    except SendFailed:
+        logger.exception(
+            "messaging: could not record the failure of %s %s", edge_id, message.message_id
+        )
+    try:
+        await publish(
+            route,
+            message.to_json(),
+            headers={**received, DELIVERY_COUNT_HEADER: attempt},
+            delay_ms=delay_ms,
+        )
+    except SendFailed as publish_error:
+        logger.warning(
+            "messaging: the retry copy of %s %s could not be published; putting it back",
+            edge_id,
+            message.message_id,
+        )
+        raise _PutBack() from publish_error
+
+
 def _edge(base: str) -> str:
     """去重状态的 edge：带上部署泳道。ppe 和 prod 共用 runtime_inflight 所在的库。"""
     return f"{base}@{lane_label()}"
@@ -546,12 +626,17 @@ def _inbox_handler(spec: InboxSpec):
                 run=run,
                 lease_ms=_lease_ms(spec),
                 on_final_failure=spec.on_final_failure,
+                retry_without_limit=spec.retry_without_limit,
             )
 
     async def handler(incoming: AbstractIncomingMessage) -> None:
         async with incoming.process(requeue=False, ignore_processed=True):
             if not _is_question(incoming.body):
-                await process(incoming)
+                try:
+                    await process(incoming)
+                except _PutBack:
+                    await asyncio.sleep(PUT_BACK_DELAY_SECONDS)
+                    await incoming.reject(requeue=True)
                 return
             # 问题：整条路径上的任何失败（包括去重状态读写、解码）都在这里收住并确认。
             task = asyncio.current_task()

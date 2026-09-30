@@ -48,6 +48,9 @@ class Outcome(StrEnum):
     DELIVERED = "delivered"
     NOT_DELIVERED = "not_delivered"
     NO_ANSWER = "no_answer"
+    # 拥有者点名不限次数重试的那条消息又处理失败了一次，已经排好下一次；reason 里是错误和
+    # 下一次的延时（:mod:`app.messaging.receiving`）。
+    RETRYING = "retrying"
 
 
 async def record(
