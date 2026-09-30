@@ -67,6 +67,14 @@ class Settings:
         default_factory=lambda: _env_or_none("GOOGLE_SEARCH_CX")
     )
 
+    # -- QWeather（和风天气；只有 world App 配，见 app.capabilities.weather） --
+    qweather_api_key: str | None = field(
+        default_factory=lambda: _env_or_none("QWEATHER_API_KEY")
+    )
+    qweather_api_host: str | None = field(
+        default_factory=lambda: _env_or_none("QWEATHER_API_HOST")
+    )
+
     # -- Misc --
     bangumi_access_token: str | None = field(
         default_factory=lambda: _env_or_none("BANGUMI_ACCESS_TOKEN")
