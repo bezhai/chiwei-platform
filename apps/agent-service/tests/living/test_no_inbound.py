@@ -109,6 +109,7 @@ def _ops_http(
     *,
     requires_inner_secret: bool = False,
     answers_with_lane: bool = False,
+    requires_lane_match: bool = False,
 ) -> tuple:
     """一条运维 HTTP 口的完整身份。
 
@@ -124,6 +125,7 @@ def _ops_http(
             ("method", method),
             ("path", path),
             ("requires_inner_secret", requires_inner_secret),
+            ("requires_lane_match", requires_lane_match),
             ("response", True),
         ),
         (consumer,),
@@ -177,6 +179,7 @@ _OPS_ONLY_EXTERNAL_SOURCES = frozenset({
         "app.messaging.operator.operator_send_node",
         requires_inner_secret=True,
         answers_with_lane=True,
+        requires_lane_match=True,
     ),
     _ops_http(
         "app.messaging.operator.OperatorAskRequest",
@@ -184,6 +187,7 @@ _OPS_ONLY_EXTERNAL_SOURCES = frozenset({
         "app.messaging.operator.operator_ask_node",
         requires_inner_secret=True,
         answers_with_lane=True,
+        requires_lane_match=True,
     ),
     _ops_http(
         "app.messaging.operator.OperatorSendAtRequest",
@@ -191,6 +195,7 @@ _OPS_ONLY_EXTERNAL_SOURCES = frozenset({
         "app.messaging.operator.operator_send_at_node",
         requires_inner_secret=True,
         answers_with_lane=True,
+        requires_lane_match=True,
     ),
     _ops_http(
         "app.messaging.operator.OperatorRecordRequest",
@@ -198,6 +203,7 @@ _OPS_ONLY_EXTERNAL_SOURCES = frozenset({
         "app.messaging.operator.operator_record_node",
         requires_inner_secret=True,
         answers_with_lane=True,
+        requires_lane_match=True,
     ),
     _ops_http(
         "app.messaging.operator.OperatorDeadLettersRequest",
@@ -205,6 +211,7 @@ _OPS_ONLY_EXTERNAL_SOURCES = frozenset({
         "app.messaging.operator.operator_dead_letters_node",
         requires_inner_secret=True,
         answers_with_lane=True,
+        requires_lane_match=True,
     ),
     _ops_http(
         "app.messaging.operator.OperatorReplayRequest",
@@ -212,6 +219,7 @@ _OPS_ONLY_EXTERNAL_SOURCES = frozenset({
         "app.messaging.operator.operator_replay_node",
         requires_inner_secret=True,
         answers_with_lane=True,
+        requires_lane_match=True,
     ),
 })
 

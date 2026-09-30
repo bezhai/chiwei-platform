@@ -1,7 +1,8 @@
 """Wiring: 通信机制的人工参与者（运维入口 + ``operator`` 收件箱）。
 
 六条运维 HTTP 都要内网凭据（``requires_inner_secret``），每个回答都带执行它的进程
-所在的泳道（``answers_with_lane``）。从开发机过来走 monitor-dashboard 的
+所在的泳道（``answers_with_lane``），请求要去的泳道不是这个进程所在的泳道就一条都不做
+（``requires_lane_match``）。从开发机过来走 monitor-dashboard 的
 ``/dashboard/api/ops/messaging/*`` 转发：那一侧认 PAAS_TOKEN、落审计、带着凭据和
 泳道头转到这里。
 
@@ -42,6 +43,7 @@ def _operator_route(path: str, method: str) -> SourceSpec:
         response=True,
         requires_inner_secret=True,
         answers_with_lane=True,
+        requires_lane_match=True,
     )
 
 

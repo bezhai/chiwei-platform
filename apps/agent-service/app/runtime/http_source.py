@@ -21,7 +21,10 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 from app.runtime.emit import emit
 from app.runtime.http_auth import inner_secret_guard
-from app.runtime.lane_policy import current_deployment_lane
+from app.runtime.lane_policy import (
+    current_deployment_lane,
+    normalize_deployment_lane,
+)
 from app.runtime.wire import WIRING_REGISTRY
 
 _PATH_PARAM_RE = re.compile(r"\{([^}]+)\}")
@@ -130,6 +133,10 @@ def _bind_one(app: FastAPI, w, src) -> None:
         if src.params.get("requires_inner_secret")
         else []
     )
+    # 泳道核对排在凭据之后：没凭据的人连"你落到了哪条泳道"都不该问得出来。FastAPI
+    # 按列表顺序解依赖。
+    if src.params.get("requires_lane_match"):
+        guard.append(Depends(_lane_match_guard(refusal_detail)))
 
     status_code = 200 if sync_response else 202
     bind = {
@@ -141,6 +148,28 @@ def _bind_one(app: FastAPI, w, src) -> None:
     if bind is None:
         raise ValueError(f"unsupported HTTP method {method!r}")
     bind(path, status_code=status_code, dependencies=guard)(endpoint)
+
+
+def _lane_match_guard(refusal_detail):
+    """请求要去的泳道和进程的部署泳道不一致就 409 的那个路由级依赖。
+
+    请求要去的泳道读 ``x-ctx-lane``（sidecar 选路用的就是它），没有就是 prod。读请求头
+    而不是 :func:`app.api.middleware.get_lane`：这一步不该依赖某个中间件先跑过。
+    """
+
+    async def check(request: Request) -> None:
+        requested = normalize_deployment_lane(request.headers.get("x-ctx-lane"))
+        executed = current_deployment_lane()
+        if requested != executed:
+            raise HTTPException(
+                status_code=409,
+                detail=refusal_detail(
+                    f"request was meant for lane {requested or 'prod'} but reached "
+                    f"lane {executed or 'prod'}; nothing was done"
+                ),
+            )
+
+    return check
 
 
 async def _emit_rpc(w, data_obj):

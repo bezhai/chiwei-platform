@@ -31,6 +31,7 @@ class Source:
         response: bool = False,
         requires_inner_secret: bool = False,
         answers_with_lane: bool = False,
+        requires_lane_match: bool = False,
     ) -> SourceSpec:
         """HTTP source.
 
@@ -61,6 +62,12 @@ class Source:
         它跟 ``requires_inner_secret`` 是两件事，所以是两个开关：一条路由可以要凭据而
         不自报落点，也可以反过来。合成一个的话，下一条要凭据的路由会跟着把自己的部署
         身份告诉没通过校验的人，而那不是任何人选过的。
+
+        requires_lane_match=True 表示请求要去的泳道（``x-ctx-lane``，没有就是 prod）和
+        这个进程自己的部署泳道不一致时，一步都不做，回 409。泳道没部署这个服务时，
+        sidecar 会把请求静默落回 prod 的 pod；一条动的是本泳道自己状态的路由（往本泳道的
+        收件箱里发、改本泳道的记录）落回 prod 就等于改了 prod。校验跟凭据一样挂成路由级
+        依赖，排在凭据之后、参数反序列化之前。
         """
         method = method.upper()
         if method not in {"GET", "POST", "PUT", "DELETE"}:
@@ -73,6 +80,7 @@ class Source:
                 "response": response,
                 "requires_inner_secret": requires_inner_secret,
                 "answers_with_lane": answers_with_lane,
+                "requires_lane_match": requires_lane_match,
             },
         )
 

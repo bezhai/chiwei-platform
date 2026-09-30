@@ -13,8 +13,9 @@
 
 **请求要去的泳道和实际落在的泳道不一致时，一条都不发。** 泳道没部署这个服务时，sidecar
 会把请求静默落回 prod 的 pod 上；通信机制按进程自己的部署泳道收发，落回 prod 就等于
-往 prod 的收件箱里发。所以这里比对请求带来的泳道（``x-ctx-lane``，没有就是 prod）和
-进程的部署泳道，不一致就 409，并在回答里说出自己在哪条泳道。每个回答都带 ``lane``。
+往 prod 的收件箱里发。所以六条路由都声明了 ``requires_lane_match``：请求带来的泳道
+（``x-ctx-lane``，没有就是 prod）和进程的部署泳道不一致，框架在进 handler 之前就回 409，
+并说出自己在哪条泳道（:mod:`app.wiring.messaging`）。每个回答都带 ``lane``。
 """
 from __future__ import annotations
 
@@ -28,13 +29,13 @@ from typing import Annotated, Any
 from fastapi import HTTPException
 from pydantic import Field
 
-from app.api.middleware import get_header_var, get_lane
+from app.api.middleware import get_header_var
 from app.messaging.dead_letters import peek_dead_letters, replay_dead_letters
 from app.messaging.message import Message, SendFailed
 from app.messaging.record import read_record
 from app.messaging.sending import ask, send, send_at
 from app.runtime import Data, Key, node
-from app.runtime.lane_policy import current_deployment_lane, normalize_deployment_lane
+from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 
@@ -179,21 +180,8 @@ def _lane() -> str:
 
 
 @contextmanager
-def _in_this_lane_only() -> Iterator[None]:
-    """先确认请求就是冲着本泳道来的，再把通信机制的异常翻成 HTTP。"""
-    requested = normalize_deployment_lane(get_lane())
-    executed = current_deployment_lane()
-    if requested != executed:
-        raise HTTPException(
-            409,
-            detail={
-                "lane": _lane(),
-                "message": (
-                    f"request was meant for lane {requested or 'prod'} but reached "
-                    f"lane {_lane()}; nothing was sent"
-                ),
-            },
-        )
+def _as_http_errors() -> Iterator[None]:
+    """把通信机制的异常翻成 HTTP：参数不合规 400，发送没完成 503（带消息 id）。"""
     try:
         yield
     except ValueError as exc:
@@ -207,7 +195,7 @@ def _in_this_lane_only() -> Iterator[None]:
 
 @node
 async def operator_send_node(req: OperatorSendRequest) -> OperatorSendResponse:
-    with _in_this_lane_only():
+    with _as_http_errors():
         delivery = await send(
             sender=req.sender,
             recipient=req.recipient,
@@ -224,7 +212,7 @@ async def operator_send_node(req: OperatorSendRequest) -> OperatorSendResponse:
 
 @node
 async def operator_ask_node(req: OperatorAskRequest) -> OperatorAskResponse:
-    with _in_this_lane_only():
+    with _as_http_errors():
         answer = await ask(
             sender=req.sender,
             recipient=req.recipient,
@@ -243,7 +231,7 @@ async def operator_ask_node(req: OperatorAskRequest) -> OperatorAskResponse:
 
 @node
 async def operator_send_at_node(req: OperatorSendAtRequest) -> OperatorSendAtResponse:
-    with _in_this_lane_only():
+    with _as_http_errors():
         message_id = await send_at(
             sender=req.sender,
             recipient=req.recipient,
@@ -258,7 +246,7 @@ async def operator_send_at_node(req: OperatorSendAtRequest) -> OperatorSendAtRes
 
 @node
 async def operator_record_node(req: OperatorRecordRequest) -> OperatorRecordResponse:
-    with _in_this_lane_only():
+    with _as_http_errors():
         rows = await read_record(
             message_id=req.message_id, participant=req.participant, limit=req.limit
         )
@@ -269,14 +257,14 @@ async def operator_record_node(req: OperatorRecordRequest) -> OperatorRecordResp
 async def operator_dead_letters_node(
     req: OperatorDeadLettersRequest,
 ) -> OperatorDeadLettersResponse:
-    with _in_this_lane_only():
+    with _as_http_errors():
         rows = await peek_dead_letters(limit=req.limit)
     return OperatorDeadLettersResponse(lane=_lane(), dead_letters=rows)
 
 
 @node
 async def operator_replay_node(req: OperatorReplayRequest) -> OperatorReplayResponse:
-    with _in_this_lane_only():
+    with _as_http_errors():
         result = await replay_dead_letters(
             limit=req.limit, operator=get_header_var("operator")
         )
