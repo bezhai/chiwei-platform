@@ -13,9 +13,9 @@
 
 App 之间不靠接线互通，靠通信机制（:mod:`app.messaging`）。
 
-**节点绑定现在一条都没有。** 一个 App 的接线里没有显式 ``bind`` 的 ``@node`` 落在默认
-App ``agent-service`` 上。要把某个节点挪到别的 App，在那个 App 自己的接线模块里
-``bind(node).to_app("name")``——写在这里的话，每个 App 的进程都会 import 那个节点。
+**节点绑定写在各 App 自己的接线模块里。** 没有显式 ``bind`` 的 ``@node`` 落在默认 App
+``agent-service`` 上；world 记录的人工读写接口那四个节点在 :mod:`app.world.wiring` 里
+``bind(node).to_app("world")``。写在这里的话，每个 App 的进程都会 import 那个节点。
 App 名必须已经存在于 PaaS（先 ``/api/paas/apps/`` 建，否则部署那步没有落脚处）。
 """
 from __future__ import annotations
