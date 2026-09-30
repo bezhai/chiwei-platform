@@ -19,6 +19,43 @@ mechanism behind it and must be listed here.
 
 ## Pending
 
+### Old world layer: drop `lasts_until`, drop seven tables
+
+The old world round, calendar and upcoming items are deleted from agent-service
+(`Happening.lasts_until`, `WorldRound`, `Upcoming` and their writers are gone). Same DDL
+for prod and chiwei-test; every statement carries `IF EXISTS` because the two databases
+did not see the same code. `lasts_until` was added on this branch (`d211c960`) and never
+reached main, so it exists where this branch ran (chiwei-test through coe-living, and the
+prod database only if a ppe lane of this branch ever ran).
+
+**Order matters for the column, and it is the opposite of the tables.** The migrator
+refuses to start when a still-declared table has a column its class no longer has
+(`migrator.py:218-224` → `MigrationError: column data_happening.lasts_until dropped from
+Happening`), so the first release without the field crash-loops until this runs. The
+old code writes `lasts_until` on every `Happening` insert, so dropping it while the old
+code still runs breaks her `say` / `act`. Stop the old agent-service in that lane, run
+the column drop, then start the new release. Its index
+(`ix_data_happening_lane_lasts_until`) goes with the column. Rows with
+`actor = 'world'` stay.
+
+```sql
+ALTER TABLE data_happening DROP COLUMN IF EXISTS lasts_until;
+```
+
+The tables have no reader or writer after the release (the migrator only touches
+declared classes, so their presence does not block startup). Drop them after the
+release:
+
+```sql
+DROP TABLE IF EXISTS data_world_round;
+DROP TABLE IF EXISTS data_upcoming;
+DROP TABLE IF EXISTS data_world_arc;
+DROP TABLE IF EXISTS data_world_attention;
+DROP TABLE IF EXISTS data_world_outline;
+DROP TABLE IF EXISTS data_world_state;
+DROP TABLE IF EXISTS data_npc_roster;
+```
+
 ### `message_record` (messaging record)
 
 Declared at `apps/agent-service/app/data/models.py` (`MessageRecord`); written and read
@@ -123,8 +160,8 @@ tables.
 Migrator also fails the batch if a still-declared table has a column the class no
 longer has (`migrator.py:218-224`) or if a column's pg type no longer matches the
 declaration (`:232-238`). Both say "write explicit migration script" — meaning an
-entry in this file. No retained table changed shape on this branch, so neither path
-fires; `data_persona_version` in particular moved from `app/life/persona_chain.py` to
+entry in this file. `data_happening` losing `lasts_until` takes the first path; its
+entry is under Pending. `data_persona_version` moved from `app/life/persona_chain.py` to
 `app/living/persona.py:58` with its fields unchanged.
 
 ## Tables prod keeps but nothing reads
@@ -135,9 +172,11 @@ only so a schema diff does not read as a discrepancy.
 `data_act_performed`, `data_book_impression`, `data_chat_request`,
 `data_common_message_content_synced`, `data_daily_materials`, `data_day_page`,
 `data_event_envelope`, `data_event_read`, `data_jotting`, `data_jotting_watermark`,
-`data_life_state`, `data_notebook_entry`, `data_npc_roster`, `data_reading_triggered`,
-`data_relationship_page`, `data_world_arc`, `data_world_attention`,
-`data_world_outline`, `data_world_state`.
+`data_life_state`, `data_notebook_entry`, `data_reading_triggered`,
+`data_relationship_page`.
+
+The old world's tables used to be on this list; they are now scheduled for a drop
+under Pending.
 
 `data_day_page` is the reason the new page table is named `data_living_day_page`
 (`6ad0e5a9`) — the old table is still there with a different shape.
@@ -154,7 +193,8 @@ All five the living engine needs were labelled `production` on 2026-09-11:
 `living_life_moment` (v8), `living_world_round`, `living_day_page`,
 `living_persona_review`, `book_reading_impression`. `guard_output_safety` already had
 one. When a new prompt id appears in an `AgentConfig`, label it before the deploy that
-reads it.
+reads it. `living_world_round` no longer has a reader: the old world round that used it
+is deleted.
 
 ## Running one
 

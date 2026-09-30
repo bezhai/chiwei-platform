@@ -501,7 +501,7 @@ make logs APP=agent-service LANE=<your-lane> SINCE=10m
 | 入口 | 代码位置 | 例子 |
 |---|---|---|
 | LLM tool（她醒来时调） | `app/living/moment.py` 的 `@tool`，实现落在 `app/living/*.py` | `keep_in_mind`(@tool) → `rewrite_loose_ends`(`loose_ends.py`) |
-| @node 内部委托 | `app/wiring/living.py` 挂的五个 tick 节点调底层 mutation | `calendar_tick`(@node) → `plan_day` / `deliver_due`(`calendar.py`) |
+| @node 内部委托 | `app/wiring/living.py` 挂的五个 tick 节点调底层 mutation | `day_page_tick`(@node) → `write_day_page`(`day_page.py`) |
 
 **这种 mutation function 要触发下游 EventData 时，必须用 `transactional_emit(s)` 在事务内 append**，不能 commit 后再 `await emit(...)`。
 
@@ -566,7 +566,7 @@ async def record_two_things(...):
 
 **关键**：@node 也可以持有 session 写业务表（或委托 mutation function 持有）。这种 @node 内部写或者它调用的 mutation function **必须**用 `transactional_emit`。
 
-形状举例：五条钟的 tick 节点都是 `@node` 直接持有 session 写库（`calendar_tick` → `plan_day` / `deliver_due` 写 `Upcoming` / `Happening`）。这类节点将来要在写完之后通知下游，就得走 `transactional_emit`，不能在 `async with get_session()` 块外补一个 `await emit(...)`。
+形状举例：五条钟的 tick 节点都是 `@node` 直接或经 mutation function 写库（`day_page_tick` → `write_day_page` 写 `LivingDayPage`）。这类节点将来要在写完之后通知下游，就得走 `transactional_emit`，不能在 `async with get_session()` 块外补一个 `await emit(...)`。
 
 **反例**：在 pure transform @node 里硬给 `return Data` 配一个 `transactional_emit` 是过度复杂（runtime 已经接管了 Data 持久化，业务不需要再管事务）。
 
@@ -927,8 +927,8 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 |---|---|---|---|---|
 | **她的 moment** | `Source.interval(60s)` | `wiring/living.py` | `LifeMomentTick` → `life_moment_tick`（真实间隔是 Dynamic Config（默认 10 分钟），门在节点里；查手机 → 模型一轮 → 工具 → 落 `LifeMoment`） | agent-service |
 | **被提前叫醒** | `Source.interval(60s)` | `wiring/living.py` | `PhoneNudgeTick` → `phone_nudge_tick`（私聊、或群里点了她的名，就把她带到那一刻） | agent-service |
-| **日历** | `Source.interval(60s)` | `wiring/living.py` | `CalendarTick` → `calendar_tick`（排今天还没到点的槽 + 到期交付成 `Happening`，一分模型钱不花） | agent-service |
-| **world 轮次** | `Source.interval(300s)` | `wiring/living.py` | `WorldRoundTick` → `world_round_tick`（真实轮次间隔是 Dynamic Config，门在节点里） | agent-service |
+| **日记** | `Source.interval(300s)` | `wiring/living.py` | `DayPageTick` → `day_page_tick`（凌晨那个窗口里把昨天写成一页，窗口判在节点里） | agent-service |
+| **每周回看** | `Source.interval(300s)` | `wiring/living.py` | `PersonaReviewTick` → `persona_review_tick`（周一早上重写一版「我是谁」，窗口判在节点里） | agent-service |
 | **开口落地对账** | `Source.interval(300s)` | `wiring/living.py` | `LandingTick` → `landing_tick`（按 `agent_outbound_id` 把落地时刻和撤回时刻对回台账） | agent-service |
 | **读一程** | 图内 durable 边（`FilePickedUp`） | `wiring/living.py` | `read_a_round`（取字节 → 解码 → 几轮模型调用 → 写 `FileRead`） | agent-service |
 | **她开口出图** | 无（Sink） | `wiring/living.py` | `ChatResponseSegment` → `Sink.mq("chat_response")` → `chat_response_lark`（lark-outbound 消费）/ `chat_response_qq`（chat-response-worker 消费） | agent-service |
@@ -942,13 +942,12 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 想快速建立体感,按下面顺序读:
 
 1. `app/wiring/living.py` —— 五条钟 + 那条 durable 边 + 出口 sink，整张图就这一个文件。开头的 docstring 讲清了"为什么这里没有、也不会有入站边"。
-2. `app/living/clock.py` —— `CalendarTick` / `WorldRoundTick` 两个 tick Data + 节点，看时间源 Data 的形状约束（只能有一个 `ts` 字段）。
-3. `app/living/moment.py` —— moment，业务最重的那个 @node，`@tool` 也都在这儿。
-4. `app/living/phone.py` —— 她怎么查 `common_message`、游标怎么走。入站不经 MQ 这件事在这里落地。
-5. `app/domain/chat_dataflow.py` —— `ChatResponseSegment`，出图那一侧的 Data 契约。
-6. `app/domain/safety.py` —— `Recall`，撤回出图的 Data 契约。
-7. `app/deployment.py` —— placement bind（当前一条绑定都没有，所有 node 默认 agent-service）。
-8. `app/workers/runtime_entry.py` —— Worker 启动入口。
+2. `app/living/moment.py` —— moment，业务最重的那个 @node，`@tool` 也都在这儿；`LifeMomentTick` 是时间源 Data 形状约束（只能有一个 `ts` 字段）的例子。
+3. `app/living/phone.py` —— 她怎么查 `common_message`、游标怎么走。入站不经 MQ 这件事在这里落地。
+4. `app/domain/chat_dataflow.py` —— `ChatResponseSegment`，出图那一侧的 Data 契约。
+5. `app/domain/safety.py` —— `Recall`，撤回出图的 Data 契约。
+6. `app/deployment.py` —— 每个 App 加载哪些接线模块（`APP_WIRING`），以及 placement bind（当前一条绑定都没有，所有 node 默认 agent-service）。
+7. `app/workers/runtime_entry.py` —— Worker 启动入口。
 
 ### 源码参考点(不必记,需要时回查)
 

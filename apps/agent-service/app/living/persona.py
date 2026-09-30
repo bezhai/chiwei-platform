@@ -2,7 +2,7 @@
 
 **她是谁不是配置，是一条会变的链。** ``bot_persona.persona_core`` 是写死的出厂快
 照，全仓没有任何代码往它里面写；她这几个月长出来的东西全落在 :class:`PersonaVersion`
-这条 framework Data 版本链上（照 WorldArc / LivingDayPage 模板：Key + 正文 + 写下时刻 +
+这条 framework Data 版本链上（Key + 正文 + 写下时刻 +
 Version、append-only、读最新一版、整篇重写——新版**取代**旧版）。主表不动，只当 v0
 的来源和冷启 fallback。
 
