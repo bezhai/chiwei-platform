@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import dataclasses
-import importlib
 import logging
 
 import httpx
@@ -18,7 +17,7 @@ from app.infra import config
 from app.runtime.http_source import register_http_sources
 from app.world import records
 
-from .conftest import LANE
+from .conftest import LANE, load_world_wiring
 
 SECRET = "world-admin-secret"
 BASE = "http://world.test"
@@ -32,15 +31,7 @@ def api(volume, monkeypatch) -> FastAPI:
     monkeypatch.setattr(
         config, "settings", dataclasses.replace(config.settings, inner_http_secret=SECRET)
     )
-    import app.world.wiring as wiring
-    from app.messaging.receiving import clear_inboxes
-    from app.runtime.placement import clear_bindings
-    from app.runtime.wire import clear_wiring
-
-    clear_wiring()
-    clear_bindings()
-    clear_inboxes()
-    importlib.reload(wiring)
+    load_world_wiring()
     application = FastAPI()
     from app.api.middleware import HeaderContextMiddleware
 
@@ -202,13 +193,10 @@ async def test_a_request_without_a_lane_is_meant_for_prod_and_refused_here(api):
 
 def test_the_routes_run_in_the_world_app():
     """HTTP 路由挂在跑它消费者的那个 App 的进程里：这四条的节点都绑在 world 上。"""
-    import app.world.wiring as wiring
-    from app.runtime.placement import clear_bindings, nodes_for_app
-    from app.runtime.wire import WIRING_REGISTRY, clear_wiring
+    from app.runtime.placement import nodes_for_app
+    from app.runtime.wire import WIRING_REGISTRY
 
-    clear_wiring()
-    clear_bindings()
-    importlib.reload(wiring)
+    load_world_wiring()
 
     http_consumers = {
         c for w in WIRING_REGISTRY if any(s.kind == "http" for s in w.sources) for c in w.consumers

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 from datetime import timedelta
 
 import pytest
@@ -22,6 +21,8 @@ from app.world.tools import wake_me_at
 from tests.messaging.conftest import broker, delayed_broker, messaging_db  # noqa: F401
 from tests.messaging.helpers import eventually
 from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
+
+from .conftest import load_world_wiring
 
 pytestmark = pytest.mark.usefixtures("messaging_db")
 
@@ -67,11 +68,7 @@ def world_process(broker, tmp_path, monkeypatch):  # noqa: F811
     runner = ScriptedRunner([2.0, 1.5, 86_400.0])
     monkeypatch.setattr(main_agent, "build_round_runner", lambda config: runner)
 
-    import app.world.wiring as wiring
-    from app.messaging.receiving import clear_inboxes
-
-    clear_inboxes()
-    importlib.reload(wiring)
+    load_world_wiring()
     return runner
 
 
