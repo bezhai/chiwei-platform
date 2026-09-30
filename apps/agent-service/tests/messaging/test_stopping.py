@@ -87,3 +87,69 @@ async def test_a_message_still_running_after_the_grace_goes_back_and_is_taken_up
     await start_messaging()
     await eventually(lambda: handled, timeout=10)
     assert handled == [delivery.message_id]
+
+
+async def test_a_question_still_being_answered_at_stop_is_never_answered_again(
+    broker, monkeypatch, test_db
+):
+    """问题不重试：停下时没答完的问题确认掉、占位收住，不退回队列，不会被下一个进程再答一遍。"""
+    from app.infra.rabbitmq import Route, mq
+    from app.messaging import receiving
+    from app.messaging.message import Kind, Message
+    from app.messaging.sending import ANSWER_BY_HEADER, REPLY_RK_HEADER, ask
+
+    monkeypatch.setattr(receiving, "STOP_GRACE_SECONDS", 0.3)
+    answered: list[str] = []
+    entered = asyncio.Event()
+
+    async def slow_answer(question) -> str:
+        answered.append(question.message_id)
+        entered.set()
+        await asyncio.sleep(3600)
+        return "不会走到这里"
+
+    async def on_message(message) -> None:  # pragma: no cover - not used
+        raise AssertionError
+
+    inbox("world", on_message=on_message, on_question=slow_answer)
+    await start_messaging()
+    asking = asyncio.create_task(
+        ask(sender="operator", recipient="world", body="厨房现在什么样？", timeout_seconds=30)
+    )
+    await entered.wait()
+
+    await asyncio.wait_for(stop_messaging(), timeout=10)
+    answer = await asking
+    assert not answer.answered
+
+    assert await broker.depth(f"inbox_world_{LANE}") == 0, "问题被退回了队列"
+    assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0, "问题进了死信"
+
+    # 下一个进程起来：收件箱里没有这个问题；就算至少一次投递又来了一份同 id 的，也不再答。
+    from app.messaging.receiving import clear_inboxes
+
+    clear_inboxes()
+    inbox("world", on_message=on_message, on_question=slow_answer)
+    await start_messaging()
+    from datetime import UTC, datetime
+    from datetime import timedelta as td
+
+    duplicate = Message(
+        message_id=answer.question_id,
+        sender="operator",
+        recipient="world",
+        time=datetime.now(UTC),
+        kind=Kind.QUESTION,
+        body="厨房现在什么样？",
+    )
+    assert await mq.publish_with_confirm(
+        Route("inbox_world", "inbox.world", isolated=True),
+        duplicate.to_json(),
+        headers={
+            REPLY_RK_HEADER: "messaging.reply.nobody",
+            ANSWER_BY_HEADER: (datetime.now(UTC) + td(seconds=30)).isoformat(),
+        },
+        lane=LANE,
+    )
+    await asyncio.sleep(1.5)
+    assert answered == [answer.question_id], "同一个问题的回答函数被调了不止一次"

@@ -40,8 +40,10 @@
 **停下时正在处理的消息**（:func:`stop_receiving`）：先取消消费者（不再有新消息进来），等正在
 处理的那几条处理完、照常确认，最多等 :data:`STOP_GRACE_SECONDS`。等不完的，先关通道再取消：
 通道关着，取消时不会拒收进死信，broker 把没确认的消息放回原队列；取消的同时放开它的去重
-占位，重投的那一份马上有人接，不用等租约过期。声明了 ``consume_while`` 的收件箱：还在等着
-进上下文的，停止时直接放弃等待；已经在消费的，等上面这些都做完才退出上下文。
+占位，重投的那一份马上有人接，不用等租约过期。**问题例外**：问题不重试，等不完的问题在通道
+还开着的时候取消，确认掉、占位收成"处理过"，不退回队列，下一个进程不会再答它一遍。声明了
+``consume_while`` 的收件箱：还在等着进上下文的，停止时直接放弃等待；已经在消费的，等上面这些
+都做完才退出上下文。
 
 **问题不重试。** 问题的处理函数抛异常、返回空、或者收件箱不接受提问，都立刻给提问方
 回一个"没有回答"。问题这条路径上的任何失败——回复发不出去、去重状态读写失败、消息
@@ -208,6 +210,8 @@ _consumers: list[tuple[Any, Any, str]] = []
 
 # 正在处理消息的那些任务（aio-pika 每送来一条就起一个任务跑处理函数）。停的时候等它们。
 _in_flight: set[asyncio.Task] = set()
+# 其中正在回答问题的那些。停的时候它们要在通道还开着时取消、确认掉（问题不重试）。
+_answering: set[asyncio.Task] = set()
 
 
 def _tracked(handler):
@@ -317,7 +321,21 @@ async def stop_receiving() -> None:
     if running:
         _, unfinished = await asyncio.wait(running, timeout=STOP_GRACE_SECONDS)
 
-    # 先关通道再取消：通道关着，被取消的那几条不会被拒收进死信，broker 把它们放回原队列。
+    # 普通消息先关通道再取消：通道关着，被取消的那几条不会被拒收进死信，broker 把它们放回
+    # 原队列。问题不一样，在关通道之前处理（见下）。
+    questions = {t for t in unfinished if t in _answering}
+    if questions:
+        logger.warning(
+            "messaging: %d question(s) still being answered after %.0fs; dropped without "
+            "an answer, never redelivered",
+            len(questions),
+            STOP_GRACE_SECONDS,
+        )
+        for task in questions:
+            task.cancel()
+        await asyncio.wait(questions, timeout=STOP_GRACE_SECONDS)
+        unfinished = unfinished - questions
+
     for channel, _queue, _tag in consumers:
         if not channel.is_closed:
             try:
@@ -405,15 +423,23 @@ async def _run_once(
     try:
         await run(message, received)
     except asyncio.CancelledError:
-        # 进程在停（:func:`stop_receiving`）：放开占位，重投的那一份马上有人接。不重投、
-        # 不进死信——通道已经关了，broker 会把这条放回原队列。
+        # 进程在停（:func:`stop_receiving`）。普通消息：放开占位，重投的那一份马上有人接；
+        # 不重投、不进死信——通道已经关了，broker 会把这条放回原队列。问题：不重试，占位
+        # 收成"处理过"，同 id 的再来一份也不再答。
         try:
-            await mark_failed(
-                edge_id=edge_id,
-                idempotent_key=message.message_id,
-                last_error="cancelled while the process was stopping",
-                worker_id=claim_token,
-            )
+            if is_question:
+                await mark_succeeded(
+                    edge_id=edge_id,
+                    idempotent_key=message.message_id,
+                    worker_id=claim_token,
+                )
+            else:
+                await mark_failed(
+                    edge_id=edge_id,
+                    idempotent_key=message.message_id,
+                    last_error="cancelled while the process was stopping",
+                    worker_id=claim_token,
+                )
         except Exception:
             logger.warning(
                 "messaging: could not release %s %s after cancelling it",
@@ -528,13 +554,22 @@ def _inbox_handler(spec: InboxSpec):
                 await process(incoming)
                 return
             # 问题：整条路径上的任何失败（包括去重状态读写、解码）都在这里收住并确认。
+            task = asyncio.current_task()
+            _answering.add(task)
             try:
                 await process(incoming)
+            except asyncio.CancelledError:
+                # 进程在停，这个问题没答完（:func:`stop_receiving`）：确认掉，不退回队列。
+                if not incoming.channel.is_closed:
+                    await incoming.ack()
+                raise
             except Exception:
                 logger.exception(
                     "messaging: a question to %s failed; acknowledged, never redelivered",
                     spec.name,
                 )
+            finally:
+                _answering.discard(task)
 
     return handler
 
