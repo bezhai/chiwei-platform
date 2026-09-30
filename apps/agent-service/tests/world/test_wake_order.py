@@ -1,28 +1,30 @@
 """一轮收尾定下次醒来时，每一步都可能失败或者进程死在中间：逐个顺序看 world 会不会停转。
 
-收尾三步（:func:`app.world.wake.set_next_wake`）：① 把新时刻 B 作为"待定"写进私有状态；
-② 用 send_at 排 B；③ 把 B 升为"当前"。自定消息只要是状态里的"当前"或"待定"，就不算旧消息。
+定下次醒来是**先发后记**（:func:`app.world.wake.set_next_wake`）：先用 send_at 排出新时刻 B，
+broker 确认之后才把 B 记成私有状态里的"最新唤醒"。所以状态里记的唤醒，一定已经排出去了，
+或者就是正在处理、正在重试的那一条。自定消息的 id 跟"最新唤醒"对不上，就是旧消息，跳过。
+状态里的最新唤醒处理失败时不限次数重试，永不进死信
+（:func:`app.world.wake.retry_latest_wake_without_limit`）。
 
-A 是叫醒这一轮的那条自定消息（状态里的"当前"），B 是这一轮定的新时刻。"通信机制重投 A"
-在这里就是再调一次 :func:`app.world.main_agent.on_world_message`；"进程死了再起来"就是
-收件箱开设时的 :func:`app.world.wake.wake_on_start`，加上没确认的消息被重投。
+A 是叫醒这一轮的自定消息（状态里的最新唤醒），B 是这一轮定的新时刻。"通信机制重投 A"在这里
+就是再调一次 :func:`app.world.main_agent.on_world_message`；"进程死了再起来"就是收件箱开设时
+的 :func:`app.world.wake.wake_on_start`，加上没确认的消息被重投。
 
-每个用例最后都用 :func:`_assert_awake` 核对同一条不变量：状态里的"当前"是一条真的排出去了的
-消息，或者还有一条会被重跑的消息在路上。
+每个用例最后都用 :func:`_assert_awake` 核对同一条不变量：之后一定还有一条会被执行的自定唤醒
+——它已经排出去了，不会被当成旧消息跳过，失败了也不会进死信。
 
-| 行 | 出事的位置                              | 接下来                                      |
-|----|-----------------------------------------|---------------------------------------------|
-| 1  | 模型那一段失败（没定时刻、抛错）        | A 重投 → 照常跑一轮                         |
-| 2  | ① 写"待定"失败                          | 状态没变 → A 重投照常跑                     |
-| 3  | ② 排 B 失败，broker 没收到              | A 重投照常跑（修之前被当成旧消息跳过）      |
-| 4  | ② 报失败但 broker 收到了，B 先到        | B 是"待定" → 跑一轮；A 再来时是旧消息       |
-| 5  | ③ 升"当前"失败，A 先重投                | A 仍是"当前" → 跑一轮                       |
-| 6  | ③ 升"当前"失败，B 先到                  | B 是"待定" → 跑一轮（不能被当成旧消息）     |
-| 7  | 进程死在 ② 之后、③ 之前                 | 启动时按原 id 补排 B 并升"当前"；A 是旧消息 |
-| 8  | 进程死在 ① 之后、② 之前                 | 启动时补排 B 并升"当前"；A 是旧消息         |
-| 9  | 进程死在 ③ 之后、确认 A 之前            | A 重投是旧消息；B 已在队列                  |
-| 10 | 一轮超时，取消落在 ② 等确认时           | A 重投照常跑                                |
-| 11 | 被别人的消息叫醒的一轮在收尾失败        | 那条消息重投照跑；原定的下次醒来还是"当前" |
+| 行 | 出事的位置                               | 接下来                                               |
+|----|------------------------------------------|------------------------------------------------------|
+| 1  | 模型那一段失败、没定时刻                 | 状态不变；A 不限次重试，再跑                         |
+| 2  | send B 失败，broker 没收到               | 状态不变；A 重试再跑，定下 C                         |
+| 3  | send B 报失败，其实 broker 收到了        | 状态不变；B 到点是旧消息；A 重试定下 C               |
+| 4  | send B 成功，写状态失败                  | 同 3                                                 |
+| 5  | 进程死在 send B 与写状态之间             | 重启：A 的时刻已过，立刻排 S；A 重投、B 都是旧消息  |
+| 6  | 进程死在写状态与确认 A 之间              | A 重投是旧消息；B 已排出、是最新                     |
+| 7  | 一轮超时，取消落在 send 等确认时         | 同 2                                                 |
+| 8  | 别人的消息触发的一轮在收尾失败           | 原定的 W 仍是最新、在队列里；那条消息照常有限次重试  |
+| 9  | 状态里的最新唤醒连续失败 N 次            | 每一次都不限次重试，永不进死信（真 broker 那条在     |
+|    |                                          | ``test_wakes_on_a_real_broker.py``）                 |
 """
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, SendFailed, new_message
 from app.world import main_agent, wake
 
-from .conftest import self_message, sets_nothing
+from .conftest import self_message, sets_nothing, sets_wake
 
 
 class Crash(BaseException):
@@ -58,177 +60,140 @@ def _fail_next_send(monkeypatch, world, *, queued: bool, error: BaseException | 
     monkeypatch.setattr(wake, "send_at", send_at)
 
 
-def _fail_state_write(monkeypatch, *, on_call: int, error: BaseException):
-    """第 ``on_call`` 次写私有状态时失败（之前和之后的照常写）。"""
-    real = wake._write_state
+def _fail_next_record(monkeypatch, error: BaseException):
+    """下一次把最新唤醒写进私有状态时失败（之后的照常写）。"""
+    real = wake._record_next_wake
     calls = {"n": 0}
 
-    def write(state):
+    def record(next_wake):
         calls["n"] += 1
-        if calls["n"] == on_call:
+        if calls["n"] == 1:
             raise error
-        real(state)
+        real(next_wake)
 
-    monkeypatch.setattr(wake, "_write_state", write)
+    monkeypatch.setattr(wake, "_record_next_wake", record)
 
 
 async def _armed(world):
-    """A：状态里的"当前"、已经排出去的那条自定消息，到点了。"""
+    """A：状态里的最新唤醒，已经排出去了，到点了。"""
     a = await wake.set_next_wake(now_cst(), "到点了。")
     world.scheduled.clear()
+    world.scheduled.append({"message_id": a.message_id})  # 它早就排出去了
     return a, self_message(a.message_id, "到点了。")
 
 
-def _assert_awake(world):
-    """状态里的"当前"是一条排出去了的消息——world 不会一直睡下去。"""
-    current = wake.read_next_wake()
-    assert current is not None
-    assert current.message_id in {s["message_id"] for s in world.scheduled}
+async def _never_dead_lettered(message) -> bool:
+    return await wake.retry_latest_wake_without_limit(message) is not None
 
 
-def _new_wakes(world):
-    return [s["message_id"] for s in world.scheduled]
+async def _assert_awake(world):
+    """之后一定还有一条会被执行的自定唤醒：已排出、不是旧消息、失败了也不进死信。"""
+    latest = wake.read_next_wake()
+    assert latest is not None
+    assert latest.message_id in {s["message_id"] for s in world.scheduled}, "最新唤醒没排出去"
+    message = self_message(latest.message_id)
+    assert not wake.is_stale_wake(message), "最新唤醒会被当成旧消息跳过"
+    assert await _never_dead_lettered(message), "最新唤醒失败时会进死信"
 
 
-async def test_row_1_a_round_that_fails_before_its_wake_runs_again(world):
+async def _assert_retried_forever(trigger):
+    """这一轮失败了：叫醒它的那条重投时照常跑，而且无论失败几次都不进死信。"""
+    assert not wake.is_stale_wake(trigger)
+    assert await _never_dead_lettered(trigger)
+
+
+async def test_row_1_the_model_part_fails(world):
     a, trigger = await _armed(world)
     world.runner.plan = sets_nothing()
 
     with pytest.raises(main_agent.NoNextWake):
         await main_agent.on_world_message(trigger)
     assert wake.read_next_wake() == a
-
-    from .conftest import sets_wake
+    await _assert_retried_forever(trigger)
 
     world.runner.plan = sets_wake()
     await main_agent.on_world_message(trigger)
-
     assert len(world.runner.runs) == 2
-    _assert_awake(world)
+    await _assert_awake(world)
 
 
-async def test_row_2_recording_the_pending_wake_fails(world, monkeypatch):
-    a, trigger = await _armed(world)
-    _fail_state_write(monkeypatch, on_call=1, error=OSError("disk full"))
-
-    with pytest.raises(OSError):
-        await main_agent.on_world_message(trigger)
-    assert wake.read_state().current == a and wake.read_state().pending is None
-    assert world.scheduled == []
-
-    await main_agent.on_world_message(trigger)
-
-    assert len(world.runner.runs) == 2
-    _assert_awake(world)
-
-
-async def test_row_3_scheduling_fails_before_the_broker_has_it(world, monkeypatch):
-    """codex 复现的那条：修之前 A 重投时对不上状态里的 B，被跳过，而 B 从没排出去。"""
+async def test_row_2_sending_the_new_wake_fails(world, monkeypatch):
     a, trigger = await _armed(world)
     _fail_next_send(monkeypatch, world, queued=False)
 
     with pytest.raises(SendFailed):
         await main_agent.on_world_message(trigger)
+    assert wake.read_next_wake() == a, "没排出去的唤醒不能记进状态"
+    await _assert_retried_forever(trigger)
+
     await main_agent.on_world_message(trigger)
+    assert len(world.runner.runs) == 2
+    await _assert_awake(world)
 
-    assert len(world.runner.runs) == 2, "A 重投时被当成了旧消息"
-    _assert_awake(world)
 
-
-async def test_row_4_scheduling_unconfirmed_but_queued_and_the_new_wake_comes_first(
-    world, monkeypatch
-):
+async def test_row_3_sending_reports_failure_but_the_broker_has_it(world, monkeypatch):
     a, trigger = await _armed(world)
     _fail_next_send(monkeypatch, world, queued=True)
 
     with pytest.raises(SendFailed):
         await main_agent.on_world_message(trigger)
-    [b] = _new_wakes(world)
-    await main_agent.on_world_message(self_message(b))
-    assert len(world.runner.runs) == 2, "B 是待定，该跑一轮"
+    b = world.scheduled[-1]["message_id"]
+    await main_agent.on_world_message(self_message(b))  # B 先到
+    assert len(world.runner.runs) == 1, "没记进状态的 B 应当是旧消息"
+    await _assert_retried_forever(trigger)
+
     await main_agent.on_world_message(trigger)
+    assert len(world.runner.runs) == 2
+    assert wake.is_stale_wake(self_message(b))
+    await _assert_awake(world)
 
-    assert len(world.runner.runs) == 2, "B 那一轮定了新时刻之后，A 是旧消息"
-    _assert_awake(world)
 
-
-async def test_row_5_promoting_fails_and_the_trigger_comes_back_first(world, monkeypatch):
+async def test_row_4_recording_fails_after_the_new_wake_was_sent(world, monkeypatch):
     a, trigger = await _armed(world)
-    _fail_state_write(monkeypatch, on_call=2, error=OSError("disk full"))
+    _fail_next_record(monkeypatch, OSError("disk full"))
 
     with pytest.raises(OSError):
         await main_agent.on_world_message(trigger)
+    b = world.scheduled[-1]["message_id"]
+    assert wake.read_next_wake() == a
+    await _assert_retried_forever(trigger)
+
     await main_agent.on_world_message(trigger)
-
     assert len(world.runner.runs) == 2
-    _assert_awake(world)
+    assert wake.is_stale_wake(self_message(b))
+    await _assert_awake(world)
 
 
-async def test_row_6_promoting_fails_and_the_new_wake_comes_first(world, monkeypatch):
-    """B 已经排出去、状态还没把它升为"当前"：B 到点时不能被当成旧消息。"""
+async def test_row_5_dying_between_sending_and_recording(world, monkeypatch):
     a, trigger = await _armed(world)
-    _fail_state_write(monkeypatch, on_call=2, error=OSError("disk full"))
-
-    with pytest.raises(OSError):
-        await main_agent.on_world_message(trigger)
-    [b] = _new_wakes(world)
-    await main_agent.on_world_message(self_message(b))
-
-    assert len(world.runner.runs) == 2, "B 被当成了旧消息"
-    _assert_awake(world)
-
-
-async def test_row_7_dying_between_scheduling_and_promoting(world, monkeypatch):
-    a, trigger = await _armed(world)
-    real_write = wake._write_state
-    _fail_state_write(monkeypatch, on_call=2, error=Crash())
+    _fail_next_record(monkeypatch, Crash())
 
     with pytest.raises(Crash):
         await main_agent.on_world_message(trigger)
-    [b] = _new_wakes(world)
-    monkeypatch.setattr(wake, "_write_state", real_write)  # 新进程：状态照常写
-    world_send = world.scheduled
-    await _restart(world, monkeypatch)
+    b = world.scheduled[-1]["message_id"]
+    await wake.wake_on_start()  # 新进程：A 的时刻已经过了
 
-    assert wake.read_next_wake().message_id == b
-    assert [s["message_id"] for s in world_send].count(b) == 2  # 启动时按原 id 又排了一次
-    await main_agent.on_world_message(trigger)  # A 没确认，被重投
-    assert len(world.runner.runs) == 1, "B 已经接手，A 是旧消息"
+    started = wake.read_next_wake()
+    assert started.message_id not in {a.message_id, b}
+    await main_agent.on_world_message(trigger)  # 没确认的 A 被重投
     await main_agent.on_world_message(self_message(b))
-    assert len(world.runner.runs) == 2
-    _assert_awake(world)
+    assert len(world.runner.runs) == 1, "A 和 B 都该是旧消息"
+    await _assert_awake(world)
 
 
-async def test_row_8_dying_between_recording_pending_and_scheduling(world, monkeypatch):
-    a, trigger = await _armed(world)
-    _fail_next_send(monkeypatch, world, queued=False, error=Crash())
-
-    with pytest.raises(Crash):
-        await main_agent.on_world_message(trigger)
-    pending = wake.read_state().pending
-    assert pending is not None and world.scheduled == []
-    await _restart(world, monkeypatch)
-
-    assert wake.read_next_wake() == pending
-    assert _new_wakes(world) == [pending.message_id]
-    await main_agent.on_world_message(trigger)
-    assert len(world.runner.runs) == 1
-    _assert_awake(world)
-
-
-async def test_row_9_dying_after_promoting_before_the_trigger_is_acknowledged(world):
+async def test_row_6_dying_between_recording_and_acknowledging(world):
     a, trigger = await _armed(world)
     await main_agent.on_world_message(trigger)
-    [b] = _new_wakes(world)
+    b = world.scheduled[-1]["message_id"]
 
     await main_agent.on_world_message(trigger)  # 没确认的 A 被重投
 
     assert len(world.runner.runs) == 1
     assert wake.read_next_wake().message_id == b
-    _assert_awake(world)
+    await _assert_awake(world)
 
 
-async def test_row_10_a_timeout_lands_while_scheduling(world, monkeypatch):
+async def test_row_7_a_timeout_lands_while_sending(world, monkeypatch):
     a, trigger = await _armed(world)
     calls = {"n": 0}
 
@@ -244,36 +209,47 @@ async def test_row_10_a_timeout_lands_while_scheduling(world, monkeypatch):
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.3):
             await main_agent.on_world_message(trigger)
+    assert wake.read_next_wake() == a
+    await _assert_retried_forever(trigger)
+
     await main_agent.on_world_message(trigger)
+    assert len(world.runner.runs) == 2
+    await _assert_awake(world)
 
-    assert len(world.runner.runs) == 2, "超时之后 A 重投被当成了旧消息"
-    _assert_awake(world)
 
-
-async def test_row_11_a_round_woken_by_someone_else_fails_while_scheduling(world, monkeypatch):
+@pytest.mark.parametrize("where", ["model", "send", "record"])
+async def test_row_8_a_round_woken_by_someone_else_fails(world, monkeypatch, where):
     planned = await wake.set_next_wake(now_cst() + timedelta(hours=3), "原定的。")
     world.scheduled.clear()
-    world.scheduled.append({"message_id": planned.message_id})  # 它早就排出去了
+    world.scheduled.append({"message_id": planned.message_id})
     message = new_message(sender="operator", recipient="world", body="下雨了。", kind=Kind.MESSAGE)
-    _fail_next_send(monkeypatch, world, queued=False)
+    if where == "model":
+        world.runner.plan = sets_nothing()
+    elif where == "send":
+        _fail_next_send(monkeypatch, world, queued=False)
+    else:
+        _fail_next_record(monkeypatch, OSError("disk full"))
 
-    with pytest.raises(SendFailed):
+    with pytest.raises((main_agent.NoNextWake, SendFailed, OSError)):
         await main_agent.on_world_message(message)
+
     assert wake.read_next_wake() == planned
-    _assert_awake(world)
-    assert not wake.is_stale_wake(self_message(planned.message_id))
-
-    await main_agent.on_world_message(message)
-    assert len(world.runner.runs) == 2
-    _assert_awake(world)
+    await _assert_awake(world)
+    assert await wake.retry_latest_wake_without_limit(message) is None, (
+        "别人的消息照常有限次重试"
+    )
 
 
-async def _restart(world, monkeypatch):
-    """进程重新起来：收件箱开设时的启动检查。替身 send_at 照旧记账。"""
+async def test_row_9_the_latest_wake_failing_again_and_again_is_always_retried(world):
+    a, trigger = await _armed(world)
+    world.runner.plan = sets_nothing()
 
-    async def send_at(**kw):
-        world.scheduled.append(kw)
-        return kw["message_id"]
+    for _ in range(10):
+        with pytest.raises(main_agent.NoNextWake):
+            await main_agent.on_world_message(trigger)
+        await _assert_retried_forever(trigger)
 
-    monkeypatch.setattr(wake, "send_at", send_at)
-    await wake.wake_on_start()
+    world.runner.plan = sets_wake()
+    await main_agent.on_world_message(trigger)
+    assert len(world.runner.runs) == 11
+    await _assert_awake(world)

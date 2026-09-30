@@ -91,14 +91,10 @@ async def test_world_wakes_on_start_on_its_own_time_and_on_messages_and_skips_re
     await eventually(lambda: len(runner.stimuli) >= 2, timeout=10)
     assert "你给自己排的一次醒来" in runner.stimuli[1]
 
-    # 第二轮收完尾（1.5 秒后那次成了"当前"）再往下走：替身模型开始跑时这一轮还没定时刻。
+    # 第二轮收完尾（1.5 秒后那次记进了状态）再往下走：替身模型开始跑时这一轮还没定时刻。
     def second_round_done():
-        state = wake.read_state()
-        return (
-            state.pending is None
-            and state.current is not None
-            and "1.5 秒后" in state.current.reason
-        )
+        latest = wake.read_next_wake()
+        return latest is not None and "1.5 秒后" in latest.reason
 
     await eventually(second_round_done, timeout=10)
     replaced = wake.read_next_wake()  # 第二轮定的 1.5 秒后
@@ -180,9 +176,7 @@ async def test_someone_elses_message_dead_lettered_leaves_world_waking_on_its_pl
 
     await start_messaging()
     await eventually(
-        lambda: (s := wake.read_state()).pending is None
-        and s.current is not None
-        and "4.0 秒后" in s.current.reason,
+        lambda: (w := wake.read_next_wake()) is not None and "4.0 秒后" in w.reason,
         timeout=10,
     )
     planned = wake.read_next_wake()
@@ -198,28 +192,39 @@ async def test_someone_elses_message_dead_lettered_leaves_world_waking_on_its_pl
     assert sum("发来一条消息" in s for s in runner.stimuli) == 3
 
 
-async def test_the_due_wake_dead_lettered_arms_one_wake_after_the_backoff(
+async def test_the_latest_wake_failing_again_and_again_is_never_dead_lettered(
     world_process, broker, monkeypatch  # noqa: F811
 ):
+    """重试上限是 3：启动补醒那一轮连着失败 5 次，照样一直重试、每次都记下来，第 6 次跑完。"""
     from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS
 
     _fast_retry(monkeypatch)
-    runner = RunnerFailingOn(lambda s: True, [])
+    failures = {"left": 5}
+
+    def fails(stimulus):
+        if failures["left"]:
+            failures["left"] -= 1
+            return True
+        return False
+
+    runner = RunnerFailingOn(fails, [86_400.0])
     monkeypatch.setattr(main_agent, "build_round_runner", lambda config: runner)
 
-    await start_messaging()  # 启动补醒：那一轮一直失败
-    await eventually(lambda: broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}"), timeout=15)
-    await eventually(lambda: wake.read_state().pending is None, timeout=5)
+    await start_messaging()
+    started = None
 
-    backoff = wake.read_next_wake()
-    expected = now_cst() + timedelta(minutes=wake.DEFAULT_WAKE_BACKOFF_MINUTES)
-    assert abs((backoff.at - expected).total_seconds()) < 30
-    assert len(runner.stimuli) == 3
-    rows = await read_record(message_id=backoff.message_id)
-    assert [r["outcome"] for r in rows] == ["sending", "scheduled"]
-    scheduled_self = [
-        r
-        for r in await read_record(participant="world", limit=200)
-        if r["sender"] == "world" and r["outcome"] == "scheduled"
-    ]
-    assert len(scheduled_self) == 2  # 启动补醒那一次 + 一次退避
+    def started_wake():
+        nonlocal started
+        started = started or wake.read_next_wake()
+        return started
+
+    await eventually(started_wake, timeout=10)
+    await eventually(
+        lambda: (w := wake.read_next_wake()) is not None and "86400.0 秒后" in w.reason,
+        timeout=30,
+    )
+
+    assert len(runner.stimuli) == 6
+    assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0
+    rows = await read_record(message_id=started.message_id)
+    assert [r["outcome"] for r in rows].count("retrying") == 5

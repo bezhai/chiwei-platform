@@ -23,7 +23,7 @@ def scheduled(monkeypatch) -> list[dict]:
     seen: list[dict] = []
 
     async def send_at(**kw):
-        seen.append({**kw, "state_then": wake.read_state()})
+        seen.append({**kw, "state_then": wake.read_next_wake()})
         return kw["message_id"]
 
     monkeypatch.setattr(wake, "send_at", send_at)
@@ -34,7 +34,7 @@ def _state_file(volume):
     return volume / LANE / "next_wake.json"
 
 
-async def test_setting_the_next_wake_records_it_then_schedules_that_very_message(
+async def test_setting_the_next_wake_sends_it_first_and_only_then_records_it(
     volume, scheduled
 ):
     at = now_cst() + timedelta(hours=2)
@@ -48,28 +48,24 @@ async def test_setting_the_next_wake_records_it_then_schedules_that_very_message
     assert (sent["sender"], sent["recipient"]) == ("world", "world")
     assert (sent["at"], sent["message_id"]) == (at, chosen.message_id)
     assert sent["body"] == "两小时后看看雨停了没有。"
-    assert sent["state_then"] == wake.WakeState(current=None, pending=chosen), (
-        "排消息之前，新时刻要先作为待定写进状态"
-    )
+    assert sent["state_then"] is None, "排出去之前不能先记进状态"
     on_disk = json.loads(_state_file(volume).read_text())
-    assert on_disk["current"]["message_id"] == chosen.message_id
-    assert on_disk["pending"] is None
+    assert on_disk["latest"]["message_id"] == chosen.message_id
 
 
-async def test_when_scheduling_fails_the_new_wake_stays_pending(volume, monkeypatch):
-    """排消息失败时新时刻留在"待定"，"当前"不变：这一轮会失败重来；进程要是死了，重启时补排。"""
+async def test_when_sending_fails_nothing_is_recorded(volume, monkeypatch):
+    """没排出去的唤醒不记进状态：状态里记的，一定是排出去了的。"""
+    earlier = None
 
     async def broken(**kw):
         raise SendFailed("broker did not confirm", message_id=kw["message_id"])
 
     monkeypatch.setattr(wake, "send_at", broken)
-    at = now_cst() + timedelta(hours=1)
 
     with pytest.raises(SendFailed):
-        await wake.set_next_wake(at, "一小时后。")
+        await wake.set_next_wake(now_cst() + timedelta(hours=1), "一小时后。")
 
-    assert wake.read_next_wake() is None
-    assert wake.read_state().pending.at == at
+    assert wake.read_next_wake() is earlier
 
 
 async def test_only_the_wake_named_in_the_state_is_current(volume, scheduled):
@@ -166,13 +162,13 @@ async def test_an_unreadable_state_counts_as_no_wake(volume, scheduled):
 
 
 # ---------------------------------------------------------------------------
-# 一轮最终进了死信
+# 最新唤醒失败时不限次数重试
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def backoff_minutes(monkeypatch):
-    """Dynamic Config 的替身：默认什么都没配；测试可以往 ``values`` 里放值。"""
+def retry_cap(monkeypatch):
+    """Dynamic Config 的替身：默认什么都没配；测试可以往里放值。"""
     from inner_shared.dynamic_config import dynamic_config
 
     values: dict[str, int] = {}
@@ -188,81 +184,45 @@ def _self(message_id):
     )
 
 
-async def test_the_due_wake_failing_for_good_arms_one_wake_after_the_backoff(
-    volume, scheduled, backoff_minutes
-):
-    due = await wake.set_next_wake(now_cst(), "到点了。")
-    scheduled.clear()
+async def test_the_latest_wake_is_retried_without_limit(volume, scheduled, retry_cap):
+    latest = await wake.set_next_wake(now_cst(), "到点了。")
 
-    await wake.wake_after_failure(_self(due.message_id), RuntimeError("模型一直报错"))
+    cap = await wake.retry_latest_wake_without_limit(_self(latest.message_id))
 
-    after = wake.read_next_wake()
-    assert after.message_id != due.message_id
-    expected = now_cst() + timedelta(minutes=wake.DEFAULT_WAKE_BACKOFF_MINUTES)
-    assert abs((after.at - expected).total_seconds()) < 5
-    assert "模型一直报错" in after.reason
-    assert [s["message_id"] for s in scheduled] == [after.message_id]
+    assert cap == timedelta(minutes=wake.DEFAULT_WAKE_RETRY_CAP_MINUTES)
 
 
-async def test_the_backoff_comes_from_dynamic_config(volume, scheduled, backoff_minutes):
-    backoff_minutes[wake.WAKE_BACKOFF_MINUTES_KEY] = 5
-    due = await wake.set_next_wake(now_cst(), "到点了。")
+async def test_the_retry_cap_comes_from_dynamic_config(volume, scheduled, retry_cap):
+    retry_cap[wake.WAKE_RETRY_CAP_MINUTES_KEY] = 5
+    latest = await wake.set_next_wake(now_cst(), "到点了。")
 
-    await wake.wake_after_failure(_self(due.message_id), RuntimeError("x"))
-
-    expected = now_cst() + timedelta(minutes=5)
-    assert abs((wake.read_next_wake().at - expected).total_seconds()) < 5
+    assert await wake.retry_latest_wake_without_limit(_self(latest.message_id)) == timedelta(
+        minutes=5
+    )
 
 
 @pytest.mark.parametrize("configured", [0, -3])
-async def test_a_backoff_that_is_not_positive_falls_back_to_the_default(
-    volume, scheduled, backoff_minutes, configured
+async def test_a_cap_that_is_not_positive_falls_back_to_the_default(
+    volume, scheduled, retry_cap, configured
 ):
-    backoff_minutes[wake.WAKE_BACKOFF_MINUTES_KEY] = configured
-    due = await wake.set_next_wake(now_cst(), "到点了。")
+    retry_cap[wake.WAKE_RETRY_CAP_MINUTES_KEY] = configured
+    latest = await wake.set_next_wake(now_cst(), "到点了。")
 
-    await wake.wake_after_failure(_self(due.message_id), RuntimeError("x"))
-
-    expected = now_cst() + timedelta(minutes=wake.DEFAULT_WAKE_BACKOFF_MINUTES)
-    assert abs((wake.read_next_wake().at - expected).total_seconds()) < 5
-
-
-async def test_the_backoff_wake_failing_again_backs_off_again(
-    volume, scheduled, backoff_minutes
-):
-    due = await wake.set_next_wake(now_cst(), "到点了。")
-    await wake.wake_after_failure(_self(due.message_id), RuntimeError("第一次"))
-    first_backoff = wake.read_next_wake()
-
-    await wake.wake_after_failure(_self(first_backoff.message_id), RuntimeError("第二次"))
-
-    second_backoff = wake.read_next_wake()
-    assert second_backoff.message_id != first_backoff.message_id
-    assert "第二次" in second_backoff.reason
+    assert await wake.retry_latest_wake_without_limit(_self(latest.message_id)) == timedelta(
+        minutes=wake.DEFAULT_WAKE_RETRY_CAP_MINUTES
+    )
 
 
-async def test_someone_elses_message_failing_for_good_leaves_the_planned_wake(
-    volume, scheduled, backoff_minutes
-):
-    """那时私有状态里原定的下次醒来还在，world 本来就会按时醒：不另排。"""
-    planned = await wake.set_next_wake(now_cst() + timedelta(hours=2), "原定的。")
-    scheduled.clear()
+async def test_other_messages_keep_the_limited_retries(volume, scheduled, retry_cap):
+    """别人的消息、被取代的旧唤醒、机制的告知：照常有限次重试，然后进死信。"""
+    replaced = await wake.set_next_wake(now_cst(), "被取代的。")
+    await wake.set_next_wake(now_cst() + timedelta(hours=1), "后来定的。")
     from_operator = new_message(
         sender="operator", recipient="world", body="有人敲门。", kind=Kind.MESSAGE
     )
+    notice = new_message(
+        sender="world", recipient="world", body="没有送达。", kind=Kind.NOT_DELIVERED
+    )
 
-    await wake.wake_after_failure(from_operator, RuntimeError("x"))
-
-    assert scheduled == []
-    assert wake.read_state() == wake.WakeState(current=planned)
-
-
-async def test_a_replaced_wake_failing_for_good_does_nothing(volume, scheduled, backoff_minutes):
-    replaced = await wake.set_next_wake(now_cst(), "被取代的。")
-    current = await wake.set_next_wake(now_cst() + timedelta(hours=1), "后来定的。")
-    scheduled.clear()
-
-    await wake.wake_after_failure(_self(replaced.message_id), RuntimeError("x"))
-
-    assert scheduled == []
-    assert wake.read_next_wake() == current
+    for message in (from_operator, _self(replaced.message_id), notice):
+        assert await wake.retry_latest_wake_without_limit(message) is None

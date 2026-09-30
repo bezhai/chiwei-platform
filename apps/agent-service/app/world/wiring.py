@@ -3,8 +3,8 @@
 world 靠收件箱醒：开设名为 ``world`` 的收件箱，只在拿着卷的写锁时消费
 （:func:`app.world.volume.writer_lock`；启动补醒也在拿到锁之后才跑），一次只处理一条、一轮最多
 :data:`app.world.main_agent.ROUND_TIMEOUT`（占位租约随之放长），开设时按私有状态补醒
-（:func:`app.world.wake.wake_on_start`），自定唤醒那一轮最终进了死信就退避之后再醒
-（:func:`app.world.wake.wake_after_failure`）。它不接受提问——回答"某处现在什么样"的应答
+（:func:`app.world.wake.wake_on_start`），状态里的最新唤醒那一轮失败时不限次数重试、永不
+进死信（:func:`app.world.wake.retry_latest_wake_without_limit`）。它不接受提问——回答"某处现在什么样"的应答
 agent 还没有。
 
 记录的人工读写接口（:mod:`app.world.admin`）挂在这个 App 自己的进程里，四个节点都绑在
@@ -25,7 +25,7 @@ from app.world.admin import (
 )
 from app.world.main_agent import ROUND_TIMEOUT, on_world_message
 from app.world.volume import writer_lock
-from app.world.wake import WORLD, wake_after_failure, wake_on_start
+from app.world.wake import WORLD, retry_latest_wake_without_limit, wake_on_start
 
 inbox(
     WORLD,
@@ -33,7 +33,7 @@ inbox(
     processing_timeout=ROUND_TIMEOUT,
     one_at_a_time=True,
     on_open=wake_on_start,
-    on_final_failure=wake_after_failure,
+    retry_without_limit=retry_latest_wake_without_limit,
     consume_while=writer_lock,
 )
 

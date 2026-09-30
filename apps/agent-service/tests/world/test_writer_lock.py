@@ -57,7 +57,7 @@ async def test_the_wake_state_is_not_written_without_the_lock(bare_volume, monke
 
     with pytest.raises(volume.WriterLockNotHeld):
         await wake.set_next_wake(now_cst(), "x")
-    assert wake.read_state() == wake.WakeState()
+    assert wake.read_next_wake() is None
 
 
 def test_once_the_other_process_lets_go_this_one_takes_the_lock(bare_volume):
