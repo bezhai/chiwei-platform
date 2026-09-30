@@ -121,7 +121,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     # 各文件各建各的迟早会出现"这个文件建了那个没建"。``PersonaVersion`` 同一个理由：
     # 一轮、日记、开口三条路都要先问一遍"她是谁"（``persona_prompt_vars`` 读这条链）。
     # ``SessionTranscript`` 也是：每一轮开头读连续上下文、结尾写回下一版
-    # （``app.living.continuity``），少了它 ``run_moment`` 第一步就炸。
+    # （``app.agent.continuity``），少了它 ``run_moment`` 第一步就炸。
     for cls in (
         Happening, Whereabouts, PhoneRead, SpokenOutbound, Picture,
         LivingDayPage, PersonaVersion, SessionTranscript,

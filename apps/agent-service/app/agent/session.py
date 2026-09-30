@@ -14,7 +14,7 @@ column (``transcript_json``): a transcript is naturally one opaque blob and a TE
 column is the clean fit.
 
 **No trimming here.** Trimming is a policy decision about what she keeps and for
-how long, and it lives in exactly one place — :mod:`app.living.continuity`. A
+how long, and it lives in exactly one place — :mod:`app.agent.continuity`. A
 second regime in this layer would silently drop messages the policy meant to keep,
 and it would do so behind the caller's back (the returned value would look fine).
 So the caps this module used to apply are gone; the caller decides what the full

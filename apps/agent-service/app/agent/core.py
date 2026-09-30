@@ -935,7 +935,7 @@ class Agent:
         can store the round losslessly. The Agent itself reads and writes no
         store: a caller that continues a conversation passes the prior messages in
         ``messages`` and decides when and with what else the round is persisted
-        (:mod:`app.living.continuity`).
+        (:mod:`app.agent.continuity`).
 
         Only the messages of a *successful* attempt reach the sink: a retried
         attempt starts a fresh collection, so a transient failure never leaves a

@@ -1553,7 +1553,7 @@ async def test_the_notifications_are_in_plain_time_order(
 # 七之二 · 每轮只给新到的，还没看的全貌铺在界桩上
 # --------------------------------------------------------------------------
 #
-# 上下文不再每轮重开（:mod:`app.living.continuity`），所以上一轮的信封还在她眼前。
+# 上下文不再每轮重开（:mod:`app.agent.continuity`），所以上一轮的信封还在她眼前。
 # 这时候每轮重摆一遍同一份未读清单，就是把同一段话抄一遍：她没看手机的话那份清单一个
 # 字都不会变，而一小时六轮抄六遍。
 #
@@ -1627,7 +1627,7 @@ def test_a_cold_start_gets_everything_because_none_of_it_is_in_front_of_her_yet(
     """她上一轮是什么时候都不知道（重启、或者这条泳道的第一轮），那就全给。
 
     这时候她眼前一条历史都没有，这些对她全是新的。同一轮界桩也会立起来
-    （:func:`app.living.continuity.trim_for_round`，空上下文一律立），所以这两份会重
+    （:func:`app.agent.continuity.trim_for_round`，空上下文一律立），所以这两份会重
     一次 —— 重一次的代价是几百个 token，漏一次的代价是有人找她而她不知道。
     """
     from app.living.phone import render_arrived

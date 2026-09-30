@@ -1,6 +1,7 @@
 """分层裁剪 —— 她的上下文在固定时刻按两档时长裁，全程不做总结。
 
-这个文件钉 :mod:`app.living.continuity` 裁剪那一半的每一条：
+这个文件从她这一侧钉裁剪（机制在基础层 :mod:`app.agent.continuity`，她的阈值和
+分类表在 :mod:`app.living.moment`）：
 
   1. **分类表覆盖全部工具**：加一只手不分类就跑不过，不会静默落进某一档；
   2. **时间语义按明确截止线验**：整点清理下"保留 1 小时"实际是 1–2 小时，用例
@@ -22,24 +23,24 @@ from dataclasses import replace
 
 import pytest
 
-from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
-from app.living.continuity import (
+from app.agent.continuity import (
     CHECKPOINT_HEAD,
     MATERIAL_TRIMMED,
     PICTURE_TRIMMED,
     TrimPolicy,
     estimate_tokens,
-    load_moment_transcript,
     next_transcript,
-    transcript_key,
     trim_for_round,
 )
+from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
+from app.agent.session import load_session
 from app.living.moment import (
     KEPT_TOOLS,
     MATERIAL_TOOLS,
     MOMENT_TOOLS,
     MOMENT_TRIM_POLICY,
     run_moment,
+    transcript_key,
 )
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
 
@@ -435,7 +436,7 @@ def test_a_picture_never_outlives_its_signed_url():
     一个 moment 间隔。这一条钉的是这两个数加起来仍然小于签名寿命 —— 谁把周期往上调，
     这里先炸，而不是上线以后每一轮都在同一个地方抛错。
     """
-    from app.living.continuity import MAX_CLEANUP_MINUTES, PICTURE_URL_MINUTES
+    from app.agent.continuity import MAX_CLEANUP_MINUTES, PICTURE_URL_MINUTES
     from app.living.moment import DEFAULT_LIFE_MOMENT_MINUTES
 
     assert MAX_CLEANUP_MINUTES + DEFAULT_LIFE_MOMENT_MINUTES < PICTURE_URL_MINUTES
@@ -599,7 +600,7 @@ def test_the_hard_cap_trims_to_the_target_and_leaves_a_line_in_the_log(caplog):
     """撞上硬顶就裁到目标值，而且绝不静默。"""
     policy = _tiny_cap(cap=600, target=300)
     ctx: list[Message] = []
-    with caplog.at_level(logging.WARNING, logger="app.living.continuity"):
+    with caplog.at_level(logging.WARNING, logger="app.agent.continuity"):
         for i in range(12):
             ctx = _round(
                 ctx,
@@ -616,7 +617,7 @@ def test_the_hard_cap_never_eats_this_round(caplog):
     """哪怕这一轮自己就超了，这一轮的东西也必须原样留下来。"""
     policy = _tiny_cap(cap=50, target=20)
     huge = _said("这一轮她说了很长一段，" + "字" * 2000)
-    with caplog.at_level(logging.ERROR, logger="app.living.continuity"):
+    with caplog.at_level(logging.ERROR, logger="app.agent.continuity"):
         ctx = _round([], _at(14, 5), huge, policy=policy)
 
     assert huge.text() in _texts(ctx)
@@ -703,16 +704,17 @@ def test_what_she_thought_counts_toward_the_estimate():
 
 
 # ---------------------------------------------------------------------------
-# 七 · 她那份策略写在她自己的模块里，基建层一个阈值都不留
+# 七 · 她那份策略写在她自己的模块里
 #
-# 基建层只给形状和裁剪动作，她那份阈值写死在 moment 模块里。这一节验四样：
+# 基础层（:mod:`app.agent.continuity`）只给形状和裁剪动作，她那份阈值写死在 moment
+# 模块里。基础层自己不留阈值、不给默认值那一条在 ``tests/agent/test_continuity.py``。
+# 这一节验三样：
 #
 #   1. **等价**：阈值搬到业务层之后，同一份历史、同一时刻、同一状态下，喂进模型的那一份
 #      和落盘的那一份跟搬之前逐条相同。四条边界各走一遍。值本身另钉一条，因为整点清理
 #      下裁剪结果对分钟级的差别不敏感；
 #   2. **读的是自己那个名字**：她这一轮裁剪和收尾各一次，两次读的都是 moment 模块里那份；
-#   3. **约束**：原来那个运行时校验函数表达的五条约束，原样钉在这份常量上；
-#   4. **基建层只剩机制**：阈值、配置读取、一致性校验一样不留，策略参数也没有默认值。
+#   3. **约束**：原来那个运行时校验函数表达的五条约束，原样钉在这份常量上。
 # ---------------------------------------------------------------------------
 
 # 拿来验素材那一档的那只手，必须在她自己的素材表里。
@@ -946,7 +948,7 @@ def test_the_own_window_is_not_shorter_than_the_material_one():
 
 def test_the_cleanup_period_stays_inside_the_bound():
     """三 · 清理周期落在 1 到上限之间（上限是基建层那条从图片地址寿命派生的事实）。"""
-    from app.living.continuity import MAX_CLEANUP_MINUTES
+    from app.agent.continuity import MAX_CLEANUP_MINUTES
 
     policy = MOMENT_TRIM_POLICY
     assert 0 < policy.cleanup_minutes <= MAX_CLEANUP_MINUTES
@@ -963,41 +965,6 @@ def test_the_target_is_strictly_below_the_cap():
     """五 · 裁剪目标**严格**小于硬顶，不然撞顶之后裁不下去。"""
     policy = MOMENT_TRIM_POLICY
     assert policy.trim_target_tokens < policy.hard_cap_tokens
-
-
-# ---------------------------------------------------------------------------
-# 基建层：只剩机制
-# ---------------------------------------------------------------------------
-
-
-def test_the_trim_layer_holds_no_thresholds_and_reads_no_config():
-    """裁剪这一层不持有业务阈值、不读任何外部配置，策略参数也没有默认值。
-
-    给了默认值的话，接进来的下一个调用方一个阈值都不写也照跑 —— 跑的是谁设计的那套
-    没人说得清，而且一句报错都没有。这跟分类表那条纪律是同一条。
-    """
-    import inspect
-
-    from app.living import continuity as mod
-
-    for gone in (
-        "dynamic_config",
-        "load_trim_policy",
-        "DEFAULT_TRIM_POLICY",
-        "_holds_together",
-        "MATERIAL_MINUTES_KEY",
-        "OWN_MINUTES_KEY",
-        "CLEANUP_MINUTES_KEY",
-        "HARD_CAP_TOKENS_KEY",
-        "TRIM_TARGET_TOKENS_KEY",
-    ):
-        assert not hasattr(mod, gone), f"{gone} 还在基建层里"
-
-    for fn in (mod.trim_for_round, mod.next_transcript):
-        param = inspect.signature(fn).parameters["policy"]
-        assert param.default is inspect.Parameter.empty, (
-            f"{fn.__name__} 的 policy 有默认值"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -1020,8 +987,8 @@ async def test_a_cleanup_lands_in_the_stored_transcript(moment_db, stub_moment):
     stub_moment(said="继续")
     await run_moment(lane=LANE, persona_id="akao", now=_at(15, 10))
 
-    tid = transcript_key(lane=LANE, actor="akao")
-    stored, _ver = await load_moment_transcript(tid)
+    tid = transcript_key(lane=LANE, persona_id="akao")
+    stored, _ver = await load_session(tid)
     joined = "\n".join(_texts(stored))
 
     assert MATERIAL_TRIMMED in joined, "look_around 的返回是素材，跨过清理点该换掉"
@@ -1036,14 +1003,14 @@ async def test_a_picture_is_gone_before_she_is_fed_again(moment_db, stub_moment)
     裁剪如果只发生在收尾，这条路永远走不到 —— adapter 会在模型请求之前拿 403 抛错，
     每一轮都炸在同一个地方，收尾轮不上。所以裁必须在喂之前。
     """
+    from app.agent.continuity import commit_transcript
     from app.data.session import get_session
-    from app.living.continuity import commit_moment_transcript
 
     # 先塞一段带图片的历史，模拟上一个进程 13:00 那一轮画过一张
-    tid = transcript_key(lane=LANE, actor="akao")
+    tid = transcript_key(lane=LANE, persona_id="akao")
 
     async with get_session() as s:
-        await commit_moment_transcript(
+        await commit_transcript(
             tid,
             [
                 _stim("现在 13:00。"),
@@ -1175,7 +1142,7 @@ def test_trimming_the_pictures_changes_the_content_and_nothing_else():
     """
     from dataclasses import fields
 
-    from app.living.continuity import _without_pictures
+    from app.agent.continuity import _without_pictures
 
     call = ToolCall(
         id="p1",
@@ -1285,23 +1252,6 @@ def test_what_she_said_an_hour_ago_survives_crossing_four_in_the_morning():
     )
 
     assert "我正想着祭典的事" in "\n".join(_texts(ctx))
-
-
-def test_the_cleanup_line_never_goes_backwards_across_the_day_boundary():
-    """清理点按生活日 04:00 起算取整 —— 跨过那一刻它必须继续往前，不能倒回去。
-
-    倒回去的话 ``_due`` 会判成"还没跨过"，从 04:00 起整整一天一根界桩都不立：
-    素材和图片永远不过期，而图片的预签名地址 90 分钟就死。
-    """
-    from app.living.continuity import _cleanup_instant
-
-    at = _at(0, 0, day=26)
-    last = _cleanup_instant(at, BEFORE_THE_MOVE.cleanup_minutes)
-    for _ in range(60):  # 00:00 → 10:00，每 10 分钟看一次
-        at += dt.timedelta(minutes=10)
-        now = _cleanup_instant(at, BEFORE_THE_MOVE.cleanup_minutes)
-        assert now >= last, f"{at} 的清理点 {now} 比上一个 {last} 还早"
-        last = now
 
 
 def test_the_first_round_on_the_new_key_lays_her_state_down():

@@ -721,7 +721,7 @@ def render_arrived(
 ) -> str:
     """这一轮**新到的**那些会话，摆到她眼前的那一段。
 
-    **每轮只给新到的。** 她的上下文不再每轮重开（:mod:`app.living.continuity`），上一
+    **每轮只给新到的。** 她的上下文不再每轮重开（:mod:`app.agent.continuity`），上一
     轮的信封还在她眼前；她没看手机的话那份清单一个字都不会变，每轮重摆就是把同一段话
     抄一遍，一小时抄六遍。真人手机也是这个形态：新消息才震，躺着的未读不会一直震。
 
@@ -731,7 +731,7 @@ def render_arrived(
 
     ``since`` 是 ``None``（重启之后的第一轮、或者这条泳道的第一个 moment）就**全给**：
     那时她眼前一条历史都没有，这些对她全是新的。同一轮界桩也会立起来
-    （:func:`app.living.continuity.trim_for_round`，空上下文一律立），所以这两份会重一
+    （:func:`app.agent.continuity.trim_for_round`，空上下文一律立），所以这两份会重一
     次 —— 重一次的代价是几百个 token，漏一次的代价是有人找她而她不知道。
 
     **数字仍然是这条会话上她没看的全部**，不是这一轮新到的那几条：只数新的，她会以为
@@ -758,7 +758,7 @@ def render_unread(envelopes: list[Envelope], *, now: datetime) -> str:
     """此刻**还没看的全部**，铺在界桩上的那一段。
 
     :func:`render_arrived` 只给新到的，所以一条她一直不看的通知，会随着摆出它的那一轮
-    刺激一起在 ``own_minutes`` 之后被裁掉（:mod:`app.living.continuity`）—— 之后再没有
+    刺激一起在 ``own_minutes`` 之后被裁掉（:mod:`app.agent.continuity`）—— 之后再没有
     第二处说得出有人找过她。界桩重铺的正是这类"此刻仍然为真"的事实，未读是其中一件。
 
     **这一份不截条数。** 它答的是"此刻还有什么没看"，截断会让这个答案变成假话；而被

@@ -86,7 +86,7 @@ async def test_the_state_she_stands_in_carries_nothing_that_just_happened(snap_d
     """重铺那一半只有当下的事实，不含这一轮新发生的东西。
 
     上下文连续之后，每轮重发一份全量状态就是把她上一轮读过的东西再抄一遍。全量只在
-    清理那一下重铺一次（:func:`app.living.continuity.trim_for_round`），所以这一半必须
+    清理那一下重铺一次（:func:`app.agent.continuity.trim_for_round`），所以这一半必须
     不含"这段时间你感知到的"——那是每轮都变的，重铺进去等于把已经推过游标的动静又摆
     一遍。
     """

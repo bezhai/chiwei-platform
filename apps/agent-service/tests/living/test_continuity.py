@@ -1,8 +1,9 @@
 """连续上下文的契约用例 —— 键、日界、恢复、写失败、以及"谁不许裁剪"。
 
-这个文件钉的是 :mod:`app.living.continuity` 那份契约的每一条，逐条对应：
+这个文件从她这一侧钉连续上下文（存取和裁剪的机制在基础层 :mod:`app.agent.continuity`，
+键、写失败怎么算在 :mod:`app.living.moment`），逐条对应：
 
-  1. 一个 persona 一条、键是 ``lane:persona:生活日``，日界在 CST 04:00；
+  1. 一个 persona 一条、键是 ``lane:persona``，不分天；
   2. 上下文写失败不拖垮这一轮，但留得下一行 ERROR，不是悄悄冷启动；
   3. moment 记录和手机已读是同一次提交，上下文在它之后单独写；
   4. 裁剪只有一处，存储层一根手指都不伸；
@@ -17,18 +18,16 @@ import logging
 
 import pytest
 
-from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
-from app.data.session import get_session
-from app.living.continuity import (
+from app.agent.continuity import (
     CHECKPOINT_HEAD,
     GAP_HEAD,
-    TranscriptConflict,
-    commit_moment_transcript,
-    load_moment_transcript,
-    transcript_key,
+    commit_transcript,
 )
+from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
+from app.agent.session import load_session
+from app.data.session import get_session
 from app.living.happening import record_happening
-from app.living.moment import LifeMoment, latest_moment, run_moment
+from app.living.moment import LifeMoment, latest_moment, run_moment, transcript_key
 from app.living.records import KIND_SPEECH
 from app.living.whereabouts import note_whereabouts
 
@@ -96,7 +95,7 @@ async def _write_transcript(
 ) -> None:
     """用例侧直接落一条上下文（模拟"上一个进程写下的"）。"""
     async with get_session() as s:
-        await commit_moment_transcript(
+        await commit_transcript(
             transcript_id, messages, expected_ver=expected_ver, session=s
         )
 
@@ -119,7 +118,7 @@ async def _write_transcript(
 
 def test_one_row_per_persona_forever():
     """同一个人永远落在同一条上 —— 早上、深夜、下个月，都是它。"""
-    morning = transcript_key(lane=LANE, actor="akao")
+    morning = transcript_key(lane=LANE, persona_id="akao")
     assert morning == f"{LANE}:akao"
 
 
@@ -130,16 +129,16 @@ def test_the_context_does_not_reset_at_four_in_the_morning():
     话，全部只剩库里还有。接住它的是日记页那一层 —— 但那是一份她自己写的概述，不是
     她昨晚真正说过的每一句。现在两个时刻是同一条，她接着往下想。
     """
-    before = transcript_key(lane=LANE, actor="akao")
-    after = transcript_key(lane=LANE, actor="akao")
+    before = transcript_key(lane=LANE, persona_id="akao")
+    after = transcript_key(lane=LANE, persona_id="akao")
     assert before == after
 
 
 def test_a_lane_and_a_person_never_share_a_row():
     ids = {
-        transcript_key(lane=LANE, actor="akao"),
-        transcript_key(lane=LANE, actor="ayana"),
-        transcript_key(lane="prod", actor="akao"),
+        transcript_key(lane=LANE, persona_id="akao"),
+        transcript_key(lane=LANE, persona_id="ayana"),
+        transcript_key(lane="prod", persona_id="akao"),
     }
     assert len(ids) == 3
 
@@ -150,7 +149,7 @@ def test_the_key_says_who_it_is_without_looking_anything_up():
     顺带钉住"键里没有日期"这件事本身：留着日期段的话它会静默地每天开一条新的，
     而症状是她每天早上不记得昨天，跟"裁剪太狠"长得一模一样。
     """
-    tid = transcript_key(lane=LANE, actor="akao")
+    tid = transcript_key(lane=LANE, persona_id="akao")
     assert tid.split(":") == [LANE, "akao"]
 
 
@@ -162,7 +161,7 @@ def test_the_key_says_who_it_is_without_looking_anything_up():
 @pytest.mark.integration
 async def test_a_missing_row_is_a_cold_start(moment_db):
     """从没写过 = 空上下文 + 版本 0，不是报错。"""
-    assert await load_moment_transcript(f"{LANE}:akao:2026-07-25") == ([], 0)
+    assert await load_session(f"{LANE}:akao:2026-07-25") == ([], 0)
 
 
 @pytest.mark.integration
@@ -195,7 +194,7 @@ async def test_what_another_process_wrote_comes_back_verbatim(moment_db):
     ]
     await _write_transcript(tid, written)
 
-    loaded, ver = await load_moment_transcript(tid)
+    loaded, ver = await load_session(tid)
     assert ver == 1
     assert [m.role for m in loaded] == [
         Role.USER,
@@ -210,27 +209,6 @@ async def test_what_another_process_wrote_comes_back_verbatim(moment_db):
     assert loaded[2].content[1].image_url == {"url": "https://x/1.png"}
 
 
-@pytest.mark.integration
-async def test_writing_from_a_stale_version_is_refused(moment_db):
-    """读到哪一版就只能覆盖哪一版。
-
-    进程内的排他占用保证同一个人不会两个 moment 同时跑，所以正常永远撞不上这条。
-    撞上就说明那个前提破了（多副本、或者有人绕开了占用），这时候必须炸 —— 默默
-    覆盖等于把另一个进程刚写下的一整段丢掉，而且查不出来。
-    """
-    tid = f"{LANE}:akao:2026-07-25"
-    await _write_transcript(tid, [Message(role=Role.USER, content="第一版")])
-
-    with pytest.raises(TranscriptConflict):
-        await _write_transcript(
-            tid, [Message(role=Role.USER, content="拿旧版本覆盖")], expected_ver=0
-        )
-
-    loaded, ver = await load_moment_transcript(tid)
-    assert ver == 1
-    assert [m.text() for m in loaded] == ["第一版"]
-
-
 # ---------------------------------------------------------------------------
 # 三 · 裁剪只有一处：存储层不插手
 # ---------------------------------------------------------------------------
@@ -242,7 +220,7 @@ async def test_the_store_keeps_everything_it_is_handed(moment_db):
 
     本设计的硬顶是 200k token，旧存储层那两条（200 条 / 256 KiB）比它小一个数量级，
     而且只记一行警告、不影响返回值 —— 两套同时生效的话她的话会被另一套规则悄悄砍掉，
-    排查时看到的返回值一切正常。所以裁剪只留一处（:mod:`app.living.continuity`），
+    排查时看到的返回值一切正常。所以裁剪只留一处（:mod:`app.agent.continuity`），
     这里验存储层一根手指都不伸。
     """
     tid = f"{LANE}:akao:2026-07-25"
@@ -252,7 +230,7 @@ async def test_the_store_keeps_everything_it_is_handed(moment_db):
     ]
     await _write_transcript(tid, written)
 
-    loaded, _ver = await load_moment_transcript(tid)
+    loaded, _ver = await load_session(tid)
     assert len(loaded) == 600
     assert loaded[0].text() == f"m0-{filler}"
     assert loaded[-1].text() == f"m599-{filler}"
@@ -303,7 +281,7 @@ async def test_she_picks_up_a_context_this_process_never_wrote(
 
     等价于"杀掉 pod 之后她接着之前的上下文继续" —— 新进程手上什么都没有，全部来自 PG。
     """
-    tid = transcript_key(lane=LANE, actor="akao")
+    tid = transcript_key(lane=LANE, persona_id="akao")
     await _write_transcript(
         tid,
         [
@@ -329,8 +307,8 @@ async def test_the_round_lands_in_the_context_exactly_once(moment_db, stub_momen
     )
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
-    tid = transcript_key(lane=LANE, actor="akao")
-    stored, ver = await load_moment_transcript(tid)
+    tid = transcript_key(lane=LANE, persona_id="akao")
+    stored, ver = await load_session(tid)
     assert ver == 1
     # 一根界桩（一天的头一轮立的）+ 这一轮的刺激 + 工具那一组 + 最后那句
     assert [m.role for m in stored] == [
@@ -411,7 +389,7 @@ async def test_a_failed_context_write_leaves_the_round_standing(
     async def boom(*_a, **_kw):
         raise RuntimeError("上下文写不进去")
 
-    monkeypatch.setattr(moment_mod, "commit_moment_transcript", boom)
+    monkeypatch.setattr(moment_mod, "commit_transcript", boom)
 
     stub_moment(("look_at_phone", {"channel_id": str(_DM)}), said="继续")
     with caplog.at_level(logging.ERROR, logger="app.living.moment"):
@@ -426,8 +404,8 @@ async def test_a_failed_context_write_leaves_the_round_standing(
 
     assert await _rows(PhoneRead) == 1, "手机已读跟着上下文一起被回滚了"
 
-    tid = transcript_key(lane=LANE, actor="akao")
-    assert await load_moment_transcript(tid) == ([], 0)
+    tid = transcript_key(lane=LANE, persona_id="akao")
+    assert await load_session(tid) == ([], 0)
     assert any("上下文" in r.message for r in caplog.records), caplog.text
 
 
@@ -448,12 +426,12 @@ async def test_a_failed_context_write_only_costs_her_this_round(
     async def boom(*_a, **_kw):
         raise RuntimeError("上下文写不进去")
 
-    real_commit = moment_mod.commit_moment_transcript
-    monkeypatch.setattr(moment_mod, "commit_moment_transcript", boom)
+    real_commit = moment_mod.commit_transcript
+    monkeypatch.setattr(moment_mod, "commit_transcript", boom)
     stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="去煮了")
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
-    monkeypatch.setattr(moment_mod, "commit_moment_transcript", real_commit)
+    monkeypatch.setattr(moment_mod, "commit_transcript", real_commit)
     runner = stub_moment(said="继续")
     await run_moment(lane=LANE, persona_id="akao", now=_at(14, 10))
 
@@ -484,16 +462,16 @@ async def test_a_lost_round_puts_her_state_back_in_front_of_her(
     stub_moment(said="第一轮")
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
-    real_commit = moment_mod.commit_moment_transcript
+    real_commit = moment_mod.commit_transcript
 
     async def boom(*_a, **_kw):
         raise RuntimeError("上下文写不进去")
 
-    monkeypatch.setattr(moment_mod, "commit_moment_transcript", boom)
+    monkeypatch.setattr(moment_mod, "commit_transcript", boom)
     stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="第二轮")
     await run_moment(lane=LANE, persona_id="akao", now=_at(14, 10))
 
-    monkeypatch.setattr(moment_mod, "commit_moment_transcript", real_commit)
+    monkeypatch.setattr(moment_mod, "commit_transcript", real_commit)
     runner = stub_moment(said="第三轮")
     with caplog.at_level(logging.ERROR, logger="app.living.moment"):
         await run_moment(lane=LANE, persona_id="akao", now=_at(14, 20))
@@ -571,12 +549,12 @@ async def test_the_gap_is_only_reported_once(moment_db, stub_moment, monkeypatch
     async def boom(*_a, **_kw):
         raise RuntimeError("上下文写不进去")
 
-    real_commit = moment_mod.commit_moment_transcript
-    monkeypatch.setattr(moment_mod, "commit_moment_transcript", boom)
+    real_commit = moment_mod.commit_transcript
+    monkeypatch.setattr(moment_mod, "commit_transcript", boom)
     stub_moment(said="第二轮")
     await run_moment(lane=LANE, persona_id="akao", now=_at(14, 10))
 
-    monkeypatch.setattr(moment_mod, "commit_moment_transcript", real_commit)
+    monkeypatch.setattr(moment_mod, "commit_transcript", real_commit)
     stub_moment(said="第三轮")
     await run_moment(lane=LANE, persona_id="akao", now=_at(14, 20))
     runner = stub_moment(said="第四轮")
@@ -637,8 +615,8 @@ async def test_the_replay_after_a_failed_close_stores_the_round_once(
     assert len(replayed) == 2, "重放读到的历史不该带上没提交的那一轮"
     assert "你在看什么" in replayed[-1].content
 
-    tid = transcript_key(lane=LANE, actor="akao")
-    stored, ver = await load_moment_transcript(tid)
+    tid = transcript_key(lane=LANE, persona_id="akao")
+    stored, ver = await load_session(tid)
     assert ver == 1
     assert len(_stimuli(stored)) == 1
 
@@ -658,8 +636,8 @@ async def test_the_same_summons_only_wakes_her_once(moment_db, stub_moment):
     assert second is None
     assert len(runner.runs) == 1
 
-    tid = transcript_key(lane=LANE, actor="akao")
-    stored, ver = await load_moment_transcript(tid)
+    tid = transcript_key(lane=LANE, persona_id="akao")
+    stored, ver = await load_session(tid)
     assert ver == 1
     assert len(_stimuli(stored)) == 1
 
@@ -684,6 +662,6 @@ async def test_the_moment_record_and_the_context_land_together(
         ).scalar_one()
     assert rows == 1
 
-    tid = transcript_key(lane=LANE, actor="akao")
-    _stored, ver = await load_moment_transcript(tid)
+    tid = transcript_key(lane=LANE, persona_id="akao")
+    _stored, ver = await load_session(tid)
     assert ver == 1

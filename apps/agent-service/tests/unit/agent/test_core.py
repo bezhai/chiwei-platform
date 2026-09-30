@@ -1293,7 +1293,7 @@ class TestTranscriptSink:
     """``Agent.run`` reads and writes no store. A caller that keeps a continuous
     context passes the prior messages in ``messages`` and gets this round's new
     messages back through ``transcript_sink``, so it decides when and with what
-    else the round is persisted (``app.living.continuity``)."""
+    else the round is persisted (``app.agent.continuity``)."""
 
     async def test_sink_collects_tool_call_result_and_final_reply(self, mock_deps):
         from app.agent.neutral import ToolCall, TurnPart

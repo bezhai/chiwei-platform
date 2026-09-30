@@ -26,7 +26,7 @@
 
   * :meth:`MomentSnapshot.render_state` —— 前四层，**她此刻的样子**。读一百遍字字一
     样，所以每轮重发就是把同一段话抄一遍。只在清理那一下作为新起点重铺
-    （:func:`app.living.continuity.trim_for_round`），默认一小时一次。
+    （:func:`app.agent.continuity.trim_for_round`），默认一小时一次。
   * :meth:`MomentSnapshot.render_new` —— **这一轮新发生的**：几点了、离上一次隔了多
     久、这期间别人做了什么、有什么到点了。每轮都送，因为每轮都不一样。
 
@@ -117,7 +117,7 @@ class MomentSnapshot:
         每段空的时候如实说空，不留白洞。
 
         **这一份不是每轮都送的**，只在清理那一下当作新起点重铺一次
-        （:func:`app.living.continuity.trim_for_round`）。四段读一百遍字字一样，连续
+        （:func:`app.agent.continuity.trim_for_round`）。四段读一百遍字字一样，连续
         上下文里她上一轮已经读过；每轮重发只是把同一段话抄二十四遍。
 
         **不带时刻。** 界桩自己头上就印着这次清理的时刻，这里再报一次就是同一份输入里

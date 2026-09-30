@@ -574,7 +574,7 @@ async def test_what_a_sister_said_can_be_kept_in_a_moment_that_carries_on(
 
     **看的是她这一轮读到的全部，不只是最后那条刺激。** 每轮的刺激只送新发生的事；她挂
     着什么是状态，跟着连续上下文走，清理那一下再重铺一次
-    （:mod:`app.living.continuity`）。
+    （:mod:`app.agent.continuity`）。
     """
     await _stand("akao", "家/客厅", "看书", _at(13))
     await _stand("ayana", "家/客厅", "待着", _at(13))
@@ -687,7 +687,7 @@ def _all_she_read(run) -> str:
     """这个 moment 眼前的全部 —— 连续上下文加这一轮的刺激。
 
     验"她还记得 X 吗"用这个：状态跟着上下文走，每轮的刺激只送新发生的事，全量状态由
-    清理时那根界桩重铺（:mod:`app.living.continuity`）。
+    清理时那根界桩重铺（:mod:`app.agent.continuity`）。
     """
     return "\n".join(m.text() for m in run[0])
 
@@ -739,7 +739,7 @@ async def test_a_cold_start_still_tells_her_where_she_stands(
 ):
     """上下文是空的那一轮（一天的开头、刚重启），全量状态必须还在她眼前。
 
-    它由清理时那根界桩给（:func:`app.living.continuity.trim_for_round`），不是由刺激
+    它由清理时那根界桩给（:func:`app.agent.continuity.trim_for_round`），不是由刺激
     重新塞一份 —— 两个地方各渲染一份全量状态，迟早只改一处。
     """
     await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(13))
@@ -1718,7 +1718,7 @@ async def test_a_notification_she_ignores_is_not_put_in_front_of_her_again(
 ):
     """她没看手机，下一轮的刺激里不再有那条通知 —— 上一轮那份还在她眼前。
 
-    上下文一直连着（:mod:`app.living.continuity`），所以"她还不知道有人找她"这件事
+    上下文一直连着（:mod:`app.agent.continuity`），所以"她还不知道有人找她"这件事
     只需要说一次。每轮重摆一遍同一份未读清单，就是同一段话一小时抄六遍。
     """
     from tests.living.test_phone import _DM, _incoming, _seed_world
@@ -1753,7 +1753,7 @@ async def test_what_she_still_has_not_read_comes_back_on_the_checkpoint(
     每轮只给新到的，摆出它的那一轮刺激走 ``own_minutes``，到期整组删。界桩不重铺的话
     之后再没有第二处说得出有人找过她 —— 她不看手机就永远不知道。
     """
-    from app.living.continuity import CHECKPOINT_HEAD
+    from app.agent.continuity import CHECKPOINT_HEAD
     from tests.living.test_phone import _DM, _incoming, _seed_world
 
     await _seed_world()
