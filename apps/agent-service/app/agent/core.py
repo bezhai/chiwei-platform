@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -90,6 +91,7 @@ from app.runtime.lane_policy import (
     current_deployment_lane,
     normalize_deployment_lane,
 )
+from app.runtime.placement import DEFAULT_APP
 
 logger = logging.getLogger(__name__)
 
@@ -179,13 +181,16 @@ class _NoOpRootSpan:
         pass
 
 
-def _trace_lane_attributes() -> tuple[dict[str, str], list[str]]:
-    """Return Langfuse trace attributes that make lane lookup cheap.
+def _trace_attributes() -> tuple[dict[str, str], list[str]]:
+    """Return Langfuse trace attributes that make app and lane lookup cheap.
 
     ``tags`` are the primary query surface (``list-traces`` supports tags
-    directly); metadata carries the same lane fields for the trace detail page
-    and later analytics.
+    directly); metadata carries the same fields for the trace detail page and
+    later analytics. The app is the one this process runs as (``APP_NAME``,
+    injected by PaaS per Deployment), so a world round is tagged ``app:world``
+    and an agent-service run ``app:agent-service``.
     """
+    app_name = os.getenv("APP_NAME") or DEFAULT_APP
     raw_request_lane = get_lane()
     if raw_request_lane:
         lane = normalize_deployment_lane(raw_request_lane) or "prod"
@@ -197,13 +202,13 @@ def _trace_lane_attributes() -> tuple[dict[str, str], list[str]]:
 
     lane_class = classify_deployment_lane(lane)
     metadata = {
-        "app": "agent-service",
+        "app": app_name,
         "lane": lane,
         "laneClass": lane_class,
         "laneSource": source,
     }
     tags = [
-        "app:agent-service",
+        f"app:{app_name}",
         f"lane:{lane}",
         f"lane_class:{lane_class}",
     ]
@@ -224,7 +229,7 @@ def _set_current_trace(
     break the call.
     """
     try:
-        metadata, tags = _trace_lane_attributes()
+        metadata, tags = _trace_attributes()
         _get_trace_client().update_current_trace(
             name=name,
             input=input,

@@ -468,6 +468,52 @@ class TestRootSpanLaneAttributes:
         assert kw["metadata"]["laneSource"] == "default"
 
 
+class TestRootSpanAppAttributes:
+    """The ``app:`` tag and ``metadata.app`` name the App this process runs as
+    (``APP_NAME``, injected by PaaS per Deployment). One image runs both the
+    agent-service and the world App; a world round's trace must not be filed
+    under ``app:agent-service``."""
+
+    @staticmethod
+    def _trace_kwargs() -> dict:
+        from app.agent import core
+
+        client = MagicMock()
+        with (
+            patch.object(core, "_get_trace_client", return_value=client),
+            patch.object(core, "get_lane", return_value=None),
+            patch.object(core, "current_deployment_lane", return_value=None),
+        ):
+            with core._root_span(name="world-round", input=[], update_trace=True):
+                pass
+        return client.update_current_trace.call_args.kwargs
+
+    def test_world_process_tags_its_traces_as_world(self, monkeypatch):
+        monkeypatch.setenv("APP_NAME", "world")
+
+        kw = self._trace_kwargs()
+
+        assert "app:world" in kw["tags"]
+        assert "app:agent-service" not in kw["tags"]
+        assert kw["metadata"]["app"] == "world"
+
+    def test_agent_service_process_keeps_app_agent_service(self, monkeypatch):
+        monkeypatch.setenv("APP_NAME", "agent-service")
+
+        kw = self._trace_kwargs()
+
+        assert kw["tags"][0] == "app:agent-service"
+        assert kw["metadata"]["app"] == "agent-service"
+
+    def test_unset_app_name_falls_back_to_the_default_app(self, monkeypatch):
+        monkeypatch.delenv("APP_NAME", raising=False)
+
+        kw = self._trace_kwargs()
+
+        assert kw["tags"][0] == "app:agent-service"
+        assert kw["metadata"]["app"] == "agent-service"
+
+
 class TestRunSessionPlumbing:
     """The session_id rides on AgentContext (the existing per-run context) so no
     new public parameter is needed; chat passes a context without a session and
