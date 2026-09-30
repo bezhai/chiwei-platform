@@ -203,7 +203,7 @@ async def check_weather(
 async def wake_me_at(
     at: Annotated[
         str,
-        Field(description="下次醒来的时刻，ISO 8601，形如 YYYY-MM-DDTHH:MM；不带时区的按北京时间算"),
+        Field(description="下次醒来的时刻，ISO 8601，形如 YYYY-MM-DDTHH:MM；不带时区的按东八区算"),
     ],
     reason: Annotated[
         str, Field(description="为什么定这个时刻。到时候这句话会原样摆在你眼前")
@@ -217,7 +217,7 @@ async def wake_me_at(
         moment = datetime.fromisoformat(at.strip())
     except ValueError as exc:
         raise CapabilityInvalidArg(
-            "时刻写成 ISO 8601，形如 YYYY-MM-DDTHH:MM；不带时区的按北京时间算"
+            "时刻写成 ISO 8601，形如 YYYY-MM-DDTHH:MM；不带时区的按东八区算"
         ) from exc
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=CST)

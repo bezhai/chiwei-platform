@@ -113,7 +113,7 @@ async def test_the_last_wake_set_in_a_round_wins(scope):
     assert scope.next_wake.reason == "改主意了。"
 
 
-async def test_a_time_without_an_offset_is_read_as_beijing_time(scope):
+async def test_a_time_without_an_offset_is_read_as_utc_plus_eight(scope):
     local = (now_cst() + timedelta(hours=1)).replace(tzinfo=None, microsecond=0)
 
     await _call(tools.wake_me_at, at=local.isoformat(), reason="一小时后。")
