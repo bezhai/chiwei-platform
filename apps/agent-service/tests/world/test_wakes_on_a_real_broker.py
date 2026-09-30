@@ -1,0 +1,117 @@
+"""world 的醒来规则跑在真 broker + 真 Postgres 上：启动补醒 → 自定时刻 → 别人的消息 → 旧自定消息作废。
+
+模型、上下文存储、成本记账换成替身；通信机制（定时送达、收件箱、去重、记录者）全是真的。
+"""
+from __future__ import annotations
+
+import asyncio
+import importlib
+from datetime import timedelta
+
+import pytest
+
+from app.agent.neutral import Message as Turn
+from app.agent.neutral import Role
+from app.agent.runtime_context import agent_context
+from app.infra.cst_time import now_cst
+from app.messaging.lifecycle import start_messaging
+from app.messaging.record import read_record
+from app.messaging.sending import send
+from app.world import main_agent, wake
+from app.world.tools import wake_me_at
+from tests.messaging.conftest import broker, delayed_broker, messaging_db  # noqa: F401
+from tests.messaging.helpers import eventually
+from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("messaging_db")
+
+
+class ScriptedRunner:
+    """每轮按顺序取一个"再过几秒醒"，在这一轮的 context 里真调 ``wake_me_at``。"""
+
+    def __init__(self, wake_in_seconds: list[float]):
+        self.plan = list(wake_in_seconds)
+        self.stimuli: list[str] = []
+
+    async def run(self, messages, *, context, transcript_sink, **_):
+        self.stimuli.append(messages[-1].content)
+        seconds = self.plan.pop(0)
+        with agent_context(context):
+            at = now_cst() + timedelta(seconds=seconds)
+            await wake_me_at.invoke({"at": at.isoformat(), "reason": f"{seconds} 秒后"})
+        reply = Turn(role=Role.ASSISTANT, content="好。")
+        transcript_sink.append(reply)
+        return reply
+
+
+@pytest.fixture
+def world_process(broker, tmp_path, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("WORLD_DATA_DIR", str(tmp_path / "world-volume"))
+    from inner_shared.dynamic_config import dynamic_config
+
+    monkeypatch.setattr(dynamic_config, "get", lambda k, default="": default)
+    monkeypatch.setattr(dynamic_config, "get_int", lambda k, default=0: default)
+
+    async def load_session(key):
+        return [], 0
+
+    async def nothing(*a, **kw):
+        return None
+
+    monkeypatch.setattr(main_agent, "load_session", load_session)
+    monkeypatch.setattr(main_agent, "commit_transcript", nothing)
+    monkeypatch.setattr(main_agent, "record_round_cost", nothing)
+
+    # 最后一次定到一天以后：测试结束时它还躺在延时交换机里，这个 broker 活不到那时候，
+    # 不会有一条迟到的自定消息落进后面用例的收件箱。
+    runner = ScriptedRunner([2.0, 1.5, 86_400.0])
+    monkeypatch.setattr(main_agent, "build_round_runner", lambda config: runner)
+
+    import app.world.wiring as wiring
+    from app.messaging.receiving import clear_inboxes
+
+    clear_inboxes()
+    importlib.reload(wiring)
+    return runner
+
+
+async def test_world_wakes_on_start_on_its_own_time_and_on_messages_and_skips_replaced_wakes(
+    world_process,
+):
+    runner = world_process
+
+    # 启动：私有状态里什么都没有 → 立刻醒一次。
+    await start_messaging()
+    await eventually(lambda: len(runner.stimuli) >= 1, timeout=10)
+    assert "进程刚启动" in runner.stimuli[0]
+
+    # 那一轮定了 2 秒后醒 → 到点醒了第二轮。
+    await eventually(lambda: len(runner.stimuli) >= 2, timeout=10)
+    assert "你给自己排的一次醒来" in runner.stimuli[1]
+    replaced = wake.read_next_wake()  # 第二轮定的 1.5 秒后
+
+    # 在那之前有人发来消息 → 第三轮，定到一天后，1.5 秒那条被取代。
+    delivery = await send(sender="operator", recipient="world", body="有人敲门。")
+    await eventually(lambda: len(runner.stimuli) >= 3, timeout=10)
+    assert "有人敲门。" in runner.stimuli[2]
+    assert "1.5 秒后" in runner.stimuli[2]  # 它看得到自己原来定的那次
+
+    # 被取代的那条照样送到了，但没有再跑一轮。
+    async def replaced_was_delivered():
+        rows = await read_record(message_id=replaced.message_id)
+        return "delivered" in [r["outcome"] for r in rows]
+
+    await eventually(replaced_was_delivered, timeout=10)
+    await asyncio.sleep(1.0)
+    assert len(runner.stimuli) == 3
+    current = wake.read_next_wake()
+    assert current.message_id != replaced.message_id
+    assert current.at > now_cst() + timedelta(seconds=30)
+
+    # 每一轮都对得上一个醒来原因：记录者里一条送到 world 的消息。
+    rows = await read_record(participant="world", limit=200)
+    delivered_to_world = [
+        r for r in rows if r["recipient"] == "world" and r["outcome"] == "delivered"
+    ]
+    assert delivery.message_id in [r["message_id"] for r in delivered_to_world]
+    assert len({r["message_id"] for r in delivered_to_world}) == 4  # 启动、自定、消息、被取代的

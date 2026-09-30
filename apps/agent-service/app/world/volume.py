@@ -31,10 +31,7 @@ def lane_dir() -> Path:
     """这条泳道在私有卷上的目录（不一定已经存在）。"""
     root = os.getenv(DATA_DIR_ENV)
     if not root:
-        raise VolumeUnavailable(
-            f"{DATA_DIR_ENV} is not configured; world has nowhere to keep its "
-            f"records and state"
-        )
+        raise VolumeUnavailable(f"{DATA_DIR_ENV} 没有配置：world 没有地方放它的记录和状态")
     return Path(root) / (current_deployment_lane() or "prod")
 
 

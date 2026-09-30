@@ -29,6 +29,7 @@ _PROBE = (
     "from app.messaging.receiving import INBOX_REGISTRY;"
     "print(json.dumps({{"
     "'living': sorted(m for m in sys.modules if m == 'app.living' or m.startswith('app.living.')),"
+    "'world': sorted(m for m in sys.modules if m == 'app.world' or m.startswith('app.world.')),"
     "'wired_types': sorted(w.data_type.__module__ + '.' + w.data_type.__name__ for w in WIRING_REGISTRY),"
     "'inboxes': sorted(INBOX_REGISTRY)}}))"
 )
@@ -37,6 +38,7 @@ _PROBE = (
 def _loaded_by(app_name: str) -> dict:
     env = dict(os.environ)
     env.pop("LANE", None)
+    env["APP_NAME"] = app_name
     proc = subprocess.run(
         [sys.executable, "-c", _PROBE.format(app=app_name)],
         capture_output=True,
@@ -54,8 +56,16 @@ def test_the_world_app_loads_none_of_the_life_code():
     assert loaded["living"] == [], (
         "world 的进程里出现了 life 的代码：" + ", ".join(loaded["living"])
     )
-    assert loaded["wired_types"] == []
-    assert loaded["inboxes"] == []
+    assert loaded["inboxes"] == ["world"]
+    assert all(t.startswith("app.world.") for t in loaded["wired_types"])
+
+
+def test_the_agent_service_app_loads_none_of_the_world_code():
+    loaded = _loaded_by("agent-service")
+
+    assert loaded["world"] == [], (
+        "agent-service 的进程里出现了 world 的代码：" + ", ".join(loaded["world"])
+    )
 
 
 def test_the_agent_service_app_loads_its_own_wiring():

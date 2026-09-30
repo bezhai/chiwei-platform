@@ -7,7 +7,9 @@
 不建它的表、不跑它的钟、不开它的收件箱。
 
 * ``agent-service``：``app.wiring``（living 引擎的钟和出站、运维 HTTP、通信机制的人工入口）。
-* ``world``：还没有内容。它的代码将放在 ``app/world/``，接线模块写好后加进这里。
+* ``world``：``app.world.wiring``（world 的收件箱和记录的人工读写接口）。它不在
+  ``app.wiring`` 这个包里：import ``app.wiring.xxx`` 会先执行 ``app/wiring/__init__.py``，
+  把 agent-service 的全部接线（连同 life）带进来。
 
 App 之间不靠接线互通，靠通信机制（:mod:`app.messaging`）。
 
@@ -20,5 +22,5 @@ from __future__ import annotations
 
 APP_WIRING: dict[str, tuple[str, ...]] = {
     "agent-service": ("app.wiring",),
-    "world": (),
+    "world": ("app.world.wiring",),
 }

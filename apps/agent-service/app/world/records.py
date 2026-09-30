@@ -98,21 +98,21 @@ def _resolve(path: object) -> Path:
     """把一条记录路径换成盘上的位置；不是树里一份记录的路径就抛 :class:`InvalidRecordPath`。"""
     if not isinstance(path, str) or not path or len(path) > MAX_PATH_CHARS:
         raise InvalidRecordPath(
-            f"a record path is 1 to {MAX_PATH_CHARS} characters, relative to the "
-            f"records root, like dir/name{_SUFFIX}"
+            f"记录的路径是相对记录根目录的 1 到 {MAX_PATH_CHARS} 个字符，"
+            f"形如 目录/名字{_SUFFIX}"
         )
     parts = path.split("/")
     if not all(_normal_part(p) for p in parts):
         raise InvalidRecordPath(
-            f"{path!r}: every segment must be a plain name (not empty, not . or .., "
-            f"not starting with a dot, no backslash or control characters)"
+            f"「{path}」不是一条记录路径：每一段都得是普通的名字（不空、不是 . 或 ..、"
+            f"不以点开头、没有反斜杠和控制字符）"
         )
     if not parts[-1].endswith(_SUFFIX) or parts[-1] == _SUFFIX:
-        raise InvalidRecordPath(f"{path!r}: a record is a {_SUFFIX} file")
+        raise InvalidRecordPath(f"「{path}」不是一条记录路径：记录是 {_SUFFIX} 文件")
     root = records_root()
     target = root.joinpath(*parts)
     if root.resolve() not in target.resolve().parents:
-        raise InvalidRecordPath(f"{path!r} leads out of the records tree")
+        raise InvalidRecordPath(f"「{path}」走出了记录的目录树")
     return target
 
 
@@ -123,26 +123,26 @@ def _updated_at(target: Path) -> datetime:
 def _current_text(target: Path, path: str) -> str | None:
     """盘上现在的正文；没有这一份是 ``None``。同名的是个目录就不是记录。"""
     if target.is_dir():
-        raise InvalidRecordPath(f"{path!r} is a directory, not a record")
+        raise InvalidRecordPath(f"「{path}」是一个目录，不是一份记录")
     try:
         return target.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except NotADirectoryError as exc:
-        raise InvalidRecordPath(f"{path!r}: a parent of it is a record, not a directory") from exc
+        raise InvalidRecordPath(f"「{path}」上面有一层是一份记录，不是目录") from exc
 
 
 def _check_expected(path: str, current: str | None, expected: str | None) -> None:
     if expected is None and current is not None:
         raise RecordConflict(
-            f"{path!r} already exists; read it and write with its fingerprint to change it"
+            f"「{path}」已经有了：要改它，先读到它现在的样子"
         )
     if expected is not None and current is None:
-        raise RecordConflict(f"{path!r} does not exist; there is nothing to change")
+        raise RecordConflict(f"「{path}」不存在，没有可以改的")
     if expected is not None and fingerprint_of(current) != expected:
         raise RecordConflict(
-            f"{path!r} changed after it was read (fingerprint {expected} is stale); "
-            f"read it again"
+            f"「{path}」在读过之后被改过（指纹 {expected} 已经不是现在的了）："
+            f"重新读一遍再决定"
         )
 
 
@@ -174,7 +174,7 @@ def read(path: str) -> Record:
     target = _resolve(path)
     text = _current_text(target, path)
     if text is None:
-        raise RecordNotFound(f"{path!r} does not exist")
+        raise RecordNotFound(f"没有「{path}」这一份")
     return Record(path, text, fingerprint_of(text), _updated_at(target))
 
 
@@ -182,17 +182,16 @@ def write(path: str, text: str, *, expected: str | None) -> Record:
     """整份写下一份记录。``expected`` 的规矩见模块说明。"""
     target = _resolve(path)
     if not isinstance(text, str) or not text.strip():
-        raise InvalidRecordText("a record cannot be empty")
+        raise InvalidRecordText("记录不能是空的")
     if len(text) > MAX_RECORD_CHARS:
         raise InvalidRecordText(
-            f"a record is at most {MAX_RECORD_CHARS} characters, this one has "
-            f"{len(text)}; split it"
+            f"一份记录最多 {MAX_RECORD_CHARS} 字，这一份有 {len(text)} 字：拆成几份"
         )
     _check_expected(path, _current_text(target, path), expected)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
     except (FileExistsError, NotADirectoryError) as exc:
-        raise InvalidRecordPath(f"{path!r}: a parent of it is a record, not a directory") from exc
+        raise InvalidRecordPath(f"「{path}」上面有一层是一份记录，不是目录") from exc
     write_atomically(target, text)
     return Record(path, text, fingerprint_of(text), _updated_at(target))
 
@@ -202,7 +201,7 @@ def delete(path: str, *, expected: str) -> None:
     target = _resolve(path)
     current = _current_text(target, path)
     if current is None:
-        raise RecordNotFound(f"{path!r} does not exist")
+        raise RecordNotFound(f"没有「{path}」这一份")
     _check_expected(path, current, expected)
     target.unlink()
     root = records_root()
