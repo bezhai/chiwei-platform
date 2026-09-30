@@ -24,9 +24,10 @@
 
 **定时送达。** 定时队列里的消息到点才被送到这里：先看时刻到了没有——没到（延时被
 broker 上限截成了几段）就按剩下的时长再排一段；到了，就在这一刻判断对方开设了收件箱
-没有，投递或者记 ``not_delivered`` 并给原发送方发一条 ``not_delivered`` 告知。告知的 id
-由原消息 id 推出来，这一步失败重试时再发的告知还是同一个 id，发送方按 id 去重。这一步
-失败同样按重试、死信处理。
+没有，投递或者记 ``not_delivered`` 并给原发送方发一条 ``not_delivered`` 告知。告知是原
+发送方自己的消息被退回，所以发送方和接收方都是原发送方。告知的 id 由原消息 id 推出来，
+这一步失败重试时再发的告知还是同一个 id，发送方按 id 去重。这一步失败同样按重试、
+死信处理。
 """
 from __future__ import annotations
 
@@ -405,8 +406,10 @@ async def _deliver_due(message: Message, received: dict[str, Any]) -> None:
     delivery = await deliver(message)
     if delivery.delivered:
         return
+    # 这是发送方自己的消息被退回：发送方和接收方都是它。填成没开设收件箱的那一方，
+    # 看起来就像对方发来了一条消息，而对方根本不在。
     notice = new_message(
-        sender=message.recipient,
+        sender=message.sender,
         recipient=message.sender,
         kind=Kind.NOT_DELIVERED,
         message_id=_notice_id(message),

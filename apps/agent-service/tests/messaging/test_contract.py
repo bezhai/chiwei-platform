@@ -285,7 +285,11 @@ async def test_send_at_decides_about_the_inbox_when_it_is_due(broker):
 
 
 async def test_send_at_to_an_inbox_still_missing_when_due_tells_the_sender(broker):
-    """到点时收件箱仍不存在：记录没有送达，并给发送方发一条"没有送达"。"""
+    """到点时收件箱仍不存在：记录没有送达，并给发送方发一条"没有送达"。
+
+    这条告知是发送方自己的消息被退回，所以发送方和接收方都是原发送方。填成没开设
+    收件箱的那一方的话，看起来就像对方发来了一条消息，而对方根本不在。
+    """
     world = Inbox()
     inbox("world", on_message=world.on_message)
     await start_messaging()
@@ -296,8 +300,8 @@ async def test_send_at_to_an_inbox_still_missing_when_due_tells_the_sender(broke
     await eventually(lambda: world.got, timeout=10)
     notice = world.got[0]
     assert notice.kind == Kind.NOT_DELIVERED
-    assert notice.sender == "ayana" and notice.recipient == "world"
-    assert "快递到了。" in notice.body
+    assert notice.sender == "world" and notice.recipient == "world"
+    assert "ayana" in notice.body and "快递到了。" in notice.body
     assert outcomes(await read_record(message_id=message_id)) == [
         "sending",
         "scheduled",

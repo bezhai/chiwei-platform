@@ -40,7 +40,8 @@ class Kind(StrEnum):
     QUESTION = "question"
     # 对一个问题的回答。只出现在提问方的回复队列和记录里，不进任何收件箱。
     ANSWER = "answer"
-    # 定时消息到点时对方没有收件箱：机制发给原发送方的告知。
+    # 定时消息到点时对方没有收件箱：机制发给原发送方的告知，发送方和接收方都是原发送方
+    # （它自己的消息被退回）。
     NOT_DELIVERED = "not_delivered"
 
 
