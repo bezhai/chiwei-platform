@@ -32,6 +32,11 @@
   消息和最后那次的异常。消息照常进死信（人工可查看、可重放）；钩子只是让拥有者知道这件
   事并自己做点什么。钩子本身失败只记一笔日志，消息照样进死信。问题不走这条路径。
 
+**停下时正在处理的消息**（:func:`stop_receiving`）：先取消消费者（不再有新消息进来），等正在
+处理的那几条处理完、照常确认，最多等 :data:`STOP_GRACE_SECONDS`。等不完的，先关通道再取消：
+通道关着，取消时不会拒收进死信，broker 把没确认的消息放回原队列；取消的同时放开它的去重
+占位，重投的那一份马上有人接，不用等租约过期。
+
 **问题不重试。** 问题的处理函数抛异常、返回空、或者收件箱不接受提问，都立刻给提问方
 回一个"没有回答"。问题这条路径上的任何失败——回复发不出去、去重状态读写失败、消息
 本身解不开——都只记一笔日志、确认掉：不重投，不进死信。提问方已经不等了（过了它带来
@@ -114,6 +119,10 @@ LEASE_OVER_TIMEOUT_MS = 60_000
 # 消费通道一次最多拿几条没确认的消息（:meth:`app.infra.rabbitmq.MQ.open_channel` 的默认）。
 _PREFETCH = 10
 
+# 停下时最多等正在处理的消息多久（秒）。要比部署平台给进程的退出宽限（K8s 默认 30 秒）短，
+# 否则等到一半进程就被杀掉，后面放回和放开占位那两步都来不及做。
+STOP_GRACE_SECONDS = 20.0
+
 OnMessage = Callable[[Message], Awaitable[None]]
 OnQuestion = Callable[[Message], Awaitable[str | None]]
 OnOpen = Callable[[], Awaitable[None]]
@@ -182,11 +191,26 @@ def clear_inboxes() -> None:
 # (channel, queue, consumer_tag)，停的时候逐个取消。
 _consumers: list[tuple[Any, Any, str]] = []
 
+# 正在处理消息的那些任务（aio-pika 每送来一条就起一个任务跑处理函数）。停的时候等它们。
+_in_flight: set[asyncio.Task] = set()
+
+
+def _tracked(handler):
+    async def run(incoming: AbstractIncomingMessage) -> None:
+        task = asyncio.current_task()
+        _in_flight.add(task)
+        try:
+            await handler(incoming)
+        finally:
+            _in_flight.discard(task)
+
+    return run
+
 
 async def _consume(route, handler, *, prefetch_count: int = _PREFETCH) -> None:
     channel = await mq.open_channel(prefetch_count=prefetch_count)
     queue = await channel.get_queue(lane_queue(route.queue, lane()))
-    tag = await queue.consume(handler)
+    tag = await queue.consume(_tracked(handler))
     _consumers.append((channel, queue, tag))
     logger.info("messaging: consuming %s", queue.name)
 
@@ -208,17 +232,40 @@ async def start_receiving() -> None:
 
 
 async def stop_receiving() -> None:
+    """停止消费：取消消费者，等正在处理的消息，等不完的放回去（见模块说明）。"""
     consumers, _consumers[:] = list(_consumers), []
-    for channel, queue, tag in consumers:
+    for _channel, queue, tag in consumers:
         try:
             await queue.cancel(tag)
         except Exception:
             logger.warning("messaging: cancel %s failed", queue.name, exc_info=True)
+
+    unfinished: set[asyncio.Task] = set()
+    running = {t for t in _in_flight if not t.done()}
+    if running:
+        _, unfinished = await asyncio.wait(running, timeout=STOP_GRACE_SECONDS)
+
+    # 先关通道再取消：通道关着，被取消的那几条不会被拒收进死信，broker 把它们放回原队列。
+    for channel, _queue, _tag in consumers:
         if not channel.is_closed:
             try:
                 await channel.close()
             except Exception:
                 logger.warning("messaging: close channel failed", exc_info=True)
+
+    if unfinished:
+        logger.warning(
+            "messaging: %d message(s) still being handled after %.0fs; cancelled and "
+            "left for the next process",
+            len(unfinished),
+            STOP_GRACE_SECONDS,
+        )
+        # 关通道时 aio-pika 自己会取消挂在那条通道上的处理任务；再取消一次会打断它们放开
+        # 占位的那一步，所以只取消还没被取消的。
+        for task in unfinished:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        await asyncio.wait(unfinished, timeout=STOP_GRACE_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +326,24 @@ async def _run_once(
 
     try:
         await run(message, received)
+    except asyncio.CancelledError:
+        # 进程在停（:func:`stop_receiving`）：放开占位，重投的那一份马上有人接。不重投、
+        # 不进死信——通道已经关了，broker 会把这条放回原队列。
+        try:
+            await mark_failed(
+                edge_id=edge_id,
+                idempotent_key=message.message_id,
+                last_error="cancelled while the process was stopping",
+                worker_id=claim_token,
+            )
+        except Exception:
+            logger.warning(
+                "messaging: could not release %s %s after cancelling it",
+                edge_id,
+                message.message_id,
+                exc_info=True,
+            )
+        raise
     except Exception as exc:
         still_mine = await mark_failed(
             edge_id=edge_id,
