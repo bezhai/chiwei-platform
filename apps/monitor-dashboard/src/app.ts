@@ -19,7 +19,6 @@ import auditLogsRoutes from './routes/audit-logs';
 import activityRoutes from './routes/activity';
 import dynamicConfigRoutes from './routes/dynamic-config';
 import skillsRoutes from './routes/skills';
-import worldDocumentsRoutes from './routes/world-documents';
 import messagingRoutes from './routes/messaging';
 
 /**
@@ -72,7 +71,6 @@ export function createDashboardApp(): Hono {
   dashboard.route('/', activityRoutes);
   dashboard.route('/', dynamicConfigRoutes);
   dashboard.route('/', skillsRoutes);
-  dashboard.route('/', worldDocumentsRoutes);
   dashboard.route('/', messagingRoutes);
 
   app.route('/dashboard', dashboard);

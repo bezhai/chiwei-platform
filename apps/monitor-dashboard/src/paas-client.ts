@@ -25,7 +25,7 @@ function getChannelConfig(): { baseURL: string; headers: Record<string, string> 
 }
 
 /**
- * agent-service 的管理端点：世界文档树 /admin/world-documents/*、通信机制的人工入口 /admin/messaging/*。
+ * agent-service 的管理端点：通信机制的人工入口 /admin/messaging/*。
  *
  * 现有两个 client 都打不到它——paasClient 的 baseURL 是 paas-engine、channelClient 是
  * channel-server，而且两者用的都是 X-API-Key。agent-service 那几个端点的门认的是内网

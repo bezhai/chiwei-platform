@@ -59,7 +59,7 @@ describe('agentClient 真发出去的请求', () => {
           auth: req.headers.get('authorization'),
           lane: req.headers.get('x-ctx-lane'),
         });
-        return Response.json({ lane: 'coe-living', path: 'a.md', fingerprint: 'f1', content: '正文' });
+        return Response.json({ lane: 'coe-living', records: [] });
       },
     });
 
@@ -68,16 +68,16 @@ describe('agentClient 真发出去的请求', () => {
       process.env.INNER_HTTP_SECRET = 's3cr3t';
 
       const data = await agentClient.get(
-        '/admin/world-documents/document',
-        { path: 'a.md' },
+        '/admin/messaging/record',
+        { participant: 'world' },
         { 'x-ctx-lane': 'coe-living' },
       );
 
       expect(seen.length).toBe(1);
-      expect(seen[0].url).toBe('/admin/world-documents/document?path=a.md');
+      expect(seen[0].url).toBe('/admin/messaging/record?participant=world');
       expect(seen[0].auth).toBe('Bearer s3cr3t');
       expect(seen[0].lane).toBe('coe-living');
-      expect(data).toEqual({ lane: 'coe-living', path: 'a.md', fingerprint: 'f1', content: '正文' });
+      expect(data).toEqual({ lane: 'coe-living', records: [] });
     } finally {
       server.stop(true);
     }
@@ -86,13 +86,12 @@ describe('agentClient 真发出去的请求', () => {
 
 // createClient 默认会把顶层带 data 键的响应拆开只返回 data（那是 paas-engine 的信封
 // 口径）。agent-service 不是那个口径：上游哪天加一个 data 字段，lane 会被静默吃掉，
-// 而 lane 是整条链路唯一能证明"我改的是哪棵树"的东西。所以 agentClient 直接透传。
+// 而 lane 是整条链路唯一能证明"这次操作落在哪条泳道"的东西。所以 agentClient 直接透传。
 describe('agentClient 不拆包', () => {
   it('上游响应顶层带 data 键时，整个对象原样返回，lane 不被吃掉', async () => {
     const upstreamBody = {
       lane: 'coe-living',
-      path: '设定/世界底子.md',
-      fingerprint: '812f70471934',
+      records: [],
       data: { 这是上游自己的一个字段: '不是信封' },
     };
     const server = Bun.serve({ port: 0, fetch: () => Response.json(upstreamBody) });
@@ -100,7 +99,7 @@ describe('agentClient 不拆包', () => {
       process.env.DASHBOARD_AGENT_API = `http://127.0.0.1:${server.port}`;
       process.env.INNER_HTTP_SECRET = 's3cr3t';
 
-      const got = await agentClient.get('/admin/world-documents/document', { path: 'a.md' });
+      const got = await agentClient.get('/admin/messaging/record', { participant: 'world' });
       expect(got).toEqual(upstreamBody);
       expect((got as Record<string, unknown>).lane).toBe('coe-living');
     } finally {
