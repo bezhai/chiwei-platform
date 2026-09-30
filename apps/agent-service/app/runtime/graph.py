@@ -14,6 +14,7 @@ never reach traffic.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from app.runtime.data import Data
@@ -33,8 +34,16 @@ class CompiledGraph:
     wires: list[WireSpec]
 
 
-def compile_graph() -> CompiledGraph:
+def compile_graph(app_name: str | None = None) -> CompiledGraph:
+    """Validate the wired graph for the app this process runs as.
+
+    ``app_name`` is that app; ``None`` means ``APP_NAME`` from the
+    environment (``DEFAULT_APP`` when unset) — the same answer ``emit()``
+    uses when it picks which consumers run here. Boot passes it explicitly
+    (:func:`app.runtime.bootstrap.load_dataflow_graph`).
+    """
     wires = list(WIRING_REGISTRY)
+    process_app = app_name or os.getenv("APP_NAME") or DEFAULT_APP
 
     # 1) every consumer in wires must be @node-registered
     for w in wires:
@@ -425,28 +434,26 @@ def compile_graph() -> CompiledGraph:
             "sink dispatch validation failed:\n  - " + "\n  - ".join(sink_errors)
         )
 
-    # 6) HTTP source placement: ``register_http_sources`` only mounts on
-    # the FastAPI main app (which is the agent-service deployment). A
-    # wire whose source includes ``Source.http(...)`` must therefore have
-    # its consumer running in DEFAULT_APP — otherwise the route returns
-    # 202 to the client but emit() filters the consumer out by APP_NAME
-    # and nothing happens. This refuses the cross-app HTTP wire at compile
+    # 6) HTTP source placement: ``register_http_sources`` mounts every
+    # loaded ``Source.http(...)`` wire on this process's FastAPI app, and
+    # a process loads only its own app's wiring
+    # (``app.deployment.APP_WIRING``). The consumer must therefore run in
+    # the app this process runs as — otherwise the route returns 202 to
+    # the client but emit() filters the consumer out by APP_NAME and
+    # nothing happens. This refuses the misplaced HTTP wire at compile
     # time so the failure surfaces at boot, not as a silent 202.
-    own_default = nodes_for_app(DEFAULT_APP)
+    own = nodes_for_app(process_app)
     for w in wires:
         if not any(s.kind == "http" for s in w.sources):
             continue
-        misplaced = [
-            c.__name__ for c in w.consumers if c not in own_default
-        ]
+        misplaced = [c.__name__ for c in w.consumers if c not in own]
         if misplaced:
             raise GraphError(
                 f"wire({w.data_type.__name__}).from_(Source.http(...)) "
-                f"consumer(s) {sorted(misplaced)} are bound to non-default "
-                f"app(s); HTTP sources are mounted only in "
-                f"{DEFAULT_APP!r} (the FastAPI main process). Bind the "
-                f"consumer to {DEFAULT_APP!r}, or expose a separate "
-                f"main-service endpoint that publishes to MQ explicitly."
+                f"consumer(s) {sorted(misplaced)} are not nodes of "
+                f"{process_app!r}; HTTP sources are mounted only in the "
+                f"process of the app that runs their consumer. Bind the "
+                f"consumer to {process_app!r} in that app's wiring."
             )
 
     data_types: set[type[Data]] = {w.data_type for w in wires} | {

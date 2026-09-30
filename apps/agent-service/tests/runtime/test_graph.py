@@ -284,13 +284,14 @@ def test_compile_graph_rejects_sink_mq_with_unknown_queue():
     assert "ALL_ROUTES" in str(excinfo.value)
 
 
-def test_http_source_consumer_must_be_in_default_app():
-    # register_http_sources() mounts FastAPI routes only on the main
-    # (agent-service) process. A consumer bound to a worker app would
-    # see the request return 202 to the caller while emit() filters it
-    # out by APP_NAME — silent drop. compile_graph must reject this at
-    # boot.
+def test_http_source_consumer_must_be_in_default_app(monkeypatch):
+    # register_http_sources() mounts FastAPI routes on the process that
+    # loaded the wire. A consumer bound to another app would see the
+    # request return 202 to the caller while emit() filters it out by
+    # APP_NAME — silent drop. compile_graph must reject this at boot.
     from app.runtime.source import Source
+
+    monkeypatch.delenv("APP_NAME", raising=False)
 
     @node
     async def worker_only(m: M) -> None: ...
@@ -302,9 +303,58 @@ def test_http_source_consumer_must_be_in_default_app():
         compile_graph()
 
 
-def test_http_source_consumer_in_default_app_ok():
+def test_http_source_consumer_of_the_app_this_process_runs_is_fine(monkeypatch):
+    """world 的进程也是 FastAPI 主进程：它自己的 HTTP 路由挂在它自己那里。"""
+    from app.runtime.source import Source
+
+    monkeypatch.setenv("APP_NAME", "world")
+
+    @node
+    async def world_route(m: M) -> None: ...
+
+    bind(world_route).to_app("world")
+    wire(M).to(world_route).from_(Source.http("/admin/world/x"))
+
+    compile_graph()  # no raise
+
+
+def test_http_source_consumer_of_another_app_is_refused_in_this_process(monkeypatch):
+    from app.runtime.source import Source
+
+    monkeypatch.setenv("APP_NAME", "agent-service")
+
+    @node
+    async def world_route(m: M) -> None: ...
+
+    bind(world_route).to_app("world")
+    wire(M).to(world_route).from_(Source.http("/admin/world/x"))
+
+    with pytest.raises(GraphError, match="HTTP sources are mounted only"):
+        compile_graph()
+
+
+def test_the_app_to_check_against_can_be_named_explicitly(monkeypatch):
+    """启动时按要加载的那个 App 判，不依赖环境变量先设好。"""
+    from app.runtime.source import Source
+
+    monkeypatch.delenv("APP_NAME", raising=False)
+
+    @node
+    async def world_route(m: M) -> None: ...
+
+    bind(world_route).to_app("world")
+    wire(M).to(world_route).from_(Source.http("/admin/world/x"))
+
+    compile_graph(app_name="world")  # no raise
+    with pytest.raises(GraphError, match="HTTP sources are mounted only"):
+        compile_graph(app_name="agent-service")
+
+
+def test_http_source_consumer_in_default_app_ok(monkeypatch):
     # Default-app (unbound) consumer is fine.
     from app.runtime.source import Source
+
+    monkeypatch.delenv("APP_NAME", raising=False)
 
     @node
     async def main_handler(m: M) -> None: ...

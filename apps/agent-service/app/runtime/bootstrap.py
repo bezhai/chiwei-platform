@@ -79,7 +79,7 @@ def load_dataflow_graph(app_name: str) -> CompiledGraph:
     for module in modules:
         importlib.import_module(module)
 
-    graph = compile_graph()
+    graph = compile_graph(app_name)
     logger.info(
         "dataflow graph loaded for app=%s: %d wires, %d nodes, %d data types",
         app_name,
