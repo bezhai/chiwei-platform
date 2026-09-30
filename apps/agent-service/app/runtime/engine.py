@@ -128,7 +128,6 @@ class Runtime:
         # Always apply runtime-internal DDL (idempotent IF NOT EXISTS),
         # regardless of whether the Data plan is empty — these tables are
         # framework state, not Data, and aren't tracked by plan_migration.
-        from app.messaging.record import MESSAGE_RECORD_DDL
         from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
         from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
         from app.runtime.outbox import RUNTIME_OUTBOX_DDL
@@ -137,7 +136,6 @@ class Runtime:
             list(RUNTIME_INFLIGHT_DDL)
             + list(RUNTIME_DLQ_AUDIT_DDL)
             + list(RUNTIME_OUTBOX_DDL)
-            + list(MESSAGE_RECORD_DDL)
         )
 
         if not plan.stmts and not runtime_internal_stmts:

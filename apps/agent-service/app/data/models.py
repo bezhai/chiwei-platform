@@ -7,6 +7,11 @@ Tables:
   - common_bot_presence (raw SQL, managed by channel-server)
   - model_provider, model_mappings
   - bot_persona
+  - message_record (written and read with raw SQL in app.messaging.record)
+
+How these tables come into existence: ``app.data.bootstrap.ensure_business_schema``
+runs ``create_all`` on coe-* lanes only. prod gets them through a DDL request that
+lands before the release that reads them (docs/runbooks/prod-ddl-backlog.md).
 """
 
 from datetime import datetime
@@ -19,6 +24,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Index,
     Integer,
     String,
     Text,
@@ -250,3 +256,43 @@ class BotPersona(Base):
     )
 
 
+# ---------------------------------------------------------------------------
+# Messaging record
+# ---------------------------------------------------------------------------
+
+
+class MessageRecord(Base):
+    """Every message that passed through app.messaging, delivered or not.
+
+    Append-only: each state change of a message is its own row. Only
+    :mod:`app.messaging.record` writes it and only the operator entry reads it;
+    participants never do. ``lane`` is the writing process's deployment lane —
+    ppe lanes share prod's database and this column keeps them apart.
+    """
+
+    __tablename__ = "message_record"
+    __table_args__ = (
+        Index("message_record_message_idx", "message_id"),
+        Index("message_record_lane_time_idx", "lane", text("recorded_at DESC")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    lane: Mapped[str] = mapped_column(Text, nullable=False)
+    message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    sender: Mapped[str] = mapped_column(Text, nullable=False)
+    recipient: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    message_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    in_reply_to: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # clock_timestamp(), not now(): several rows for one message are written in
+    # quick succession and their order has to show in this column.
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("clock_timestamp()"),
+    )

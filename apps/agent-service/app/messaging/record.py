@@ -21,6 +21,11 @@
 这一行写下的时刻——``delivered`` 那一行的 ``recorded_at`` 就是送达时间。
 
 ``lane`` 列是写入进程的部署泳道。ppe 泳道和 prod 共用一个库，靠这一列分开。
+
+表的声明在 :class:`app.data.models.MessageRecord`，跟公共层的业务表一样建：coe-* 泳道启动
+时由 :func:`app.data.bootstrap.ensure_business_schema` 建，prod 在发版之前走 DDL 申请
+（``docs/runbooks/prod-ddl-backlog.md``）。App 启动时的运行时迁移
+（:meth:`app.runtime.engine.Runtime.migrate_schema`）不建它。
 """
 from __future__ import annotations
 
@@ -32,33 +37,6 @@ from sqlalchemy import text
 from app.data.session import get_session
 from app.messaging.broker import lane_label
 from app.messaging.message import Message, SendFailed
-
-MESSAGE_RECORD_DDL: list[str] = [
-    """
-    CREATE TABLE IF NOT EXISTS message_record (
-        id           BIGSERIAL PRIMARY KEY,
-        lane         TEXT NOT NULL,
-        message_id   TEXT NOT NULL,
-        kind         TEXT NOT NULL,
-        sender       TEXT NOT NULL,
-        recipient    TEXT NOT NULL,
-        body         TEXT NOT NULL,
-        message_time TIMESTAMPTZ NOT NULL,
-        in_reply_to  TEXT,
-        outcome      TEXT NOT NULL,
-        reason       TEXT,
-        recorded_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS message_record_message_idx
-    ON message_record (message_id)
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS message_record_lane_time_idx
-    ON message_record (lane, recorded_at DESC)
-    """,
-]
 
 
 class Outcome(StrEnum):

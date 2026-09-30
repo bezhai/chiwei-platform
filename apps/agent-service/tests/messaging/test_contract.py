@@ -543,8 +543,48 @@ async def test_the_recorder_keeps_messages_apart_by_lane(broker, monkeypatch):
     ]
 
 
-async def test_the_runtime_migration_creates_the_record_table(test_db, monkeypatch):
-    """记录者的表跟 runtime_inflight 一样由运行时自己建：每个 App 启动时都会建。
+async def test_a_coe_lane_builds_the_record_table_with_the_business_schema(
+    test_db, monkeypatch
+):
+    """记录者的表跟公共层的业务表走同一条路：在 ``app.data.models`` 里声明，coe-* 泳道
+    启动时由 ``ensure_business_schema()`` 建，prod 走 DDL 申请。
+
+    建出来的表要能直接用：记一行、按泳道读回来。
+    """
+    import dataclasses
+
+    import app.data.bootstrap as bootstrap
+    from app.data.bootstrap import ensure_business_schema
+    from app.messaging.record import Outcome, record
+
+    async with test_db.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS message_record"))
+    monkeypatch.setattr(bootstrap, "engine", test_db)
+    monkeypatch.setattr(
+        bootstrap, "settings", dataclasses.replace(bootstrap.settings, lane=LANE)
+    )
+
+    await ensure_business_schema()
+
+    async with test_db.begin() as conn:
+        indexes = {
+            row[0]
+            for row in await conn.execute(
+                text("SELECT indexname FROM pg_indexes WHERE tablename = 'message_record'")
+            )
+        }
+    assert {"message_record_message_idx", "message_record_lane_time_idx"} <= indexes
+    message = new_message(
+        sender="operator", recipient="world", body="建好就能用。", kind=Kind.MESSAGE
+    )
+    await record(message, Outcome.NOT_DELIVERED, reason="对方没有开设收件箱")
+    assert outcomes(await read_record(message_id=message.message_id)) == [
+        "not_delivered"
+    ]
+
+
+async def test_starting_an_app_does_not_create_the_record_table(test_db, monkeypatch):
+    """App 启动时的运行时迁移不碰这张表：它在 prod 上要先走 DDL 申请，不能由发版顺手建。
 
     Data 注册表清空：这里只看运行时自己的那几张表，别的测试顺带注册进来的 Data 类
     跟这件事无关。
@@ -561,4 +601,4 @@ async def test_the_runtime_migration_creates_the_record_table(test_db, monkeypat
         exists = (
             await conn.execute(text("SELECT to_regclass('public.message_record')"))
         ).scalar()
-    assert exists == "message_record"
+    assert exists is None

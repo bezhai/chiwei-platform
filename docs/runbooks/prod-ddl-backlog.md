@@ -19,7 +19,32 @@ mechanism behind it and must be listed here.
 
 ## Pending
 
-Nothing.
+### `message_record` (messaging record)
+
+Declared at `apps/agent-service/app/data/models.py` (`MessageRecord`); written and read
+with raw SQL in `app/messaging/record.py`. coe-* lanes get it from
+`ensure_business_schema()`; chiwei-test already has it. Recording is part of every
+send, so without the table every send, ask and scheduled delivery fails with
+`SendFailed` — apply before the first prod release that runs messaging.
+
+```sql
+CREATE TABLE message_record (
+    id           BIGSERIAL PRIMARY KEY,
+    lane         TEXT NOT NULL,
+    message_id   TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    sender       TEXT NOT NULL,
+    recipient    TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    message_time TIMESTAMPTZ NOT NULL,
+    in_reply_to  TEXT,
+    outcome      TEXT NOT NULL,
+    reason       TEXT,
+    recorded_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX message_record_message_idx ON message_record (message_id);
+CREATE INDEX message_record_lane_time_idx ON message_record (lane, recorded_at DESC);
+```
 
 ## Applied
 

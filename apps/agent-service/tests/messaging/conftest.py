@@ -141,14 +141,19 @@ class BrokerHandle:
 
 @pytest.fixture
 async def messaging_db(test_db) -> AsyncGenerator[object, None]:  # noqa: F811
-    """记录者、去重状态、死信重放审计三张表。"""
+    """记录者、去重状态、死信重放审计三张表。
+
+    记录者的表按 :class:`app.data.models.MessageRecord` 的声明建，跟 coe-* 泳道启动时
+    ``ensure_business_schema()`` 建出来的是同一份。
+    """
     from sqlalchemy import text
 
-    from app.messaging.record import MESSAGE_RECORD_DDL
+    from app.data.models import MessageRecord
     from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
     from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
 
     async with test_db.begin() as conn:
-        for ddl in (*RUNTIME_INFLIGHT_DDL, *MESSAGE_RECORD_DDL, *RUNTIME_DLQ_AUDIT_DDL):
+        for ddl in (*RUNTIME_INFLIGHT_DDL, *RUNTIME_DLQ_AUDIT_DDL):
             await conn.execute(text(ddl))
+        await conn.run_sync(lambda sync: MessageRecord.__table__.create(sync))
     yield test_db
