@@ -19,13 +19,23 @@ LANE = "coe-world"
 
 
 @pytest.fixture
-def volume(tmp_path, monkeypatch) -> Path:
-    """``WORLD_DATA_DIR`` 指向一个空目录，进程的部署泳道是 :data:`LANE`。"""
+def bare_volume(tmp_path, monkeypatch) -> Path:
+    """``WORLD_DATA_DIR`` 指向一个空目录，进程的部署泳道是 :data:`LANE`；写锁不在手上。"""
     root = tmp_path / "world-volume"
     root.mkdir()
     monkeypatch.setenv("WORLD_DATA_DIR", str(root))
     monkeypatch.setenv("LANE", LANE)
     return root
+
+
+@pytest.fixture
+def volume(bare_volume) -> Path:
+    """同 :func:`bare_volume`，并且这个进程拿着这条泳道的写锁——跑着的 world 就是这样。"""
+    from app.world import volume as world_volume
+
+    assert world_volume.try_acquire_writer_lock()
+    yield bare_volume
+    world_volume.release_writer_lock()
 
 
 def load_world_wiring() -> None:

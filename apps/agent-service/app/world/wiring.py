@@ -1,6 +1,7 @@
 """world App 的接线：只有 world 的进程 import 它（``app.deployment.APP_WIRING``）。
 
-world 靠收件箱醒：开设名为 ``world`` 的收件箱，一次只处理一条、一轮最多
+world 靠收件箱醒：开设名为 ``world`` 的收件箱，只在拿着卷的写锁时消费
+（:func:`app.world.volume.writer_lock`；启动补醒也在拿到锁之后才跑），一次只处理一条、一轮最多
 :data:`app.world.main_agent.ROUND_TIMEOUT`（占位租约随之放长），开设时按私有状态补醒
 （:func:`app.world.wake.wake_on_start`），自定唤醒那一轮最终进了死信就退避之后再醒
 （:func:`app.world.wake.wake_after_failure`）。它不接受提问——回答"某处现在什么样"的应答
@@ -23,6 +24,7 @@ from app.world.admin import (
     record_write_node,
 )
 from app.world.main_agent import ROUND_TIMEOUT, on_world_message
+from app.world.volume import writer_lock
 from app.world.wake import WORLD, wake_after_failure, wake_on_start
 
 inbox(
@@ -32,6 +34,7 @@ inbox(
     one_at_a_time=True,
     on_open=wake_on_start,
     on_final_failure=wake_after_failure,
+    consume_while=writer_lock,
 )
 
 

@@ -155,7 +155,7 @@ async def test_on_start_with_a_wake_still_ahead_it_does_not_wake_now(volume, sch
 
 
 async def test_an_unreadable_state_counts_as_no_wake(volume, scheduled):
-    _state_file(volume).parent.mkdir(parents=True)
+    _state_file(volume).parent.mkdir(parents=True, exist_ok=True)
     _state_file(volume).write_text("{not json", encoding="utf-8")
 
     assert wake.read_next_wake() is None

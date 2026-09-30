@@ -31,7 +31,7 @@ from app.api.middleware import get_header_var
 from app.runtime import Data, Key, node
 from app.runtime.lane_policy import current_deployment_lane
 from app.world import records
-from app.world.volume import VolumeUnavailable
+from app.world.volume import VolumeUnavailable, WriterLockNotHeld
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,8 @@ def _lane() -> str:
 
 @contextmanager
 def _as_http_errors() -> Iterator[None]:
-    """把记录的异常翻成 HTTP：路径或正文不对 400、没有 404、指纹对不上 409、没有卷 503。"""
+    """把记录的异常翻成 HTTP：路径或正文不对 400、没有 404、指纹对不上 409、没有卷或者
+    这个进程没拿着写锁 503。"""
     try:
         yield
     except (records.InvalidRecordPath, records.InvalidRecordText) as exc:
@@ -129,7 +130,7 @@ def _as_http_errors() -> Iterator[None]:
         raise HTTPException(404, detail={"lane": _lane(), "message": str(exc)}) from exc
     except records.RecordConflict as exc:
         raise HTTPException(409, detail={"lane": _lane(), "message": str(exc)}) from exc
-    except VolumeUnavailable as exc:
+    except (VolumeUnavailable, WriterLockNotHeld) as exc:
         raise HTTPException(503, detail={"lane": _lane(), "message": str(exc)}) from exc
 
 

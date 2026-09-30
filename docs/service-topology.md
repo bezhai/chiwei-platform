@@ -127,7 +127,7 @@ QQ 那条链形状相同,只是入站是 qq-gateway 把 QQ 协议归一化成 `C
 
 「回复」不是独立的一条线,它就是她生活的一部分:同一次醒来里她既决定要不要换手上的事、去哪儿、记住什么,也决定要不要开口。这些全跑在 agent-service 主进程里,由 dataflow runtime 的五条时间源驱动,代码在 `apps/agent-service/app/living/`。
 
-world(推演客观世界的那个引擎)不在 agent-service 这个 App 里,也不跟 life 共读共写任何表:它是同一个镜像上单独发布的 App `world`(代码在 `apps/agent-service/app/world/`,进程只加载 `app.world.wiring`,见 `apps/agent-service/app/deployment.py`),两边唯一的连接是通信机制(`apps/agent-service/app/messaging/`,具名收件箱 + RabbitMQ,按泳道隔离)。world 的主 agent 只在两种时候醒:收件箱 `world` 来了消息,或者它自己上一轮定的时刻到了(用通信机制的定时送达发给自己);没有心跳。它的记录是私有卷上按泳道分目录的自然语言文档(`$WORLD_DATA_DIR/<泳道>/records/`),下次醒来的时刻也存在那个目录里;记录的人工读写接口是 world App 上的 `/admin/world/records*`,从开发机经 monitor-dashboard 的 `/dashboard/api/ops/world/records*` 转发并落审计。旧的 world 轮次、日历和 world 的文档树已经删掉。
+world(推演客观世界的那个引擎)不在 agent-service 这个 App 里,也不跟 life 共读共写任何表:它是同一个镜像上单独发布的 App `world`(代码在 `apps/agent-service/app/world/`,进程只加载 `app.world.wiring`,见 `apps/agent-service/app/deployment.py`),两边唯一的连接是通信机制(`apps/agent-service/app/messaging/`,具名收件箱 + RabbitMQ,按泳道隔离)。world 的主 agent 只在两种时候醒:收件箱 `world` 来了消息,或者它自己上一轮定的时刻到了(用通信机制的定时送达发给自己);没有心跳。它的记录是私有卷上按泳道分目录的自然语言文档(`$WORLD_DATA_DIR/<泳道>/records/`),下次醒来的时刻也存在那个目录里。同一时刻只有一个 world 进程写这个目录(滚动发布时新旧两个进程会同时在跑一段):卷是 hostPath 卷、固定在单节点,world 拿着目录里锁文件上的 flock 独占锁时才消费收件箱,没拿到的进程照常起来、只读不写;记录的人工读写接口是 world App 上的 `/admin/world/records*`,从开发机经 monitor-dashboard 的 `/dashboard/api/ops/world/records*` 转发并落审计。旧的 world 轮次、日历和 world 的文档树已经删掉。
 
 ---
 

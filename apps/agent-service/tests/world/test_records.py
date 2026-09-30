@@ -11,7 +11,11 @@ import os
 import pytest
 
 from app.world import records
-from app.world.volume import VolumeUnavailable
+from app.world.volume import (
+    VolumeUnavailable,
+    release_writer_lock,
+    try_acquire_writer_lock,
+)
 
 from .conftest import LANE
 
@@ -39,6 +43,8 @@ def test_lanes_do_not_see_each_others_records(volume, monkeypatch):
         records.read("甲.md")
 
     monkeypatch.delenv("LANE")
+    release_writer_lock()
+    assert try_acquire_writer_lock()  # prod 那条泳道自己的写锁
     records.write("甲.md", "prod 的。", expected=None)
     assert (volume / "prod" / "records" / "甲.md").exists()
 

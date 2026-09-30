@@ -204,3 +204,24 @@ def test_the_routes_run_in_the_world_app():
     assert len(http_consumers) == 4
     assert http_consumers <= nodes_for_app("world")
     assert not http_consumers & nodes_for_app("agent-service")
+
+
+async def test_a_process_without_the_writer_lock_refuses_writes_but_still_reads(client, volume):
+    """发布期间新旧两个 world 进程同时在跑，请求可能落到没拿到锁的那一个：写不做、说清楚。"""
+    from app.world import volume as world_volume
+
+    from .test_writer_lock import held_by_another_process
+
+    records.write("甲.md", "已有的。", expected=None)
+    world_volume.release_writer_lock()
+    try:
+        with held_by_another_process(volume):
+            put = await client.put(DOC, json={"path": "乙.md", "text": "不该写下。"})
+            listed = await client.get(LIST)
+    finally:
+        assert world_volume.try_acquire_writer_lock()
+
+    assert put.status_code == 503
+    assert put.json()["detail"]["lane"] == LANE
+    assert listed.status_code == 200
+    assert [r["path"] for r in listed.json()["records"]] == ["甲.md"]

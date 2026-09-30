@@ -18,7 +18,8 @@
 ``.`` / ``..``、不以点开头、没有反斜杠和控制字符），最后一段以 ``.md`` 结尾；解析掉符号
 链接之后还得在 ``records/`` 里面。同一个目录下的私有状态文件因此碰不到。
 
-读写都是同步的，理由见 :mod:`app.world.volume`。
+读写都是同步的，理由见 :mod:`app.world.volume`。写和删只有拿着这条泳道写锁的进程能做
+（:func:`app.world.volume.require_writer_lock`），读不受限制。
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.infra.cst_time import CST
-from app.world.volume import lane_dir, write_atomically
+from app.world.volume import lane_dir, require_writer_lock, write_atomically
 
 # 一份记录最多多少字。一份跑飞的文档能把主 agent 一轮的上下文顶掉；超过就拒，让写的人
 # 拆成几份。
@@ -181,6 +182,7 @@ def read(path: str) -> Record:
 def write(path: str, text: str, *, expected: str | None) -> Record:
     """整份写下一份记录。``expected`` 的规矩见模块说明。"""
     target = _resolve(path)
+    require_writer_lock()
     if not isinstance(text, str) or not text.strip():
         raise InvalidRecordText("记录不能是空的")
     if len(text) > MAX_RECORD_CHARS:
@@ -199,6 +201,7 @@ def write(path: str, text: str, *, expected: str | None) -> Record:
 def delete(path: str, *, expected: str) -> None:
     """删掉一份记录，``expected`` 必须是它现在的指纹。删空的目录一并收掉。"""
     target = _resolve(path)
+    require_writer_lock()
     current = _current_text(target, path)
     if current is None:
         raise RecordNotFound(f"没有「{path}」这一份")
