@@ -13,7 +13,6 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * :mod:`app.living.serial`      进程内排他占用 + 提交序 append
   * :mod:`app.living.happening`   谁在哪、对谁、通过什么渠道、做了什么说了什么
   * :mod:`app.living.whereabouts` 她此刻在做什么、在哪
-  * :mod:`app.living.documents`   旧世界层留下的那棵文档树和它的外部端点
 
 她一直在推进（T2）+ 她对外说话（T4）——嘴在外面，耳朵没有：
 

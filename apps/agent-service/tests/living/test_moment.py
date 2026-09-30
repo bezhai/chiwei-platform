@@ -1282,7 +1282,7 @@ def test_one_wake_has_room_for_more_than_one_whole_thing():
 
 
 def test_the_moment_runs_on_the_life_model():
-    """life 一天 432 个 moment × 三个人 —— 这条高频线走 ``life-model``，不占 world 的档位。"""
+    """life 一天 432 个 moment × 三个人 —— 这条高频线走 ``life-model``，不占离线调用的档位。"""
     from app.living.moment import _MOMENT_CFG
 
     assert _MOMENT_CFG.model_id == "life-model"
@@ -1872,16 +1872,11 @@ async def test_refusing_an_empty_place_hands_her_no_place_name(
 
 @pytest.mark.integration
 async def test_landing_somewhere_hands_back_only_where_she_is(
-    moment_db, in_a_moment, tmp_path, monkeypatch
+    moment_db, in_a_moment
 ):
-    """那儿有地方文档、刚有人在那儿做过事，两只手也一个字都不带出来。"""
+    """刚有人在那儿做过事，两只手也一个字都不带出来：返回的就是那一句确认。"""
     from app.living.happening import record_happening
 
-    monkeypatch.setenv("WORLD_DOCS_DIR", str(tmp_path / "mount"))
-    monkeypatch.setenv("LANE", LANE)
-    kitchen = tmp_path / "mount" / LANE / "地方" / "家" / "厨房.md"
-    kitchen.parent.mkdir(parents=True)
-    kitchen.write_text("桌上还堆着没洗的碗。", encoding="utf-8")
     await record_happening(
         lane=LANE,
         happening_id="ayana-on-the-field",
