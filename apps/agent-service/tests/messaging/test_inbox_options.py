@@ -1,5 +1,5 @@
 """收件箱拥有者开设时可以声明的几件事：一条最多处理多久、一次只处理一条、开设时先做一件事、
-一条消息最终处理失败时做一件事。
+一条消息最终处理失败时做一件事、只在持有某样东西期间消费。
 
 world 的主 agent 一轮可能跑得比默认的 15 分钟租约还久，一次只能想一件事，进程启动时
 要按自己的私有状态决定要不要立刻醒一次，一轮最终失败时要自己安排再醒。这些都落在 broker
@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import pytest
 
 from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, Route, mq
 from app.messaging.broker import inbox_exists
-from app.messaging.lifecycle import start_messaging
+from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.message import Kind, Message
 from app.messaging.receiving import inbox
 from app.messaging.sending import send
@@ -275,3 +276,109 @@ async def test_the_hook_is_not_called_while_retries_remain(broker, monkeypatch):
 
     await eventually(lambda: done, timeout=10)
     assert given_up == []
+
+
+# ---------------------------------------------------------------------------
+# 只在持有某样东西期间消费
+# ---------------------------------------------------------------------------
+
+
+class Gate:
+    """一个由测试控制的 ``consume_while``：放行之前进不去；进去、出来都记一笔。"""
+
+    def __init__(self, *, open_now: bool = False) -> None:
+        self.may_enter = asyncio.Event()
+        if open_now:
+            self.may_enter.set()
+        self.events: list[str] = []
+
+    @asynccontextmanager
+    async def hold(self):
+        await self.may_enter.wait()
+        self.events.append("entered")
+        try:
+            yield
+        finally:
+            self.events.append("left")
+
+
+async def test_waiting_to_hold_neither_blocks_the_start_nor_consumes(broker):
+    """拿不到就等，不消费；启动不被它卡住（进程照常起来、照常答健康检查）。开设时那一步也等拿到之后才跑。"""
+    gate = Gate()
+    order: list[str] = []
+
+    async def on_open() -> None:
+        order.append("open")
+
+    async def on_message(message) -> None:
+        order.append(f"message:{message.body}")
+
+    inbox("world", on_message=on_message, on_open=on_open, consume_while=gate.hold)
+    await asyncio.wait_for(start_messaging(), timeout=5)
+
+    await send(sender="operator", recipient="world", body="等着。")
+    await asyncio.sleep(1.0)
+    assert order == []
+    assert await broker.depth(f"inbox_world_{LANE}") == 1
+
+    gate.may_enter.set()
+    await eventually(lambda: len(order) == 2, timeout=10)
+    assert order == ["open", "message:等着。"]
+
+
+async def test_stopping_lets_go_only_after_the_message_being_handled(broker):
+    gate = Gate(open_now=True)
+    entered = asyncio.Event()
+
+    async def takes_a_moment(message) -> None:
+        entered.set()
+        await asyncio.sleep(0.8)
+        gate.events.append("handled")
+
+    inbox("world", on_message=takes_a_moment, consume_while=gate.hold)
+    await start_messaging()
+    await send(sender="operator", recipient="world", body="正在处理。")
+    await entered.wait()
+
+    await stop_messaging()
+
+    assert gate.events == ["entered", "handled", "left"]
+
+
+async def test_stopping_while_still_waiting_to_hold_gives_up_the_wait(broker):
+    gate = Gate()
+
+    async def on_message(message) -> None:  # pragma: no cover - never reached
+        raise AssertionError
+
+    inbox("world", on_message=on_message, consume_while=gate.hold)
+    await start_messaging()
+
+    await asyncio.wait_for(stop_messaging(), timeout=5)
+
+    assert gate.events == []
+
+
+async def test_a_failing_on_open_while_held_lets_go_and_tries_again(broker, monkeypatch):
+    from app.messaging import receiving
+
+    monkeypatch.setattr(receiving, "OPEN_RETRY_SECONDS", 0.2)
+    gate = Gate(open_now=True)
+    attempts = {"n": 0}
+    handled: list[str] = []
+
+    async def on_open() -> None:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("启动检查失败")
+
+    async def on_message(message) -> None:
+        handled.append(message.body)
+
+    inbox("world", on_message=on_message, on_open=on_open, consume_while=gate.hold)
+    await start_messaging()
+    await send(sender="operator", recipient="world", body="第二次开设之后处理。")
+
+    await eventually(lambda: handled, timeout=10)
+    assert gate.events[:3] == ["entered", "left", "entered"]
+    assert attempts["n"] == 2

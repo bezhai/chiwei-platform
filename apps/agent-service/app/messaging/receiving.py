@@ -31,11 +31,17 @@
 * ``on_final_failure`` —— 一条普通消息最后一次重试也失败、即将进死信时调一次，带着那条
   消息和最后那次的异常。消息照常进死信（人工可查看、可重放）；钩子只是让拥有者知道这件
   事并自己做点什么。钩子本身失败只记一笔日志，消息照样进死信。问题不走这条路径。
+* ``consume_while`` —— 只在持有它（一个异步上下文，比如一把跨进程的独占锁）期间消费。
+  开设时不在启动流程里等它：队列照常建好，启动照常返回，后台等到进了这个上下文，才跑
+  ``on_open``、开始消费；停止时等正在处理的消息处理完（见下面"停下时"）之后才退出这个
+  上下文。进了上下文之后 ``on_open`` 失败，就退出上下文、隔 :data:`OPEN_RETRY_SECONDS`
+  再来一次——这时启动早已返回，失败不能再靠让启动失败来暴露。
 
 **停下时正在处理的消息**（:func:`stop_receiving`）：先取消消费者（不再有新消息进来），等正在
 处理的那几条处理完、照常确认，最多等 :data:`STOP_GRACE_SECONDS`。等不完的，先关通道再取消：
 通道关着，取消时不会拒收进死信，broker 把没确认的消息放回原队列；取消的同时放开它的去重
-占位，重投的那一份马上有人接，不用等租约过期。
+占位，重投的那一份马上有人接，不用等租约过期。声明了 ``consume_while`` 的收件箱：还在等着
+进上下文的，停止时直接放弃等待；已经在消费的，等上面这些都做完才退出上下文。
 
 **问题不重试。** 问题的处理函数抛异常、返回空、或者收件箱不接受提问，都立刻给提问方
 回一个"没有回答"。问题这条路径上的任何失败——回复发不出去、去重状态读写失败、消息
@@ -58,6 +64,7 @@ import os
 import socket
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -127,6 +134,10 @@ OnMessage = Callable[[Message], Awaitable[None]]
 OnQuestion = Callable[[Message], Awaitable[str | None]]
 OnOpen = Callable[[], Awaitable[None]]
 OnFinalFailure = Callable[[Message, BaseException], Awaitable[None]]
+ConsumeWhile = Callable[[], AbstractAsyncContextManager[None]]
+
+# 声明了 consume_while 的收件箱：进了上下文之后开设失败，隔多久再来一次（秒）。
+OPEN_RETRY_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -138,6 +149,7 @@ class InboxSpec:
     one_at_a_time: bool = False
     on_open: OnOpen | None = None
     on_final_failure: OnFinalFailure | None = None
+    consume_while: ConsumeWhile | None = None
 
 
 INBOX_REGISTRY: dict[str, InboxSpec] = {}
@@ -152,6 +164,7 @@ def inbox(
     one_at_a_time: bool = False,
     on_open: OnOpen | None = None,
     on_final_failure: OnFinalFailure | None = None,
+    consume_while: ConsumeWhile | None = None,
 ) -> None:
     """声明本 App 拥有名为 ``name`` 的收件箱。在 App 的接线模块里调，进程启动时开设。
 
@@ -159,7 +172,8 @@ def inbox(
     ``on_question`` 回答问题，返回回答正文；返回 ``None`` 表示没有回答。不给它的
     收件箱不接受提问，问它的一律拿到"没有回答"。
 
-    ``processing_timeout`` / ``one_at_a_time`` / ``on_open`` / ``on_final_failure`` 见模块说明。
+    ``processing_timeout`` / ``one_at_a_time`` / ``on_open`` / ``on_final_failure`` /
+    ``consume_while`` 见模块说明。
     """
     participant(name)
     if name in INBOX_REGISTRY:
@@ -174,6 +188,7 @@ def inbox(
         one_at_a_time=one_at_a_time,
         on_open=on_open,
         on_final_failure=on_final_failure,
+        consume_while=consume_while,
     )
 
 
@@ -215,24 +230,81 @@ async def _consume(route, handler, *, prefetch_count: int = _PREFETCH) -> None:
     logger.info("messaging: consuming %s", queue.name)
 
 
+@dataclass
+class _HeldOpener:
+    """一个声明了 consume_while 的收件箱在后台的那一路：等着进上下文，或者已经在消费。"""
+
+    task: asyncio.Task | None = None
+    consuming: bool = False
+
+
+_held_openers: list[_HeldOpener] = []
+# 停止时设上：已经在消费的那几路据此退出上下文。每次开设换一个新的。
+_let_go: asyncio.Event | None = None
+
+
+async def _open(spec: InboxSpec, route) -> None:
+    if spec.on_open is not None:
+        await spec.on_open()
+    await _consume(
+        route,
+        _inbox_handler(spec),
+        prefetch_count=1 if spec.one_at_a_time else _PREFETCH,
+    )
+
+
+async def _open_while_held(
+    spec: InboxSpec, route, opener: _HeldOpener, let_go: asyncio.Event
+) -> None:
+    while True:
+        try:
+            async with spec.consume_while():
+                await _open(spec, route)
+                opener.consuming = True
+                await let_go.wait()
+                return
+        except Exception:
+            logger.exception(
+                "messaging: opening %s failed while held; trying again in %.0fs",
+                spec.name,
+                OPEN_RETRY_SECONDS,
+            )
+        await asyncio.sleep(OPEN_RETRY_SECONDS)
+
+
 async def start_receiving() -> None:
-    """开设本进程声明的全部收件箱并开始消费；同时消费本泳道的定时队列。"""
+    """开设本进程声明的全部收件箱并开始消费；同时消费本泳道的定时队列。
+
+    声明了 ``consume_while`` 的收件箱在后台等到持有之后才开设、消费，这里不等它。
+    """
+    global _let_go
+    _let_go = asyncio.Event()
     await mq.declare_route(SCHEDULED, lane=lane())
     await _consume(SCHEDULED, _on_scheduled)
     for spec in INBOX_REGISTRY.values():
         route = inbox_route(spec.name)
         await mq.declare_route(route, lane=lane())
-        if spec.on_open is not None:
-            await spec.on_open()
-        await _consume(
-            route,
-            _inbox_handler(spec),
-            prefetch_count=1 if spec.one_at_a_time else _PREFETCH,
+        if spec.consume_while is None:
+            await _open(spec, route)
+            continue
+        opener = _HeldOpener()
+        opener.task = asyncio.create_task(
+            _open_while_held(spec, route, opener, _let_go),
+            name=f"messaging-open-{spec.name}",
         )
+        _held_openers.append(opener)
 
 
 async def stop_receiving() -> None:
     """停止消费：取消消费者，等正在处理的消息，等不完的放回去（见模块说明）。"""
+    openers, _held_openers[:] = list(_held_openers), []
+    # 还没开始消费的那几路（在等着进上下文，或者正在开设）：直接放弃，不让它们在下面取快照
+    # 之后才开始消费。
+    waiting = [o.task for o in openers if not o.consuming]
+    for task in waiting:
+        task.cancel()
+    await asyncio.gather(*waiting, return_exceptions=True)
+
     consumers, _consumers[:] = list(_consumers), []
     for _channel, queue, tag in consumers:
         try:
@@ -266,6 +338,12 @@ async def stop_receiving() -> None:
             if not task.done() and not task.cancelling():
                 task.cancel()
         await asyncio.wait(unfinished, timeout=STOP_GRACE_SECONDS)
+
+    # 消费停了、正在处理的都处理完或放回去了，这时才退出那几路的上下文（放开锁之类）。
+    if _let_go is not None:
+        _let_go.set()
+    held = [o.task for o in openers if o.consuming]
+    await asyncio.gather(*held, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------
