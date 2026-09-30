@@ -118,19 +118,23 @@ export const auditMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
       Object.assign(params, stashed);
     }
 
-    // Fire-and-forget audit write
-    try {
-      const repo = AppDataSource.getRepository(AuditLog);
-      await repo.save({
-        caller,
-        action,
-        params: Object.keys(params).length ? params : null,
-        result,
-        error_message: errorMessage,
-        duration_ms: duration,
-      });
-    } catch (auditErr) {
-      console.error('Failed to write audit log:', auditErr);
+    // Fire-and-forget audit write. A route that wrote its own row before acting
+    // (world record writes: routes/world-records.ts) marks auditWritten, and this
+    // middleware does not write a second one for it.
+    if (!c.get('auditWritten')) {
+      try {
+        const repo = AppDataSource.getRepository(AuditLog);
+        await repo.save({
+          caller,
+          action,
+          params: Object.keys(params).length ? params : null,
+          result,
+          error_message: errorMessage,
+          duration_ms: duration,
+        });
+      } catch (auditErr) {
+        console.error('Failed to write audit log:', auditErr);
+      }
     }
   }
 };

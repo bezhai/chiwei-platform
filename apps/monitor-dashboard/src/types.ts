@@ -9,5 +9,8 @@ export type AppEnv = {
     // - world 记录：request_lane/executed_lane/record_path/fingerprint_before/fingerprint_after/outcome
     // 键名叫 gatewayAudit 是历史遗留，语义已经不止 gateway；改名是另一条改动。
     gatewayAudit: Record<string, unknown>;
+    // The route already wrote this request's audit row itself (world record writes
+    // and deletes write it before forwarding); the audit middleware skips it.
+    auditWritten: boolean;
   };
 };

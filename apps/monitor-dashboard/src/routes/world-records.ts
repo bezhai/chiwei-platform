@@ -2,6 +2,9 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { AppEnv } from '../types';
 import { worldClient } from '../paas-client';
+import { AppDataSource } from '../db';
+import { AuditLog } from '../entities/audit-log';
+import { deriveAction } from '../middleware/audit';
 
 // ---------------------------------------------------------------------------
 // world 记录的人工读写：转发到 world App 的 /admin/world/records*。
@@ -18,6 +21,9 @@ import { worldClient } from '../paas-client';
 //    自己在哪条泳道；这个 lane 是调用方判断落点的唯一依据。
 // 5. 审计里记下请求泳道、执行泳道、哪一份、改之前和改之后的指纹、结果。写的正文在审计的
 //    请求体里：人工改过什么，只有这里留着。
+// 6. 写和删先落审计再转发：先写一条带正文、结果为 pending 的审计，写不进去就 503、不往下
+//    转发；转发之后把结果补记到同一条上（补记失败只打日志，先落的那条正文还在）。这一条由
+//    路由自己写，共享审计中间件看到 auditWritten 就不再写第二条。列目录和读仍由中间件审计。
 // ---------------------------------------------------------------------------
 
 const RECORDS_PATH = '/admin/world/records';
@@ -28,6 +34,27 @@ export type WorldRecordsClient = {
   get(path: string, params?: Record<string, string>, extraHeaders?: Record<string, string>): Promise<unknown>;
   put(path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<unknown>;
   del(path: string, params?: Record<string, string>, extraHeaders?: Record<string, string>): Promise<unknown>;
+};
+
+/** 写和删那一条审计的落库。抽成参数是为了测试能注入替身。 */
+export type RecordAuditStore = {
+  /** 落一条结果为 pending 的审计，返回它的 id；落不下就抛。 */
+  begin(row: { caller: string; action: string; params: Record<string, unknown> }): Promise<number>;
+  /** 把结果补记到那一条上。 */
+  finish(
+    id: number,
+    patch: { result: string; error_message: string | null; duration_ms: number; params: Record<string, unknown> },
+  ): Promise<void>;
+};
+
+export const auditLogStore: RecordAuditStore = {
+  async begin(row) {
+    const saved = await AppDataSource.getRepository(AuditLog).save({ ...row, result: 'pending' });
+    return saved.id;
+  },
+  async finish(id, patch) {
+    await AppDataSource.getRepository(AuditLog).save({ id, ...patch });
+  },
 };
 
 type RecordAudit = {
@@ -47,7 +74,7 @@ function asString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
-export function createWorldRecordRoutes(client: WorldRecordsClient) {
+export function createWorldRecordRoutes(client: WorldRecordsClient, auditStore: RecordAuditStore) {
   const app = new Hono<AppEnv>();
 
   function startAudit(c: Context<AppEnv>, path: unknown, before: unknown): RecordAudit {
@@ -103,6 +130,52 @@ export function createWorldRecordRoutes(client: WorldRecordsClient) {
     }
   }
 
+  /**
+   * 写和删：先落一条带正文的审计，落不下就拒绝；转发之后补记结果。
+   * ``requestParams`` 是这次请求原样的入参（写：请求体；删：查询参数）。
+   */
+  async function audited(
+    c: Context<AppEnv>,
+    audit: RecordAudit,
+    requestParams: Record<string, unknown>,
+    forwardCall: () => Promise<Response>,
+  ): Promise<Response> {
+    const started = Date.now();
+    const caller = c.get('caller') || 'unknown';
+    const params = () => ({ ...requestParams, ...audit });
+    let id: number;
+    try {
+      id = await auditStore.begin({ caller, action: deriveAction(c.req.method, c.req.path), params: params() });
+    } catch (err) {
+      console.error('world records: audit row could not be written; request not forwarded:', err);
+      audit.outcome = 'audit_unavailable';
+      return c.json({ message: '审计没能落库，这次操作没有转发给 world。' }, 503);
+    }
+    c.set('auditWritten', true);
+    const res = await forwardCall();
+    const ok = audit.outcome === 'ok';
+    let errorMessage: string | null = null;
+    if (!ok) {
+      try {
+        const body = (await res.clone().json()) as Record<string, unknown>;
+        errorMessage = typeof body?.message === 'string' ? body.message : `HTTP ${res.status}`;
+      } catch {
+        errorMessage = `HTTP ${res.status}`;
+      }
+    }
+    try {
+      await auditStore.finish(id, {
+        result: ok ? 'success' : 'error',
+        error_message: errorMessage,
+        duration_ms: Date.now() - started,
+        params: params(),
+      });
+    } catch (err) {
+      console.error(`world records: could not record the outcome on audit row ${id}:`, err);
+    }
+    return res;
+  }
+
   /** GET /api/ops/world/records — 列目录 */
   app.get('/api/ops/world/records', async (c) => {
     const audit = startAudit(c, null, null);
@@ -132,11 +205,13 @@ export function createWorldRecordRoutes(client: WorldRecordsClient) {
     }
     const fields = body as Record<string, unknown>;
     const audit = startAudit(c, fields.path, fields.fingerprint);
-    return forward(
-      c,
-      audit,
-      () => client.put(DOCUMENT_PATH, body, headers(audit, c.get('caller'))),
-      (data) => asString(data?.fingerprint),
+    return audited(c, audit, { body: fields }, () =>
+      forward(
+        c,
+        audit,
+        () => client.put(DOCUMENT_PATH, body, headers(audit, c.get('caller'))),
+        (data) => asString(data?.fingerprint),
+      ),
     );
   });
 
@@ -148,10 +223,12 @@ export function createWorldRecordRoutes(client: WorldRecordsClient) {
     const params: Record<string, string> = {};
     if (path) params.path = path;
     if (fingerprint) params.fingerprint = fingerprint;
-    return forward(c, audit, () => client.del(DOCUMENT_PATH, params, headers(audit, c.get('caller'))));
+    return audited(c, audit, { query: params }, () =>
+      forward(c, audit, () => client.del(DOCUMENT_PATH, params, headers(audit, c.get('caller')))),
+    );
   });
 
   return app;
 }
 
-export default createWorldRecordRoutes(worldClient);
+export default createWorldRecordRoutes(worldClient, auditLogStore);
