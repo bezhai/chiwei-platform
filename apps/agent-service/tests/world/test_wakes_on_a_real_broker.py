@@ -85,6 +85,17 @@ async def test_world_wakes_on_start_on_its_own_time_and_on_messages_and_skips_re
     # 那一轮定了 2 秒后醒 → 到点醒了第二轮。
     await eventually(lambda: len(runner.stimuli) >= 2, timeout=10)
     assert "你给自己排的一次醒来" in runner.stimuli[1]
+
+    # 第二轮收完尾（1.5 秒后那次成了"当前"）再往下走：替身模型开始跑时这一轮还没定时刻。
+    def second_round_done():
+        state = wake.read_state()
+        return (
+            state.pending is None
+            and state.current is not None
+            and "1.5 秒后" in state.current.reason
+        )
+
+    await eventually(second_round_done, timeout=10)
     replaced = wake.read_next_wake()  # 第二轮定的 1.5 秒后
 
     # 在那之前有人发来消息 → 第三轮，定到一天后，1.5 秒那条被取代。

@@ -1,29 +1,37 @@
 """world 什么时候醒：只因两种原因——收件箱来了消息，或者它自己定的时刻到了。
 
-没有心跳，也没有默认间隔。每一轮最后由主 agent 定下次醒来的时刻（:mod:`app.world.round`），
-这里负责把它变成现实：
+没有心跳，也没有默认间隔。每一轮最后由主 agent 定下次醒来的时刻（:mod:`app.world.main_agent`），
+这里负责把它变成现实。
 
-1. **先写私有状态**（``$WORLD_DATA_DIR/<泳道>/next_wake.json``）：下次醒来的时刻、一个新的
-   消息 id、为什么定这个时刻。只有 world 自己读写这个文件；人工读写接口只够得到
-   ``records/``。
-2. **再用通信机制排一条那个时刻送达自己的消息**（``send_at``），消息 id 就是状态里记的那个，
-   正文就是那段说明。
+**私有状态**（``$WORLD_DATA_DIR/<泳道>/next_wake.json``）记两样：
 
-**私有状态是"下次什么时候醒"的唯一依据，那条自定消息只是触发。** 所以：
+* **当前**：已经排出去的那次醒来——哪一条自定消息（id）、什么时刻、为什么；
+* **待定**：正在排、还不知道排没排出去的那一次。
 
-* **旧的自定消息作废。** 每一轮都会定一个新时刻，而上一轮定的那条消息还在路上。它到的
-  时候，id 跟状态里记的对不上，就是被后来定的时刻取代了：跳过，不跑一轮
-  （:func:`is_stale_wake`）。别人发来的消息、机制发回来的"没有送达"告知不受这条影响。
-* **进程启动时按状态补醒**（:func:`wake_on_start`，挂在收件箱开设时）：
-    - 没有记录（第一次启动、状态文件读不出来）或者记的时刻已经过了：立刻醒一次——排一条
-      "现在"送达的自定消息，同样先写状态。首次启动、重启、一轮失败到进了死信之后，都靠
-      这一条保证它不会一直睡下去。
-    - 记的时刻还没到：不立刻醒，把同一条消息按原 id、原时刻再排一次。进程要是死在"写好
-      状态"和"排好消息"之间，这是那条消息唯一的来源；原来那条要是还在，两条同 id 的消息
-      只会被处理一次（通信机制按 id 去重）。
+只有 world 自己读写这个文件；人工读写接口只够得到 ``records/``。
 
-先写状态、后排消息，是因为反过来的话，死在两步之间会留下一条状态里没有的消息（到了
-也被当成作废），而状态里还是上一次的时刻；先写状态则任何时候都能从状态把消息补出来。
+**定下次醒来分三步**（:func:`set_next_wake`）：① 把新时刻 B 作为"待定"写进状态（"当前"不动）；
+② 用通信机制排一条 B 时刻送达自己的消息（``send_at``），消息 id 就是 B 的 id，正文就是那段
+说明；③ 把 B 升为"当前"，清掉"待定"。
+
+**一条自定消息，只要是状态里的"当前"或"待定"，就不是旧消息**（:func:`is_stale_wake`）；
+两者都不是，就是被后来定的时刻取代了，跳过、不跑一轮。别人发来的消息、机制发回来的
+"没有送达"告知不受这条影响。这一条让三步之间任何一处失败或进程死掉都不会让它停转：
+
+* 死在 ① 之前或 ① 失败：状态没变，叫醒这一轮的那条消息（它是"当前"）重投时照常跑。
+* ② 失败（broker 没收到，或者超时取消落在等确认时）："当前"还是叫醒这一轮的那条，重投时
+  照常跑，重跑那一轮会用新的"待定"把 B 顶掉。broker 其实收到了 B 的话，B 先到时它是
+  "待定"，照常跑。
+* ③ 失败：B 已经排出去，它是"待定"，到点照常跑；叫醒这一轮的那条仍是"当前"，重投时也照常
+  跑。两边谁先跑完谁定下一个时刻，另一条随之成为旧消息。
+* 进程死在 ① 之后、③ 之前：重启时（:func:`wake_on_start`）看到"待定"，按它原来的 id、原来的
+  时刻再排一次并升为"当前"。它要是其实已经排出去了，两条同 id 的消息只会被处理一次（通信
+  机制按 id 去重）；叫醒那一轮的旧消息重投时就是旧消息了——那一轮在定时刻之前已经把上下文
+  存下，它的决定就是 B。
+
+**进程启动时按状态补醒**（:func:`wake_on_start`，挂在收件箱开设时）：有"待定"就按上面补完；
+没有"当前"（第一次启动、状态文件读不出来）或者"当前"的时刻已经过了，立刻醒一次；"当前"
+还没到，按原 id、原时刻再排一次（同样靠按 id 去重，不会醒两次）。
 """
 from __future__ import annotations
 
@@ -48,41 +56,66 @@ _STATE_FILE = "next_wake.json"
 
 @dataclass(frozen=True)
 class NextWake:
-    """定下的下次醒来：哪一条自定消息、什么时刻、为什么（这段话也是那条消息的正文）。"""
+    """定下的一次醒来：哪一条自定消息、什么时刻、为什么（这段话也是那条消息的正文）。"""
 
     message_id: str
     at: datetime
     reason: str
 
 
-def read_next_wake() -> NextWake | None:
-    """私有状态里记的下次醒来；没有、或者读不出来都是 ``None``（启动时按"没有"补醒）。"""
+@dataclass(frozen=True)
+class WakeState:
+    current: NextWake | None = None
+    pending: NextWake | None = None
+
+
+def _wake_to_json(wake: NextWake | None) -> dict | None:
+    if wake is None:
+        return None
+    return {"message_id": wake.message_id, "at": wake.at.isoformat(), "reason": wake.reason}
+
+
+def _wake_from_json(raw: dict | None) -> NextWake | None:
+    if raw is None:
+        return None
+    return NextWake(
+        message_id=str(raw["message_id"]),
+        at=datetime.fromisoformat(raw["at"]),
+        reason=str(raw["reason"]),
+    )
+
+
+def read_state() -> WakeState:
+    """私有状态；没有、或者读不出来都当作什么都没记（启动时按"没有"补醒）。"""
     path = lane_dir() / _STATE_FILE
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return NextWake(
-            message_id=str(raw["message_id"]),
-            at=datetime.fromisoformat(raw["at"]),
-            reason=str(raw["reason"]),
+        return WakeState(
+            current=_wake_from_json(raw.get("current")),
+            pending=_wake_from_json(raw.get("pending")),
         )
     except FileNotFoundError:
-        return None
-    except (ValueError, KeyError, TypeError):
+        return WakeState()
+    except (ValueError, KeyError, TypeError, AttributeError):
         logger.error("world: %s is unreadable; treated as no wake set", path, exc_info=True)
-        return None
+        return WakeState()
 
 
-def _write_next_wake(wake: NextWake) -> None:
+def read_next_wake() -> NextWake | None:
+    """状态里的"当前"：已经排出去的那次醒来。"""
+    return read_state().current
+
+
+def _write_state(state: WakeState) -> None:
     directory = lane_dir()
     directory.mkdir(parents=True, exist_ok=True)
     write_atomically(
         directory / _STATE_FILE,
         json.dumps(
             {
-                "message_id": wake.message_id,
-                "at": wake.at.isoformat(),
-                "reason": wake.reason,
-                "set_at": now_cst().isoformat(),
+                "current": _wake_to_json(state.current),
+                "pending": _wake_to_json(state.pending),
+                "written_at": now_cst().isoformat(),
             },
             ensure_ascii=False,
         ),
@@ -99,16 +132,21 @@ async def _schedule(wake: NextWake) -> None:
     )
 
 
-async def set_next_wake(at: datetime, reason: str) -> NextWake:
-    """定下次醒来：先写私有状态，再排一条 ``at`` 送达自己的消息。``at`` 必须带时区。
+async def _schedule_and_promote(wake: NextWake) -> None:
+    """② 排出去，③ 升为"当前"。"""
+    await _schedule(wake)
+    _write_state(WakeState(current=wake))
+    logger.info("world: next wake %s at %s", wake.message_id, wake.at.isoformat())
 
-    ``reason`` 是那条消息的正文，醒来时原样摆到主 agent 眼前。排消息失败（``SendFailed``）
-    往外抛，状态已经写下。
+
+async def set_next_wake(at: datetime, reason: str) -> NextWake:
+    """定下次醒来（三步见模块说明）。``at`` 必须带时区；``reason`` 是那条消息的正文。
+
+    哪一步失败都往外抛；已经写下的"待定"留着，重投或重启时由上面的规则接手。
     """
     wake = NextWake(message_id=uuid.uuid4().hex, at=at, reason=reason)
-    _write_next_wake(wake)
-    await _schedule(wake)
-    logger.info("world: next wake %s at %s", wake.message_id, at.isoformat())
+    _write_state(WakeState(current=read_state().current, pending=wake))
+    await _schedule_and_promote(wake)
     return wake
 
 
@@ -116,28 +154,39 @@ def is_stale_wake(message: Message) -> bool:
     """这是一条被后来定的时刻取代了的自定消息吗。只有自己发给自己的普通消息才可能是。"""
     if message.kind is not Kind.MESSAGE or message.sender != WORLD:
         return False
-    current = read_next_wake()
-    return current is None or current.message_id != message.message_id
+    state = read_state()
+    live = {w.message_id for w in (state.current, state.pending) if w is not None}
+    return message.message_id not in live
 
 
 async def wake_on_start() -> None:
-    """进程启动、收件箱开设时：按私有状态决定要不要立刻醒一次。规则见模块说明。"""
-    current = read_next_wake()
+    """进程启动、收件箱开设时：按私有状态补完没做完的一次定时刻，或者决定要不要立刻醒。"""
+    state = read_state()
     now = now_cst()
-    if current is None:
+    if state.pending is not None:
+        logger.info(
+            "world: wake %s was left pending; scheduling it again and making it current",
+            state.pending.message_id,
+        )
+        await _schedule_and_promote(state.pending)
+    elif state.current is None:
         logger.info("world: no wake set; waking now")
         await set_next_wake(now, "进程刚启动，没有找到你定下的下次醒来时刻。")
-    elif current.at <= now:
-        logger.info("world: wake %s at %s has passed; waking now", current.message_id, current.at)
+    elif state.current.at <= now:
+        logger.info(
+            "world: wake %s at %s has passed; waking now",
+            state.current.message_id,
+            state.current.at,
+        )
         await set_next_wake(
             now,
-            f"进程刚启动。你上一次定下的醒来时刻（{to_cst_full(current.at.isoformat())}）"
-            f"已经过了，那一次的说明是：{current.reason}",
+            f"进程刚启动。你上一次定下的醒来时刻（{to_cst_full(state.current.at.isoformat())}）"
+            f"已经过了，那一次的说明是：{state.current.reason}",
         )
     else:
         logger.info(
             "world: wake %s at %s is still ahead; scheduling it again",
-            current.message_id,
-            current.at,
+            state.current.message_id,
+            state.current.at,
         )
-        await _schedule(current)
+        await _schedule(state.current)

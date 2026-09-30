@@ -23,7 +23,7 @@ def scheduled(monkeypatch) -> list[dict]:
     seen: list[dict] = []
 
     async def send_at(**kw):
-        seen.append({**kw, "state_then": wake.read_next_wake()})
+        seen.append({**kw, "state_then": wake.read_state()})
         return kw["message_id"]
 
     monkeypatch.setattr(wake, "send_at", send_at)
@@ -48,12 +48,16 @@ async def test_setting_the_next_wake_records_it_then_schedules_that_very_message
     assert (sent["sender"], sent["recipient"]) == ("world", "world")
     assert (sent["at"], sent["message_id"]) == (at, chosen.message_id)
     assert sent["body"] == "两小时后看看雨停了没有。"
-    assert sent["state_then"] == chosen, "状态要在排消息之前写好"
-    assert json.loads(_state_file(volume).read_text())["message_id"] == chosen.message_id
+    assert sent["state_then"] == wake.WakeState(current=None, pending=chosen), (
+        "排消息之前，新时刻要先作为待定写进状态"
+    )
+    on_disk = json.loads(_state_file(volume).read_text())
+    assert on_disk["current"]["message_id"] == chosen.message_id
+    assert on_disk["pending"] is None
 
 
-async def test_when_scheduling_fails_the_state_still_names_the_wake(volume, monkeypatch):
-    """排消息失败时状态已经写下：这一轮会失败重来；进程要是死了，重启时按状态补排。"""
+async def test_when_scheduling_fails_the_new_wake_stays_pending(volume, monkeypatch):
+    """排消息失败时新时刻留在"待定"，"当前"不变：这一轮会失败重来；进程要是死了，重启时补排。"""
 
     async def broken(**kw):
         raise SendFailed("broker did not confirm", message_id=kw["message_id"])
@@ -64,7 +68,8 @@ async def test_when_scheduling_fails_the_state_still_names_the_wake(volume, monk
     with pytest.raises(SendFailed):
         await wake.set_next_wake(at, "一小时后。")
 
-    assert wake.read_next_wake().at == at
+    assert wake.read_next_wake() is None
+    assert wake.read_state().pending.at == at
 
 
 async def test_only_the_wake_named_in_the_state_is_current(volume, scheduled):
