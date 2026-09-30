@@ -75,6 +75,14 @@ agent-service(X) 靠自己的钟醒来，每次醒来查 common_message 才看�
 
 指标 `lane_handoff_total{channel,target_lane,outcome}`，outcome ∈ `lane` / `fallback` / `error`，飞书和 QQ 共用同一个指标名（QQ 侧的日志 tag 是 `[lane-handoff]`，飞书侧是 `[lark-handoff]`）。
 
+几个容易踩的细节：
+
+- 按会话绑定（`TYPE=chat`）时，`route_key` 是 `common_conversation_id`，不是飞书的 `oc_xxx` chat_id（`packages/ts-shared/src/lane-binding/resolver.ts`）。真实群的 id 从 `lark_base_chat_info` 查。
+- 绑定解析有 30s 进程内缓存（`resolver.ts` 的 `CACHE_TTL_MS`）。只有 channel-server 改绑定时会清缓存，lark-service 要等 TTL 过期，刚绑完的前 30 秒消息可能还走旧路由。
+- 泳道接收端会重新生成 `common_message_id`：prod 判定交接后不落库，信封里也不带 id。prod 日志里的 `common_message_id` 和泳道那边的对不上，排查时不要拿它串两边。
+- 按泳道查日志用 `make logs APP=<app> POD=<app>-<lane>`。`LANE=<非 prod>` 会被拼成 Loki 的 `lane=` selector，而 Loki 没有 lane label，结果静默为空。
+- App 设了 `AllowedLaneClasses` 时，release 只能发到列出的泳道类别，其他会被 paas-engine 拒绝（`release_service.go`）。
+
 ## 泳道测不到的部分
 
 泳道部署只覆盖**交接之后**的处理路径（投影落库、出站投递；她那一段见上方硬约束，只有 coe 覆盖得到）。以下几件只在 prod 跑，泳道测不到：
