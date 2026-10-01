@@ -16,6 +16,7 @@ def test_the_world_app_loads_the_world_wiring():
 
 def test_world_opens_one_inbox_that_takes_one_long_round_at_a_time():
     from app.messaging.receiving import INBOX_REGISTRY, PROCESSING_RETRY, _lease_ms
+    from app.world.answer import answer_question
     from app.world.main_agent import ROUND_TIMEOUT, on_world_message
     from app.world.volume import writer_lock
     from app.world.wake import retry_latest_wake_without_limit, wake_on_start
@@ -24,7 +25,7 @@ def test_world_opens_one_inbox_that_takes_one_long_round_at_a_time():
 
     spec = INBOX_REGISTRY["world"]
     assert spec.on_message is on_world_message
-    assert spec.on_question is None, "第一期 world 不回答问题（应答 agent 是 T4）"
+    assert spec.on_question is answer_question
     assert spec.one_at_a_time
     assert spec.on_open is wake_on_start
     # 状态里的最新唤醒失败时不限次数重试，永不进死信；别的消息照常有限次重试。
