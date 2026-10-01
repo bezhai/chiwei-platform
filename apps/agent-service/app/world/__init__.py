@@ -1,4 +1,5 @@
-"""world：一个独立部署的引擎，自己醒来、看现实、让世界变化，变化写进它自己的记录。
+"""world：一个独立部署的引擎，自己醒来、看现实、让世界变化，变化写进它自己的记录；谁会察觉
+到一个变化由它判断并告知当事人，NPC 由临时 agent 扮演，别人问它某处什么样、谁在哪时它回答。
 
 它和三姐妹的 life 互不 import（CI 规则 ``scripts/check_world_life_imports.py``），运行时
 也不加载 life 的代码：它是同一个镜像上的另一个 App，进程只加载 :mod:`app.world.wiring`
@@ -12,6 +13,10 @@
 * :mod:`app.world.agents` —— world 的几类 agent 怎么调模型（模型、trace、成本）；
 * :mod:`app.world.main_agent` —— 主 agent 的一轮；
 * :mod:`app.world.actions` —— 只有主 agent 才有的动作；
+* :mod:`app.world.perception` —— 感知判断 agent：谁会察觉、察觉到什么，以及告知他们；
+* :mod:`app.world.npc` —— NPC agent：扮演一个 NPC 完成一次互动；
+* :mod:`app.world.answer` —— 应答 agent：回答问 world 的问题，只读；
+* :mod:`app.world.unfinished` —— 没跑完的一轮里已经发生、收不回来的事；
 * :mod:`app.world.admin` —— 记录的人工读写接口；
 * :mod:`app.world.wiring` —— 这个 App 的接线：来源登记、收件箱和人工接口。
 """

@@ -131,7 +131,7 @@ QQ 那条链形状相同,只是入站是 qq-gateway 把 QQ 协议归一化成 `C
 
 「回复」不是独立的一条线,它就是她生活的一部分:同一次醒来里她既决定要不要换手上的事、去哪儿、记住什么,也决定要不要开口。这些全跑在 agent-service 主进程里,由 dataflow runtime 的五条时间源驱动,代码在 `apps/agent-service/app/living/`。
 
-world(推演客观世界的那个引擎)不在 agent-service 这个 App 里,也不跟 life 共读共写任何表:它是同一个镜像上单独发布的 App `world`(代码在 `apps/agent-service/app/world/`,进程只加载 `app.world.wiring`,见 `apps/agent-service/app/deployment.py`),两边唯一的连接是通信机制(`apps/agent-service/app/messaging/`,具名收件箱 + RabbitMQ,按泳道隔离)。world 的主 agent 只在两种时候醒:收件箱 `world` 来了消息,或者它自己上一轮定的时刻到了(用通信机制的定时送达发给自己);没有心跳。它的记录是私有卷上按泳道分目录的自然语言文档(`$WORLD_DATA_DIR/<泳道>/records/`),下次醒来的时刻也存在那个目录里。同一时刻只有一个 world 进程写这个目录(滚动发布时新旧两个进程会同时在跑一段):卷是 hostPath 卷、固定在单节点,world 拿着目录里锁文件上的 flock 独占锁时才消费收件箱,没拿到的进程照常起来、只读不写;记录的人工读写接口是 world App 上的 `/admin/world/records*`,从开发机经 monitor-dashboard 的 `/dashboard/api/ops/world/records*` 转发并落审计。旧的 world 轮次、日历和 world 的文档树已经删掉。
+world(推演客观世界的那个引擎)不在 agent-service 这个 App 里,也不跟 life 共读共写任何表:它是同一个镜像上单独发布的 App `world`(代码在 `apps/agent-service/app/world/`,进程只加载 `app.world.wiring`,见 `apps/agent-service/app/deployment.py`),两边唯一的连接是通信机制(`apps/agent-service/app/messaging/`,具名收件箱 + RabbitMQ,按泳道隔离)。world 的主 agent 只在两种时候醒:收件箱 `world` 来了消息,或者它自己上一轮定的时刻到了(用通信机制的定时送达发给自己);没有心跳。它的记录是私有卷上按泳道分目录的自然语言文档(`$WORLD_DATA_DIR/<泳道>/records/`),下次醒来的时刻也存在那个目录里。主 agent 之外还有三类按需起的 agent:感知判断(主 agent 报告一个变化时判断谁会察觉、察觉到什么,代码把判断经通信机制发给那个参与者——这是 world 告知别人的唯一途径)、NPC 扮演(NPC 的言行出自它,原样交给感知判断)、应答(回答问 world 的问题,只读,不叫醒主 agent)。四类 agent 能查的东西都来自同一组知识来源(记录、现实、别人发给 world 的消息),启用哪些走 Dynamic Config `world_sources`;"别人发给 world 的消息"存在同一个目录的 `sources/` 下,跟记录分开。同一时刻只有一个 world 进程写这个目录(滚动发布时新旧两个进程会同时在跑一段):卷是 hostPath 卷、固定在单节点,world 拿着目录里锁文件上的 flock 独占锁时才消费收件箱,没拿到的进程照常起来、只读不写;记录的人工读写接口是 world App 上的 `/admin/world/records*`,从开发机经 monitor-dashboard 的 `/dashboard/api/ops/world/records*` 转发并落审计。旧的 world 轮次、日历和 world 的文档树已经删掉。
 
 ---
 
@@ -160,7 +160,7 @@ flowchart LR
 
 `chat_response` / `recall` 两条不带 channel 后缀的 base 队列也声明着,但**没有生产者也没有消费者**:它们在代码里只当逻辑 sink 的名字用(`Sink.mq("chat_response")`),真实 routing key 由出站时按 payload 的 channel 现算。同理 `recall_qq` 声明了但 QQ 侧没起 recall 消费者,`proactive_eval` 两头都没有,都是空队列。
 
-通信机制(`apps/agent-service/app/messaging/`)的队列也不在上表,它们连接的是参与者而不是渠道:收件箱 `inbox_<名字>_<泳道>` 由开设它的 App 消费(`inbox_world_*` 归 world,`inbox_operator_*` 归 agent-service),定时送达 `messaging_scheduled_<泳道>` 由开着通信机制的进程共同消费,死信进 `isolated_dead_letters_<泳道>`。发送方是任何用通信机制的进程:world 给自己排下次醒来,运维经 agent-service 的人工入口(`/admin/messaging/*`)发给任何收件箱。这几条都按进程的部署泳道隔离,没有消费者时不退回 prod。
+通信机制(`apps/agent-service/app/messaging/`)的队列也不在上表,它们连接的是参与者而不是渠道:收件箱 `inbox_<名字>_<泳道>` 由开设它的 App 消费(`inbox_world_*` 归 world,`inbox_operator_*` 归 agent-service),定时送达 `messaging_scheduled_<泳道>` 由开着通信机制的进程共同消费,死信进 `isolated_dead_letters_<泳道>`。发送方是任何用通信机制的进程:world 给自己排下次醒来、把感知判断的结果发给参与者、回答问它的问题,运维经 agent-service 的人工入口(`/admin/messaging/*`)发给任何收件箱、向 world 提问。这几条都按进程的部署泳道隔离,没有消费者时不退回 prod。
 
 agent-service 进程内还有两类队列不在上表:一是 durable 边(当前只有一条——她拿起一个文件 → 读一程)底下的队列,由 runtime 框架按 Data 类型和消费者名自动声明(`durable_<data>_<consumer>`);二是 `runtime_delayed_trigger_agent-service`,框架自己的延迟自触发回投。两者的生产者和消费者都在同一个进程里。
 
@@ -245,7 +245,7 @@ flowchart LR
 | channel-server | **channel-server** | HTTP,QQ 入站(`POST /api/internal/qq/inbound`) |
 | channel-server | **chat-response-worker** | 消费 `chat_response_qq`,经 qq-gateway 发 QQ 回复 |
 | agent-service | **agent-service** | HTTP(健康检查 + admin/DLQ + 通信机制人工入口)+ dataflow runtime(五条时间源 + 一条 durable 边)+ life 引擎;不挂 world 的卷 |
-| agent-service | **world** | world 引擎:只通过通信机制跟其他参与者交流(收件箱 `world` + 定时送达),私有记录放在只挂给它的卷上;HTTP 上是健康检查和记录的人工读写接口 `/admin/world/records*`。不是 sibling,单独发布(`make deploy APP=world`) |
+| agent-service | **world** | world 引擎:只通过通信机制跟其他参与者交流(收件箱 `world` 收消息、答提问 + 定时送达 + 发给参与者的告知),私有记录放在只挂给它的卷上;HTTP 上是健康检查和记录的人工读写接口 `/admin/world/records*`。不是 sibling,单独发布(`make deploy APP=world`) |
 | 其余 10 个 | 各自 1 个同名 Deployment | — |
 
 16 = lark-service 2 + channel-server 2 + agent-service 2 + 其余 10 个目录各 1。两个不在此表的例外:`lane-sidecar` 不是独立 Deployment,而是注入到上面每个业务 pod 里的容器;`tagger-service` 完全不在 K8s 里,跑在裸机 GPU 主机上由 systemd 托管。这两个目录不产出 Deployment,所以 15 个应用目录对应 16 个 Deployment。
@@ -266,7 +266,7 @@ flowchart LR
 | MinIO(对象存储) | media-sync-worker(素材入库)、tagger-service(打标取图)、lark-service(本地 pixiv 图源) |
 | Harbor(镜像仓库) | paas-engine(Kaniko 构建产物) |
 | K8s API | paas-engine、lite-registry、lane-sidecar |
-| world 私有卷(hostPath,固定在单节点) | 只有 world:记录和下次醒来的时刻,按泳道分目录(`$WORLD_DATA_DIR/<泳道>/`)。agent-service 不挂 |
+| world 私有卷(hostPath,固定在单节点) | 只有 world:记录、各知识来源自己存的东西(`sources/`)、下次醒来的时刻,按泳道分目录(`$WORLD_DATA_DIR/<泳道>/`)。agent-service 不挂 |
 
 ---
 
