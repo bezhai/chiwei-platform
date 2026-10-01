@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 import opentelemetry.trace as _otel_trace
 from langfuse import Langfuse
+from opentelemetry import context as otel_context
 
 from app.agent.tools._common import get_or_create_counter
 from app.infra.config import settings
@@ -160,6 +161,32 @@ def current_generation_context() -> dict[str, str] | None:
     reads it to parent each tool span under the model call that requested it.
     """
     return _current_generation_ctx.get()
+
+
+# ---------------------------------------------------------------------------
+# 另起一条 trace：一个 agent 在工具里调另一个 agent 时用
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def separate_trace() -> Iterator[None]:
+    """在这个作用域里开的 ``Agent`` 根 span 另起一条 langfuse trace。
+
+    一个 agent 在自己的工具里调另一个 agent 时，里面那个的根 span 默认是外面那条 trace 里
+    当前工具 span 的子 span，而且会把外面那条 trace 的名字、输入改成自己的。包上这一层：
+    当前 OTel 上下文换成空的（里面开的第一个 span 就是一条新 trace 的根），"最近一次模型
+    调用"和这一轮对话的 trace 都清空。离开时三样都恢复，外面那一轮接下来的工具 span 照常
+    挂在它自己的模型调用下面。
+    """
+    otel_token = otel_context.attach(otel_context.Context())
+    generation_token = _current_generation_ctx.set(None)
+    turn_token = _turn_trace_seed.set(None)
+    try:
+        yield
+    finally:
+        _turn_trace_seed.reset(turn_token)
+        _current_generation_ctx.reset(generation_token)
+        otel_context.detach(otel_token)
 
 
 # ---------------------------------------------------------------------------

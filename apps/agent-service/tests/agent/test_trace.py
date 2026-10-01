@@ -457,3 +457,53 @@ async def test_collect_usage_collector_inherited_by_create_task_child(
     assert usage["input"] == 11
     assert usage["total"] == 11
     assert usage["calls"] == 1
+
+
+# ---------------------------------------------------------------------------
+# separate_trace —— 一个 agent 在工具里调另一个 agent 时，里面那个另起一条 trace
+# ---------------------------------------------------------------------------
+
+import opentelemetry.trace as otel_trace  # noqa: E402
+from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+
+from app.agent.trace import separate_trace  # noqa: E402
+
+
+@pytest.fixture
+def tracer():
+    """一个本地的 OTel tracer：不碰全局 provider，span 照样进当前上下文。"""
+    return TracerProvider().get_tracer("test")
+
+
+def test_separate_trace_starts_spans_outside_the_current_trace(tracer):
+    with tracer.start_as_current_span("outer") as outer:
+        with separate_trace():
+            assert not otel_trace.get_current_span().get_span_context().is_valid
+            with tracer.start_as_current_span("inner") as inner:
+                pass
+        assert otel_trace.get_current_span() is outer
+
+    assert inner.parent is None
+    assert inner.get_span_context().trace_id != outer.get_span_context().trace_id
+
+
+def test_separate_trace_leaves_the_outer_model_call_and_turn_as_they_were(
+    tracer, mock_langfuse
+):
+    """离开之后，外面那一轮接下来的工具 span 仍然挂在它自己的模型调用下面。"""
+    with tracer.start_as_current_span("outer"), turn_trace("msg-1:persona-1"):
+        with generation_span(name="llm", model="m", input=[]):
+            pass
+        outer_generation = current_generation_context()
+        outer_turn = current_turn_trace_id()
+        assert outer_generation is not None and outer_turn is not None
+
+        with separate_trace():
+            assert current_generation_context() is None
+            assert current_turn_trace_id() is None
+            with generation_span(name="llm", model="m", input=[]):
+                pass
+            assert current_generation_context() != outer_generation
+
+        assert current_generation_context() == outer_generation
+        assert current_turn_trace_id() == outer_turn
