@@ -156,7 +156,12 @@ async def test_the_main_agent_has_no_tool_that_messages_anyone(world):
 
     main_tools = tools_built_for(world, main_agent.ROUND.prompt_id)
     assert main_tools == [t.name for t in await query_tools()] + [t.name for t in ACTIONS]
-    assert [t.name for t in ACTIONS] == ["write_record", "wake_me_at", "report_change"]
+    assert [t.name for t in ACTIONS] == [
+        "write_record",
+        "wake_me_at",
+        "report_change",
+        "let_npc_appear",
+    ]
 
 
 def test_in_worlds_code_only_perception_sends_to_others_and_only_wake_schedules():
