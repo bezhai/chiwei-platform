@@ -16,8 +16,8 @@ from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
 from app.agent.runtime_context import agent_context
 from app.infra.cst_time import now_cst
-from app.messaging.message import Kind, new_message
-from app.world import agents, main_agent, wake
+from app.messaging.message import Delivery, Kind, SendFailed, new_message
+from app.world import agents, main_agent, perception, wake
 from app.world.actions import wake_me_at
 
 LANE = "coe-world"
@@ -79,6 +79,24 @@ class FakeRunner:
         return reply
 
 
+class ScriptedAgent:
+    """主 agent 之外那几类的替身：每次调用按 ``plan(输入那段话)`` 在这次调用的 context 里调
+    工具，``plan`` 交回的话就是它最后说的。记下每次看到的输入和 context。"""
+
+    def __init__(self, plan):
+        self.plan = plan
+        self.inputs: list[str] = []
+        self.contexts: list = []
+
+    async def run(self, messages, *, context, max_retries, transcript_sink, **_):
+        text = messages[-1].content
+        self.inputs.append(text)
+        self.contexts.append(context)
+        with agent_context(context):
+            said = await self.plan(text)
+        return Turn(role=Role.ASSISTANT, content=said)
+
+
 def sets_wake(hours: float = 2, reason: str = "过一阵再看看。"):
     async def plan():
         at = (now_cst() + timedelta(hours=hours)).replace(microsecond=0)
@@ -106,6 +124,10 @@ def world(volume, monkeypatch):
         # 每一次建 runner：(AgentConfig, 拿到的工具名)。
         built: list[tuple] = []
         scheduled: list[dict] = []
+        # 感知判断之后代码发出去的告知；开设了收件箱的名字；发送会失败的名字。
+        sent: list[dict] = []
+        open_inboxes: set[str] = set()
+        send_fails: set[str] = set()
         committed: list[dict] = []
         costs: list[dict] = []
         history: list[Turn] = []
@@ -114,12 +136,21 @@ def world(volume, monkeypatch):
     h = Handle()
     h.agents, h.built = {}, []
     h.scheduled, h.committed, h.costs = [], [], []
+    h.sent, h.open_inboxes, h.send_fails = [], set(), set()
     h.history = [Turn(role=Role.USER, content="上一轮的输入。")]
     h.runner = FakeRunner(sets_wake())
 
     async def send_at(**kw):
         h.scheduled.append(kw)
         return kw["message_id"]
+
+    async def send(*, sender, recipient, body, message_id=None):
+        if recipient in h.send_fails:
+            raise SendFailed("broker did not confirm", message_id="x")
+        h.sent.append({"sender": sender, "recipient": recipient, "body": body})
+        if recipient in h.open_inboxes:
+            return Delivery(f"n{len(h.sent)}", delivered=True)
+        return Delivery(f"n{len(h.sent)}", delivered=False, reason="对方没有开设收件箱")
 
     async def load_session(key):
         h.loaded_key = key
@@ -143,6 +174,7 @@ def world(volume, monkeypatch):
     monkeypatch.setattr(dynamic_config, "get", lambda k, default="": default)
     monkeypatch.setattr(dynamic_config, "get_int", lambda k, default=0: default)
     monkeypatch.setattr(wake, "send_at", send_at)
+    monkeypatch.setattr(perception, "send", send)
     monkeypatch.setattr(main_agent, "load_session", load_session)
     monkeypatch.setattr(main_agent, "commit_transcript", commit_transcript)
     monkeypatch.setattr(agents, "record_round_cost", record_round_cost)

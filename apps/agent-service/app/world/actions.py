@@ -5,6 +5,9 @@
   没了，改写那份记录说它没了。人工接口可以删。
 * :func:`wake_me_at` —— 定下次醒来的时刻。每一轮必须调，没调的一轮算失败
   （:mod:`app.world.main_agent`）。
+* :func:`report_change` —— 报告世界里发生的一个变化。由感知判断 agent 决定谁会察觉、各自
+  察觉到什么，代码把判断发给他们（:mod:`app.world.perception`），主 agent 看到告知了谁、送没
+  送达。这是让居民知道世界变化的唯一办法：主 agent 没有直接给谁发消息的工具。
 
 一轮里动作之间共享的东西放在 :class:`RoundScope` 里，由这一轮的 ``AgentContext`` 带着：这一轮
 写下了哪几份记录、定下的下次醒来。
@@ -29,6 +32,7 @@ from app.capabilities._errors import CapabilityInvalidArg
 from app.infra.cst_time import CST, now_cst
 from app.world import records
 from app.world.agents import when
+from app.world.perception import render_notices, tell_who_notices
 from app.world.sources.records import RECORDS_READ, RecordPath
 
 ROUND_SCOPE = "world_round"
@@ -133,6 +137,34 @@ async def wake_me_at(
     )
 
 
+# ---------------------------------------------------------------------------
+# 报告一个变化
+# ---------------------------------------------------------------------------
+
+
+@tool
+@tool_error("没有报告出去")
+async def report_change(
+    change: Annotated[
+        str,
+        Field(
+            description=(
+                "世界里发生的一个变化：什么时候、在哪、什么变成了什么样。主语是世界：天气、"
+                "地方、物件、机构、其他人的处境"
+            )
+        ),
+    ],
+) -> str:
+    """报告世界里发生的一个变化，让会察觉到它的人知道。
+
+    由感知判断决定谁会察觉、各自察觉到的是什么，并告知他们；返回告知了谁、送没送达。
+    这是让居民知道世界变化的唯一办法。一个变化报告一次。
+    """
+    if not change.strip():
+        raise CapabilityInvalidArg("写下发生了什么变化")
+    return render_notices(await tell_who_notices(change.strip()))
+
+
 # 只给主 agent 的动作，排在知识来源的查询工具后面。它们的返回是它自己做过的事，跟着它自己
 # 的话一起留（:mod:`app.agent.continuity` 只把来源的查询结果当材料裁）。
-ACTIONS = [write_record, wake_me_at]
+ACTIONS = [write_record, wake_me_at, report_change]

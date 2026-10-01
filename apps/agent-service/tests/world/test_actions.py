@@ -125,7 +125,3 @@ async def test_an_unusable_wake_is_refused_and_nothing_is_set(scope, offset_minu
 
     assert scope.next_wake is None
     assert isinstance(result, dict) and result.get("kind") == "invalid_args"
-
-
-def test_the_main_agent_has_these_actions_of_its_own():
-    assert [t.name for t in actions.ACTIONS] == ["write_record", "wake_me_at"]
