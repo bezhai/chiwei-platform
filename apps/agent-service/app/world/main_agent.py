@@ -3,27 +3,31 @@
 **一条消息一轮。** 收件箱每送来一条消息（别人发来的、自己排的醒来、机制发回的"没有送达"
 告知），:func:`on_world_message` 先把它交给各知识来源的收件处理
 （:func:`app.world.sources.take_in`，各来源按消息 id 去重，重投、重跑都不会多存一份），再跑
-一轮；被后来定的时刻取代了的自定消息不跑（:func:`app.world.wake.is_stale_wake`）。收件箱开设时声明了一次只处理一条、一轮最多
-:data:`ROUND_TIMEOUT`（:mod:`app.world.wiring`），所以同一时刻只有一轮在跑，一轮跑得再久
-也不会被当成"前一个进程死了"被别人接管。
+一轮；被后来定的时刻取代了的自定消息不跑（:func:`app.world.wake.is_stale_wake`）。收件箱开设时
+声明了一次只处理一条、一轮最多 :data:`ROUND_TIMEOUT`（:mod:`app.world.wiring`），所以同一时刻
+只有一轮在跑，一轮跑得再久也不会被当成"前一个进程死了"被别人接管。
 
 **一轮怎样才算跑完。** 模型那一段结束之后，依次：
 
 1. 这一轮定了下次醒来的时刻吗（:func:`app.world.actions.wake_me_at`）？没定就抛
    :class:`NoNextWake`：这一轮算处理失败，按通信机制的重试再跑，重试用完进死信。工具预算
    用完时框架给的那一次不带工具的收尾定不了时刻，同样按没定处理；
-2. 把这一轮存进它的连续上下文（:mod:`app.agent.continuity`，按版本做 CAS）；
+2. 把这一轮存进它的连续上下文（:mod:`app.agent.continuity`，按版本做 CAS），然后清空
+   :mod:`app.world.unfinished`——这一轮发生过的事已经在上下文里了；
 3. 定下次醒来（:func:`app.world.wake.set_next_wake`：先排出自定消息，broker 确认之后才记成
    私有状态里的最新唤醒）。
 
 任何一步失败都往外抛，这一轮按失败重跑。重跑是安全的：它改过的记录留在盘上，下一次读得到；
-上下文和下次醒来都只在最后才写下。叫醒这一轮的自定消息在第 3 步记下新唤醒之前一直是状态里的
+已经发出去的告知收不回来，报告过的变化、出过场的 NPC 和告知了谁都记在
+:mod:`app.world.unfinished`，重跑那一次摆在它眼前，它不会把同一件事再报告一遍；上下文和下次
+醒来都只在最后才写下。叫醒这一轮的自定消息在第 3 步记下新唤醒之前一直是状态里的
 最新唤醒，所以重投时不会被当成旧消息，失败了也不限次数重试、不进死信；哪一处失败、进程死在
 哪里，各自怎么接上见 :mod:`app.world.wake`。先存上下文、后定时刻，是因为定时刻做完之后这一轮
 就不该再重跑——否则会多出一个被取代的自定消息，而上下文里又少了这一轮。
 
 **它眼前摆着什么。** 一条 USER 消息：现在几点、这一次是什么叫醒了它；被别人叫醒时再加上
-它原来定的下次醒来，提醒它这一轮结束前要重新定。它的记录目录只在上下文清理时写进那条带
+它原来定的下次醒来，提醒它这一轮结束前要重新定；之前有一轮没跑完时，再加上那一轮里已经
+发生的事。它的记录目录只在上下文清理时写进那条带
 时刻的标记消息（:mod:`app.agent.continuity`；每轮都一样的东西不每轮重发）。prompt 在 Langfuse
 （:data:`ROUND`），正文不引用任何变量。
 
@@ -52,7 +56,7 @@ from app.agent.neutral import Role
 from app.agent.session import load_session
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, Message
-from app.world import records
+from app.world import records, unfinished
 from app.world.actions import ACTIONS, ROUND_SCOPE, RoundScope
 from app.world.agents import WORLD_MODEL_KEY, AgentKind, run_agent, session_key, when
 from app.world.sources import material_tools, query_tools, take_in
@@ -95,23 +99,34 @@ def _render_state() -> str:
     )
 
 
-def _render_round_input(trigger: Message, *, now: datetime, planned: NextWake | None) -> str:
+def _render_round_input(
+    trigger: Message,
+    *,
+    now: datetime,
+    planned: NextWake | None,
+    left_over: list[unfinished.Happened],
+) -> str:
     lines = [f"【现在】{when(now)}"]
     if trigger.kind is Kind.MESSAGE and trigger.sender == WORLD:
         lines.append(f"【叫醒你的】你给自己排的一次醒来（排在 {when(trigger.time)}）：")
         lines.append(trigger.body)
-        return "\n".join(lines)
-    if trigger.kind is Kind.NOT_DELIVERED:
-        lines.append("【叫醒你的】通信机制告诉你，你的一条消息没有送达：")
-        lines.append(trigger.body)
     else:
-        lines.append(f"【叫醒你的】{trigger.sender} 发来一条消息（{when(trigger.time)}）：")
+        if trigger.kind is Kind.NOT_DELIVERED:
+            lines.append("【叫醒你的】通信机制告诉你，你的一条消息没有送达：")
+        else:
+            lines.append(f"【叫醒你的】{trigger.sender} 发来一条消息（{when(trigger.time)}）：")
         lines.append(trigger.body)
-    if planned is not None:
+        if planned is not None:
+            lines.append(
+                f"【你原来定的下次醒来】{when(planned.at)}。当时的说明：{planned.reason}\n"
+                f"这一轮结束前要重新定一个时刻；还想按原来的来，就再定一次同一个时刻。"
+            )
+    if left_over:
         lines.append(
-            f"【你原来定的下次醒来】{when(planned.at)}。当时的说明：{planned.reason}\n"
-            f"这一轮结束前要重新定一个时刻；还想按原来的来，就再定一次同一个时刻。"
+            "【之前没跑完的一轮里已经发生的事】之前有一轮没有跑完，那一轮的经过不在你的上下文里；"
+            "可下面这些在那一轮里已经发生了：告知已经发出去，收不回来，记录里可能还没写。"
         )
+        lines += [f"- {when(h.at)}\n{h.what}" for h in left_over]
     return "\n".join(lines)
 
 
@@ -143,7 +158,9 @@ async def run_round(trigger: Message) -> None:
     )
     round_input = Turn(
         role=Role.USER,
-        content=_render_round_input(trigger, now=now, planned=read_next_wake()),
+        content=_render_round_input(
+            trigger, now=now, planned=read_next_wake(), left_over=unfinished.read()
+        ),
     )
     scope = RoundScope()
     context = AgentContext(
@@ -171,6 +188,7 @@ async def run_round(trigger: Message) -> None:
         expected_ver=ver,
         session=None,
     )
+    unfinished.clear()
     chosen = await set_next_wake(
         choice.at, f"你在 {when(now)} 定下这个时刻醒来，当时写下的理由：{choice.reason}"
     )

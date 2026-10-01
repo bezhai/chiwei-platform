@@ -12,6 +12,9 @@
   agent 给出他的言行（:mod:`app.world.npc`），那段言行原样交给感知判断；主 agent 看到他的言行
   和告知了谁，事后把互动留下的东西记进记录。
 
+报告变化、让 NPC 出场的结果一产生就记进 :mod:`app.world.unfinished`：告知收不回来，这一轮要是
+没跑完、整轮重来，重来的那一次得看得见它们。
+
 一轮里动作之间共享的东西放在 :class:`RoundScope` 里，由这一轮的 ``AgentContext`` 带着：这一轮
 写下了哪几份记录、定下的下次醒来。
 
@@ -33,7 +36,7 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg
 from app.infra.cst_time import CST, now_cst
-from app.world import records
+from app.world import records, unfinished
 from app.world.agents import when
 from app.world.npc import play_npc
 from app.world.perception import render_notices, tell_who_notices
@@ -166,7 +169,9 @@ async def report_change(
     """
     if not change.strip():
         raise CapabilityInvalidArg("写下发生了什么变化")
-    return render_notices(await tell_who_notices(change.strip()))
+    result = render_notices(await tell_who_notices(change.strip()))
+    unfinished.note(f"你报告了一个变化：{change.strip()}\n{result}")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -195,11 +200,14 @@ async def let_npc_appear(
     """
     if not npc.strip() or not situation.strip():
         raise CapabilityInvalidArg("写下出场的是谁，以及这次出场的情境")
-    acted = await play_npc(npc.strip(), situation.strip())
+    name = npc.strip()
+    acted = await play_npc(name, situation.strip())
     if not acted:
-        return f"{npc.strip()} 这一次没有说话，也没有做什么。没有告知任何人。"
+        return f"{name} 这一次没有说话，也没有做什么。没有告知任何人。"
     notices = await tell_who_notices(acted)
-    return f"【{npc.strip()} 这一次的言行】\n{acted}\n\n{render_notices(notices)}"
+    result = f"【{name} 这一次的言行】\n{acted}\n\n{render_notices(notices)}"
+    unfinished.note(f"你让 {name} 出场，情境：{situation.strip()}\n{result}")
+    return result
 
 
 # 只给主 agent 的动作，排在知识来源的查询工具后面。它们的返回是它自己做过的事，跟着它自己
