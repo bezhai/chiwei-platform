@@ -27,12 +27,12 @@ from app.world.admin import (
     record_write_node,
 )
 from app.world.main_agent import ROUND_TIMEOUT, on_world_message
-from app.world.sources import reality, register
+from app.world.sources import reality, register, told
 from app.world.sources import records as records_source
 from app.world.volume import writer_lock
 from app.world.wake import WORLD, retry_latest_wake_without_limit, wake_on_start
 
-for source in (records_source.SOURCE, reality.SOURCE):
+for source in (records_source.SOURCE, reality.SOURCE, told.SOURCE):
     register(source)
 
 inbox(

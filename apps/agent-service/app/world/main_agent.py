@@ -1,8 +1,9 @@
 """world 主 agent 的一轮：被一条消息叫醒，看记录、看现实、让世界变化，最后定下次醒来的时刻。
 
 **一条消息一轮。** 收件箱每送来一条消息（别人发来的、自己排的醒来、机制发回的"没有送达"
-告知），:func:`on_world_message` 就跑一轮；被后来定的时刻取代了的自定消息直接跳过
-（:func:`app.world.wake.is_stale_wake`）。收件箱开设时声明了一次只处理一条、一轮最多
+告知），:func:`on_world_message` 先把它交给各知识来源的收件处理
+（:func:`app.world.sources.take_in`，各来源按消息 id 去重，重投、重跑都不会多存一份），再跑
+一轮；被后来定的时刻取代了的自定消息不跑（:func:`app.world.wake.is_stale_wake`）。收件箱开设时声明了一次只处理一条、一轮最多
 :data:`ROUND_TIMEOUT`（:mod:`app.world.wiring`），所以同一时刻只有一轮在跑，一轮跑得再久
 也不会被当成"前一个进程死了"被别人接管。
 
@@ -54,7 +55,7 @@ from app.messaging.message import Kind, Message
 from app.world import records
 from app.world.actions import ACTIONS, ROUND_SCOPE, RoundScope
 from app.world.agents import WORLD_MODEL_KEY, AgentKind, run_agent, session_key, when
-from app.world.sources import material_tools, query_tools
+from app.world.sources import material_tools, query_tools, take_in
 from app.world.sources.records import RECORDS_READ
 from app.world.wake import WORLD, NextWake, is_stale_wake, read_next_wake, set_next_wake
 
@@ -115,7 +116,9 @@ def _render_round_input(trigger: Message, *, now: datetime, planned: NextWake | 
 
 
 async def on_world_message(message: Message) -> None:
-    """world 收件箱的处理函数：作废的自定消息跳过，其余每一条跑一轮。"""
+    """world 收件箱的处理函数：先交给各知识来源收下，再看要不要跑一轮——作废的自定消息跳过，
+    其余每一条跑一轮。"""
+    await take_in(message)
     if is_stale_wake(message):
         logger.info(
             "world: wake %s was replaced by a later one; skipped", message.message_id
