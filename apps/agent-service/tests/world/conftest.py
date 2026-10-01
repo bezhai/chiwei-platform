@@ -1,4 +1,9 @@
-"""world 测试共用：临时的私有卷、重新执行一遍 world 的接线、替身模型和一轮之外的替身。"""
+"""world 测试共用：临时的私有卷、重新执行一遍 world 的接线、替身模型和一轮之外的替身。
+
+四类 agent（主 agent、感知判断、NPC、应答）都经 :func:`app.world.agents.build_runner` 拿到
+runner，替身从那里换：按 prompt id 分给各自的替身，同时记下每一次建出来的是哪一类、拿到了
+哪些工具。
+"""
 from __future__ import annotations
 
 import importlib
@@ -12,8 +17,8 @@ from app.agent.neutral import Role
 from app.agent.runtime_context import agent_context
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, new_message
-from app.world import main_agent, wake
-from app.world.tools import wake_me_at
+from app.world import agents, main_agent, wake
+from app.world.actions import wake_me_at
 
 LANE = "coe-world"
 
@@ -48,10 +53,12 @@ def load_world_wiring() -> None:
     from app.messaging.receiving import clear_inboxes
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
+    from app.world.sources import clear_sources
 
     clear_wiring()
     clear_bindings()
     clear_inboxes()
+    clear_sources()
     importlib.reload(wiring)
 
 
@@ -94,6 +101,10 @@ def world(volume, monkeypatch):
 
     class Handle:
         runner: FakeRunner
+        # 主 agent 之外那三类的替身：prompt id → runner。
+        agents: dict[str, object] = {}
+        # 每一次建 runner：(AgentConfig, 拿到的工具名)。
+        built: list[tuple] = []
         scheduled: list[dict] = []
         committed: list[dict] = []
         costs: list[dict] = []
@@ -101,6 +112,7 @@ def world(volume, monkeypatch):
         ver = 3
 
     h = Handle()
+    h.agents, h.built = {}, []
     h.scheduled, h.committed, h.costs = [], [], []
     h.history = [Turn(role=Role.USER, content="上一轮的输入。")]
     h.runner = FakeRunner(sets_wake())
@@ -119,9 +131,12 @@ def world(volume, monkeypatch):
     async def record_round_cost(**kw):
         h.costs.append(kw)
 
-    def build_round_runner(config):
-        h.runner.configs.append(config)
-        return h.runner
+    def build_runner(config, tools):
+        h.built.append((config, [t.name for t in tools]))
+        if config.prompt_id == main_agent.ROUND.prompt_id:
+            h.runner.configs.append(config)
+            return h.runner
+        return h.agents[config.prompt_id]
 
     from inner_shared.dynamic_config import dynamic_config
 
@@ -130,9 +145,15 @@ def world(volume, monkeypatch):
     monkeypatch.setattr(wake, "send_at", send_at)
     monkeypatch.setattr(main_agent, "load_session", load_session)
     monkeypatch.setattr(main_agent, "commit_transcript", commit_transcript)
-    monkeypatch.setattr(main_agent, "record_round_cost", record_round_cost)
-    monkeypatch.setattr(main_agent, "build_round_runner", build_round_runner)
+    monkeypatch.setattr(agents, "record_round_cost", record_round_cost)
+    monkeypatch.setattr(agents, "build_runner", build_runner)
+    load_world_wiring()
     return h
+
+
+def tools_built_for(world_handle, prompt_id: str) -> list[str]:
+    """最近一次为 ``prompt_id`` 那一类 agent 建 runner 时，它拿到的工具名。"""
+    return [names for config, names in world_handle.built if config.prompt_id == prompt_id][-1]
 
 
 def self_message(message_id: str, body: str = "醒来。"):

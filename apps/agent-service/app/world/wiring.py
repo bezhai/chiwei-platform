@@ -1,5 +1,8 @@
 """world App 的接线：只有 world 的进程 import 它（``app.deployment.APP_WIRING``）。
 
+world 的 agent 能查到的东西由知识来源提供（:mod:`app.world.sources`），在这里登记：加一个来源
+就是在下面的登记表里加一行。
+
 world 靠收件箱醒：开设名为 ``world`` 的收件箱，只在拿着卷的写锁时消费
 （:func:`app.world.volume.writer_lock`；启动补醒也在拿到锁之后才跑），一次只处理一条、一轮最多
 :data:`app.world.main_agent.ROUND_TIMEOUT`（占位租约随之放长），开设时按私有状态补醒
@@ -24,8 +27,13 @@ from app.world.admin import (
     record_write_node,
 )
 from app.world.main_agent import ROUND_TIMEOUT, on_world_message
+from app.world.sources import reality, register
+from app.world.sources import records as records_source
 from app.world.volume import writer_lock
 from app.world.wake import WORLD, retry_latest_wake_without_limit, wake_on_start
+
+for source in (records_source.SOURCE, reality.SOURCE):
+    register(source)
 
 inbox(
     WORLD,

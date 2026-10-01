@@ -14,7 +14,7 @@ from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, wake
 
-from .conftest import LANE, self_message, sets_nothing, sets_wake
+from .conftest import LANE, self_message, sets_nothing, sets_wake, tools_built_for
 
 
 def _round_input(world_handle, run: int = -1) -> str:
@@ -150,37 +150,48 @@ async def test_when_the_context_cannot_be_stored_the_round_fails_before_scheduli
 
 
 # ---------------------------------------------------------------------------
-# 模型和参数走 Dynamic Config
+# 它手里有什么
 # ---------------------------------------------------------------------------
 
 
-async def test_model_and_tool_budget_come_from_dynamic_config(world, monkeypatch):
-    from inner_shared.dynamic_config import dynamic_config
-
-    values = {main_agent.WORLD_MODEL_KEY: "some-model"}
-    ints = {main_agent.WORLD_RECURSION_LIMIT_KEY: 20}
-    monkeypatch.setattr(dynamic_config, "get", lambda k, default="": values.get(k, default))
-    monkeypatch.setattr(dynamic_config, "get_int", lambda k, default=0: ints.get(k, default))
+async def test_the_main_agent_gets_every_enabled_sources_query_tools_and_its_own_actions(world):
+    from app.world.actions import ACTIONS
+    from app.world.sources import query_tools
 
     await main_agent.on_world_message(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
-    config = world.runner.configs[0]
-    assert (config.prompt_id, config.model_id, config.recursion_limit) == (
-        main_agent.ROUND_PROMPT_ID,
-        "some-model",
-        20,
+    expected = [t.name for t in await query_tools()] + [t.name for t in ACTIONS]
+    assert tools_built_for(world, main_agent.ROUND.prompt_id) == expected
+    assert {"list_records", "read_record", "check_weather", "search_web"} <= set(expected)
+
+
+async def test_the_round_runs_as_its_own_trace_with_its_own_prompt(world):
+    await main_agent.on_world_message(
+        new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
+    config = world.runner.configs[0]
+    assert (config.prompt_id, config.trace_name) == ("world_round", "world-round")
+    assert world.costs[0]["round_id"].startswith("world-round:")
 
-async def test_without_dynamic_config_the_code_defaults_apply(world, monkeypatch):
-    from inner_shared.dynamic_config import dynamic_config
 
-    monkeypatch.setattr(dynamic_config, "get", lambda k, default="": default)
-    monkeypatch.setattr(dynamic_config, "get_int", lambda k, default=0: default)
+async def test_what_the_sources_return_is_trimmed_as_material(world, monkeypatch):
+    from app.world import sources
 
-    config = await main_agent.round_config()
+    seen = {}
+    real = main_agent.trim_for_round
 
-    assert config.model_id == main_agent.DEFAULT_WORLD_MODEL
-    assert config.recursion_limit == main_agent.DEFAULT_WORLD_RECURSION_LIMIT
+    def trim(history, **kw):
+        seen.update(kw)
+        return real(history, **kw)
+
+    monkeypatch.setattr(main_agent, "trim_for_round", trim)
+
+    await main_agent.on_world_message(
+        new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
+    )
+
+    assert seen["material_tools"] == sources.material_tools()
+    assert "write_record" not in seen["material_tools"]

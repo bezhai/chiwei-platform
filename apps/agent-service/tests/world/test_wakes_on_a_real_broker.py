@@ -16,8 +16,8 @@ from app.infra.cst_time import now_cst
 from app.messaging.lifecycle import start_messaging
 from app.messaging.record import read_record
 from app.messaging.sending import send
-from app.world import main_agent, wake
-from app.world.tools import wake_me_at
+from app.world import agents, main_agent, wake
+from app.world.actions import wake_me_at
 from tests.messaging.conftest import (  # noqa: F401
     LANE,
     broker,
@@ -66,12 +66,12 @@ def world_process(broker, tmp_path, monkeypatch):  # noqa: F811
 
     monkeypatch.setattr(main_agent, "load_session", load_session)
     monkeypatch.setattr(main_agent, "commit_transcript", nothing)
-    monkeypatch.setattr(main_agent, "record_round_cost", nothing)
+    monkeypatch.setattr(agents, "record_round_cost", nothing)
 
     # 最后一次定到一天以后：测试结束时它还躺在延时交换机里，这个 broker 活不到那时候，
     # 不会有一条迟到的自定消息落进后面用例的收件箱。
     runner = ScriptedRunner([2.0, 1.5, 86_400.0])
-    monkeypatch.setattr(main_agent, "build_round_runner", lambda config: runner)
+    monkeypatch.setattr(agents, "build_runner", lambda config, tools: runner)
 
     load_world_wiring()
     return runner
@@ -172,7 +172,7 @@ async def test_someone_elses_message_dead_lettered_leaves_world_waking_on_its_pl
 
     _fast_retry(monkeypatch)
     runner = RunnerFailingOn(lambda s: "发来一条消息" in s, [4.0, 86_400.0])
-    monkeypatch.setattr(main_agent, "build_round_runner", lambda config: runner)
+    monkeypatch.setattr(agents, "build_runner", lambda config, tools: runner)
 
     await start_messaging()
     await eventually(
@@ -208,7 +208,7 @@ async def test_the_latest_wake_failing_again_and_again_is_never_dead_lettered(
         return False
 
     runner = RunnerFailingOn(fails, [86_400.0])
-    monkeypatch.setattr(main_agent, "build_round_runner", lambda config: runner)
+    monkeypatch.setattr(agents, "build_runner", lambda config, tools: runner)
 
     await start_messaging()
     started = None

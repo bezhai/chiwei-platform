@@ -37,7 +37,7 @@ class _Runner:
         from app.agent.neutral import Role
         from app.agent.runtime_context import agent_context
         from app.infra.cst_time import now_cst
-        from app.world.tools import wake_me_at
+        from app.world.actions import wake_me_at
 
         _append(ROUNDS, " | ".join(messages[-1].content.splitlines()))
         with agent_context(context):
@@ -53,7 +53,7 @@ async def main() -> None:
 
     from app.messaging.lifecycle import start_messaging, stop_messaging
     from app.runtime.bootstrap import load_dataflow_graph
-    from app.world import main_agent, volume
+    from app.world import agents, main_agent, volume
 
     volume.WRITER_LOCK_POLL_SECONDS = 0.2
     logging.getLogger("app.world.volume").addHandler(_EventsHandler())
@@ -67,8 +67,8 @@ async def main() -> None:
 
     main_agent.load_session = load_session
     main_agent.commit_transcript = nothing
-    main_agent.record_round_cost = nothing
-    main_agent.build_round_runner = lambda config: _Runner()
+    agents.record_round_cost = nothing
+    agents.build_runner = lambda config, tools: _Runner()
     dynamic_config.get = lambda key, default="": default
     dynamic_config.get_int = lambda key, default=0: default
 
