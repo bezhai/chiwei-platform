@@ -245,6 +245,8 @@ async def test_stored_but_not_cleared_resends_them_once_more_and_clears_after(
     *history, round_input = world.runner.runs[-1]
     assert any("报告了下雨，结果是" in str(turn.content) for turn in history)
     assert "已经发生" in round_input.content and "下雨了。" in round_input.content
+    # 这时上一轮的经过就在它的上下文里，眼前那段话不能说"不在"。
+    assert "不在你的上下文里" not in round_input.content
     assert world.sent_ids == kept + kept
     assert unfinished.read() == []
 
