@@ -129,6 +129,21 @@ describe('路径、参数、请求体', () => {
     ]);
   });
 
+  it('参与者的名字可以是中文：请求体里的、查询参数里的都原样交下去', async () => {
+    nextResult = { ok: { lane: 'coe-msg', message_id: 'm2', delivered: true, reason: null } };
+    const body = { sender: '千凪', recipient: '赤尾', body: '姐姐，晚饭好了。' };
+    await call('/api/ops/messaging/send', { method: 'POST', headers: { 'x-lane': 'coe-msg' }, body });
+    await call(`/api/ops/messaging/record?participant=${encodeURIComponent('赤尾')}`, {
+      headers: { 'x-lane': 'coe-msg' },
+    });
+    expect(calls[0]).toMatchObject({ method: 'POST', path: '/admin/messaging/send', body });
+    expect(calls[1]).toMatchObject({
+      method: 'GET',
+      path: '/admin/messaging/record',
+      params: { participant: '赤尾' },
+    });
+  });
+
   it('请求体不是 JSON 对象时 400，不往下发', async () => {
     const res = await call('/api/ops/messaging/send', { method: 'POST', body: '[1,2]' });
     expect(res.status).toBe(400);

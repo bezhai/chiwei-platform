@@ -87,6 +87,31 @@ describe('agentClient 真发出去的请求', () => {
   });
 });
 
+// 参与者的名字可以是中文（赤尾、千凪）。查询参数要按 UTF-8 编码发出去，上游解回来的还是原来的名字。
+describe('agentClient 发中文的查询参数', () => {
+  it('上游从实际报文里解出来的 participant 就是原来的中文名', async () => {
+    const seen: Array<{ raw: string; participant: string | null }> = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        seen.push({ raw: url.search, participant: url.searchParams.get('participant') });
+        return Response.json({ lane: 'coe-living', rows: [] });
+      },
+    });
+    try {
+      process.env.DASHBOARD_AGENT_API = `http://127.0.0.1:${server.port}`;
+      process.env.INNER_HTTP_SECRET = 's3cr3t';
+
+      await agentClient.get('/admin/messaging/record', { participant: '赤尾' });
+
+      expect(seen).toEqual([{ raw: '?participant=%E8%B5%A4%E5%B0%BE', participant: '赤尾' }]);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
 // createClient 默认会把顶层带 data 键的响应拆开只返回 data（那是 paas-engine 的信封
 // 口径）。agent-service 不是那个口径：上游哪天加一个 data 字段，lane 会被静默吃掉，
 // 而 lane 是整条链路唯一能证明"这次操作落在哪条泳道"的东西。所以 agentClient 直接透传。
