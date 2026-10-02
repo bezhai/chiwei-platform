@@ -13,6 +13,7 @@ from app.agent.context import AgentContext
 from app.agent.runtime_context import agent_context
 from app.messaging.message import Kind, Message, new_message
 from app.world import main_agent, records
+from app.world.agents import when
 from app.world.sources import private_dir, told
 
 from .conftest import sets_nothing, sets_wake
@@ -76,6 +77,21 @@ async def test_the_same_message_delivered_twice_is_kept_once(volume):
     assert "1 条" in await _call(told.list_senders)
 
 
+async def test_the_same_message_id_sent_again_later_is_kept_once_with_its_first_time(volume):
+    """发送方按 ``SendFailed`` 带回的 id 重发：同一个 id，消息时间却是重发那一刻的。"""
+    first = _said("ayana", "我出门了。", minutes_ago=30, message_id="same-id")
+    resent = _said("ayana", "我出门了。", minutes_ago=0, message_id="same-id")
+
+    await told.take_in(first)
+    await told.take_in(resent)
+
+    assert len(_stored()) == 1
+    assert "1 条" in await _call(told.list_senders)
+    shown = await _call(told.read_messages_from, name="ayana")
+    assert shown.count("我出门了。") == 1
+    assert when(first.time) in shown
+
+
 async def test_what_it_keeps_stays_apart_from_worlds_records(volume):
     await told.take_in(_said("ayana", "我在厨房。"))
 
@@ -97,6 +113,19 @@ async def test_each_senders_messages_are_read_back_newest_first_and_only_theirs(
 
     assert shown.index("中午到了学校。") < shown.index("早上在家。")
     assert "我在厨房。" not in shown
+
+
+async def test_recent_means_by_the_time_the_message_was_sent_not_by_its_id(volume, monkeypatch):
+    monkeypatch.setattr(told, "RECENT", 2)
+    await told.take_in(_said("ayana", "最早。", minutes_ago=90, message_id="c"))
+    await told.take_in(_said("ayana", "最晚。", minutes_ago=10, message_id="a"))
+    await told.take_in(_said("ayana", "中间。", minutes_ago=50, message_id="b"))
+
+    shown = await _call(told.read_messages_from, name="ayana")
+
+    assert "最早。" not in shown
+    assert shown.index("最晚。") < shown.index("中间。")
+    assert "共 3 条" in shown
 
 
 async def test_list_senders_names_everyone_who_has_sent_something(volume):

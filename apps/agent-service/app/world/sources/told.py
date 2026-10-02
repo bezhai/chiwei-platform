@@ -14,16 +14,18 @@
 他们自己的事留在这里，记录不用写主语是居民的句子；以后换成"直接问居民本人"，是再写一个经
 通信机制提问的来源、在启用列表里换掉这一个，记录和主 agent 的写法都不用动。
 
-**怎么存。** 一条消息一份文件：``<发送方目录>/<消息时间>-<消息 id>.json``，在这个来源自己的
-目录里（:func:`app.world.sources.private_dir`）。发送方目录名取名字的摘要：名字由通信机制校验，
-可能含有不能直接做文件名的字符；原名存在文件里。文件名以时间开头，列出来就是按时间排好的。
-同一条消息再来一次（投递至少一次），算出来是同一个路径、写下的是同样的内容，还是那一份。
+**怎么存。** 一条消息一份文件：``<发送方目录>/<消息 id>.json``，在这个来源自己的目录里
+（:func:`app.world.sources.private_dir`）。发送方目录名取名字的摘要：名字由通信机制校验，可能
+含有不能直接做文件名的字符；原名、消息时间、正文都存在文件里，"最近"按文件里的消息时间排。
+文件只按消息 id 命名：同一条消息再来一次（投递至少一次），或者发送方拿着原 id 重发（那一次的
+消息时间是重发那一刻），都落在同一个文件上；已经在了就不再写，留下的是先到的那一份。写走
+:func:`app.world.volume.write_atomically`（同目录临时文件 + 原子替换），读的人看不到半份。
 """
 from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -51,15 +53,13 @@ def _sender_dir(sender: str) -> Path:
     return _root() / hashlib.sha256(sender.encode("utf-8")).hexdigest()[:16]
 
 
-def _file_name(message: Message) -> str:
-    return f"{message.time.astimezone(UTC):%Y%m%dT%H%M%S%f}-{message.message_id}.json"
-
-
 async def take_in(message: Message) -> None:
-    """收件处理：别的参与者发来的消息存一份；同一条再来还是那一份。"""
+    """收件处理：别的参与者发来的消息存一份；同一个消息 id 已经存过就什么都不做。"""
     if message.sender == WORLD:
         return
-    target = _sender_dir(message.sender) / _file_name(message)
+    target = _sender_dir(message.sender) / f"{message.message_id}.json"
+    if target.exists():
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
     write_atomically(
         target,
@@ -75,15 +75,16 @@ async def take_in(message: Message) -> None:
     )
 
 
-def _kept(directory: Path) -> list[Path]:
-    """一个发送方存下的消息，按时间从旧到新。以点开头的是写到一半的临时文件，不算。"""
-    return sorted(
-        p for p in directory.iterdir() if p.suffix == ".json" and not p.name.startswith(".")
-    )
-
-
-def _load(path: Path) -> dict[str, str]:
-    return json.loads(path.read_text(encoding="utf-8"))
+def _kept(directory: Path) -> list[dict[str, str]]:
+    """一个发送方存下的消息，按消息时间从旧到新。以点开头的是写到一半的临时文件，不算。"""
+    if not directory.is_dir():
+        return []
+    loaded = [
+        json.loads(p.read_text(encoding="utf-8"))
+        for p in directory.iterdir()
+        if p.suffix == ".json" and not p.name.startswith(".")
+    ]
+    return sorted(loaded, key=lambda m: datetime.fromisoformat(m["time"]))
 
 
 def _senders() -> list[tuple[str, int, datetime]]:
@@ -93,9 +94,9 @@ def _senders() -> list[tuple[str, int, datetime]]:
         return []
     found = []
     for directory in root.iterdir():
-        kept = _kept(directory) if directory.is_dir() else []
+        kept = _kept(directory)
         if kept:
-            latest = _load(kept[-1])
+            latest = kept[-1]
             found.append(
                 (latest["sender"], len(kept), datetime.fromisoformat(latest["time"]))
             )
@@ -125,13 +126,12 @@ async def read_messages_from(
 
     这是他们自己说的，不是世界确认过的事。
     """
-    directory = _sender_dir(name)
-    kept = _kept(directory) if directory.is_dir() else []
+    kept = _kept(_sender_dir(name))
     if not kept:
         others = "、".join(s[0] for s in _senders())
         known = f"给世界发过消息的有：{others}。" if others else "还没有人给世界发过消息。"
         return f"没有收到过「{name}」的消息。{known}"
-    recent = [_load(p) for p in reversed(kept[-RECENT:])]
+    recent = list(reversed(kept[-RECENT:]))
     lines = [f"{name} 最近发给世界的 {len(recent)} 条消息（共 {len(kept)} 条，从新到旧）："]
     lines += [f"- {when(datetime.fromisoformat(m['time']))}：{m['body']}" for m in recent]
     return "\n".join(lines)
