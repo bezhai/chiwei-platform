@@ -38,6 +38,7 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg
 from app.infra.cst_time import CST, now_cst
+from app.messaging.message import message_body
 from app.world import records, unfinished
 from app.world.agents import when
 from app.world.npc import play_npc
@@ -157,7 +158,9 @@ async def wake_me_at(
 # 报告一个变化、让一个 NPC 出场
 #
 # 这两个动作都分两段。判断那一段（感知判断、NPC 扮演）没成，什么都还没记、没发，失败交回给主
-# agent，它可以再试一次。判断完先把告知记进 unfinished，再按记下的 id 发：从这里往后的失败（写不
+# agent，它可以再试一次。要记进 unfinished 的每一段话（变化原文、NPC 的名字和情境、NPC 的言行）
+# 和每一条告知的正文，都先按通信机制的正文规则（:func:`app.messaging.message.message_body`）
+# 检查过，记下来的东西一定写得进卷、发得出去。判断完先把告知记进 unfinished，再按记下的 id 发：从这里往后的失败（写不
 # 进卷、发送出错、被取消）不收住，原样往外抛，这一轮按失败重来，下一轮开始时按原 id 补发。所以
 # 这两个动作不包 @tool_error——它会把发送出错也变成一条交给模型的失败，这一轮照常跑完、清空
 # unfinished，那条告知就再也发不出去了。
@@ -191,9 +194,10 @@ async def report_change(
     由感知判断决定谁会察觉、各自察觉到的是什么，并告知他们；返回告知了谁、送没送达。
     这是让居民知道世界变化的唯一办法。一个变化报告一次。
     """
-    change = change.strip()
-    if not change:
-        return "没有报告：写下发生了什么变化。"
+    try:
+        change = message_body(change.strip())
+    except ValueError as exc:
+        return f"没有报告：这段话里有记不下来的东西，改一下再报告（{exc}）。"
     try:
         notices = await judge_who_notices(change)
     except Exception as exc:
@@ -219,14 +223,15 @@ async def let_npc_appear(
     一个临时 agent 依据各来源扮演他，给出他这一次说的话、做的事；这段言行原样交给感知判断，
     告知会察觉到的人。返回他的言行和告知了谁。这次互动留下了什么，之后由你记进记录。
     """
-    name, situation = npc.strip(), situation.strip()
-    if not name or not situation:
-        return "没有出场：写下出场的是谁，以及这次出场的情境。"
+    try:
+        name, situation = message_body(npc.strip()), message_body(situation.strip())
+    except ValueError as exc:
+        return f"没有出场：写下出场的是谁、这次出场的情境，里面不能有记不下来的东西（{exc}）。"
     try:
         acted = await play_npc(name, situation)
         if not acted:
             return f"{name} 这一次没有说话，也没有做什么。没有告知任何人。"
-        notices = await judge_who_notices(acted)
+        notices = await judge_who_notices(message_body(acted))
     except Exception as exc:
         return _not_done(f"{name} 没有出场，扮演或者感知判断没有做成", exc)
     words = f"【{name} 这一次的言行】\n{acted}"

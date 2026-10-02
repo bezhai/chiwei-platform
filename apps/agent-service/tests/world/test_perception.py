@@ -15,7 +15,7 @@ from app.world import main_agent, perception
 from app.world.actions import ACTIONS, report_change
 from app.world.sources import query_tools
 
-from .conftest import ScriptedAgent, sets_wake, tools_built_for
+from .conftest import LANE, ScriptedAgent, sets_wake, tools_built_for
 
 
 def judges(*judgments: tuple[str, str], said: str = "判断完了。"):
@@ -132,6 +132,48 @@ async def test_a_judgment_naming_world_itself_or_an_unusable_name_is_refused(wor
 
     assert world.sent == []
     assert all(a.get("kind") == "invalid_args" for a in plan.answers)
+
+
+async def test_a_body_messaging_would_refuse_goes_back_to_perception_and_is_never_kept(
+    world, volume
+):
+    """通信机制存不下的正文（NUL、单独的代理码位）在判断那一刻就退回给感知判断；记下来、
+    发出去的只有收得下的那条。"""
+    kept_when_sending: list[str] = []
+    world.before_send = lambda _r: kept_when_sending.append(
+        (volume / LANE / "unfinished.json").read_text(encoding="utf-8")
+    )
+
+    async def plan(_input):
+        plan.answers = [
+            await perception.someone_notices.invoke({"who": "akao", "what": "门响了\x00一声。"}),
+            await perception.someone_notices.invoke({"who": "chinagi", "what": "门响了\ud800一声。"}),
+        ]
+        await perception.someone_notices.invoke({"who": "ayana", "what": "门响了一声。"})
+        return "好。"
+
+    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+
+    await _a_round(world, reports("门被风吹得响了一声。"))
+
+    assert [a.get("kind") for a in plan.answers] == ["invalid_args", "invalid_args"]
+    assert [(s["recipient"], s["body"]) for s in world.sent] == [("ayana", "门响了一声。")]
+    [kept] = kept_when_sending
+    assert "ayana" in kept and "akao" not in kept and "chinagi" not in kept
+
+
+async def test_a_change_messaging_could_not_carry_is_handed_back_before_anyone_judges_it(
+    world, volume
+):
+    """变化原文要记进 unfinished 给下一轮看，存不下的字在报告那一刻就退回给主 agent。"""
+    judge = judges(("ayana", "x"))
+    world.agents[perception.PERCEPTION.prompt_id] = judge
+
+    [result] = await _a_round(world, reports("门响了\x00一声。"))
+
+    assert "没有报告" in result
+    assert judge.inputs == [] and world.sent == []
+    assert not (volume / LANE / "unfinished.json").exists()
 
 
 # ---------------------------------------------------------------------------

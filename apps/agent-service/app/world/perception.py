@@ -18,7 +18,9 @@ id 记进 :mod:`app.world.unfinished`，再调 :func:`tell`。发到一半进程
 
 **没送达不另外处理。** 对方没开设收件箱时 ``send`` 不投递、记下来、当场交回"没有送达"，不会
 再给 world 发一条告知，也就不会叫醒它。名字就是参与者在这个世界里的名字，通信机制校验不过的，
-在判断那一刻就退回给感知判断 agent，让它改。
+在判断那一刻就退回给感知判断 agent，让它改；正文也一样，通信机制收不下的（记录者存不下的字，见
+:func:`app.messaging.message.message_body`）在判断那一刻退回，记下来、发出去的告知都是发得出去的。
+所以 :func:`tell` 还会遇到的发送出错只剩基础设施的（broker、数据库不可用），按失败重来是对的。
 
 prompt 在 Langfuse（:data:`PERCEPTION`），正文不引用任何变量；现在几点、这一次的变化写在
 USER 消息里。
@@ -41,7 +43,7 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg
 from app.infra.cst_time import now_cst
-from app.messaging.message import participant
+from app.messaging.message import message_body, participant
 from app.messaging.sending import send
 from app.world.agents import AgentKind, run_agent, session_key, when
 from app.world.sources import query_tools
@@ -86,9 +88,13 @@ async def someone_notices(
         raise CapabilityInvalidArg(f"「{who}」不是通信机制收得下的参与者名字：{exc}") from exc
     if name == WORLD:
         raise CapabilityInvalidArg(f"「{WORLD}」是世界自己，不用告知")
-    if not what.strip():
-        raise CapabilityInvalidArg("写下他察觉到的是什么：这段话会原样发给他")
-    get_context().features[_JUDGMENTS][name] = what.strip()
+    try:
+        body = message_body(what.strip())
+    except ValueError as exc:
+        raise CapabilityInvalidArg(
+            f"这段话通信机制发不出去，改一下再交：{exc}。写下他察觉到的是什么，它会原样发给他"
+        ) from exc
+    get_context().features[_JUDGMENTS][name] = body
     return f"记下了：{name} 会察觉到。"
 
 

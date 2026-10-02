@@ -10,7 +10,7 @@ from app.world import main_agent, npc, perception
 from app.world.actions import let_npc_appear
 from app.world.sources import query_tools
 
-from .conftest import ScriptedAgent, sets_wake, tools_built_for
+from .conftest import LANE, ScriptedAgent, sets_wake, tools_built_for
 
 SITUATION = "下午四点，学校的美术教室，一个学生把一幅画递给美术老师。"
 LINES = "美术老师接过画，举到窗边看了一会儿，说：「这里的光很好，影子可以再深一点。」"
@@ -121,3 +121,26 @@ async def test_the_main_agent_sees_the_npcs_own_words_even_if_nobody_notices_the
 
     assert LINES in result and "没有人会察觉到" in result
     assert world.sent == []
+
+
+async def test_npc_words_messaging_could_not_carry_are_not_kept_or_judged(world, volume):
+    """NPC 的言行要原样记进 unfinished、交给感知判断；存不下的字当作这次扮演没做成，交回主 agent。"""
+    judge = passes_on_what_it_was_told("ayana")
+    world.agents[npc.NPC.prompt_id] = plays("门卫说：「今天\x00关门早。」")
+    world.agents[perception.PERCEPTION.prompt_id] = judge
+
+    [result] = await _a_round(world, lets_appear(("门卫", "放学时的校门口。")))
+
+    assert "没有出场" in result
+    assert judge.inputs == [] and world.sent == []
+    assert not (volume / LANE / "unfinished.json").exists()
+
+
+async def test_a_situation_messaging_could_not_carry_is_handed_back_before_anyone_plays(world):
+    player = plays(LINES)
+    world.agents[npc.NPC.prompt_id] = player
+
+    [result] = await _a_round(world, lets_appear(("美术老师", "美术教室\x00里。")))
+
+    assert "没有出场" in result
+    assert player.inputs == []
