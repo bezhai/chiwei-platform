@@ -51,6 +51,29 @@ def participant(name: Any) -> str:
     return name
 
 
+def message_body(body: Any) -> str:
+    """校验一段正文，原样交回；不合规就抛 ``ValueError``。
+
+    正文是自然语言，什么字都可以有，除了记录者存不下的两样。记录是发送的一部分
+    （:mod:`app.messaging.record`），正文要原样写进 Postgres 的 ``text`` 列：NUL 写不进去，单独的
+    代理码位（U+D800–U+DFFF，不成对的半个 UTF-16 字符）编不成 UTF-8 也写不进去。这样的正文
+    每一次发送都会在写记录那一步失败，重试多少次都一样，所以造消息时就拒掉。名字的规则
+    （:func:`participant`）本来就不收这两样。
+    """
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("message body must be non-empty natural-language text")
+    if "\x00" in body:
+        raise ValueError("message body must not contain NUL: Postgres text cannot store it")
+    try:
+        body.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            "message body must not contain lone surrogates (U+D800-U+DFFF): they cannot be "
+            "encoded as UTF-8, so the recorder cannot store them"
+        ) from exc
+    return body
+
+
 def broker_form(name: str) -> str:
     """参与者名字写进队列名和 routing key 时的样子。
 
@@ -115,8 +138,6 @@ def new_message(
     message_id: str | None = None,
 ) -> Message:
     """造一条新消息。``message_id`` 只在重试一次失败的发送时给：沿用原来的 id。"""
-    if not isinstance(body, str) or not body.strip():
-        raise ValueError("message body must be non-empty natural-language text")
     if message_id is not None and not (
         isinstance(message_id, str) and _MESSAGE_ID.fullmatch(message_id)
     ):
@@ -127,7 +148,7 @@ def new_message(
         recipient=participant(recipient),
         time=time or datetime.now(UTC),
         kind=kind,
-        body=body,
+        body=message_body(body),
     )
 
 

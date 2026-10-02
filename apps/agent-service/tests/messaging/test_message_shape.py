@@ -8,7 +8,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.infra.rabbitmq import X_DELAY_MAX_MS
-from app.messaging.message import Kind, Message, broker_form, new_message, participant
+from app.messaging.message import (
+    Kind,
+    Message,
+    broker_form,
+    message_body,
+    new_message,
+    participant,
+)
 
 
 def _chinese_name(length: int) -> str:
@@ -57,6 +64,7 @@ def test_participant_names_that_are_accepted(name):
         "赤\t尾",
         "　赤尾",  # 全角空格
         "赤\x00尾",  # 控制字符；NUL 也进不了 Postgres 的 text
+        "赤\ud800尾",  # 单独的代理码位编不成 UTF-8，记录者存不下
         "a/b",
         "a:b",  # 冒号留给非 ASCII 名字在 broker 上的写法
         "赤尾！",
@@ -154,6 +162,31 @@ def test_a_malformed_message_id_is_refused(bad):
 def test_an_empty_body_is_refused(body):
     with pytest.raises(ValueError):
         new_message(sender="world", recipient="akao", body=body, kind=Kind.MESSAGE)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "门响了\x00一声。",  # Postgres 的 text 存不了 NUL
+        "门响了\ud800一声。",  # 单独的代理码位编不成 UTF-8
+        "\udfff",
+    ],
+)
+def test_a_body_the_recorder_cannot_store_is_refused(body):
+    """记录是发送的一部分：记录者存不下的正文，造消息时就拒，不等到写记录时每次都失败。"""
+    with pytest.raises(ValueError):
+        message_body(body)
+    with pytest.raises(ValueError):
+        new_message(sender="world", recipient="akao", body=body, kind=Kind.MESSAGE)
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["你听见门响了一声。\n第二行\t有制表符", "外面下雨了 🌧", "\ufffe\uffff 非字符也存得下"],
+)
+def test_any_other_text_is_a_body_as_it_is(body):
+    assert message_body(body) == body
+    assert new_message(sender="world", recipient="akao", body=body, kind=Kind.MESSAGE).body == body
 
 
 def test_hop_delay_is_capped_by_the_broker_limit():
