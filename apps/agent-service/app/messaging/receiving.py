@@ -1,9 +1,10 @@
 """接收一侧：拥有者开设收件箱、处理送来的消息和问题；以及定时送达到点时的那一步。
 
 **收件箱由拥有者开设。** 一个 App 在自己的接线模块里调 :func:`inbox` 声明它拥有的
-收件箱和处理函数；进程启动时 :func:`open_inboxes` 在本泳道建队列、开始消费。发送方
-永远不会建收件箱，所以"这个名字开设过收件箱没有"就是"这条队列在不在"。队列不设
-过期，拥有者不在线时消息一直留着。
+收件箱和处理函数；进程启动时 :func:`start_receiving` 在本泳道建队列、开始消费。一个收件箱
+是两条队列：收件箱本身装普通消息和退回的告知，旁边一条问题队列装问它的问题（布局见
+:mod:`app.messaging.broker`），两条一起建、各自消费。发送方永远不会建它们，所以"这个名字
+开设过收件箱没有"就是"这条队列在不在"。队列不设过期，拥有者不在线时消息一直留着。
 
 **至少一次，按消息 id 去重。** broker 在消费者断开时会把没确认的消息重投，所以同一条
 消息可能到两次。每个收件箱按 ``(inbox:<名字>@<泳道>, 消息 id)`` 在 ``runtime_inflight``
@@ -21,27 +22,37 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
 放回原队列（停的时长翻倍、封顶 :data:`PUT_BACK_CAP_SECONDS`，不限次数），问题确认掉。结论
 只在 :func:`_settle` 一处交给 broker，见下面"一条消息的处理"那一节。
 
-**拥有者开设时可以多声明三件事**（:func:`inbox`）：
+**拥有者开设时可以多声明几件事**（:func:`inbox`），都只管普通消息，问题不受它们影响（见下面
+"问题不排在普通消息后面"）：
 
 * ``processing_timeout`` —— 一条消息最多处理多久。超过就取消，算一次处理失败（按上面的
   重试、死信处理）；这条消息的去重占位租约相应放长到它之上
   （:data:`LEASE_OVER_TIMEOUT_MS`），所以处理还没完时到的重复副本不会把它当成"前一个
   进程死了"接管过去。不声明就是默认的 15 分钟租约、不限时。
-* ``one_at_a_time`` —— 一次只处理一条：这个收件箱的消费通道 prefetch 为 1，broker 在上一
+* ``one_at_a_time`` —— 一次只处理一条：收件箱的消费通道 prefetch 为 1，broker 在上一
   条确认之前不送下一条。租约从真正开始处理那一刻起算，排队等的那几条不占租约。
-* ``on_open`` —— 收件箱开设（队列建好）之后、开始消费之前调一次。拥有者在这里按自己的
-  状态做启动时该做的事，可以往自己的收件箱里发消息，它们等这一步结束才被处理。它抛
+* ``on_open`` —— 收件箱开设（队列建好）之后、开始消费普通消息之前调一次。拥有者在这里按
+  自己的状态做启动时该做的事，可以往自己的收件箱里发消息，它们等这一步结束才被处理。它抛
   异常，启动就失败。
 * ``retry_without_limit`` —— 拥有者对一条处理失败的普通消息的判断：交回一个时长，表示这条
   不限次数重试、永不进死信，退避按指数翻倍、封顶在这个时长；交回 ``None``，照常有限次重试后
   进死信。不限次数重试的每一次失败都让人看得到：记录者里记一行 ``retrying``（错误和下一次的
   延时），日志里一条 warning。判断本身出错按"不限次数"算，封顶用 :data:`PROCESSING_RETRY`
   的上限——宁可多试，不能把拥有者要保住的那条送进死信。
-* ``consume_while`` —— 只在持有它（一个异步上下文，比如一把跨进程的独占锁）期间消费。
+* ``consume_while`` —— 只在持有它（一个异步上下文，比如一把跨进程的独占锁）期间消费普通消息。
   开设时不在启动流程里等它：队列照常建好，启动照常返回，后台等到进了这个上下文，才跑
   ``on_open``、开始消费；停止时等正在处理的消息处理完（见下面"停下时"）之后才退出这个
   上下文。进了上下文之后 ``on_open`` 失败，就退出上下文、隔 :data:`OPEN_RETRY_SECONDS`
   再来一次——这时启动早已返回，失败不能再靠让启动失败来暴露。
+
+**问题不排在普通消息后面。** 问题走自己的队列、自己的消费通道（prefetch :data:`_PREFETCH`），
+队列一建好就开始消费：不等 ``on_open``，不受 ``one_at_a_time`` 限制，也不等 ``consume_while``。
+所以一个收件箱正在处理一条要跑很久的消息、后面还排着几条时，问它的问题照样在提问方的截止
+时刻之前答上。不让 ``consume_while`` 管问题，是因为它护着的是普通消息的处理函数要独占的东西
+（比如 world 的卷只能有一个写的进程），回答用不着：没持有的进程——比如滚动发布时等着旧进程
+放手的新进程——照样能答，提问方不用为了等锁白等到截止时刻。代价落在拥有者身上：``on_question``
+可能跟 ``on_message`` 同时跑，也可能跑在没持有 ``consume_while`` 的进程里，它只该读，不该改
+``on_message`` 要独占的东西。
 
 **停下时正在处理的消息**（:func:`stop_receiving`）：先取消消费者（不再有新消息进来），等正在
 处理的那几条处理完、照常确认，最多等 :data:`STOP_GRACE_SECONDS`。等不完的，先关通道再取消：
@@ -51,8 +62,8 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
 ``consume_while`` 的收件箱：还在等着进上下文的，停止时直接放弃等待；已经在消费的，等上面这些
 都做完才退出上下文。
 
-**问题不重试，至多答一次。** 问题的处理函数抛异常、返回空、或者收件箱不接受提问，都立刻给
-提问方回一个"没有回答"。问题这条路径上的任何失败——回复发不出去、去重状态读写失败、消息
+**问题不重试，至多答一次。** 问题的处理函数抛异常、返回空、或者收件箱不接受提问（没给
+``on_question`` 的收件箱也有问题队列），都立刻给提问方回一个"没有回答"。问题这条路径上的任何失败——回复发不出去、去重状态读写失败、消息
 本身解不开——都只记一笔日志、确认掉：不重投，不进死信。领到一个问题先把占位收成"处理过"再
 答（:func:`_answer_question`），所以确认之后再来的同 id 副本也不会被答第二遍。提问方已经不等了
 （过了它带来的截止时刻）的问题直接跳过。
@@ -91,6 +102,7 @@ from app.messaging.broker import (
     lane,
     lane_label,
     publish,
+    question_route,
     reply_route,
 )
 from app.messaging.message import (
@@ -186,7 +198,8 @@ def inbox(
 
     ``on_message`` 处理普通消息和 ``not_delivered`` 告知，抛异常即处理失败（会重试）。
     ``on_question`` 回答问题，返回回答正文；返回 ``None`` 表示没有回答。不给它的
-    收件箱不接受提问，问它的一律拿到"没有回答"。
+    收件箱不接受提问，问它的一律拿到"没有回答"。问题走自己的队列，``on_question`` 可能
+    跟 ``on_message`` 同时跑、也可能跑在没持有 ``consume_while`` 的进程里，所以它只该读。
 
     ``processing_timeout`` / ``one_at_a_time`` / ``on_open`` / ``consume_while`` /
     ``retry_without_limit`` 见模块说明。
@@ -261,23 +274,22 @@ _held_openers: list[_HeldOpener] = []
 _let_go: asyncio.Event | None = None
 
 
-async def _open(spec: InboxSpec, route) -> None:
+async def _open(spec: InboxSpec) -> None:
+    """跑 ``on_open``，然后开始消费普通消息。"""
     if spec.on_open is not None:
         await spec.on_open()
     await _consume(
-        route,
-        _inbox_handler(spec),
+        inbox_route(spec.name),
+        _message_handler(spec),
         prefetch_count=1 if spec.one_at_a_time else _PREFETCH,
     )
 
 
-async def _open_while_held(
-    spec: InboxSpec, route, opener: _HeldOpener, let_go: asyncio.Event
-) -> None:
+async def _open_while_held(spec: InboxSpec, opener: _HeldOpener, let_go: asyncio.Event) -> None:
     while True:
         try:
             async with spec.consume_while():
-                await _open(spec, route)
+                await _open(spec)
                 opener.consuming = True
                 await let_go.wait()
                 return
@@ -293,21 +305,25 @@ async def _open_while_held(
 async def start_receiving() -> None:
     """开设本进程声明的全部收件箱并开始消费；同时消费本泳道的定时队列。
 
-    声明了 ``consume_while`` 的收件箱在后台等到持有之后才开设、消费，这里不等它。
+    每个收件箱建两条队列，问题队列马上开始消费。声明了 ``consume_while`` 的收件箱，普通消息在
+    后台等到持有之后才开始消费，这里不等它。
     """
     global _let_go
     _let_go = asyncio.Event()
     await mq.declare_route(SCHEDULED, lane=lane())
     await _consume(SCHEDULED, _on_scheduled)
     for spec in INBOX_REGISTRY.values():
-        route = inbox_route(spec.name)
-        await mq.declare_route(route, lane=lane())
+        await mq.declare_route(inbox_route(spec.name), lane=lane())
+        questions = question_route(spec.name)
+        await mq.declare_route(questions, lane=lane())
+        # 问题不等 on_open 和 consume_while，也不受 one_at_a_time 限制（见模块说明）。
+        await _consume(questions, _question_handler(spec))
         if spec.consume_while is None:
-            await _open(spec, route)
+            await _open(spec)
             continue
         opener = _HeldOpener()
         opener.task = asyncio.create_task(
-            _open_while_held(spec, route, opener, _let_go),
+            _open_while_held(spec, opener, _let_go),
             name=f"messaging-open-{spec.name}",
         )
         _held_openers.append(opener)
@@ -439,22 +455,21 @@ async def _settle(incoming: AbstractIncomingMessage, verdict: Verdict) -> None:
     await incoming.reject(requeue=False)
 
 
-def _consumer(on_message: Decide, on_question: Decide | None = None):
-    """一条队列的消费回调：业务处理和记账交给 ``on_message`` / ``on_question``，这里接住它们
-    抛出来的基础设施失败，再把结论交给 :func:`_settle`。"""
+def _consumer(decide: Decide, *, questions: bool = False):
+    """一条队列的消费回调：业务处理和记账交给 ``decide``，这里接住它抛出来的基础设施失败，再把
+    结论交给 :func:`_settle`。``questions`` 说明这是一条问题队列：问题不重试，失败了确认掉。"""
 
     async def handler(incoming: AbstractIncomingMessage) -> None:
-        is_question = on_question is not None and _is_question(incoming.body)
         task = asyncio.current_task()
-        if is_question:
+        if questions:
             _answering.add(task)
         try:
             try:
-                verdict = await (on_question if is_question else on_message)(incoming)
+                verdict = await decide(incoming)
             except asyncio.CancelledError:
                 # 进程在停（:func:`stop_receiving`）。问题：确认掉，不退回队列。普通消息：通道
                 # 已经关了，broker 把它放回原队列。
-                if is_question and not incoming.channel.is_closed:
+                if questions and not incoming.channel.is_closed:
                     await incoming.ack()
                 raise
             except Exception:
@@ -462,11 +477,11 @@ def _consumer(on_message: Decide, on_question: Decide | None = None):
                     "messaging: bookkeeping or hand-over for a delivery on %s failed; %s",
                     incoming.routing_key,
                     "acknowledged, a question is never handled twice"
-                    if is_question
+                    if questions
                     else "putting it back",
                     exc_info=True,
                 )
-                verdict = Verdict.ACK if is_question else Verdict.PUT_BACK
+                verdict = Verdict.ACK if questions else Verdict.PUT_BACK
             await _settle(incoming, verdict)
         finally:
             _answering.discard(task)
@@ -665,14 +680,6 @@ def _edge(base: str) -> str:
     return f"{base}@{lane_label()}"
 
 
-def _is_question(body: bytes) -> bool:
-    """只看 ``kind``，解不开就不是问题。用来在完整解码之前决定走哪条路。"""
-    try:
-        return json.loads(body).get("kind") == str(Kind.QUESTION)
-    except Exception:
-        return False
-
-
 async def _run_owner(spec: InboxSpec, message: Message) -> None:
     if spec.processing_timeout is None:
         await spec.on_message(message)
@@ -734,12 +741,19 @@ async def _answer_question(
     return Verdict.ACK
 
 
-def _inbox_handler(spec: InboxSpec):
+def _message_handler(spec: InboxSpec):
+    """收件箱本身那条队列：普通消息和退回的告知，交给 ``on_message``。"""
     route = inbox_route(spec.name)
     edge_id = _edge(f"inbox:{spec.name}")
+    return _consumer(lambda incoming: _deliver_to_owner(spec, route, edge_id, incoming))
+
+
+def _question_handler(spec: InboxSpec):
+    """收件箱旁边的问题队列：交给 ``on_question``。去重跟普通消息用同一个 edge，靠消息 id 区分。"""
+    route = question_route(spec.name)
+    edge_id = _edge(f"inbox:{spec.name}")
     return _consumer(
-        lambda incoming: _deliver_to_owner(spec, route, edge_id, incoming),
-        lambda incoming: _answer_question(spec, route, edge_id, incoming),
+        lambda incoming: _answer_question(spec, route, edge_id, incoming), questions=True
     )
 
 

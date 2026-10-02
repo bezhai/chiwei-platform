@@ -122,7 +122,7 @@ async def test_a_question_still_being_answered_at_stop_is_never_answered_again(
     answer = await asking
     assert not answer.answered
 
-    assert await broker.depth(f"inbox_world_{LANE}") == 0, "问题被退回了队列"
+    assert await broker.depth(f"questions_world_{LANE}") == 0, "问题被退回了队列"
     assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0, "问题进了死信"
 
     # 下一个进程起来：收件箱里没有这个问题；就算至少一次投递又来了一份同 id 的，也不再答。
@@ -143,7 +143,7 @@ async def test_a_question_still_being_answered_at_stop_is_never_answered_again(
         body="厨房现在什么样？",
     )
     assert await mq.publish_with_confirm(
-        Route("inbox_world", "inbox.world", isolated=True),
+        Route("questions_world", "questions.world", isolated=True),
         duplicate.to_json(),
         headers={
             REPLY_RK_HEADER: "messaging.reply.nobody",
@@ -216,7 +216,7 @@ async def test_a_question_cancelled_while_being_marked_handled_is_never_answered
         body="在吗？",
     )
     assert await mq.publish_with_confirm(
-        Route("inbox_world", "inbox.world", isolated=True),
+        Route("questions_world", "questions.world", isolated=True),
         duplicate.to_json(),
         headers={
             REPLY_RK_HEADER: "messaging.reply.nobody",
@@ -227,4 +227,4 @@ async def test_a_question_cancelled_while_being_marked_handled_is_never_answered
     await asyncio.sleep(1.5)
 
     assert len(answers) <= 1, "同一个问题被答了不止一次"
-    assert await broker.depth(f"inbox_world_{LANE}") == 0
+    assert await broker.depth(f"questions_world_{LANE}") == 0

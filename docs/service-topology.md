@@ -160,7 +160,7 @@ flowchart LR
 
 `chat_response` / `recall` 两条不带 channel 后缀的 base 队列也声明着,但**没有生产者也没有消费者**:它们在代码里只当逻辑 sink 的名字用(`Sink.mq("chat_response")`),真实 routing key 由出站时按 payload 的 channel 现算。同理 `recall_qq` 声明了但 QQ 侧没起 recall 消费者,`proactive_eval` 两头都没有,都是空队列。
 
-通信机制(`apps/agent-service/app/messaging/`)的队列也不在上表,它们连接的是参与者而不是渠道:收件箱 `inbox_<名字>_<泳道>` 由开设它的 App 消费(`inbox_world_*` 归 world,`inbox_operator_*` 归 agent-service),定时送达 `messaging_scheduled_<泳道>` 由开着通信机制的进程共同消费,死信进 `isolated_dead_letters_<泳道>`。发送方是任何用通信机制的进程:world 给自己排下次醒来、把感知判断的结果发给参与者、回答问它的问题,运维经 agent-service 的人工入口(`/admin/messaging/*`)发给任何收件箱、向 world 提问。这几条都按进程的部署泳道隔离,没有消费者时不退回 prod。
+通信机制(`apps/agent-service/app/messaging/`)的队列也不在上表,它们连接的是参与者而不是渠道:收件箱 `inbox_<名字>_<泳道>` 由开设它的 App 消费(`inbox_world_*` 归 world,`inbox_operator_*` 归 agent-service),它旁边的问题队列 `questions_<名字>_<泳道>` 也由同一个 App 消费、和收件箱分开消费,问题因此不排在正在处理的普通消息后面;名字含非 ASCII 字符时队列名里写成 `:` 加 punycode(`赤尾` 是 `:bgtr75i`),定时送达 `messaging_scheduled_<泳道>` 由开着通信机制的进程共同消费,死信进 `isolated_dead_letters_<泳道>`。发送方是任何用通信机制的进程:world 给自己排下次醒来、把感知判断的结果发给参与者、回答问它的问题,运维经 agent-service 的人工入口(`/admin/messaging/*`)发给任何收件箱、向 world 提问。这几条都按进程的部署泳道隔离,没有消费者时不退回 prod。
 
 agent-service 进程内还有两类队列不在上表:一是 durable 边(当前只有一条——她拿起一个文件 → 读一程)底下的队列,由 runtime 框架按 Data 类型和消费者名自动声明(`durable_<data>_<consumer>`);二是 `runtime_delayed_trigger_agent-service`,框架自己的延迟自触发回投。两者的生产者和消费者都在同一个进程里。
 

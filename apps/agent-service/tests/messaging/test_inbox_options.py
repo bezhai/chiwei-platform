@@ -15,7 +15,7 @@ from datetime import timedelta
 import pytest
 
 from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, Route, mq
-from app.messaging.broker import inbox_exists
+from app.messaging.broker import inbox_route, opened
 from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.message import Kind, Message
 from app.messaging.receiving import inbox
@@ -177,7 +177,7 @@ async def test_on_open_runs_once_after_the_inbox_exists_and_before_anything_is_h
     order: list[str] = []
 
     async def on_open() -> None:
-        order.append(f"open:{await inbox_exists('world')}")
+        order.append(f"open:{await opened(inbox_route('world'))}")
         await send(sender="world", recipient="world", body="开设时发给自己的。")
         await asyncio.sleep(0.3)
         order.append("open done")

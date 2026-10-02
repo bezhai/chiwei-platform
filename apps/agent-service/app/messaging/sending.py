@@ -6,9 +6,11 @@
 * :func:`send` —— 对方没开设收件箱：不投递、记一行 ``not_delivered``、结果里
   ``delivered=False``。开设过：记一行 ``delivered`` 并投进收件箱（对方不在线也
   一直保留，等它上线）。
-* :func:`ask` —— 同上投递，然后在本进程的私有回复队列上等。对方没开设、不在线、
-  处理失败、没给回答、超时，一律拿到 ``Answer(text=None, reason=...)``，并记一行
-  ``no_answer``。**不自动重试**：问题只发一次。
+* :func:`ask` —— 投进对方收件箱旁边的问题队列（不进收件箱，所以不排在对方正在处理的普通
+  消息后面），然后在本进程的私有回复队列上等。问题队列不在（对方没开设收件箱，或者还跑着
+  没有问题队列的旧代码）就跟 ``send`` 一样不投递、记 ``not_delivered``。对方不在线、处理
+  失败、没给回答、超时，一律拿到 ``Answer(text=None, reason=...)``，并记一行 ``no_answer``。
+  **不自动重试**：问题只发一次。
 * :func:`send_at` —— 记一行 ``scheduled``，把消息放进本泳道的定时队列。到点时由
   :mod:`app.messaging.receiving` 判断对方开设了收件箱没有，再决定投递还是记
   ``not_delivered`` 并告知发送方。时长没有业务上限，超过 broker 延时上限的部分分段。
@@ -34,10 +36,11 @@ from app.messaging.broker import (
     SCHEDULED,
     headers,
     hop_delay_ms,
-    inbox_exists,
     inbox_route,
     lane,
+    opened,
     publish,
+    question_route,
     reply_route,
 )
 from app.messaging.message import (
@@ -106,7 +109,7 @@ async def send(
 
 async def deliver(message: Message) -> Delivery:
     """把一条已经造好的消息投进对方的收件箱，或者记下它没送到。"""
-    if not await inbox_exists(message.recipient):
+    if not await opened(inbox_route(message.recipient)):
         await record(message, Outcome.NOT_DELIVERED, reason=NO_INBOX)
         return Delivery(message.message_id, delivered=False, reason=NO_INBOX)
     await publish_recorded(
@@ -227,7 +230,8 @@ async def ask(
         kind=Kind.QUESTION,
         message_id=message_id,
     )
-    if not await inbox_exists(recipient):
+    route = question_route(recipient)
+    if not await opened(route):
         await record(question, Outcome.NOT_DELIVERED, reason=NO_INBOX)
         return Answer(question.message_id, None, NO_INBOX)
 
@@ -238,7 +242,7 @@ async def ask(
     try:
         await publish_recorded(
             question,
-            inbox_route(recipient),
+            route,
             question.to_json(),
             headers=headers(
                 {REPLY_RK_HEADER: reply_rk, ANSWER_BY_HEADER: answer_by.isoformat()}

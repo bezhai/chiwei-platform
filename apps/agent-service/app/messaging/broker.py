@@ -5,13 +5,18 @@ ASCII 的样子，见 :func:`app.messaging.message.broker_form`，``world`` 还�
 是 ``:bgtr75i``）：
 
   收件箱      ``inbox_<名字>_<泳道>``          rk ``inbox.<名字>.<泳道>``
+  问题        ``questions_<名字>_<泳道>``      rk ``questions.<名字>.<泳道>``
   定时送达    ``messaging_scheduled_<泳道>``   rk ``messaging.scheduled.<泳道>``
   死信        ``isolated_dead_letters_<泳道>``
   回答        每个进程一条私有队列，rk ``messaging.reply.<随机串>.<泳道>``
 
-三类队列都是 ``Route.isolated``：没有消费者时不转回 prod、闲置不过期、死信进本泳道
-自己那一条。泳道只取进程的部署环境（``LANE``），不看请求上下文：coe 泳道连的是独立
-的 broker，ppe 泳道和 prod 共用 broker，靠队列名和 routing key 上的泳道后缀分开。
+收件箱只装普通消息和退回的告知；问它的问题进它旁边那条问题队列，两条都由拥有者开设收件箱时
+一起声明，各自消费（见 :mod:`app.messaging.receiving`）。前缀不同，所以不管名字里有没有
+``_``，一个参与者的问题队列都不会跟另一个参与者的收件箱同名。
+
+收件箱、问题、定时三类队列都是 ``Route.isolated``：没有消费者时不转回 prod、闲置不过期、
+死信进本泳道自己那一条。泳道只取进程的部署环境（``LANE``），不看请求上下文：coe 泳道连的是
+独立的 broker，ppe 泳道和 prod 共用 broker，靠队列名和 routing key 上的泳道后缀分开。
 """
 from __future__ import annotations
 
@@ -51,13 +56,19 @@ def inbox_route(name: str) -> Route:
     return Route(f"inbox_{form}", f"inbox.{form}", isolated=True)
 
 
+def question_route(name: str) -> Route:
+    form = broker_form(name)
+    return Route(f"questions_{form}", f"questions.{form}", isolated=True)
+
+
 def reply_route(rk: str) -> Route:
     return Route("", rk, isolated=True)
 
 
-async def inbox_exists(name: str) -> bool:
-    """这条泳道里 ``name`` 开设过收件箱没有。队列只由拥有者声明，从不过期。"""
-    return await mq.queue_exists(lane_queue(inbox_route(name).queue, lane()))
+async def opened(route: Route) -> bool:
+    """这条泳道里有没有这条收件箱（或问题）队列。它们只由拥有者开设收件箱时声明，从不过期，
+    所以"在"就是"开设过"。"""
+    return await mq.queue_exists(lane_queue(route.queue, lane()))
 
 
 def headers(extra: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -17,8 +17,9 @@ from enum import StrEnum
 from typing import Any
 
 # 参与者的名字就是它在世界里的名字（赤尾、千凪、world、operator），不另设 id，谁都不需要
-# 名字和 id 的对照表。名字要写进队列名（``inbox_<名字>_<泳道>``）和 topic routing key
-# （``inbox.<名字>.<泳道>``），所以只收 Unicode 字母、数字、``-``、``_``，以字母或数字开头。
+# 名字和 id 的对照表。名字要写进队列名（``inbox_<名字>_<泳道>``、``questions_<名字>_<泳道>``）
+# 和 topic routing key（``inbox.<名字>.<泳道>``、``questions.<名字>.<泳道>``），所以只收 Unicode
+# 字母、数字、``-``、``_``，以字母或数字开头。
 # 不收的各有原因：点是 routing key 的分隔符，``*`` / ``#`` 写进绑定就成了通配符，空白和控制
 # 字符（NUL 进不了 Postgres 的 text）在队列名、日志、记录里都会出问题，``:`` 留给下面
 # :func:`broker_form` 的写法，``/`` 之类的标点也一并不收。``\w`` 在 Unicode 模式下就是"字母或
@@ -27,7 +28,7 @@ _PARTICIPANT = re.compile(r"[^\W_][\w-]*")
 
 # 名字在 broker 上的写法（:func:`broker_form`）最多这么多个字符。队列名和 routing key 都是
 # AMQP 的 shortstr，最长 255 个字节；泳道是 K8s 资源名 ``<App>-<泳道>`` 的一部分，最长 63 个
-# 字节。最长的 ``inbox_<名字>_<泳道>`` 是 6 + 128 + 1 + 63 = 198 个字节，留有余量。ASCII 名字
+# 字节。最长的 ``questions_<名字>_<泳道>`` 是 10 + 128 + 1 + 63 = 202 个字节，留有余量。ASCII 名字
 # 就是 128 个字符；中文名一个字写出来大约 3 个字符，四十个字上下。
 _BROKER_FORM_MAX = 128
 

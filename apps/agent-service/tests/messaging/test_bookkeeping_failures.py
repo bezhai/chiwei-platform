@@ -129,7 +129,7 @@ async def _asked_once(world: World, broker) -> None:
     await ask(sender="operator", recipient="world", body="在吗？", timeout_seconds=2)
     await asyncio.sleep(1.0)
     assert world.answers <= 1
-    assert await broker.depth(f"inbox_world_{LANE}") == 0
+    assert await broker.depth(f"questions_world_{LANE}") == 0
 
 
 MESSAGE_KINDS = ["plain", "latest"]
@@ -352,7 +352,7 @@ async def test_a_question_behind_a_live_claim(world, broker, rejects_to_dead_let
 
     assert not answer.answered
     assert world.answers == 0
-    assert await broker.depth(f"inbox_world_{LANE}") == 0
+    assert await broker.depth(f"questions_world_{LANE}") == 0
     await _nothing_dead_lettered(broker, rejects_to_dead_letters)
 
 

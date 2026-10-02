@@ -169,12 +169,14 @@ async def test_ask_an_offline_owner_gives_no_answer_and_is_not_retried(broker):
         "delivered",
         "no_answer",
     ]
-    assert await broker.depth(f"inbox_world_{LANE}") == 1
+    # 问题走收件箱旁边自己的那条队列，不进收件箱。
+    assert await broker.depth(f"questions_world_{LANE}") == 1
+    assert await broker.depth(f"inbox_world_{LANE}") == 0
 
     await start_messaging()
     await asyncio.sleep(1.5)
     assert world.questions == []
-    assert await broker.depth(f"inbox_world_{LANE}") == 0
+    assert await broker.depth(f"questions_world_{LANE}") == 0
 
 
 async def test_ask_when_the_owner_fails_gives_no_answer_promptly_without_retry(broker):
@@ -230,13 +232,20 @@ async def test_ask_when_the_owner_has_nothing_to_say(broker):
 
 
 async def test_ask_an_inbox_that_takes_no_questions(broker):
+    """不接受提问的收件箱也开设了问题队列：问题送到，拿到"对方不接受提问"，不是"没有开设"。"""
     world = Inbox()
     inbox("world", on_message=world.on_message)
     await start_messaging()
 
     answer = await ask(sender="operator", recipient="world", body="?", timeout_seconds=10)
 
-    assert not answer.answered and answer.reason
+    assert not answer.answered and answer.reason == "对方不接受提问"
+    assert outcomes(await read_record(message_id=answer.question_id)) == [
+        "sending",
+        "delivered",
+        "no_answer",
+    ]
+    assert world.got == []
 
 
 # ---------------------------------------------------------------------------
@@ -472,15 +481,17 @@ async def test_when_the_broker_does_not_confirm_the_send_fails_and_the_record_sa
 
 
 async def test_inbox_queues_never_fall_back_never_expire_and_dead_letter_per_lane(broker):
+    """收件箱和它旁边的问题队列一样声明。"""
     world = Inbox()
     inbox("world", on_message=world.on_message)
     await start_messaging()
 
-    args = (await broker.queue(f"inbox_world_{LANE}"))["arguments"]
-    assert "x-message-ttl" not in args
-    assert "x-expires" not in args
-    assert args["x-dead-letter-exchange"] == ""
-    assert args["x-dead-letter-routing-key"] == f"{ISOLATED_DEAD_LETTERS}_{LANE}"
+    for queue in (f"inbox_world_{LANE}", f"questions_world_{LANE}"):
+        args = (await broker.queue(queue))["arguments"]
+        assert "x-message-ttl" not in args
+        assert "x-expires" not in args
+        assert args["x-dead-letter-exchange"] == ""
+        assert args["x-dead-letter-routing-key"] == f"{ISOLATED_DEAD_LETTERS}_{LANE}"
     scheduled = (await broker.queue(f"messaging_scheduled_{LANE}"))["arguments"]
     assert "x-message-ttl" not in scheduled and "x-expires" not in scheduled
 

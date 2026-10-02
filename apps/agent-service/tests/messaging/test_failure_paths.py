@@ -284,7 +284,7 @@ async def test_a_question_is_never_dead_lettered_even_when_its_bookkeeping_fails
                      "x-answer-by": (datetime.now(UTC) + timedelta(seconds=30)).isoformat()}
                 ),
             ),
-            routing_key=f"inbox.world.{LANE}",
+            routing_key=f"questions.world.{LANE}",
         )
         await channel.close()
     else:
@@ -292,7 +292,7 @@ async def test_a_question_is_never_dead_lettered_even_when_its_bookkeeping_fails
 
     await asyncio.sleep(1.5)
     assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0
-    assert await broker.depth(f"inbox_world_{LANE}") == 0
+    assert await broker.depth(f"questions_world_{LANE}") == 0
     assert len(world.questions) <= 1
 
 
@@ -417,7 +417,7 @@ async def test_two_consumers_taking_the_same_message_at_once_process_it_once(
     await start_messaging()
     # 第二个消费者：同一条队列上另一个 channel，相当于另一个进程。
     await receiving._consume(
-        inbox_route("world"), receiving._inbox_handler(receiving.INBOX_REGISTRY["world"])
+        inbox_route("world"), receiving._message_handler(receiving.INBOX_REGISTRY["world"])
     )
 
     message = new_message(sender="operator", recipient="world", body="同时领。", kind=Kind.MESSAGE)

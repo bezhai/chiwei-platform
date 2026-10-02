@@ -32,6 +32,7 @@ async def test_send_to_and_ask_an_inbox_with_a_chinese_name(broker):
     inbox("千凪", on_message=chinagi.on_message)
     await start_messaging()
     assert await broker.depth(f"inbox_:bgtr75i_{LANE}") == 0
+    assert await broker.depth(f"questions_:bgtr75i_{LANE}") == 0
 
     delivery = await send(sender="千凪", recipient="赤尾", body="姐姐，晚饭好了。")
     answer = await ask(sender="千凪", recipient="赤尾", body="你在哪？", timeout_seconds=10)

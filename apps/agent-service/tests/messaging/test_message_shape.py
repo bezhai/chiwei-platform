@@ -96,12 +96,12 @@ def test_the_longest_name_in_the_longest_lane_fits_every_queue_name_and_routing_
     这里按 63 个字节算。
     """
     from app.infra.rabbitmq import _lane_rk, lane_queue
-    from app.messaging.broker import inbox_route
+    from app.messaging.broker import inbox_route, question_route
 
     longest_lane = "coe-" + "x" * 59
     assert len(longest_lane) == 63
     for name in (_LONGEST_ASCII, _LONG_CHINESE):
-        for route in (inbox_route(name),):
+        for route in (inbox_route(name), question_route(name)):
             assert len(lane_queue(route.queue, longest_lane).encode()) <= 255
             assert len(_lane_rk(route.rk, longest_lane).encode()) <= 255
 
