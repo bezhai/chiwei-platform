@@ -226,8 +226,13 @@ async def test_stored_but_not_cleared_resends_them_once_more_and_clears_after(
         real_clear()
 
     monkeypatch.setattr(unfinished, "clear", clear)
-    world.runner.plan = reports("下雨了。")
 
+    async def reports_and_says_so():
+        told = await report_change.invoke({"change": "下雨了。"})
+        await sets_wake()()
+        return f"报告了下雨，结果是：{told}"
+
+    world.runner.plan = reports_and_says_so
     with pytest.raises(Crash):
         await main_agent.on_world_message(_message())
     assert len(world.committed) == 1
@@ -236,6 +241,10 @@ async def test_stored_but_not_cleared_resends_them_once_more_and_clears_after(
     world.runner.plan = sets_wake()
     await main_agent.on_world_message(_message())
 
+    # 这一轮读回来的上下文里已经有上一轮（它存下了），眼前也摆着补发的结果：两边都看得到。
+    *history, round_input = world.runner.runs[-1]
+    assert any("报告了下雨，结果是" in str(turn.content) for turn in history)
+    assert "已经发生" in round_input.content and "下雨了。" in round_input.content
     assert world.sent_ids == kept + kept
     assert unfinished.read() == []
 

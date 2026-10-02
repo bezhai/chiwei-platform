@@ -165,7 +165,13 @@ def world(volume, monkeypatch):
         return list(h.history), h.ver
 
     async def commit_transcript(key, messages, *, expected_ver, session):
+        """跟真的一样按版本做 CAS，写下的就是下一轮 ``load_session`` 读回来的那一版。"""
+        from app.agent.continuity import TranscriptConflict
+
+        if expected_ver != h.ver:
+            raise TranscriptConflict(f"读到的是 ver={expected_ver}，现在是 {h.ver}")
         h.committed.append({"key": key, "messages": messages, "expected_ver": expected_ver})
+        h.history, h.ver = list(messages), expected_ver + 1
 
     async def record_round_cost(**kw):
         h.costs.append(kw)
