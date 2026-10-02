@@ -253,6 +253,24 @@ async def test_a_replay_meant_for_another_lane_is_refused(api, calls):
     assert calls == []
 
 
+async def test_chinese_participant_names_pass_through_body_and_query(client, calls):
+    """参与者的名字就是它在世界里的名字：请求体里的、查询参数里的中文名都原样交给通信机制。"""
+    sent = await client.post(
+        "/admin/messaging/send",
+        json={"sender": "千凪", "recipient": "赤尾", "body": "姐姐，晚饭好了。"},
+    )
+    rows = await client.get("/admin/messaging/record", params={"participant": "赤尾"})
+
+    assert sent.status_code == 200 and rows.status_code == 200
+    assert calls == [
+        (
+            "send",
+            {"sender": "千凪", "recipient": "赤尾", "body": "姐姐，晚饭好了。", "message_id": None},
+        ),
+        ("read_record", {"message_id": None, "participant": "赤尾", "limit": 50}),
+    ]
+
+
 async def test_a_bad_participant_name_is_a_bad_request(client, calls, monkeypatch):
     from app.messaging import operator
 

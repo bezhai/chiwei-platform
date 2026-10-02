@@ -7,9 +7,9 @@
 broker，队列名不带泳道后缀的那一条就是 prod 的。所以：
 
 * 来源队列不由调用方指定，永远是本进程部署泳道的那一条；
-* 目的地从死信头里读出来之后，要能还原成本泳道里通信机制自己的一条队列（某个收件箱，
-  或者定时队列），队列名和 routing key 都对得上才发；对不上的留在死信队列里不动，
-  计入 ``refused``。
+* 目的地从死信头里读出来之后，要正是本泳道里通信机制自己的一条队列（这条消息的接收方的
+  收件箱，或者定时队列），队列名和 routing key 都对得上才发；对不上的、消息体解不开的，
+  留在死信队列里不动，计入 ``refused``。
 
 入口在 :mod:`app.messaging.operator`，和人工参与者同一套凭据和泳道核对。
 """
@@ -29,7 +29,7 @@ from app.infra.rabbitmq import (
     mq,
 )
 from app.messaging.broker import SCHEDULED, inbox_route, lane, publish
-from app.messaging.message import Message, SendFailed, participant
+from app.messaging.message import Message, SendFailed
 from app.runtime.dlq_audit import (
     AuditAction,
     AuditStatus,
@@ -57,8 +57,14 @@ def dead_letter_queue() -> str:
     return lane_queue(ISOLATED_DEAD_LETTERS, lane())
 
 
-def _own_route(origin: Route | None) -> Route | None:
-    """死信头里的去处，如果它是本泳道里通信机制自己的一条队列，交回那条 Route。"""
+def _own_route(origin: Route | None, message: Message) -> Route | None:
+    """死信头里的去处，如果它是本泳道里通信机制自己的一条队列——定时队列，或者这条消息的
+    接收方的收件箱——交回那条 Route。
+
+    收件箱按消息自己的接收方算，不从 routing key 里把名字拆出来：名字在 broker 上是另一种
+    写法（:func:`app.messaging.message.broker_form`），而一个收件箱里的消息，接收方就是它的
+    拥有者。
+    """
     if origin is None:
         return None
     here = lane()
@@ -68,18 +74,10 @@ def _own_route(origin: Route | None) -> Route | None:
         if not base_rk.endswith(suffix):
             return None
         base_rk = base_rk[: -len(suffix)]
-    if base_rk == SCHEDULED.rk:
-        route = SCHEDULED
-    elif base_rk.startswith("inbox."):
-        try:
-            route = inbox_route(participant(base_rk[len("inbox.") :]))
-        except ValueError:
-            return None
-    else:
-        return None
-    if origin.queue != lane_queue(route.queue, here):
-        return None
-    return route
+    for route in (SCHEDULED, inbox_route(message.recipient)):
+        if base_rk == route.rk and origin.queue == lane_queue(route.queue, here):
+            return route
+    return None
 
 
 async def _take(channel, limit: int) -> list[Any]:
@@ -141,11 +139,13 @@ async def replay_dead_letters(*, limit: int, operator: str | None) -> dict[str, 
     try:
         for incoming in await _take(channel, limit):
             received = dict(incoming.headers or {})
-            route = _own_route(dead_letter_origin(received))
             try:
                 message = Message.from_json(json.loads(incoming.body))
             except Exception:
                 message = None
+            route = (
+                _own_route(dead_letter_origin(received), message) if message else None
+            )
             audit_id = await insert_audit_row(
                 action=AuditAction.REQUEUE,
                 status=AuditStatus.CLEARED,

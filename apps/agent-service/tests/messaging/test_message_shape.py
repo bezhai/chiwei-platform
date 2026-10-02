@@ -8,22 +8,102 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.infra.rabbitmq import X_DELAY_MAX_MS
-from app.messaging.message import Kind, Message, new_message, participant
+from app.messaging.message import Kind, Message, broker_form, new_message, participant
 
 
-@pytest.mark.parametrize("name", ["world", "akao", "operator", "ayana-2", "npc_teacher"])
+def _chinese_name(length: int) -> str:
+    """``length`` 个互不相同的汉字。"""
+    return "".join(chr(0x4E00 + 211 * i) for i in range(length))
+
+
+# 名字在 broker 上的写法最长 128 个字符。ASCII 名字就是它本身；中文名是 ":" 加 punycode，
+# 这 43 个字写出来是 127 个字符，再多一个就是 130 个。
+_LONGEST_ASCII = "x" * 128
+_LONG_CHINESE = _chinese_name(43)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "world",
+        "operator",
+        "ayana-2",
+        "npc_teacher",
+        "赤尾",
+        "千凪",
+        "绫奈",
+        "佐々木",
+        "アリス",
+        "World",
+        "3号",
+        _LONGEST_ASCII,
+        _LONG_CHINESE,
+    ],
+)
 def test_participant_names_that_are_accepted(name):
+    """参与者的名字就是它在世界里的名字：中文、日文、大小写、数字都收，原样交回。"""
     assert participant(name) == name
 
 
 @pytest.mark.parametrize(
     "name",
-    ["", "World", "a.b", "a*", "#", "赤尾", "-lead", "x" * 64, None, 3],
+    [
+        "",
+        "a.b",  # routing key 的分隔符
+        "赤尾.",
+        "a*",  # 写进绑定就成了通配符
+        "#",
+        "赤 尾",  # 空白
+        "赤\t尾",
+        "　赤尾",  # 全角空格
+        "赤\x00尾",  # 控制字符；NUL 也进不了 Postgres 的 text
+        "a/b",
+        "a:b",  # 冒号留给非 ASCII 名字在 broker 上的写法
+        "赤尾！",
+        "-lead",
+        "_lead",
+        _LONGEST_ASCII + "x",
+        _chinese_name(44),
+        None,
+        3,
+    ],
 )
 def test_participant_names_that_are_refused(name):
-    """名字直接进队列名和 routing key：点、通配符、大写、非 ASCII 一律不收。"""
+    """名字要拼进队列名和 routing key：点、通配符、空白、控制字符、标点、过长的一律不收。"""
     with pytest.raises(ValueError):
         participant(name)
+
+
+def test_how_a_name_is_written_on_the_broker():
+    """AMQP 客户端只收 ASCII 的队列名：ASCII 名字原样用，别的写成 ":" 加 punycode，能原样解回来。
+
+    这是队列名的一部分，改了写法，已经开设的收件箱就对不上了。
+    """
+    assert broker_form("world") == "world"
+    assert broker_form("World") == "World"
+    assert broker_form("赤尾") == ":bgtr75i"
+    assert broker_form("赤尾_2") == ":_2-ds1dl11p"
+    for name in ("赤尾", "千凪", "アリス", "赤尾_2", _LONG_CHINESE):
+        form = broker_form(name)
+        assert form.isascii()
+        assert form[1:].encode().decode("punycode") == name
+
+
+def test_the_longest_name_in_the_longest_lane_fits_every_queue_name_and_routing_key():
+    """队列名和 routing key 都是 AMQP 的 shortstr，最长 255 个字节。
+
+    泳道是 K8s 资源名 ``<App>-<泳道>`` 的一部分，那个名字最长 63 个字符，泳道只会更短，
+    这里按 63 个字节算。
+    """
+    from app.infra.rabbitmq import _lane_rk, lane_queue
+    from app.messaging.broker import inbox_route
+
+    longest_lane = "coe-" + "x" * 59
+    assert len(longest_lane) == 63
+    for name in (_LONGEST_ASCII, _LONG_CHINESE):
+        for route in (inbox_route(name),):
+            assert len(lane_queue(route.queue, longest_lane).encode()) <= 255
+            assert len(_lane_rk(route.rk, longest_lane).encode()) <= 255
 
 
 def test_a_message_has_exactly_id_sender_recipient_time_kind_and_body():

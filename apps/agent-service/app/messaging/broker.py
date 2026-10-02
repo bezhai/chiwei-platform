@@ -1,6 +1,8 @@
 """通信机制在 RabbitMQ 上的队列布局，以及它唯一的发布口。
 
-布局（``<泳道>`` 是进程自己的部署泳道，prod 没有这一段后缀）：
+布局（``<泳道>`` 是进程自己的部署泳道，prod 没有这一段后缀；``<名字>`` 是参与者名字写成
+ASCII 的样子，见 :func:`app.messaging.message.broker_form`，``world`` 还是 ``world``，``赤尾``
+是 ``:bgtr75i``）：
 
   收件箱      ``inbox_<名字>_<泳道>``          rk ``inbox.<名字>.<泳道>``
   定时送达    ``messaging_scheduled_<泳道>``   rk ``messaging.scheduled.<泳道>``
@@ -17,7 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from app.infra.rabbitmq import X_DELAY_MAX_MS, Route, lane_queue, mq
-from app.messaging.message import SendFailed
+from app.messaging.message import SendFailed, broker_form
 from app.runtime.lane_policy import current_deployment_lane
 from app.runtime.propagation import Context, inject_context, outbound_context
 
@@ -45,7 +47,8 @@ def lane_label() -> str:
 
 
 def inbox_route(name: str) -> Route:
-    return Route(f"inbox_{name}", f"inbox.{name}", isolated=True)
+    form = broker_form(name)
+    return Route(f"inbox_{form}", f"inbox.{form}", isolated=True)
 
 
 def reply_route(rk: str) -> Route:
