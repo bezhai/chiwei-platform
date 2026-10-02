@@ -3,7 +3,7 @@
 **NPC 的言行不经主 agent 转述。** 主 agent 只说让谁出场、在什么情境下
 （:func:`app.world.actions.let_npc_appear`）；扮演他的 agent 依据各知识来源（他是谁、他在的
 地方、刚刚发生了什么）给出他这一次说的话、做的事。这段输出原样作为一个变化交给感知判断
-（:func:`app.world.perception.tell_who_notices`），谁会察觉、察觉到什么由那边判断；主 agent
+（:func:`app.world.perception.judge_who_notices`），谁会察觉、察觉到什么由那边判断；主 agent
 看到他的言行和告知了谁，事后把这次互动留下的东西记进记录。主 agent 一转述，NPC 的话就成了
 world 代写的。
 
