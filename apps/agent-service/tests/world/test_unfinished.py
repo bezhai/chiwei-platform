@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -371,11 +372,63 @@ async def test_every_change_a_failed_round_reported_is_kept_in_order(world):
     assert ["后下雨。" in h.what for h in unfinished.read()] == [False, True]
 
 
-async def test_it_is_kept_on_worlds_volume_and_an_unreadable_file_counts_as_nothing(world, volume):
-    unfinished.note("某件事。", [])
+# ---------------------------------------------------------------------------
+# 读不出来的文件：挪到旁边留给人，不当成"没有"，也不被覆盖、删掉
+# ---------------------------------------------------------------------------
+
+
+def _half_broken() -> str:
+    """一条好好的记录，加一条少了字段的。"""
+    return json.dumps(
+        [
+            {
+                "at": "2026-10-02T09:00:00+08:00",
+                "what": "你报告了一个变化：下雨了。",
+                "notices": [{"who": "ayana", "what": "下雨了。", "message_id": "kept-1"}],
+            },
+            {"at": "2026-10-02T09:05:00+08:00", "what": "少了 notices。"},
+        ],
+        ensure_ascii=False,
+    )
+
+
+def _set_aside(volume) -> list:
+    return sorted((volume / LANE).glob("unfinished.json.unreadable-*"))
+
+
+@pytest.mark.parametrize(
+    "content",
+    [_half_broken().encode("utf-8"), "不是 JSON".encode(), b"\xff\xfe broken utf-8"],
+)
+async def test_an_unreadable_file_is_set_aside_logged_and_the_round_goes_on(
+    world, volume, caplog, content
+):
     path = volume / LANE / "unfinished.json"
-    assert path.exists()
+    path.write_bytes(content)
+    world.agents[perception.PERCEPTION.prompt_id] = judges(("akao", "起风了。"))
+    world.runner.plan = reports("起风了。")
 
-    path.write_text("不是 JSON", encoding="utf-8")
+    with caplog.at_level("ERROR", logger="app.world.unfinished"):
+        await main_agent.on_world_message(_message())
 
-    assert unfinished.read() == []
+    # 这一轮照常跑完：存下了上下文，自己报告的那条照常发，记着的那条没有被当成"没有"补发。
+    assert len(world.committed) == 1
+    assert [s["recipient"] for s in world.sent] == ["akao"]
+    # 原样留在旁边，这一轮清空 unfinished 的时候也没有碰它。
+    [aside] = _set_aside(volume)
+    assert aside.read_bytes() == content
+    assert not path.exists()
+    assert any(str(aside) in r.getMessage() for r in caplog.records)
+
+
+async def test_noting_over_an_unreadable_file_sets_it_aside_instead_of_overwriting_it(
+    world, volume
+):
+    path = volume / LANE / "unfinished.json"
+    path.write_text(_half_broken(), encoding="utf-8")
+
+    unfinished.note("你报告了一个变化：天晴了。", [])
+
+    [aside] = _set_aside(volume)
+    assert aside.read_text(encoding="utf-8") == _half_broken()
+    assert [h.what for h in unfinished.read()] == ["你报告了一个变化：天晴了。"]

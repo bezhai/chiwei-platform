@@ -23,12 +23,18 @@
 
 只有 world 的主 agent 这一侧读写这个文件，应答 agent 不碰它。写只有拿着卷的写锁的进程能做，
 走 :func:`app.world.volume.write_atomically`（同目录临时文件 + 原子替换），读的人看不到半份。
-读不出来按"没有"处理、记一条 error：宁可少补发、少看见几件事，也不让 world 停转。
+
+**读不出来的文件挪到旁边，不当成"没有"。** 文件里哪怕只有一条坏了（少了字段、不是 JSON、不是
+UTF-8），整份原样改名成 ``unfinished.json.unreadable-<时刻>`` 留在同一个目录，记一条点出这个名字
+的 error，然后按"没有要补的"接着跑：world 不会因为它一直停在每一轮的开头，后面的 :func:`note`
+写的是一份新文件、:func:`clear` 删的也只是新文件，挪开的那份不会被覆盖或者删掉。里面记着的告知
+这时不会补发，由人看过之后处理。
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -77,15 +83,31 @@ def _to_json(happening: Happening) -> dict:
     }
 
 
+def _set_aside(path: Path) -> None:
+    """把读不出来的那份原样改名留在旁边，点名记一条 error。"""
+    require_writer_lock()
+    aside = path.with_name(f"{path.name}.unreadable-{now_cst():%Y%m%dT%H%M%S%f}")
+    os.replace(path, aside)
+    logger.error(
+        "world: %s is unreadable; moved it to %s and went on as if nothing were left over. "
+        "The notices kept in it were not resent: read it and handle them by hand",
+        path,
+        aside,
+        exc_info=True,
+    )
+
+
 def read() -> list[Happening]:
-    """还没进上下文的那几件事，按发生的先后。"""
+    """还没进上下文的那几件事，按发生的先后。文件读不出来就挪到旁边（见模块说明），交回空的。"""
     path = _path()
     try:
-        return [_from_json(raw) for raw in json.loads(path.read_text(encoding="utf-8"))]
+        raw = path.read_bytes()
     except FileNotFoundError:
         return []
+    try:
+        return [_from_json(entry) for entry in json.loads(raw.decode("utf-8"))]
     except (ValueError, KeyError, TypeError):
-        logger.error("world: %s is unreadable; treated as nothing left over", path, exc_info=True)
+        _set_aside(path)
         return []
 
 
