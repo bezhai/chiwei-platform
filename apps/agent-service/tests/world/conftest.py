@@ -124,10 +124,14 @@ def world(volume, monkeypatch):
         # 每一次建 runner：(AgentConfig, 拿到的工具名)。
         built: list[tuple] = []
         scheduled: list[dict] = []
-        # 感知判断之后代码发出去的告知；开设了收件箱的名字；发送会失败的名字。
+        # 感知判断之后代码发出去的告知（和它们的消息 id，按发的先后）；开设了收件箱的名字；
+        # 发送会抛 SendFailed 的名字；每次发之前调一下的钩子（拿到收件人，可以在这里抛异常，
+        # 模拟发到一半进程死了或者被取消）。
         sent: list[dict] = []
+        sent_ids: list[str] = []
         open_inboxes: set[str] = set()
         send_fails: set[str] = set()
+        before_send = None
         committed: list[dict] = []
         costs: list[dict] = []
         history: list[Turn] = []
@@ -136,7 +140,8 @@ def world(volume, monkeypatch):
     h = Handle()
     h.agents, h.built = {}, []
     h.scheduled, h.committed, h.costs = [], [], []
-    h.sent, h.open_inboxes, h.send_fails = [], set(), set()
+    h.sent, h.sent_ids, h.open_inboxes, h.send_fails = [], [], set(), set()
+    h.before_send = None
     h.history = [Turn(role=Role.USER, content="上一轮的输入。")]
     h.runner = FakeRunner(sets_wake())
 
@@ -145,9 +150,12 @@ def world(volume, monkeypatch):
         return kw["message_id"]
 
     async def send(*, sender, recipient, body, message_id=None):
+        if h.before_send is not None:
+            h.before_send(recipient)
         if recipient in h.send_fails:
-            raise SendFailed("broker did not confirm", message_id="x")
+            raise SendFailed("broker did not confirm", message_id=message_id)
         h.sent.append({"sender": sender, "recipient": recipient, "body": body})
+        h.sent_ids.append(message_id)
         if recipient in h.open_inboxes:
             return Delivery(f"n{len(h.sent)}", delivered=True)
         return Delivery(f"n{len(h.sent)}", delivered=False, reason="对方没有开设收件箱")

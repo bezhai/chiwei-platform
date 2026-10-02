@@ -12,8 +12,9 @@
   agent 给出他的言行（:mod:`app.world.npc`），那段言行原样交给感知判断；主 agent 看到他的言行
   和告知了谁，事后把互动留下的东西记进记录。
 
-报告变化、让 NPC 出场的结果一产生就记进 :mod:`app.world.unfinished`：告知收不回来，这一轮要是
-没跑完、整轮重来，重来的那一次得看得见它们。
+报告变化、让 NPC 出场：判断完、发出任何一条告知之前，先把要发的告知连同预先定好的消息 id 记进
+:mod:`app.world.unfinished`，再按这些 id 发。告知收不回来，这一轮要是没跑完，下一轮开始时按原 id
+补发，并且看得见它们。
 
 一轮里动作之间共享的东西放在 :class:`RoundScope` 里，由这一轮的 ``AgentContext`` 带着：这一轮
 写下了哪几份记录、定下的下次醒来。
@@ -25,6 +26,7 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated
@@ -39,8 +41,10 @@ from app.infra.cst_time import CST, now_cst
 from app.world import records, unfinished
 from app.world.agents import when
 from app.world.npc import play_npc
-from app.world.perception import render_notices, tell_who_notices
+from app.world.perception import Notice, judge_who_notices, render_told, tell
 from app.world.sources.records import RECORDS_READ, RecordPath
+
+logger = logging.getLogger(__name__)
 
 ROUND_SCOPE = "world_round"
 
@@ -149,8 +153,28 @@ async def wake_me_at(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 报告一个变化、让一个 NPC 出场
+#
+# 这两个动作都分两段。判断那一段（感知判断、NPC 扮演）没成，什么都还没记、没发，失败交回给主
+# agent，它可以再试一次。判断完先把告知记进 unfinished，再按记下的 id 发：从这里往后的失败（写不
+# 进卷、发送出错、被取消）不收住，原样往外抛，这一轮按失败重来，下一轮开始时按原 id 补发。所以
+# 这两个动作不包 @tool_error——它会把发送出错也变成一条交给模型的失败，这一轮照常跑完、清空
+# unfinished，那条告知就再也发不出去了。
+# ---------------------------------------------------------------------------
+
+
+def _not_done(what: str, exc: Exception) -> str:
+    logger.warning("world: %s: %s", what, exc, exc_info=True)
+    return f"{what}：{type(exc).__name__}: {exc}。什么都还没告知，可以再试一次。"
+
+
+async def _tell_and_keep(what: str, notices: list[Notice]) -> str:
+    happening = unfinished.note(what, notices)
+    return render_told(await tell(happening.notices))
+
+
 @tool
-@tool_error("没有报告出去")
 async def report_change(
     change: Annotated[
         str,
@@ -167,20 +191,17 @@ async def report_change(
     由感知判断决定谁会察觉、各自察觉到的是什么，并告知他们；返回告知了谁、送没送达。
     这是让居民知道世界变化的唯一办法。一个变化报告一次。
     """
-    if not change.strip():
-        raise CapabilityInvalidArg("写下发生了什么变化")
-    result = render_notices(await tell_who_notices(change.strip()))
-    unfinished.note(f"你报告了一个变化：{change.strip()}\n{result}")
-    return result
-
-
-# ---------------------------------------------------------------------------
-# 让一个 NPC 出场
-# ---------------------------------------------------------------------------
+    change = change.strip()
+    if not change:
+        return "没有报告：写下发生了什么变化。"
+    try:
+        notices = await judge_who_notices(change)
+    except Exception as exc:
+        return _not_done("没有报告出去，感知判断没有做成", exc)
+    return await _tell_and_keep(f"你报告了一个变化：{change}", notices)
 
 
 @tool
-@tool_error("NPC 没有出场")
 async def let_npc_appear(
     npc: Annotated[str, Field(description="出场的是谁：他在记录里的名字和身份")],
     situation: Annotated[
@@ -198,16 +219,19 @@ async def let_npc_appear(
     一个临时 agent 依据各来源扮演他，给出他这一次说的话、做的事；这段言行原样交给感知判断，
     告知会察觉到的人。返回他的言行和告知了谁。这次互动留下了什么，之后由你记进记录。
     """
-    if not npc.strip() or not situation.strip():
-        raise CapabilityInvalidArg("写下出场的是谁，以及这次出场的情境")
-    name = npc.strip()
-    acted = await play_npc(name, situation.strip())
-    if not acted:
-        return f"{name} 这一次没有说话，也没有做什么。没有告知任何人。"
-    notices = await tell_who_notices(acted)
-    result = f"【{name} 这一次的言行】\n{acted}\n\n{render_notices(notices)}"
-    unfinished.note(f"你让 {name} 出场，情境：{situation.strip()}\n{result}")
-    return result
+    name, situation = npc.strip(), situation.strip()
+    if not name or not situation:
+        return "没有出场：写下出场的是谁，以及这次出场的情境。"
+    try:
+        acted = await play_npc(name, situation)
+        if not acted:
+            return f"{name} 这一次没有说话，也没有做什么。没有告知任何人。"
+        notices = await judge_who_notices(acted)
+    except Exception as exc:
+        return _not_done(f"{name} 没有出场，扮演或者感知判断没有做成", exc)
+    words = f"【{name} 这一次的言行】\n{acted}"
+    told = await _tell_and_keep(f"你让 {name} 出场，情境：{situation}\n{words}", notices)
+    return f"{words}\n\n{told}"
 
 
 # 只给主 agent 的动作，排在知识来源的查询工具后面。它们的返回是它自己做过的事，跟着它自己

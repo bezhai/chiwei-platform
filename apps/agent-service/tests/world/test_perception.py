@@ -91,16 +91,6 @@ async def test_a_change_nobody_notices_tells_nobody(world):
     assert "没有人" in result
 
 
-async def test_a_notice_that_could_not_be_sent_does_not_stop_the_others(world):
-    world.agents[perception.PERCEPTION.prompt_id] = judges(("ayana", "甲。"), ("akao", "乙。"))
-    world.send_fails = {"ayana"}
-
-    [result] = await _a_round(world, reports("打雷了。"))
-
-    assert [s["recipient"] for s in world.sent] == ["akao"]
-    assert "ayana" in result and "没有发出" in result
-
-
 async def test_each_change_is_its_own_perception_call(world):
     judge = judges(("ayana", "x"))
     world.agents[perception.PERCEPTION.prompt_id] = judge

@@ -1,19 +1,24 @@
-"""感知判断 agent：世界里发生了一个变化，谁会察觉、各自察觉到的是什么；判断完由代码告知他们。
+"""感知判断 agent：世界里发生了一个变化，谁会察觉、各自察觉到的是什么；以及把判断告知他们。
 
-**每个变化调用一次**（:func:`tell_who_notices`）。主 agent 报告一个变化
-（:func:`app.world.actions.report_change`）就走这里：起一个感知判断 agent，它拿到全部已启用
-知识来源的查询工具（:func:`app.world.sources.query_tools`），加上只有它有的
-:func:`someone_notices`——每判断一个会察觉的人调一次，写下那个人察觉到的是什么。谁会察觉
-完全是它依据各来源做的判断：代码里没有按位置、距离或者任何规则决定感知。
+**每个变化判断一次**（:func:`judge_who_notices`）。主 agent 报告一个变化
+（:func:`app.world.actions.report_change`），或者一个 NPC 出场之后（他的言行原样作为变化），
+就起一个感知判断 agent：它拿到全部已启用知识来源的查询工具（:func:`app.world.sources.query_tools`），
+加上只有它有的 :func:`someone_notices`——每判断一个会察觉的人调一次，写下那个人察觉到的是什么。
+谁会察觉完全是它依据各来源做的判断：代码里没有按位置、距离或者任何规则决定感知。
 
-**告知居民只有这一条路。** 它判断完，代码把每一条判断原样按通信机制发给那个参与者（``send``，
-发送方是 world），把告知了谁、送没送达交回给调用方。主 agent 没有直接给谁发消息的工具，所以
-"谁知道这件事"只由这一次判断决定，告知的内容也是判断写下的那段话。
+**告知居民只有这一条路。** 每一条判断变成一条 :class:`Notice`，消息 id 在判断完那一刻就定下；
+:func:`tell` 把它原样按通信机制发给那个参与者（``send``，发送方是 world，用的就是这个 id）。
+主 agent 没有直接给谁发消息的工具，所以"谁知道这件事"只由这一次判断决定，告知的内容也是判断
+写下的那段话。
+
+**判断和发送分开，中间先记下来。** 调用方（:mod:`app.world.actions`）拿到判断之后，先把告知连同
+id 记进 :mod:`app.world.unfinished`，再调 :func:`tell`。发到一半进程死了、被取消、或者发送出错，
+下一轮开始时按原 id 再发一遍：投递至少一次，接收方按消息 id 去重，已经收到的人不会收到第二遍。
+所以发送出错（记录写不进去、broker 没确认）不在这里收住，原样往外抛，这一轮按失败重来。
 
 **没送达不另外处理。** 对方没开设收件箱时 ``send`` 不投递、记下来、当场交回"没有送达"，不会
-再给 world 发一条告知，也就不会叫醒它。发送本身出错（记录写不进去、broker 没确认）只影响那
-一条，交回"没有发出"，别的照发。名字就是参与者在这个世界里的名字，通信机制校验不过的，在
-判断那一刻就退回给感知判断 agent，让它改。
+再给 world 发一条告知，也就不会叫醒它。名字就是参与者在这个世界里的名字，通信机制校验不过的，
+在判断那一刻就退回给感知判断 agent，让它改。
 
 prompt 在 Langfuse（:data:`PERCEPTION`），正文不引用任何变量；现在几点、这一次的变化写在
 USER 消息里。
@@ -22,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -35,7 +41,7 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg
 from app.infra.cst_time import now_cst
-from app.messaging.message import SendFailed, participant
+from app.messaging.message import participant
 from app.messaging.sending import send
 from app.world.agents import AgentKind, run_agent, session_key, when
 from app.world.sources import query_tools
@@ -88,10 +94,21 @@ async def someone_notices(
 
 @dataclass(frozen=True)
 class Notice:
-    """一条告知：发给谁、发的什么、送没送达（没送达时为什么）。"""
+    """一条判断出来的告知：发给谁、发什么、用哪个消息 id。
+
+    id 在判断完那一刻定下，之后不管发几次都用它，接收方按它去重。
+    """
 
     who: str
     what: str
+    message_id: str
+
+
+@dataclass(frozen=True)
+class Told:
+    """发一条告知的结果：送没送达（没送达时为什么）。"""
+
+    notice: Notice
     delivered: bool
     reason: str | None = None
 
@@ -100,19 +117,10 @@ def _perception_input(change: str) -> str:
     return "\n".join([f"【现在】{when(now_cst())}", "【世界里发生的变化】", change])
 
 
-async def _tell(who: str, what: str) -> Notice:
-    try:
-        delivery = await send(sender=WORLD, recipient=who, body=what)
-    except SendFailed as exc:
-        logger.error("world: notice to %s was not sent: %s", who, exc)
-        return Notice(who, what, delivered=False, reason=f"通信机制出错，这一条没有发出：{exc}")
-    return Notice(who, what, delivery.delivered, delivery.reason)
+async def judge_who_notices(change: str) -> list[Notice]:
+    """为一个变化跑一次感知判断，交回判断出来的告知，每条带一个新的消息 id。一条都不发。
 
-
-async def tell_who_notices(change: str) -> list[Notice]:
-    """为一个变化跑一次感知判断，把每一条判断告知那个人，交回告知的结果。
-
-    感知判断那次模型调用失败原样往外抛，这时一条都还没发。
+    感知判断那次模型调用失败原样往外抛。
     """
     judgments: dict[str, str] = {}
     call_id = uuid.uuid4().hex
@@ -123,22 +131,36 @@ async def tell_who_notices(change: str) -> list[Notice]:
         context=AgentContext(session_id=session_key(), features={_JUDGMENTS: judgments}),
         call_id=call_id,
     )
-    notices = [await _tell(who, what) for who, what in judgments.items()]
     logger.info(
-        "world: perception %s told %s",
-        call_id,
-        ", ".join(f"{n.who}({'delivered' if n.delivered else n.reason})" for n in notices)
-        or "nobody",
+        "world: perception %s judged %s", call_id, ", ".join(judgments) or "nobody"
     )
-    return notices
+    return [Notice(who, what, uuid.uuid4().hex) for who, what in judgments.items()]
 
 
-def render_notices(notices: list[Notice]) -> str:
+async def tell(notices: Iterable[Notice]) -> list[Told]:
+    """把告知逐条按它自己的消息 id 发出去，交回每条的结果。
+
+    发送出错（``SendFailed``）原样往外抛，后面的不再发：这些告知已经记下来了，这一轮按失败
+    重来，下一轮开始时按原 id 全部再发一遍。
+    """
+    told = []
+    for notice in notices:
+        delivery = await send(
+            sender=WORLD,
+            recipient=notice.who,
+            body=notice.what,
+            message_id=notice.message_id,
+        )
+        told.append(Told(notice, delivery.delivered, delivery.reason))
+    return told
+
+
+def render_told(told: list[Told]) -> str:
     """交给主 agent 看的告知结果：告知了谁、告知的什么、送没送达。"""
-    if not notices:
+    if not told:
         return "感知判断：没有人会察觉到这个变化，没有告知任何人。"
     lines = ["感知判断之后，告知了这些人："]
-    for n in notices:
-        status = "送达了" if n.delivered else f"没有送达（{n.reason}）"
-        lines.append(f"- {n.who}：「{n.what}」——{status}")
+    for t in told:
+        status = "送达了" if t.delivered else f"没有送达（{t.reason}）"
+        lines.append(f"- {t.notice.who}：「{t.notice.what}」——{status}")
     return "\n".join(lines)

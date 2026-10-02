@@ -1,9 +1,15 @@
-"""一轮没跑完时已经发生的事：告知收不回来，重来的那一轮要看得见它们，才不会把同一个变化再报告一遍。
+"""告知收不回来：判断出来的告知先连同消息 id 记下，再按这个 id 发；下一轮在模型开始之前按原 id
+把记下的告知再发一遍（接收方按 id 去重），然后才把"已经发生的事"摆到主 agent 眼前。
+
+逐个看出事的位置：判断时、记下之后发之前、两次发送之间（进程死了 / 被取消）、全发完之后
+存上下文之前、存下上下文之后清空之前、清空之后；以及发送本身出错。
 
 模型换成替身（主 agent 在一轮的 context 里真调 ``report_change`` / ``let_npc_appear``），通信
 机制的 ``send`` / ``send_at``、上下文存储换成替身。
 """
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 
@@ -14,15 +20,20 @@ from app.world.actions import let_npc_appear, report_change
 from .conftest import LANE, ScriptedAgent, sets_wake
 
 
-def judges(who: str, what: str):
+class Crash(BaseException):
+    """进程在这一步死了：什么都接不住它。"""
+
+
+def judges(*judgments: tuple[str, str]):
     async def plan(_input):
-        await perception.someone_notices.invoke({"who": who, "what": what})
+        for who, what in judgments:
+            await perception.someone_notices.invoke({"who": who, "what": what})
         return "判断完了。"
 
     return ScriptedAgent(plan)
 
 
-def reports_then(change: str, *, sets: bool):
+def reports(change: str, *, sets: bool = True):
     async def plan():
         await report_change.invoke({"change": change})
         if sets:
@@ -32,53 +43,210 @@ def reports_then(change: str, *, sets: bool):
     return plan
 
 
-def _round_input(world, run: int = -1) -> str:
-    return world.runner.runs[run][-1].content
+def watches_sends_then_sets_wake(world, seen: list):
+    """一轮的替身：记下模型开始那一刻已经发出去了几条，然后定时刻。"""
+
+    async def plan():
+        seen.append(len(world.sent))
+        return await sets_wake()()
+
+    return plan
+
+
+def crash_on_send(n: int, error: BaseException):
+    """第 ``n`` 次发送（从 1 数）还没发出去时抛 ``error``。"""
+    calls = {"n": 0}
+
+    def hook(_recipient):
+        calls["n"] += 1
+        if calls["n"] == n:
+            raise error
+
+    return hook
 
 
 def _message(body: str = "x"):
     return new_message(sender="operator", recipient="world", body=body, kind=Kind.MESSAGE)
 
 
-async def test_a_retried_round_sees_the_change_its_failed_attempt_already_reported(world):
-    world.agents[perception.PERCEPTION.prompt_id] = judges("ayana", "你听见楼下的门响了一声。")
+def _round_input(world, run: int = -1) -> str:
+    return world.runner.runs[run][-1].content
+
+
+def _kept_ids() -> list[str]:
+    return [n.message_id for h in unfinished.read() for n in h.notices]
+
+
+TWO = (("ayana", "你听见楼下的门响了一声。"), ("akao", "厨房的窗被风吹开了。"))
+
+
+# ---------------------------------------------------------------------------
+# 先记下，再按记下的 id 发
+# ---------------------------------------------------------------------------
+
+
+async def test_the_judged_notices_are_kept_with_their_ids_before_any_is_sent(world):
+    world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
+    kept_at_first_send: list = []
+    world.before_send = lambda _r: kept_at_first_send.append(unfinished.read()) if not kept_at_first_send else None
+    world.runner.plan = reports("楼下的门被风吹得响了一声。")
+
+    await main_agent.on_world_message(_message())
+
+    [[happening]] = kept_at_first_send
+    assert "楼下的门被风吹得响了一声。" in happening.what
+    assert [(n.who, n.what) for n in happening.notices] == list(TWO)
+    assert world.sent_ids == [n.message_id for n in happening.notices]
+    assert len(set(world.sent_ids)) == 2
+
+
+# ---------------------------------------------------------------------------
+# 出事的位置
+# ---------------------------------------------------------------------------
+
+
+async def test_dying_while_judging_leaves_nothing_kept_and_nothing_to_resend(world):
+    async def dies(_input):
+        raise Crash()
+
+    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(dies)
+    world.runner.plan = reports("下雨了。")
+
+    with pytest.raises(Crash):
+        await main_agent.on_world_message(_message())
+
+    assert unfinished.read() == [] and world.sent == []
+    world.runner.plan = sets_wake()
+    await main_agent.on_world_message(_message())
+    assert world.sent == []
+    assert "已经发生" not in _round_input(world)
+
+
+async def test_a_judgment_that_fails_is_handed_back_and_nothing_is_kept_or_sent(world):
+    """判断那一段没成（模型调用出错）：交回给主 agent，这一轮照常跑下去，什么都没记、没发。"""
+
+    async def breaks(_input):
+        raise RuntimeError("model timed out")
+
+    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(breaks)
+    results: list = []
+
+    async def plan():
+        results.append(await report_change.invoke({"change": "下雨了。"}))
+        return await sets_wake()()
+
+    world.runner.plan = plan
+    await main_agent.on_world_message(_message())
+
+    assert "没有报告出去" in results[0] and "RuntimeError" in results[0]
+    assert unfinished.read() == [] and world.sent == []
+    assert len(world.committed) == 1
+
+
+async def test_dying_after_keeping_but_before_sending_sends_them_before_the_next_model_runs(world):
+    world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
+    world.before_send = crash_on_send(1, Crash())
+    world.runner.plan = reports("楼下的门被风吹得响了一声。")
     trigger = _message()
 
-    world.runner.plan = reports_then("楼下的门被风吹得响了一声。", sets=False)
-    with pytest.raises(main_agent.NoNextWake):
+    with pytest.raises(Crash):
         await main_agent.on_world_message(trigger)
+    assert world.sent == []
+    kept = _kept_ids()
+
+    world.before_send = None
+    seen: list = []
+    world.runner.plan = watches_sends_then_sets_wake(world, seen)
+    await main_agent.on_world_message(trigger)
+
+    assert seen == [2]
+    assert world.sent_ids == kept
+    retried = _round_input(world)
+    assert "已经发生" in retried and "楼下的门被风吹得响了一声。" in retried
+    assert "你听见楼下的门响了一声。" in retried and "厨房的窗被风吹开了。" in retried
+
+
+@pytest.mark.parametrize("interruption", [Crash(), asyncio.CancelledError()])
+async def test_interrupted_between_two_sends_both_go_out_again_with_their_original_ids(
+    world, interruption
+):
+    world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
+    world.before_send = crash_on_send(2, interruption)
+    world.runner.plan = reports("楼下的门被风吹得响了一声。")
+    trigger = _message()
+
+    with pytest.raises(type(interruption)):
+        await main_agent.on_world_message(trigger)
+    first_id, second_id = _kept_ids()
+    assert world.sent_ids == [first_id]
+
+    world.before_send = None
     world.runner.plan = sets_wake()
     await main_agent.on_world_message(trigger)
 
-    retried = _round_input(world)
-    assert "已经发生" in retried
-    assert "楼下的门被风吹得响了一声。" in retried
-    assert "ayana" in retried and "你听见楼下的门响了一声。" in retried
-    # 重来的那一轮没有再报告，居民只收到一条。
-    assert len(world.sent) == 1
+    # ayana 那条按原 id 再发一次，接收方按 id 去重；akao 那条第一次发出。没有新 id。
+    assert world.sent_ids == [first_id, first_id, second_id]
+    assert "已经发生" in _round_input(world)
+    # 重来的那一轮没有再报告：感知判断只跑过一次。
+    assert len(world.agents[perception.PERCEPTION.prompt_id].inputs) == 1
 
 
-async def test_once_a_round_is_stored_what_happened_in_it_is_not_shown_again(world):
-    world.agents[perception.PERCEPTION.prompt_id] = judges("ayana", "下雨了。")
+async def test_all_sent_but_the_round_not_stored_resends_them_once_and_then_forgets(world):
+    world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
+    world.runner.plan = reports("楼下的门被风吹得响了一声。", sets=False)
+    trigger = _message()
 
-    world.runner.plan = reports_then("下雨了。", sets=True)
-    await main_agent.on_world_message(_message())
+    with pytest.raises(main_agent.NoNextWake):
+        await main_agent.on_world_message(trigger)
+    kept = _kept_ids()
+
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(_message())
+    await main_agent.on_world_message(trigger)
+    await main_agent.on_world_message(_message("下一条"))
 
-    assert "已经发生" not in _round_input(world)
+    assert world.sent_ids == kept + kept
+    assert "已经发生" in _round_input(world, -2)
+    assert "已经发生" not in _round_input(world, -1)
     assert unfinished.read() == []
 
 
-async def test_a_round_stored_but_not_scheduled_leaves_nothing_behind(world, monkeypatch):
-    """上下文存下了才清：存下之后重来的那一轮从上下文里就看得到它报告过什么。"""
-    world.agents[perception.PERCEPTION.prompt_id] = judges("ayana", "下雨了。")
+async def test_stored_but_not_cleared_resends_them_once_more_and_clears_after(
+    world, monkeypatch
+):
+    """存下上下文之后、清空之前死了：再发一遍（接收方按 id 去重），这一轮存下之后清空。"""
+    world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
+    real_clear = unfinished.clear
+    dies_once = {"left": 1}
+
+    def clear():
+        if dies_once["left"]:
+            dies_once["left"] -= 1
+            raise Crash()
+        real_clear()
+
+    monkeypatch.setattr(unfinished, "clear", clear)
+    world.runner.plan = reports("下雨了。")
+
+    with pytest.raises(Crash):
+        await main_agent.on_world_message(_message())
+    assert len(world.committed) == 1
+    kept = _kept_ids()
+
+    world.runner.plan = sets_wake()
+    await main_agent.on_world_message(_message())
+
+    assert world.sent_ids == kept + kept
+    assert unfinished.read() == []
+
+
+async def test_cleared_then_scheduling_fails_leaves_nothing_to_resend(world, monkeypatch):
+    world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
 
     async def broken(**kw):
         raise SendFailed("broker did not confirm", message_id=kw["message_id"])
 
     monkeypatch.setattr(wake, "send_at", broken)
-    world.runner.plan = reports_then("下雨了。", sets=True)
+    world.runner.plan = reports("下雨了。")
 
     with pytest.raises(SendFailed):
         await main_agent.on_world_message(_message())
@@ -87,26 +255,108 @@ async def test_a_round_stored_but_not_scheduled_leaves_nothing_behind(world, mon
     assert unfinished.read() == []
 
 
-async def test_a_round_that_fails_before_being_stored_keeps_what_happened(world, monkeypatch):
-    from app.agent.continuity import TranscriptConflict
+# ---------------------------------------------------------------------------
+# 发送本身出错
+# ---------------------------------------------------------------------------
 
-    world.agents[perception.PERCEPTION.prompt_id] = judges("ayana", "下雨了。")
 
-    async def conflict(*a, **kw):
-        raise TranscriptConflict("别人写过了")
+async def test_a_send_error_fails_the_round_and_the_notice_goes_out_on_the_next(world):
+    """记下来的告知必须发出去：发送出错不吞掉，这一轮按失败重来，重来时按原 id 再发。"""
+    world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
+    world.send_fails = {"akao"}
+    world.runner.plan = reports("楼下的门被风吹得响了一声。")
+    trigger = _message()
 
-    monkeypatch.setattr(main_agent, "commit_transcript", conflict)
-    world.runner.plan = reports_then("下雨了。", sets=True)
+    with pytest.raises(SendFailed):
+        await main_agent.on_world_message(trigger)
+    first_id, second_id = _kept_ids()
+    assert world.sent_ids == [first_id]
+    assert world.committed == []
 
-    with pytest.raises(TranscriptConflict):
+    world.send_fails = set()
+    world.runner.plan = sets_wake()
+    await main_agent.on_world_message(trigger)
+
+    assert world.sent_ids == [first_id, first_id, second_id]
+
+
+async def test_a_send_error_while_resending_fails_the_round_before_the_model_runs(world):
+    world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
+    world.runner.plan = reports("下雨了。", sets=False)
+    with pytest.raises(main_agent.NoNextWake):
+        await main_agent.on_world_message(_message())
+    kept = unfinished.read()
+    runs = len(world.runner.runs)
+
+    world.send_fails = {"akao"}
+    with pytest.raises(SendFailed):
         await main_agent.on_world_message(_message())
 
-    [happened] = unfinished.read()
-    assert "下雨了。" in happened.what and "ayana" in happened.what
+    assert len(world.runner.runs) == runs
+    assert unfinished.read() == kept
+
+
+# ---------------------------------------------------------------------------
+# 别的情形
+# ---------------------------------------------------------------------------
+
+
+async def test_a_round_woken_by_something_else_resends_them_too(world):
+    """那条消息重试用完进了死信，下一轮由别的消息叫醒：照样补发、照样摆出来。"""
+    world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
+    world.runner.plan = reports("下雨了。", sets=False)
+    with pytest.raises(main_agent.NoNextWake):
+        await main_agent.on_world_message(_message("先来的"))
+    kept = _kept_ids()
+
+    world.runner.plan = sets_wake()
+    await main_agent.on_world_message(_message("后来的"))
+
+    assert world.sent_ids == kept + kept
+    assert "下雨了。" in _round_input(world)
+
+
+async def test_an_npcs_appearance_is_kept_with_its_own_words_and_resent(world):
+    async def plays(_input):
+        return "门卫抬头说：「今天关门早。」"
+
+    world.agents[npc.NPC.prompt_id] = ScriptedAgent(plays)
+    world.agents[perception.PERCEPTION.prompt_id] = judges(("ayana", "门卫说今天关门早。"))
+    world.before_send = crash_on_send(1, Crash())
+
+    async def plan():
+        await let_npc_appear.invoke({"npc": "门卫", "situation": "放学时的校门口。"})
+        return await sets_wake()()
+
+    world.runner.plan = plan
+    with pytest.raises(Crash):
+        await main_agent.on_world_message(_message())
+    [happening] = unfinished.read()
+    assert "门卫" in happening.what and "今天关门早" in happening.what
+
+    world.before_send = None
+    world.runner.plan = sets_wake()
+    await main_agent.on_world_message(_message())
+
+    assert world.sent_ids == [happening.notices[0].message_id]
+    assert "今天关门早" in _round_input(world)
+
+
+async def test_a_change_nobody_notices_is_still_kept_so_it_is_not_reported_again(world):
+    world.agents[perception.PERCEPTION.prompt_id] = judges()
+    world.runner.plan = reports("后院落了一片叶子。", sets=False)
+
+    with pytest.raises(main_agent.NoNextWake):
+        await main_agent.on_world_message(_message())
+    world.runner.plan = sets_wake()
+    await main_agent.on_world_message(_message())
+
+    assert world.sent == []
+    assert "后院落了一片叶子。" in _round_input(world)
 
 
 async def test_every_change_a_failed_round_reported_is_kept_in_order(world):
-    world.agents[perception.PERCEPTION.prompt_id] = judges("ayana", "x")
+    world.agents[perception.PERCEPTION.prompt_id] = judges(("ayana", "x"))
 
     async def plan():
         await report_change.invoke({"change": "先起风。"})
@@ -121,27 +371,8 @@ async def test_every_change_a_failed_round_reported_is_kept_in_order(world):
     assert ["后下雨。" in h.what for h in unfinished.read()] == [False, True]
 
 
-async def test_an_npcs_appearance_is_kept_with_its_own_words(world):
-    async def plays(_input):
-        return "门卫抬头说：「今天关门早。」"
-
-    world.agents[npc.NPC.prompt_id] = ScriptedAgent(plays)
-    world.agents[perception.PERCEPTION.prompt_id] = judges("ayana", "门卫说今天关门早。")
-
-    async def plan():
-        await let_npc_appear.invoke({"npc": "门卫", "situation": "放学时的校门口。"})
-        return "出场完了，忘了定时刻。"
-
-    world.runner.plan = plan
-    with pytest.raises(main_agent.NoNextWake):
-        await main_agent.on_world_message(_message())
-
-    [happened] = unfinished.read()
-    assert "门卫" in happened.what and "今天关门早" in happened.what
-
-
 async def test_it_is_kept_on_worlds_volume_and_an_unreadable_file_counts_as_nothing(world, volume):
-    unfinished.note("某件事。")
+    unfinished.note("某件事。", [])
     path = volume / LANE / "unfinished.json"
     assert path.exists()
 

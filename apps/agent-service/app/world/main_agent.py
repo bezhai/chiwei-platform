@@ -18,16 +18,16 @@
    私有状态里的最新唤醒）。
 
 任何一步失败都往外抛，这一轮按失败重跑。重跑是安全的：它改过的记录留在盘上，下一次读得到；
-已经发出去的告知收不回来，报告过的变化、出过场的 NPC 和告知了谁都记在
-:mod:`app.world.unfinished`，重跑那一次摆在它眼前，它不会把同一件事再报告一遍；上下文和下次
-醒来都只在最后才写下。叫醒这一轮的自定消息在第 3 步记下新唤醒之前一直是状态里的
+已经发出去的告知收不回来：报告过的变化、出过场的 NPC 和要发的告知（带预先定好的消息 id）在
+发之前就记在 :mod:`app.world.unfinished`，下一轮模型跑之前按原 id 补发一遍（接收方按 id 去重），
+再摆到它眼前，它不会把同一件事再报告一遍；上下文和下次醒来都只在最后才写下。叫醒这一轮的自定消息在第 3 步记下新唤醒之前一直是状态里的
 最新唤醒，所以重投时不会被当成旧消息，失败了也不限次数重试、不进死信；哪一处失败、进程死在
 哪里，各自怎么接上见 :mod:`app.world.wake`。先存上下文、后定时刻，是因为定时刻做完之后这一轮
 就不该再重跑——否则会多出一个被取代的自定消息，而上下文里又少了这一轮。
 
 **它眼前摆着什么。** 一条 USER 消息：现在几点、这一次是什么叫醒了它；被别人叫醒时再加上
 它原来定的下次醒来，提醒它这一轮结束前要重新定；之前有一轮没跑完时，再加上那一轮里已经
-发生的事。它的记录目录只在上下文清理时写进那条带
+发生的事和补发告知的结果。它的记录目录只在上下文清理时写进那条带
 时刻的标记消息（:mod:`app.agent.continuity`；每轮都一样的东西不每轮重发）。prompt 在 Langfuse
 （:data:`ROUND`），正文不引用任何变量。
 
@@ -59,6 +59,7 @@ from app.messaging.message import Kind, Message
 from app.world import records, unfinished
 from app.world.actions import ACTIONS, ROUND_SCOPE, RoundScope
 from app.world.agents import WORLD_MODEL_KEY, AgentKind, run_agent, session_key, when
+from app.world.perception import Told, render_told, tell
 from app.world.sources import material_tools, query_tools, take_in
 from app.world.sources.records import RECORDS_READ
 from app.world.wake import WORLD, NextWake, is_stale_wake, read_next_wake, set_next_wake
@@ -104,7 +105,7 @@ def _render_round_input(
     *,
     now: datetime,
     planned: NextWake | None,
-    left_over: list[unfinished.Happened],
+    left_over: list[tuple[unfinished.Happening, list[Told]]],
 ) -> str:
     lines = [f"【现在】{when(now)}"]
     if trigger.kind is Kind.MESSAGE and trigger.sender == WORLD:
@@ -124,9 +125,12 @@ def _render_round_input(
     if left_over:
         lines.append(
             "【之前没跑完的一轮里已经发生的事】之前有一轮没有跑完，那一轮的经过不在你的上下文里；"
-            "可下面这些在那一轮里已经发生了：告知已经发出去，收不回来，记录里可能还没写。"
+            "可下面这些在那一轮里已经发生了，记录里可能还没写。那一轮要发的告知，这一轮开始前"
+            "已经按原样补发了一遍（收到过的人不会再收到一遍），下面是补发的结果："
         )
-        lines += [f"- {when(h.at)}\n{h.what}" for h in left_over]
+        lines += [
+            f"- {when(h.at)}\n{h.what}\n{render_told(told)}" for h, told in left_over
+        ]
     return "\n".join(lines)
 
 
@@ -142,11 +146,27 @@ async def on_world_message(message: Message) -> None:
     await run_round(message)
 
 
+async def _resend_left_over() -> list[tuple[unfinished.Happening, list[Told]]]:
+    """模型跑之前：按原 id 把还没进上下文的那几件事要发的告知全部再发一遍。
+
+    发送出错原样往外抛：这一轮在模型开始之前就算失败，记着的东西一样不动，下一轮再补。
+    """
+    left_over = [(h, await tell(h.notices)) for h in unfinished.read()]
+    if left_over:
+        logger.info(
+            "world: resent %d notice(s) of %d happening(s) left by an unfinished round",
+            sum(len(told) for _, told in left_over),
+            len(left_over),
+        )
+    return left_over
+
+
 async def run_round(trigger: Message) -> None:
     """跑一轮。没定下次醒来的时刻抛 :class:`NoNextWake`；别的失败原样往外抛。"""
     now = now_cst()
     round_id = uuid.uuid4().hex
     key = session_key()
+    left_over = await _resend_left_over()
 
     history, ver = await load_session(key)
     history = trim_for_round(
@@ -159,7 +179,7 @@ async def run_round(trigger: Message) -> None:
     round_input = Turn(
         role=Role.USER,
         content=_render_round_input(
-            trigger, now=now, planned=read_next_wake(), left_over=unfinished.read()
+            trigger, now=now, planned=read_next_wake(), left_over=left_over
         ),
     )
     scope = RoundScope()
