@@ -13,7 +13,7 @@ name: dataflow grep gate
 #
 # **业务目录清单**（每个 step 里那份 BUSINESS）是 app/ 下真实存在的业务包：
 #
-#     agent  life  living  memory  nodes  skills  world
+#     agent  living  memory  nodes  skills  world
 #
 # 不在里面的是框架和基建：runtime / data / infra / api / capabilities / messaging /
 # domain / wiring / workers。加一个业务包就要把它加进每一处清单 —— 漏一处等于
@@ -37,10 +37,9 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
-                    apps/agent-service/app/world/)
+          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+                    apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
+                    apps/agent-service/app/skills/ apps/agent-service/app/world/)
           # business code must not implement its own retry / sleep loops
           c=$(grep -rn -E "while.*retry|for.*range.*retry" "${BUSINESS[@]}" \
               2>/dev/null | grep -v "__pycache__\|/test_" | wc -l || true)
@@ -76,10 +75,9 @@ jobs:
           #
           # 加一处新的就要更新这个数，否则 gate 抓回归。
           c=$(grep -rn '\bawait emit(' \
-              apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-              apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
-              apps/agent-service/app/world/ \
+              apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+              apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
+              apps/agent-service/app/skills/ apps/agent-service/app/world/ \
               --include='*.py' 2>/dev/null | wc -l || true)
           [ "$c" -eq 3 ] || { echo "Gap 8 violation: business await emit count=$c, expected 3"; exit 1; }
       - name: Gap 15 — no arq imports, no arq dependency
@@ -119,10 +117,9 @@ jobs:
           # No more "不要 catch" / "don't catch" warnings: the wire DSL
           # expresses error policy via .on_error("dlq") explicitly.
           c=$(grep -rn "# 不要 catch\|# 不要 try/except\|# don't catch" \
-              apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-              apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
-              apps/agent-service/app/world/ \
+              apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+              apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
+              apps/agent-service/app/skills/ apps/agent-service/app/world/ \
               2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c don't-catch comments in business code"; exit 1; }
           # Manual ack/nack/requeue=False belongs to the framework
@@ -130,10 +127,9 @@ jobs:
           # nodes/dlq_admin.py is the only business-facing exception
           # (the 6-step requeue protocol). Scan business dirs only.
           c=$(grep -rn "requeue=False\|\.nack(" \
-              apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-              apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
-              apps/agent-service/app/world/ \
+              apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+              apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
+              apps/agent-service/app/skills/ apps/agent-service/app/world/ \
               2>/dev/null \
               | grep -v "nodes/dlq_admin.py\|__pycache__\|/test_" \
               | wc -l || true)
@@ -142,14 +138,13 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
-                    apps/agent-service/app/world/)
+          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+                    apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
+                    apps/agent-service/app/skills/ apps/agent-service/app/world/)
           # 拿 session 那三条只对**不拥有自己 Data 表**的业务包 exact-zero。
-          # app/life/ 和 app/living/ 自己声明 Data 表、并且用裸 SQL 读它们
+          # app/living/ 自己声明 Data 表、并且用裸 SQL 读它们
           # （MAX(seq) 取号、DISTINCT ON 取最新一版这类 runtime 四个原语
-          # 没覆盖的形状），所以它们在 gap_13_business_owns_data_tables
+          # 没覆盖的形状），所以它在 gap_13_business_owns_data_tables
           # 这条 baseline 上计数、不在这里判零。**公共层怎么读仍然 exact-zero
           # 地由 queries 层管**：living 读 common_* 的那批查询已经全部收进
           # app/data/queries/，这条 baseline 只兜自己那几张表。
@@ -194,10 +189,9 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
-                    apps/agent-service/app/world/)
+          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+                    apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
+                    apps/agent-service/app/skills/ apps/agent-service/app/world/)
           c=$(grep -rnE "from app\.infra\.redis import|from app\.infra import redis" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 14 violation: $c infra.redis imports in business"; exit 1; }
@@ -208,10 +202,9 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
-                    apps/agent-service/app/world/)
+          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+                    apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
+                    apps/agent-service/app/skills/ apps/agent-service/app/world/)
           # app/agent/adapters/ 排除在外，永久：它们**就是**跟外部 HTTP 讲话的
           # 那一层（openai / gemini 的 ModelClient 实现），跟 app/capabilities/
           # 同级。Gap 11 已经按同样理由豁免了 capabilities/。要求适配层不碰
@@ -237,15 +230,14 @@ jobs:
 
           baselines = json.load(open(".github/grep-baselines.json"))
           BUSINESS = [
-              "apps/agent-service/app/agent/", "apps/agent-service/app/life/",
-              "apps/agent-service/app/living/", "apps/agent-service/app/memory/",
-              "apps/agent-service/app/nodes/", "apps/agent-service/app/skills/",
-              "apps/agent-service/app/world/",
+              "apps/agent-service/app/agent/", "apps/agent-service/app/living/",
+              "apps/agent-service/app/memory/", "apps/agent-service/app/nodes/",
+              "apps/agent-service/app/skills/", "apps/agent-service/app/world/",
           ]
-          # 业务包里只有 app/living/ 自己声明 Data 表并用裸 SQL 读它们（旧的
-          # app/life/ 已经被它整体取代、目录已删）。app/world/ 的 Data 全是
-          # transient，记录在私有卷上，所以在 Gap 13 的 exact-zero 那半边。
-          # 这里列一个不存在的目录会让 grep 以 2 退出、整条计数读成 0。
+          # 业务包里只有 app/living/ 自己声明 Data 表并用裸 SQL 读它们。
+          # app/world/ 的 Data 全是 transient，记录在私有卷上，所以在 Gap 13
+          # 的 exact-zero 那半边。这里（以及 BUSINESS）列一个不存在的目录会让
+          # grep 以 2 退出、整条计数读成 0。
           OWN_TABLES = [
               "apps/agent-service/app/living/",
           ]
