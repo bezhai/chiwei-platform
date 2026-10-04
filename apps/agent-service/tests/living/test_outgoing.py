@@ -731,6 +731,115 @@ async def test_a_round_cancelled_while_a_send_is_in_flight_loses_nothing_and_dou
     assert await _delivered_to() == ["world", "千凪", "绫奈"]
 
 
+async def _marks(persona: str = "akao") -> list[tuple[int, int]]:
+    """她每一次"讲到哪了"，按先后。"""
+    async with session_mod.get_session() as s:
+        rows = (
+            await s.execute(
+                text(
+                    f"SELECT happening_seq, whereabouts_seq FROM {outgoing_mod._UP_TO_TABLE} "
+                    f"WHERE lane = :l AND persona_id = :p "
+                    f"ORDER BY happening_seq, whereabouts_seq"
+                ),
+                {"l": LANE, "p": persona},
+            )
+        ).all()
+    return [tuple(r) for r in rows]
+
+
+async def _her_seqs(table: str, persona_column: str, persona: str = "akao") -> list[int]:
+    async with session_mod.get_session() as s:
+        return list(
+            (
+                await s.execute(
+                    text(
+                        f"SELECT seq FROM {table} "
+                        f"WHERE lane = :l AND {persona_column} = :p ORDER BY seq"
+                    ),
+                    {"l": LANE, "p": persona},
+                )
+            ).scalars()
+        )
+
+
+@pytest.mark.integration
+async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_others_live_on(
+    started, moment_db, stub_moment, in_a_moment, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+):
+    """world 的一条把她叫醒，那一轮在她做完事之后失败了两次，每一拍都以同一个身份重跑
+    （:class:`app.living.nudge.NudgeBegun`）——哪怕中间又到了一条发生得更早的、按"最早没看过的
+    那条"本该换它叫醒她；第三次她多做了一件事、落了地。这期间千凪一直在记自己的经历，经历的
+    seq 是全泳道一条轴，两人的号交错。
+
+    她要发的消息一条不多一条不少：那句话、每件事各进一次；讲到哪了只停在她自己的号上；重跑的
+    那几次『现在』一次比一次晚，消息上的时间还是她第一次做那件事的时候。"""
+    from app.living.nudge import NudgeBegun, nudge_once
+    from app.living.received import receive
+    from app.messaging.message import Kind, new_message
+    from tests.runtime.conftest import migrate
+
+    post = started
+    await migrate(NudgeBegun, moment_db)
+    monkeypatch.setenv("LANE", LANE)
+    await _stand("chinagi", "家/厨房", "煮乌冬", _at(21, 0))
+
+    async def chinagi_does(what: str, at: dt.datetime) -> None:
+        async with in_a_moment("chinagi", now=at, moment_id=f"c:{what}"):
+            await _do(act, {"what": what})
+
+    rain = new_message(
+        sender="world", recipient="赤尾", body="窗外下起了雨。", kind=Kind.MESSAGE,
+        time=_at(21, 31),
+    )
+    await receive(rain)
+    said = ("say", {"what": "下雨了，收衣服。", "to": ["绫奈"]})
+    closed = ("act", {"what": "起身把窗关上了"})
+
+    runner = stub_moment(said, closed)
+    _fails_after_its_hands(runner, RuntimeError("这一轮在她做完事之后失败了"))
+    for minute in (32, 33):
+        with pytest.raises(RuntimeError, match="做完事之后失败"):
+            await nudge_once(lane=LANE, persona_id="akao", now=_at(21, minute))
+        await chinagi_does(f"搅了搅锅（{minute}）", _at(21, minute))
+        if minute == 32:
+            await receive(
+                new_message(
+                    sender="world", recipient="赤尾", body="楼下有人按门铃。",
+                    kind=Kind.MESSAGE, time=_at(21, 20),
+                )
+            )
+
+    stub_moment(said, closed, ("act", {"what": "把晾的衣服收进来了"}))
+    landed = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+    assert landed is not None and landed.moment_id == f"nudge:inbox:{rain.message_id}"
+    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 35)) is None
+
+    hers = await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor")
+    others = await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor", "chinagi")
+    assert len(hers) == 3 and len(others) == 2
+    assert hers[1] < others[0] < others[1] < hers[2], "前提没造出来：两人的号要交错"
+    where = max(await _her_seqs(outgoing_mod._WHEREABOUTS_TABLE, "persona_id"))
+
+    expected = [
+        ("绫奈", "当面对你说：「下雨了，收衣服。」", _at(21, 32)),
+        (
+            "world",
+            "我做了这些（按先后）：\n- 21:32 CST 起身把窗关上了\n做完这些，我在 家/客厅，正在 看书。",
+            _at(21, 32),
+        ),
+        (
+            "world",
+            "我做了这些（按先后）：\n- 21:34 CST 把晾的衣服收进来了\n"
+            "做完这些，我在 家/客厅，正在 看书。",
+            _at(21, 34),
+        ),
+    ]
+    assert [(m.recipient, m.body, m.message_time) for m in await _composed()] == expected
+    assert [(s.recipient, s.body, s.time) for s in post.sent] == expected
+    assert await _delivered_to() == ["world", "world", "绫奈"]
+    assert (await _marks())[1:] == [(hers[1], where), (hers[2], where)]
+
+
 def test_the_say_hand_asks_for_names_in_the_world_and_offers_none():
     """举出来的名字就是词表，她会逐字抄走；姐妹的名字在人设表里，代码里一个都不写。"""
     texts = model_facing_text(say)
