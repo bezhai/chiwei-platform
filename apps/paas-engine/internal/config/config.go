@@ -7,21 +7,21 @@ import (
 )
 
 type Config struct {
-	HTTPPort        string
-	DatabaseURL     string
-	KubeconfigPath  string
-	DeployNamespace string
-	KanikoNamespace string
-	KanikoImage       string
-	RegistrySecret    string
-	RegistryMirrors   []string
-	InsecureRegistries []string
-	RegistryBase      string
-	KanikoCacheRepo   string
-	BuildHttpProxy    string
-	BuildNoProxy      string
-	APIToken          string
-	LokiURL           string
+	HTTPPort              string
+	DatabaseURL           string
+	KubeconfigPath        string
+	DeployNamespace       string
+	KanikoNamespace       string
+	KanikoImage           string
+	RegistrySecret        string
+	RegistryMirrors       []string
+	InsecureRegistries    []string
+	RegistryBase          string
+	KanikoCacheRepo       string
+	BuildHttpProxy        string
+	BuildNoProxy          string
+	APIToken              string
+	LokiURL               string
 	ChiweiDatabaseURL     string
 	ChiweiTestDatabaseURL string
 	SidecarImage          string
@@ -39,24 +39,24 @@ type Config struct {
 
 func Load() *Config {
 	return &Config{
-		HTTPPort:        getEnv("HTTP_PORT", "8080"),
-		DatabaseURL:     getEnv("DATABASE_URL", "postgres://paas:paas@localhost:5432/paas_engine?sslmode=disable"),
-		KubeconfigPath:  getEnv("KUBECONFIG", ""),
-		DeployNamespace: getEnv("DEPLOY_NAMESPACE", "default"),
-		KanikoNamespace: getEnv("KANIKO_NAMESPACE", "paas-builds"),
-		KanikoImage:        getEnv("KANIKO_IMAGE", "harbor.local:30002/inner-bot/kaniko:latest"),
-		RegistrySecret:    getEnv("REGISTRY_SECRET", "harbor-secret"),
-		RegistryMirrors:    splitCSV(os.Getenv("REGISTRY_MIRRORS")),
-		InsecureRegistries: splitCSV(os.Getenv("INSECURE_REGISTRIES")),
-		RegistryBase:      getEnv("REGISTRY_BASE", "registry.example.com"),
-		KanikoCacheRepo:   os.Getenv("KANIKO_CACHE_REPO"),
-		BuildHttpProxy:    os.Getenv("BUILD_HTTP_PROXY"),
-		BuildNoProxy:      os.Getenv("BUILD_NO_PROXY"),
-		APIToken:          os.Getenv("API_TOKEN"),
-		LokiURL:           getEnv("LOKI_URL", "http://loki-gateway.monitoring.svc.cluster.local"),
+		HTTPPort:              getEnv("HTTP_PORT", "8080"),
+		DatabaseURL:           getEnv("DATABASE_URL", "postgres://paas:paas@localhost:5432/paas_engine?sslmode=disable"),
+		KubeconfigPath:        getEnv("KUBECONFIG", ""),
+		DeployNamespace:       getEnv("DEPLOY_NAMESPACE", "default"),
+		KanikoNamespace:       getEnv("KANIKO_NAMESPACE", "paas-builds"),
+		KanikoImage:           getEnv("KANIKO_IMAGE", "harbor.local:30002/inner-bot/kaniko:latest"),
+		RegistrySecret:        getEnv("REGISTRY_SECRET", "harbor-secret"),
+		RegistryMirrors:       splitCSV(os.Getenv("REGISTRY_MIRRORS")),
+		InsecureRegistries:    splitCSV(os.Getenv("INSECURE_REGISTRIES")),
+		RegistryBase:          getEnv("REGISTRY_BASE", "registry.example.com"),
+		KanikoCacheRepo:       os.Getenv("KANIKO_CACHE_REPO"),
+		BuildHttpProxy:        os.Getenv("BUILD_HTTP_PROXY"),
+		BuildNoProxy:          os.Getenv("BUILD_NO_PROXY"),
+		APIToken:              os.Getenv("API_TOKEN"),
+		LokiURL:               getEnv("LOKI_URL", "http://loki-gateway.monitoring.svc.cluster.local"),
 		ChiweiDatabaseURL:     os.Getenv("CHIWEI_DATABASE_URL"),
 		ChiweiTestDatabaseURL: os.Getenv("CHIWEI_TEST_DATABASE_URL"),
-		SidecarImage:      os.Getenv("SIDECAR_IMAGE"),
+		SidecarImage:          os.Getenv("SIDECAR_IMAGE"),
 
 		CINamespace:     getEnv("CI_NAMESPACE", "paas-builds"),
 		CIGitRepo:       os.Getenv("CI_GIT_REPO"),
@@ -98,4 +98,3 @@ func getEnv(key, defaultVal string) string {
 	}
 	return defaultVal
 }
-
