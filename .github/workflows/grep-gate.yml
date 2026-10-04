@@ -242,16 +242,19 @@ jobs:
               "apps/agent-service/app/nodes/", "apps/agent-service/app/skills/",
               "apps/agent-service/app/world/",
           ]
-          # app/life/ 和 app/living/ 自己声明 Data 表并用裸 SQL 读它们。
+          # 业务包里只有 app/living/ 自己声明 Data 表并用裸 SQL 读它们（旧的
+          # app/life/ 已经被它整体取代、目录已删）。app/world/ 的 Data 全是
+          # transient，记录在私有卷上，所以在 Gap 13 的 exact-zero 那半边。
+          # 这里列一个不存在的目录会让 grep 以 2 退出、整条计数读成 0。
           OWN_TABLES = [
-              "apps/agent-service/app/life/", "apps/agent-service/app/living/",
+              "apps/agent-service/app/living/",
           ]
           patterns = {
               # 业务不该自己做消息去重 —— 那是 wire 的 .durable() 边的事。但
               # insert_idempotent 同时也是 app/runtime/persist.py 四个公开原语之一
               # （insert_append / select_latest / select_all_versions 是另外三个，
               # 谁都没被 gate 管），业务写自己那张 Data 表时调它是正当用法。
-              # 现存 5 处（app/living/ 4 处 + app/domain/thinking_cost.py 1 处）
+              # 现存 8 处（app/living/ 7 处 + app/domain/thinking_cost.py 1 处）
               # 全是后者，所以这条从 exact-zero 降成 baseline：加新调用点仍然会
               # 被挡下、需要显式抬基线 + reviewer 签字，但不再断言一个代码库本身
               # 就不成立的零。运行时那两个实现自己排除在外。
