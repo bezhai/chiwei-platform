@@ -164,7 +164,10 @@ async def test_the_main_agent_gets_every_enabled_sources_query_tools_and_its_own
 
     expected = [t.name for t in await query_tools()] + [t.name for t in ACTIONS]
     assert tools_built_for(world, main_agent.ROUND.prompt_id) == expected
-    assert {"list_records", "read_record", "check_weather", "search_web"} <= set(expected)
+    assert {
+        "list_records", "read_record", "search_web",
+        "check_current_weather", "check_hourly_forecast", "check_daily_forecast",
+    } <= set(expected)
 
 
 async def test_the_round_runs_as_its_own_trace_with_its_own_prompt(world):

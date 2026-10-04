@@ -74,7 +74,10 @@ async def test_a_source_left_out_of_the_enabled_list_leaves_all_four_agents(worl
     tools = await _run_all_four(world)
 
     for agent in FOUR:
-        assert "check_weather" not in tools[agent] and "search_web" not in tools[agent]
+        assert not {
+            "check_current_weather", "check_hourly_forecast", "check_daily_forecast",
+            "search_web",
+        } & set(tools[agent])
         assert {"list_records", "read_record", "list_senders", "read_messages_from"} <= set(
             tools[agent]
         )
