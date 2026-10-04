@@ -61,6 +61,30 @@ async def test_send_reaches_an_open_inbox(broker):
     )
 
 
+async def test_send_carries_the_time_the_sender_gives_it(broker):
+    """发送方可以给消息它说的那件事发生的时刻（比如补发一条早先没发出去的消息）：对方拿到的、
+    记录里记的都是这个时刻，不是发出那一刻。不给就是发出那一刻。"""
+    world = Inbox()
+    inbox("world", on_message=world.on_message)
+    await start_messaging()
+
+    happened = datetime(2026, 7, 25, 13, 30, tzinfo=UTC)
+    told = await send(
+        sender="operator", recipient="world", body="赤尾在 21:30 走进了厨房。", time=happened
+    )
+    before = datetime.now(UTC)
+    just_now = await send(sender="operator", recipient="world", body="她刚坐下。")
+    after = datetime.now(UTC)
+
+    await eventually(lambda: len(world.got) == 2)
+    times = {m.message_id: m.time for m in world.got}
+    assert times[told.message_id] == happened
+    assert before <= times[just_now.message_id] <= after
+    rows = await read_record(message_id=told.message_id)
+    assert outcomes(rows) == ["sending", "delivered"]
+    assert {r["message_time"] for r in rows} == {happened}
+
+
 async def test_send_to_an_inbox_nobody_opened(broker):
     """发往未开设的收件箱：不投递、照样记录、明确告诉发送方没有送达，也不替它建收件箱。"""
     await start_messaging()

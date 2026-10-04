@@ -232,6 +232,21 @@ async def test_send_at_refuses_a_time_without_a_timezone():
         )
 
 
+async def test_send_refuses_a_time_without_a_timezone(monkeypatch):
+    """不带时区的时刻在造消息时就拒掉，什么都不记、什么都不发：带过去的话，接收方存不下它。"""
+    from app.messaging import sending
+
+    monkeypatch.setattr(sending, "opened", AsyncMock(return_value=True))
+    monkeypatch.setattr(sending, "record", AsyncMock())
+    monkeypatch.setattr(sending, "publish", AsyncMock())
+    with pytest.raises(ValueError):
+        await sending.send(
+            sender="operator", recipient="world", body="x", time=datetime(2026, 10, 1, 8, 0)
+        )
+    sending.record.assert_not_called()
+    sending.publish.assert_not_called()
+
+
 async def test_send_at_refuses_to_schedule_without_the_delayed_exchange(monkeypatch):
     """没有 x-delayed-message 插件时，延时头被忽略、定时消息会在分段那一步空转。宁可当场拒绝。"""
     from app.messaging import sending
