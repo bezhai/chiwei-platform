@@ -13,11 +13,13 @@ control flow, the adapter owns the provider wire, and ``dispatch`` runs tools.
                   ``response_model.model_validate``.
 
 Tracing埋 lives here (the langchain ``CallbackHandler`` is gone): each
-run/stream/extract opens one root span via langfuse; the adapter opens a
-generation span per LLM call (nested automatically), and every tool dispatch
-opens a tool span. ``update_trace`` controls only whether the root *trace*'s
-name / IO is overwritten (``update_current_trace``) — the spans are always
-produced (guard / deep_research want spans without clobbering the parent trace).
+run/stream/extract opens one root span via langfuse and records what it hands
+back as that span's output; the adapter opens a generation span per LLM call
+(nested automatically), and every tool dispatch opens a tool span under the
+generation that requested it. ``update_trace`` controls only whether the root
+*trace*'s name / IO is overwritten (``update_current_trace``) — the spans are
+always produced (guard / deep_research want spans without clobbering the parent
+trace).
 
 Retry is the Agent layer's sole responsibility (the adapters disable SDK retry).
 ``run`` / ``extract`` wrap the whole call in ``@retry``; ``stream`` retries only
@@ -79,8 +81,8 @@ from app.agent.runtime_context import agent_context
 from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
     TURN_TRACE_NAME,
-    current_generation_context,
     current_turn_trace_id,
+    under_last_generation,
 )
 from app.api.middleware import get_lane
 from app.capabilities.retry import retry as _retry_decorator
@@ -301,6 +303,9 @@ def _root_span(
     overwritten with this agent's — guard / deep_research pass ``False`` so the
     parent trace keeps its identity while still getting our spans.
 
+    调用方把这次调用交回去的结果记成这个 span 的 output（``_record_output``）。它是 trace 的根
+    时，langfuse 拿它的名字、输入输出和开始时间当 trace 的。
+
     ``session_id`` (when provided) groups this trace into a langfuse session,
     independently of who owns the trace name/input: a guard span with
     ``update_trace=False`` still tags the session. ``None`` leaves the trace's
@@ -340,35 +345,38 @@ def _root_span(
 def _tool_span(*, name: str, input: Any):
     """Open a span around one tool dispatch; degrade to no-op on langfuse error.
 
-    Re-parents under the model call that requested the tool (its generation span
-    has closed by now, but its parent_span_id is still a valid parent), so the
-    trace reads model-call → its tools instead of a flat list under the agent.
+    挂在要这个工具的那次模型调用下面（那个 generation 这时已经结束，但仍能当父节点），trace
+    读起来是"模型调用 → 它要的工具"，而不是平铺在 agent 根下面。父节点走普通的 OTel 上下文
+    （``under_last_generation``），所以工具 span 不会被 langfuse 当成 trace 的根。
     """
-    with _safe_current_span(
-        f"tool.{name}", input, trace_context=current_generation_context()
-    ) as span:
+    with under_last_generation(), _safe_current_span(f"tool.{name}", input) as span:
         yield span
 
 
+def _record_output(span: Any, output: Any) -> None:
+    """Record what a span's call handed back as its ``output`` (best-effort).
+
+    The output must already be JSON-serialisable (langfuse serialises the span).
+    Guarded: a tracing failure must never break the call it records.
+    """
+    try:
+        span.update(output=output)
+    except Exception as exc:  # pragma: no cover - tracing must not break the call
+        logger.warning("langfuse span output update failed: %s", exc)
+
+
 def _record_tool_output(span: Any, result: ToolResult) -> None:
-    """Record a dispatched tool's result on its span (best-effort).
+    """Record a dispatched tool's result on its span.
 
     The loop opens the tool span before dispatch so the call arguments land as
     ``input``; without this the span has no ``output`` and langfuse renders the
     tool result as ``undefined``. Content is reduced to JSON-serialisable form
-    (block lists → plain dicts) since langfuse must serialise the span. Guarded:
-    a tracing failure must never break the tool loop.
+    (block lists → plain dicts) since langfuse must serialise the span.
     """
-    try:
-        content = result.content
-        output: Any = (
-            [b.to_dict() for b in content]
-            if isinstance(content, list)
-            else content
-        )
-        span.update(output=output)
-    except Exception as exc:  # pragma: no cover - tracing must not break dispatch
-        logger.warning("langfuse tool span output update failed: %s", exc)
+    content = result.content
+    _record_output(
+        span, [b.to_dict() for b in content] if isinstance(content, list) else content
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -965,7 +973,7 @@ class Agent:
                 input=[m.to_dict() for m in full_messages],
                 update_trace=self._update_trace,
                 session_id=trace_session_id,
-            ):
+            ) as span:
                 result = await _run_loop(
                     model,
                     messages=full_messages,
@@ -977,6 +985,7 @@ class Agent:
                     model_kwargs=self._model_kwargs,
                     transcript_sink=sink,
                 )
+                _record_output(span, result.to_dict())
                 return result, sink
 
         result, produced = await _invoke()
@@ -1013,19 +1022,26 @@ class Agent:
                     input=[m.to_dict() for m in full_messages],
                     update_trace=self._update_trace,
                     session_id=trace_session_id,
-                ):
-                    async for chunk in _stream_loop(
-                        model,
-                        messages=full_messages,
-                        tools=tools,
-                        context=context,
-                        recursion_limit=self._cfg.recursion_limit,
-                        session_id=trace_session_id,
-                        native_web_search=native_web_search,
-                        model_kwargs=self._model_kwargs,
-                    ):
-                        tokens_yielded = True
-                        yield chunk
+                ) as span:
+                    streamed: list[str] = []
+                    try:
+                        async for chunk in _stream_loop(
+                            model,
+                            messages=full_messages,
+                            tools=tools,
+                            context=context,
+                            recursion_limit=self._cfg.recursion_limit,
+                            session_id=trace_session_id,
+                            native_web_search=native_web_search,
+                            model_kwargs=self._model_kwargs,
+                        ):
+                            tokens_yielded = True
+                            if chunk.text:
+                                streamed.append(chunk.text)
+                            yield chunk
+                    finally:
+                        # 跑完是完整的文本；出错或被消费方中途关掉时，是到那时已经交出去的部分。
+                        _record_output(span, "".join(streamed))
                 return
             except RETRYABLE_EXCEPTIONS as e:
                 if tokens_yielded or attempt >= max_retries:
@@ -1089,10 +1105,12 @@ class Agent:
                 input=[m.to_dict() for m in full_messages],
                 update_trace=self._update_trace,
                 session_id=session_id,
-            ):
+            ) as span:
                 data = await model.structured(
                     full_messages, schema=schema, **self._model_kwargs
                 )
-                return response_model.model_validate(data)
+                result = response_model.model_validate(data)
+                _record_output(span, result.model_dump(mode="json"))
+                return result
 
         return await _invoke()

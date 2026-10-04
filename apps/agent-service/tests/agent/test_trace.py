@@ -214,36 +214,26 @@ async def test_turn_trace_propagates_through_fan_out_wait():
 
 
 # ---------------------------------------------------------------------------
-# model-call generation context: re-parent tool spans under the generation
-# that requested them (tool dispatched after the generation span has closed,
-# but parent_span_id is still valid).
+# under_last_generation —— 在它里面开的 span 挂在最近一次模型调用下面：工具在模型
+# 调用结束之后才派发，那个 generation 已经结束了，但仍能当父节点。
 # ---------------------------------------------------------------------------
 
-from app.agent.trace import (  # noqa: E402
-    _capture_current_span_context,
-    current_generation_context,
-)
+from app.agent.trace import under_last_generation  # noqa: E402
 
 
-def test_capture_current_span_context_inside_and_outside_span():
-    from opentelemetry import trace as ot
-    from opentelemetry.sdk.trace import TracerProvider
+async def test_a_span_opened_under_the_last_generation_hangs_under_it(
+    tracer, exported_spans
+):
+    with tracer.start_as_current_span("root"):
+        with generation_span(name="llm", model="m", input=[]):
+            pass
+        with under_last_generation(), tracer.start_as_current_span("tool") as tool:
+            pass
 
-    assert _capture_current_span_context() is None  # no active span
-    tracer = TracerProvider().get_tracer("test")
-    with tracer.start_as_current_span("gen"):
-        cap = _capture_current_span_context()
-        assert cap is not None
-        assert set(cap) == {"trace_id", "parent_span_id"}
-        assert len(cap["trace_id"]) == 32  # langfuse 32-hex trace id
-        assert len(cap["parent_span_id"]) == 16  # OTel 16-hex span id
-    assert _capture_current_span_context() is None  # reverts after the span
-    # capture and TraceContext shape line up so it can be passed straight through
-    _ = ot.format_span_id  # imported symbol used by the helper
-
-
-def test_current_generation_context_none_by_default():
-    assert current_generation_context() is None
+    [generation] = exported_spans.get_finished_spans()
+    assert tool.parent is not None
+    assert tool.parent.span_id == generation.context.span_id
+    assert tool.get_span_context().trace_id == generation.context.trace_id
 
 
 # ---------------------------------------------------------------------------
@@ -487,23 +477,33 @@ def test_separate_trace_starts_spans_outside_the_current_trace(tracer):
     assert inner.get_span_context().trace_id != outer.get_span_context().trace_id
 
 
-def test_separate_trace_leaves_the_outer_model_call_and_turn_as_they_were(
-    tracer, mock_langfuse
+async def test_separate_trace_leaves_the_outer_model_call_and_turn_as_they_were(
+    tracer, exported_spans
 ):
-    """离开之后，外面那一轮接下来的工具 span 仍然挂在它自己的模型调用下面。"""
+    """里面看不到外面那次模型调用；离开之后，外面那一轮接下来的工具 span 仍然挂在它自己的
+    模型调用下面，而不是里面那次。"""
     with tracer.start_as_current_span("outer"), turn_trace("msg-1:persona-1"):
-        with generation_span(name="llm", model="m", input=[]):
+        with generation_span(name="outer-llm", model="m", input=[]):
             pass
-        outer_generation = current_generation_context()
         outer_turn = current_turn_trace_id()
-        assert outer_generation is not None and outer_turn is not None
+        assert outer_turn is not None
 
         with separate_trace():
-            assert current_generation_context() is None
             assert current_turn_trace_id() is None
-            with generation_span(name="llm", model="m", input=[]):
+            with under_last_generation(), tracer.start_as_current_span(
+                "inner-tool"
+            ) as inner_tool:
                 pass
-            assert current_generation_context() != outer_generation
+            with generation_span(name="inner-llm", model="m", input=[]):
+                pass
 
-        assert current_generation_context() == outer_generation
+        with under_last_generation(), tracer.start_as_current_span(
+            "outer-tool"
+        ) as outer_tool:
+            pass
         assert current_turn_trace_id() == outer_turn
+
+    generations = {s.name: s for s in exported_spans.get_finished_spans()}
+    assert inner_tool.parent is None
+    assert outer_tool.parent is not None
+    assert outer_tool.parent.span_id == generations["outer-llm"].context.span_id

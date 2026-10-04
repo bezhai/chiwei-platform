@@ -42,6 +42,8 @@ from app.runtime.lane_policy import current_deployment_lane
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from opentelemetry.trace import SpanContext
+
 logger = logging.getLogger(__name__)
 
 _client: Langfuse | None = None
@@ -122,45 +124,41 @@ def current_turn_trace_id() -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Model-call generation context: nest tool spans under their model call
+# 最近一次模型调用：工具 span 挂在发起它的那次模型调用下面
 # ---------------------------------------------------------------------------
 
-# In a ReAct loop the model call's generation span has already closed by the
-# time the loop dispatches the tools it requested, so a tool span would nest
-# flat under the agent root. We snapshot the generation's span context here and
-# let the loop re-parent each tool span under it via parent_span_id (a closed
-# span is still a valid parent), so the trace reads model-call → its tools.
-_current_generation_ctx: ContextVar[dict[str, str] | None] = ContextVar(
-    "agent_current_generation_ctx", default=None
+# ReAct 循环派发工具的时候，要这些工具的那次模型调用的 generation span 已经结束了，工具 span
+# 只按当前上下文开的话会平铺在 agent 根下面。这里记下 generation 的 SpanContext，循环开工具
+# span 时把它设成普通的 OTel 父节点（结束了的 span 照样能当父节点），trace 读起来就是"模型
+# 调用 → 它要的工具"。
+#
+# 不能借 langfuse 的 ``trace_context`` 指定这个父节点：SDK 把带 ``trace_context`` 开的 span
+# 一律标成 trace 的根（``langfuse.internal.as_root``），服务端拿最后收到的那个根覆盖 trace 的
+# 名字、输入输出和时间戳，带工具调用的 trace 就都改叫最后一个工具的名字了。
+_last_generation: ContextVar[SpanContext | None] = ContextVar(
+    "agent_last_generation", default=None
 )
 
 
-def _capture_current_span_context() -> dict[str, str] | None:
-    """Snapshot the current OTel span as a langfuse TraceContext, or None.
+@contextmanager
+def under_last_generation() -> Iterator[None]:
+    """在这个作用域里开的 span 挂在这个任务最近一次模型调用下面。
 
-    Returns ``{"trace_id", "parent_span_id"}`` (32-/16-hex, the shapes langfuse
-    TraceContext wants) for the active span, or None when no valid span is
-    current (langfuse unavailable / outside any span).
+    这个任务里还没有过模型调用时什么都不改，span 照常挂在当前 span 下面。"最近一次模型调用"
+    由 ``generation_span`` 顺手记下，只覆盖、不恢复：下一次模型调用覆盖它，任务结束它也就
+    没了；不恢复也免得跨着异步生成器的 yield 去 reset 一个 ContextVar。
     """
-    span = _otel_trace.get_current_span()
-    ctx = span.get_span_context() if span is not None else None
-    if ctx is None or not ctx.is_valid:
-        return None
-    return {
-        "trace_id": _otel_trace.format_trace_id(ctx.trace_id),
-        "parent_span_id": _otel_trace.format_span_id(ctx.span_id),
-    }
-
-
-def current_generation_context() -> dict[str, str] | None:
-    """The most recent model call's TraceContext in this task, or None.
-
-    Set as a side effect of ``generation_span`` (never reset — it is overwritten
-    by the next model call and dies with the task; not resetting also avoids a
-    ContextVar token being reset across an async-generator yield). The ReAct loop
-    reads it to parent each tool span under the model call that requested it.
-    """
-    return _current_generation_ctx.get()
+    generation = _last_generation.get()
+    if generation is None:
+        yield
+        return
+    token = otel_context.attach(
+        _otel_trace.set_span_in_context(_otel_trace.NonRecordingSpan(generation))
+    )
+    try:
+        yield
+    finally:
+        otel_context.detach(token)
 
 
 # ---------------------------------------------------------------------------
@@ -179,13 +177,13 @@ def separate_trace() -> Iterator[None]:
     挂在它自己的模型调用下面。
     """
     otel_token = otel_context.attach(otel_context.Context())
-    generation_token = _current_generation_ctx.set(None)
+    generation_token = _last_generation.set(None)
     turn_token = _turn_trace_seed.set(None)
     try:
         yield
     finally:
         _turn_trace_seed.reset(turn_token)
-        _current_generation_ctx.reset(generation_token)
+        _last_generation.reset(generation_token)
         otel_context.detach(otel_token)
 
 
@@ -423,8 +421,9 @@ def generation_span(
     A langfuse failure (unconfigured keys, network) degrades to a no-op span;
     the wrapped LLM call always proceeds.
 
-    Opened *as the current span* so the loop can snapshot its context (for tool
-    re-parenting) and so anything nested during the call hangs under it.
+    Opened *as the current span* so anything nested during the call hangs under
+    it; its span context is kept for the tools this call asks for, which the loop
+    dispatches after it has closed (``under_last_generation``).
     """
     try:
         cm = _get_client().start_as_current_generation(
@@ -440,9 +439,9 @@ def generation_span(
         yield _NoOpSpan(model)
         return
 
-    # Record this generation's span context so a tool span dispatched right after
-    # (in the ReAct loop, once this generation has closed) re-parents under it.
-    _current_generation_ctx.set(_capture_current_span_context())
+    # 记下这次模型调用：循环随后派发它要的工具时，工具 span 挂在它下面（这时它已经结束）。
+    generation = _otel_trace.get_current_span().get_span_context()
+    _last_generation.set(generation if generation.is_valid else None)
 
     span = _SafeSpan(gen, model)
     body_exc: BaseException | None = None
