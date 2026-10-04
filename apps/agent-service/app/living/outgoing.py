@@ -292,13 +292,9 @@ async def unsent(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
         f"WHERE r.lane = m.lane AND r.message_id = m.message_id) "
         f"ORDER BY m.seq"
     )
-    async with get_session() as s:
-        rows = (
-            await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
-        ).mappings().all()
     return [
         OutgoingMessage(**{k: row[k] for k in OutgoingMessage.model_fields})
-        for row in rows
+        for row in await _rows(sql, lane=lane, persona_id=persona_id)
     ]
 
 
@@ -356,33 +352,22 @@ async def _latest_mark(*, lane: str, persona_id: str) -> OutgoingUpTo | None:
         f"SELECT * FROM {_UP_TO_TABLE} WHERE lane = :lane AND persona_id = :persona_id "
         f"ORDER BY happening_seq DESC, whereabouts_seq DESC LIMIT 1"
     )
-    async with get_session() as s:
-        row = (
-            await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
-        ).mappings().first()
-    if row is None:
+    rows = await _rows(sql, lane=lane, persona_id=persona_id)
+    if not rows:
         return None
-    return OutgoingUpTo(**{k: row[k] for k in OutgoingUpTo.model_fields})
+    return OutgoingUpTo(**{k: rows[0][k] for k in OutgoingUpTo.model_fields})
 
 
 async def _starting_mark(*, lane: str, persona_id: str) -> OutgoingUpTo:
     """从她现在最新的经历讲起。"""
     sql = (
         f"SELECT (SELECT COALESCE(MAX(seq), 0) FROM {_HAPPENING_TABLE} "
-        f"WHERE lane = :lane AND actor = :persona_id), "
+        f"WHERE lane = :lane AND actor = :persona_id) AS happening_seq, "
         f"(SELECT COALESCE(MAX(seq), 0) FROM {_WHEREABOUTS_TABLE} "
-        f"WHERE lane = :lane AND persona_id = :persona_id)"
+        f"WHERE lane = :lane AND persona_id = :persona_id) AS whereabouts_seq"
     )
-    async with get_session() as s:
-        happening_seq, whereabouts_seq = (
-            await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
-        ).one()
-    return OutgoingUpTo(
-        lane=lane,
-        persona_id=persona_id,
-        happening_seq=int(happening_seq),
-        whereabouts_seq=int(whereabouts_seq),
-    )
+    (row,) = await _rows(sql, lane=lane, persona_id=persona_id)
+    return OutgoingUpTo(lane=lane, persona_id=persona_id, **row)
 
 
 async def _her_happenings_after(
@@ -427,15 +412,11 @@ async def _her_whereabouts_after(
 
 async def _her_last_message_seq(*, lane: str, persona_id: str) -> int:
     sql = (
-        f"SELECT COALESCE(MAX(seq), 0) FROM {_MESSAGE_TABLE} "
+        f"SELECT COALESCE(MAX(seq), 0) AS seq FROM {_MESSAGE_TABLE} "
         f"WHERE lane = :lane AND persona_id = :persona_id"
     )
-    async with get_session() as s:
-        return int(
-            (
-                await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
-            ).scalar_one()
-        )
+    (row,) = await _rows(sql, lane=lane, persona_id=persona_id)
+    return int(row["seq"])
 
 
 async def _rows(sql: str, **params: Any) -> list[Any]:
