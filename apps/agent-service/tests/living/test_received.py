@@ -337,6 +337,54 @@ async def test_a_round_that_fails_shows_them_again(her_round):
 
 
 @pytest.mark.integration
+async def test_a_landing_that_fails_halfway_through_the_read_marks_keeps_none_of_them(
+    her_round, monkeypatch
+):
+    """这一轮收尾的那个事务里，看过的记了一条、记第二条时失败：已经写下的那一条和这一轮的
+    ``LifeMoment`` 一起回滚，三条下一轮原样再摆一遍。只回滚一半的话，那一条就成了"看过"，
+    可这一轮并没有落地，她下一轮再也看不到它。"""
+    messages = [_from("world", f"第 {i} 件事。", at=_at(21, 20 + i)) for i in range(3)]
+    for m in messages:
+        await receive(m)
+
+    real = received_mod.insert_idempotent
+    marked: list[str] = []
+
+    async def fails_on_the_second_mark(obj, *, session=None):
+        if marked:
+            raise _Crash("记到第二条时库断了")
+        await real(obj, session=session)
+        marked.append(obj.message_id)
+
+    monkeypatch.setattr(received_mod, "insert_idempotent", fails_on_the_second_mark)
+    with pytest.raises(_Crash):
+        await _her_round(_at(21, 30))
+    monkeypatch.setattr(received_mod, "insert_idempotent", real)
+    assert marked == [messages[0].message_id], "前提没造出来：第一条要在失败之前写进那个事务"
+
+    async with session_mod.get_session() as s:
+        moments = (
+            await s.execute(
+                text("SELECT count(*) FROM data_life_moment WHERE lane = :l AND persona_id = :p"),
+                {"l": LANE, "p": "ayana"},
+            )
+        ).scalar_one()
+        reads = (
+            await s.execute(
+                text(f"SELECT count(*) FROM {received_mod._READ_TABLE} WHERE lane = :l"),
+                {"l": LANE},
+            )
+        ).scalar_one()
+    assert (moments, reads) == (0, 0), "这一轮没落地，可它的记录或者看过的记录留下了"
+
+    await _her_round(_at(21, 31))
+
+    again = her_round.seen[-1]
+    assert all(m.body in again for m in messages), f"没落地那一轮的消息没再摆出来：\n{again}"
+    assert await unread_received(lane=LANE, persona_id="ayana") == []
+
+
+@pytest.mark.integration
 async def test_what_arrives_while_she_is_in_a_round_stays_unread_for_the_next(her_round):
     """这一轮跑着的时候新到的消息，这一轮没给她看，就不能跟着记成看过。"""
     rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
