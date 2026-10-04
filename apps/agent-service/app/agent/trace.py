@@ -42,6 +42,7 @@ from app.runtime.lane_policy import current_deployment_lane
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from langfuse.model import PromptClient
     from opentelemetry.trace import SpanContext
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,43 @@ def under_last_generation() -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
+# 这次调用渲染用的 prompt：每个 generation 关联它实际用的那个 prompt 版本
+# ---------------------------------------------------------------------------
+
+# generation 是模型适配层开的，适配层只拿到编译好的消息，拿不到 prompt 对象。prompt 跟"最近
+# 一次模型调用"一样放在 tracing 的上下文里带到 ``generation_span``，模型客户端的接口不用认识
+# langfuse 的 prompt 对象。
+#
+# 但它不能像"最近一次模型调用"那样只覆盖、不恢复：外层 agent 的工具里调了另一个 agent，回来
+# 之后外层的下一次模型调用要关联的还是外层的 prompt。所以它按作用域设（``rendered_from``）。
+_current_prompt: ContextVar[PromptClient | None] = ContextVar(
+    "agent_current_prompt", default=None
+)
+
+
+@contextmanager
+def rendered_from(prompt: PromptClient | None) -> Iterator[None]:
+    """这个作用域里开的 generation 都关联 ``prompt``（它的名字和版本）。
+
+    一次 run / stream / extract 带的是它这次实际编译的那个 prompt 对象：泳道 label 命中就是那个
+    版本，回落到 production 就是 production 的版本。``None`` 表示这次调用不是由 prompt 渲染的，
+    它会清掉从外层继承来的值，而不是沿用外层的。SDK 自己的兜底 prompt（``is_fallback``）由
+    SDK 跳过不关联。
+
+    离开时（包括出异常、被取消、流式调用被消费方关掉）恢复外层的值。恢复用的是"把外层的值设
+    回去"，不是 ``ContextVar.reset(token)``：流式调用在异步生成器里进这个作用域，消费方没关就
+    丢下的生成器由垃圾回收在另一个上下文里收尾，在那里 reset 会抛 ValueError；设回外层的值
+    只落在那个用完就丢的上下文里。
+    """
+    outer = _current_prompt.get()
+    _current_prompt.set(prompt)
+    try:
+        yield
+    finally:
+        _current_prompt.set(outer)
+
+
+# ---------------------------------------------------------------------------
 # 另起一条 trace：一个 agent 在工具里调另一个 agent 时用
 # ---------------------------------------------------------------------------
 
@@ -173,16 +211,18 @@ def separate_trace() -> Iterator[None]:
     一个 agent 在自己的工具里调另一个 agent 时，里面那个的根 span 默认是外面那条 trace 里
     当前工具 span 的子 span，而且会把外面那条 trace 的名字、输入改成自己的。包上这一层：
     当前 OTel 上下文换成空的（里面开的第一个 span 就是一条新 trace 的根），"最近一次模型
-    调用"和这一轮对话的 trace 都清空。离开时三样都恢复，外面那一轮接下来的工具 span 照常
-    挂在它自己的模型调用下面。
+    调用"、渲染用的 prompt 和这一轮对话的 trace 都清空。离开时四样都恢复，外面那一轮接下来
+    的工具 span 照常挂在它自己的模型调用下面，模型调用照常关联它自己的 prompt。
     """
     otel_token = otel_context.attach(otel_context.Context())
     generation_token = _last_generation.set(None)
+    prompt_token = _current_prompt.set(None)
     turn_token = _turn_trace_seed.set(None)
     try:
         yield
     finally:
         _turn_trace_seed.reset(turn_token)
+        _current_prompt.reset(prompt_token)
         _last_generation.reset(generation_token)
         otel_context.detach(otel_token)
 
@@ -424,6 +464,8 @@ def generation_span(
     Opened *as the current span* so anything nested during the call hangs under
     it; its span context is kept for the tools this call asks for, which the loop
     dispatches after it has closed (``under_last_generation``).
+
+    关联的 prompt 是这次调用所在的 ``rendered_from`` 作用域里那一个。
     """
     try:
         cm = _get_client().start_as_current_generation(
@@ -432,6 +474,7 @@ def generation_span(
             input=input,
             model_parameters=model_parameters,
             metadata=metadata,
+            prompt=_current_prompt.get(),
         )
         gen = cm.__enter__()
     except Exception as exc:

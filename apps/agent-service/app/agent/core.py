@@ -55,6 +55,7 @@ from typing import Any
 
 from inner_shared.dynamic_config import dynamic_config
 from langfuse import Langfuse
+from langfuse.model import PromptClient
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -82,6 +83,7 @@ from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
     TURN_TRACE_NAME,
     current_turn_trace_id,
+    rendered_from,
     under_last_generation,
 )
 from app.api.middleware import get_lane
@@ -293,6 +295,7 @@ def _root_span(
     input: Any,
     update_trace: bool,
     session_id: str | None = None,
+    prompt: PromptClient | None = None,
 ):
     """Open the run/stream/extract root span and (optionally) name the trace.
 
@@ -305,6 +308,10 @@ def _root_span(
 
     调用方把这次调用交回去的结果记成这个 span 的 output（``_record_output``）。它是 trace 的根
     时，langfuse 拿它的名字、输入输出和开始时间当 trace 的。
+
+    ``prompt`` 是这次调用实际编译的那个 prompt 对象，这个 span 里开的每个 generation 都关联它
+    （``rendered_from``）；``None`` 是不由 prompt 渲染的调用，清掉外层调用设的那个。离开时恢复
+    外层的，外层 agent 的工具里调完这一次，外层接下来的模型调用照旧关联外层的 prompt。
 
     ``session_id`` (when provided) groups this trace into a langfuse session,
     independently of who owns the trace name/input: a guard span with
@@ -321,7 +328,10 @@ def _root_span(
     span_name = name or "agent"
     tid = current_turn_trace_id()
     trace_context = {"trace_id": tid} if tid else None
-    with _safe_current_span(span_name, input, trace_context) as span:
+    with (
+        _safe_current_span(span_name, input, trace_context) as span,
+        rendered_from(prompt),
+    ):
         trace_name: str | None = None
         trace_input: Any = None
         if tid is not None:
@@ -872,8 +882,12 @@ class Agent:
 
     async def _prepare(
         self, prompt_vars: dict[str, Any]
-    ) -> tuple[ModelClient, list[Message]]:
-        """Resolve the model client and compile the prompt messages."""
+    ) -> tuple[ModelClient, PromptClient, list[Message]]:
+        """Resolve the model client, fetch the prompt and compile its messages.
+
+        The prompt object comes back with what it compiled to: the call's root
+        span carries it, so every model call links the version actually rendered.
+        """
         if not self._cfg.prompt_id:
             raise ValueError(
                 f"Agent({self._cfg.trace_name}).run/stream requires a non-empty "
@@ -891,7 +905,7 @@ class Agent:
             currTime=now.strftime("%H:%M:%S"),
             **prompt_vars,
         )
-        return model, prompt_messages
+        return model, langfuse_prompt, prompt_messages
 
     async def _resolve_native_web_search(
         self, model: ModelClient
@@ -954,7 +968,7 @@ class Agent:
         attempt starts a fresh collection, so a transient failure never leaves a
         half-written turn behind.
         """
-        model, prompt_messages = await self._prepare(prompt_vars or {})
+        model, prompt, prompt_messages = await self._prepare(prompt_vars or {})
         tools, native_web_search = await self._resolve_native_web_search(model)
 
         full_messages = [*prompt_messages, *messages]
@@ -973,6 +987,7 @@ class Agent:
                 input=[m.to_dict() for m in full_messages],
                 update_trace=self._update_trace,
                 session_id=trace_session_id,
+                prompt=prompt,
             ) as span:
                 result = await _run_loop(
                     model,
@@ -1008,7 +1023,7 @@ class Agent:
         ``app.capabilities.retry`` (exponential ``base * 2^(N-1)`` clamped) so
         streaming and non-streaming paths stay consistent.
         """
-        model, prompt_messages = await self._prepare(prompt_vars or {})
+        model, prompt, prompt_messages = await self._prepare(prompt_vars or {})
         tools, native_web_search = await self._resolve_native_web_search(model)
 
         full_messages = [*prompt_messages, *messages]
@@ -1022,6 +1037,7 @@ class Agent:
                     input=[m.to_dict() for m in full_messages],
                     update_trace=self._update_trace,
                     session_id=trace_session_id,
+                    prompt=prompt,
                 ) as span:
                     streamed: list[str] = []
                     try:
@@ -1085,12 +1101,10 @@ class Agent:
         schema = response_model.model_json_schema()
 
         full_messages = list(messages)
-        prompt_id = self._cfg.prompt_id
-        if prompt_id:
-            langfuse_prompt = get_prompt(prompt_id)
-            prompt_messages = compile_to_messages(
-                langfuse_prompt, **(prompt_vars or {})
-            )
+        prompt: PromptClient | None = None
+        if self._cfg.prompt_id:
+            prompt = get_prompt(self._cfg.prompt_id)
+            prompt_messages = compile_to_messages(prompt, **(prompt_vars or {}))
             full_messages = [*prompt_messages, *messages]
 
         @_retry_decorator(
@@ -1105,6 +1119,7 @@ class Agent:
                 input=[m.to_dict() for m in full_messages],
                 update_trace=self._update_trace,
                 session_id=session_id,
+                prompt=prompt,
             ) as span:
                 data = await model.structured(
                     full_messages, schema=schema, **self._model_kwargs

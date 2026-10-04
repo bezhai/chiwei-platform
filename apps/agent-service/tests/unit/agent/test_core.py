@@ -495,7 +495,7 @@ class TestRunSessionPlumbing:
         from contextlib import contextmanager
 
         @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None):
+        def _spy_span(*, name, input, update_trace, session_id=None, prompt=None):
             captured["session_id"] = session_id
             yield MagicMock()
 
@@ -513,7 +513,7 @@ class TestRunSessionPlumbing:
         from contextlib import contextmanager
 
         @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None):
+        def _spy_span(*, name, input, update_trace, session_id=None, prompt=None):
             captured["session_id"] = session_id
             yield MagicMock()
 
@@ -527,7 +527,7 @@ class TestRunSessionPlumbing:
         from contextlib import contextmanager
 
         @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None):
+        def _spy_span(*, name, input, update_trace, session_id=None, prompt=None):
             captured["session_id"] = session_id
             yield MagicMock()
 
@@ -543,7 +543,7 @@ class TestRunSessionPlumbing:
         from contextlib import contextmanager
 
         @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None):
+        def _spy_span(*, name, input, update_trace, session_id=None, prompt=None):
             captured["session_id"] = session_id
             yield MagicMock()
 

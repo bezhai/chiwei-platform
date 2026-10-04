@@ -169,7 +169,7 @@ async def _system_at(template: str, clock: dt.datetime) -> str:
         ),
         patch.object(cst_time, "now_cst", lambda: clock),
     ):
-        _, messages = await Agent(_MOMENT_CFG)._prepare(
+        _, _, messages = await Agent(_MOMENT_CFG)._prepare(
             {
                 "persona_name": "赤尾",
                 "persona_core": "她拍胶片、写角色分析、逛论坛。",

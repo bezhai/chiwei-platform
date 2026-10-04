@@ -507,3 +507,40 @@ async def test_separate_trace_leaves_the_outer_model_call_and_turn_as_they_were(
     assert inner_tool.parent is None
     assert outer_tool.parent is not None
     assert outer_tool.parent.span_id == generations["outer-llm"].context.span_id
+
+
+# ---------------------------------------------------------------------------
+# rendered_from —— 作用域里开的 generation 关联这次调用编译的 prompt；另起的 trace
+# 不带外面那一轮的 prompt 进去，离开之后外面那一轮照旧关联它自己的。
+# ---------------------------------------------------------------------------
+
+from langfuse._client.attributes import LangfuseOtelSpanAttributes  # noqa: E402
+from langfuse.api import Prompt_Text  # noqa: E402
+from langfuse.model import TextPromptClient  # noqa: E402
+
+from app.agent.trace import rendered_from  # noqa: E402
+
+
+async def test_separate_trace_does_not_carry_the_outer_prompt_in(exported_spans):
+    world_round = TextPromptClient(
+        Prompt_Text(
+            name="world_round",
+            version=3,
+            prompt="你是这个世界。",
+            config={},
+            labels=["production"],
+            tags=[],
+        )
+    )
+    with rendered_from(world_round):
+        with separate_trace():
+            with generation_span(name="inner-llm", model="m", input=[]):
+                pass
+        with generation_span(name="outer-llm", model="m", input=[]):
+            pass
+
+    linked = {
+        s.name: s.attributes.get(LangfuseOtelSpanAttributes.OBSERVATION_PROMPT_NAME)
+        for s in exported_spans.get_finished_spans()
+    }
+    assert linked == {"inner-llm": None, "outer-llm": "world_round"}
