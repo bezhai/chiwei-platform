@@ -135,6 +135,7 @@ _VALID: dict[type, dict] = {
         "sender": "赤尾",
         "recipient": "绫奈",
         "body": "当面对你说：「饭好了。」",
+        "message_time": _AWARE,
     },
     OutgoingResult: {
         "lane": "coe-x",
@@ -263,9 +264,10 @@ _PINNED: dict[type, dict[str, str]] = {
         "persona_id": "TEXT",
         "nudged_by": "TEXT",
     },
-    # 她要发出去的一条消息：id、发给谁、正文生成那一刻就定死，补发时原样再发。``seq`` 是她
-    # 要发的消息里的先后（同一位收件人按它的先后发）。**没有"发没发出去"的列**：结果是另一件
-    # 事、另一张表。**没有时刻列**：她什么时候做的写在正文里，生成的先后是框架的 ``created_at``。
+    # 她要发出去的一条消息：id、发给谁、正文、消息上的时间生成那一刻就定死，补发时原样再发。
+    # ``seq`` 是她要发的消息里的先后（同一位收件人按它的先后发）。``message_time`` 是消息说的事
+    # 发生的那一刻，随消息发出去，对方按它排；补发时给发出那一刻，早话就排到后话后面。**没有
+    # "发没发出去"的列**：结果是另一件事、另一张表。生成的先后是框架的 ``created_at``。
     OutgoingMessage: {
         "lane": "TEXT",
         "message_id": "TEXT",
@@ -274,6 +276,7 @@ _PINNED: dict[type, dict[str, str]] = {
         "sender": "TEXT",
         "recipient": "TEXT",
         "body": "TEXT",
+        "message_time": "TIMESTAMPTZ",
     },
     # 一条消息发出去的结果：送到了，或者对方没开收件箱。有这一行就不再发；没确认的那次什么都
     # 不记，下一次再发。
@@ -392,6 +395,7 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
         ("FileRead", "read_at"),
         ("Happening", "occurred_at"),
         ("LivingDayPage", "written_at"),
+        ("OutgoingMessage", "message_time"),
         ("Picture", "made_at"),
         ("ReceivedMessage", "message_time"),
         ("Whereabouts", "noted_at"),

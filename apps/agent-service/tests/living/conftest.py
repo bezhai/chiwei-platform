@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 import pytest
 
@@ -47,6 +48,8 @@ class Sent:
     recipient: str
     body: str
     message_id: str
+    # 消息上的时间（通信机制里的 ``time``）；``None`` 是没给，通信机制会填发出那一刻。
+    time: datetime | None = None
 
 
 class Post:
@@ -63,12 +66,12 @@ class Post:
         self.hanging: set[str] = set()
         self.no_inbox: set[str] = set()
 
-    async def send(self, *, sender, recipient, body, message_id=None):
+    async def send(self, *, sender, recipient, body, message_id=None, time=None):
         import asyncio
 
         from app.messaging.message import Delivery, SendFailed
 
-        self.sent.append(Sent(sender, recipient, body, message_id))
+        self.sent.append(Sent(sender, recipient, body, message_id, time))
         if recipient in self.hanging:
             await asyncio.Event().wait()
         if recipient in self.failing:

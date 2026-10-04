@@ -24,11 +24,13 @@ world 的三轮，每一轮只看到一部分。她这一段在世界里什么�
 一刻她的经历全都落了库，取到的最大号之前不会再冒出一条。事务落地之前进程没了，两样都不留，
 下一次从同一段经历重新生成，id 和正文跟没落地的那一次一样：
 
-  * 对姐妹的那条，id 由那句话的经历 id 和收件人决定，正文是那句原话；
-  * 给 world 的那条，id 由这一段经历的起止决定，正文由这一段存下的内容决定。
+  * 对姐妹的那条，id 由那句话的经历 id 和收件人决定，正文是那句原话，时间是那句话说出口的那一刻；
+  * 给 world 的那条，id 由这一段经历的起止决定，正文由这一段存下的内容决定，时间是这一段里最晚
+    的那一刻。
 
-**id 和正文落地之后就定死在那一行上**（:class:`OutgoingMessage`），重发时原样再发，对方按 id
-去重。
+**id、正文、时间落地之后就定死在那一行上**（:class:`OutgoingMessage`），重发时原样再发，对方按
+id 去重。时间随消息发出去（通信机制里的 ``time``），对方按它排先后，所以它是事情发生的时间，
+不是发出那一刻：一句早先没发出去的话补发时要是带着发出那一刻，就排到别人后来说的话后面了。
 
 **发**（:func:`send_unsent`）：还没有结果的逐条发，发完记一条结果（:class:`OutgoingResult`）。
 没确认（通信机制抛错、:data:`SEND_SECONDS` 内没结果、进程没了、这一轮被取消、记结果失败）就
@@ -55,12 +57,19 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any
 
+from pydantic import field_validator
 from sqlalchemy import text
 
 from app.data.session import get_session
 from app.infra.cst_time import dated_clock
 from app.living.participants import WORLD, residents
-from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON, Happening, Whereabouts
+from app.living.records import (
+    KIND_SPEECH,
+    MEDIUM_IN_PERSON,
+    Happening,
+    Whereabouts,
+    _require_aware,
+)
 from app.messaging.sending import send
 from app.runtime.data import Data, Key
 from app.runtime.migrator import _table_name
@@ -91,12 +100,14 @@ SEND_SECONDS = 10.0
 
 
 class OutgoingMessage(Data):
-    """她要发出去的一条消息。从这一行写下起，id、发给谁、正文都不再变，重发时原样再发。
+    """她要发出去的一条消息。从这一行写下起，id、发给谁、正文、时间都不再变，重发时原样再发。
 
     自然键 ``(lane, message_id)``。纯 append：发没发出去是另一件事（:class:`OutgoingResult`）。
 
     ``seq`` 是这条在她要发的消息里的先后（每人一条轴，在占用里取号）：同一位收件人的几条按它
     的先后发。同一个事务里写下的几条 ``created_at`` 一样，分不出先后。
+
+    ``message_time`` 是这条消息说的事发生在什么时候，发出去就是消息上的时间（见模块说明）。
     """
 
     lane: Annotated[str, Key]
@@ -106,10 +117,16 @@ class OutgoingMessage(Data):
     sender: str
     recipient: str
     body: str
+    message_time: datetime
 
     class Meta:
         # 读侧唯一形状：这个人还没有结果的那些，按先后。
         indexes = (("lane", "persona_id", "seq"),)
+
+    @field_validator("message_time")
+    @classmethod
+    def _aware_message_time(cls, v: datetime) -> datetime:
+        return _require_aware("message_time", v)
 
 
 class OutgoingResult(Data):
@@ -217,6 +234,7 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
                     sender=sender,
                     recipient=name,
                     body=_said_to_her(deed, name=name),
+                    message_time=deed.occurred_at,
                 )
             )
         if not deed.audience or any(name not in sisters for name in deed.audience):
@@ -231,6 +249,7 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
     if lines:
         # 当面做的事都要先有位置（``say`` / ``act`` 没有位置就拒绝），所以有一行就有她在哪。
         assert where is not None, f"{persona_id} 当面做了事，却从没记下过自己在哪"
+        ended_at = max(at for _, _, at, _ in lines)
         seq += 1
         messages.append(
             OutgoingMessage(
@@ -246,7 +265,8 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
                 seq=seq,
                 sender=sender,
                 recipient=WORLD,
-                body=_digest(lines, where=where),
+                body=_digest(lines, where=where, ended_at=ended_at),
+                message_time=ended_at,
             )
         )
 
@@ -275,6 +295,7 @@ async def send_unsent(*, lane: str, persona_id: str) -> None:
                     recipient=message.recipient,
                     body=message.body,
                     message_id=message.message_id,
+                    time=message.message_time,
                 )
             await insert_append(
                 OutgoingResult(
@@ -348,18 +369,22 @@ def _said_to_her(deed: Happening, *, name: str) -> str:
     return f"当面对你{also}说：「{deed.content}」"
 
 
-def _digest(lines: list[tuple[datetime, int, datetime, str]], *, where: Whereabouts) -> str:
+def _digest(
+    lines: list[tuple[datetime, int, datetime, str]],
+    *,
+    where: Whereabouts,
+    ended_at: datetime,
+) -> str:
     """给 world 的那条：一行一件，带着发生的时刻；最后是她这时候在哪、在做什么。
 
-    时刻相对这一段里最晚的那一刻渲染（跨了日历日的才带日子），不取发送那一刻：正文要在重发时
-    一字不差。
+    时刻相对这一段里最晚的那一刻（``ended_at``）渲染（跨了日历日的才带日子），不取发送那一刻：
+    正文要在重发时一字不差。
     """
     lines = sorted(lines, key=lambda item: (item[0], item[1]))
-    latest = max(at for _, _, at, _ in lines)
     return "\n".join(
         [
             _DIGEST_HEAD,
-            *(f"- {dated_clock(at, now=latest)} {line}" for _, _, at, line in lines),
+            *(f"- {dated_clock(at, now=ended_at)} {line}" for _, _, at, line in lines),
             f"做完这些，我在 {where.place}，正在 {where.doing}。",
         ]
     )

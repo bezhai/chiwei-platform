@@ -318,6 +318,47 @@ async def test_a_send_that_was_not_confirmed_goes_again_with_the_same_id_and_bod
 
 
 @pytest.mark.integration
+async def test_a_sister_gets_her_words_with_the_time_she_said_them_on_every_send(
+    started, in_a_moment
+):
+    """对方按消息上的时间排。补发时给发出那一刻，一句早话就排到别人后说的话后面去了。"""
+    post = started
+    async with in_a_moment("akao", now=_at(21, 30)):
+        await _do(say, {"what": "饭好了。", "to": ["绫奈"]})
+    post.failing.add("绫奈")
+
+    await _tell()
+    post.failing.clear()
+    await _tell()
+
+    assert [(s.recipient, s.time) for s in post.sent] == [
+        ("绫奈", _at(21, 30)),
+        ("绫奈", _at(21, 30)),
+    ]
+
+
+@pytest.mark.integration
+async def test_world_gets_a_stretch_with_the_time_it_ended_on_every_send(
+    started, in_a_moment
+):
+    """给 world 的那条的时间是这一段里最晚的那一刻，跟正文一样补发时一字不变。"""
+    post = started
+    async with in_a_moment("akao", now=_at(21, 30), moment_id="m1"):
+        await _do(act, {"what": "把锅放上灶"})
+    async with in_a_moment("akao", now=_at(21, 40), moment_id="m2"):
+        await _do(act, {"what": "关了火"})
+    post.failing.add("world")
+
+    await _tell()
+    post.failing.clear()
+    await _tell()
+
+    first, again = post.sent
+    assert first.time == again.time == _at(21, 40)
+    assert (again.message_id, again.body) == (first.message_id, first.body)
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("handed_over", [False, True], ids=["before-send", "after-send"])
 async def test_a_process_that_dies_while_sending_leaves_it_to_be_sent_again(
     started, in_a_moment, monkeypatch, handed_over
@@ -328,10 +369,11 @@ async def test_a_process_that_dies_while_sending_leaves_it_to_be_sent_again(
     async with in_a_moment("akao", now=_at(21, 30)):
         await _do(say, {"what": "饭好了。", "to": ["绫奈"]})
 
-    async def dies(*, sender, recipient, body, message_id=None):
+    async def dies(*, sender, recipient, body, message_id=None, time=None):
         if handed_over:
             await post.send(
-                sender=sender, recipient=recipient, body=body, message_id=message_id
+                sender=sender, recipient=recipient, body=body, message_id=message_id,
+                time=time,
             )
         raise _Died()
 
@@ -757,3 +799,72 @@ async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_
 
     (what_she_read, _kwargs) = her_turn.runs[-1]
     assert "赤尾：当面对你说：「饭好了，下来吃。」" in what_she_read[-1].content
+
+
+@pytest.mark.integration
+async def test_through_messaging_her_sister_reads_words_in_the_order_they_were_said(
+    broker, messaging_db, moment_db, stub_moment, in_a_moment, monkeypatch  # noqa: F811
+):
+    """真的通信机制：赤尾 21:30 对绫奈说的那句第一次没发出去，千凪 21:35 对她说的那句先到了，
+    赤尾那句之后补发。绫奈读到的还是先赤尾、后千凪：她那边按消息上的时间排，那是说出口的时间。"""
+    from app.living import participants as participants_mod
+    from app.living.participants import WORLD
+    from app.living.received import open_inboxes, unread_received
+    from app.living.records import living_lane
+    from app.messaging.lifecycle import start_messaging
+    from app.messaging.message import SendFailed
+    from app.messaging.receiving import inbox, inboxes_at_start
+    from tests.messaging.helpers import Inbox, eventually
+
+    async def find_persona(persona_id: str):
+        return SimpleNamespace(persona_id=persona_id, display_name=RESIDENT_NAMES[persona_id])
+
+    monkeypatch.setattr(participants_mod, "find_persona", find_persona)
+    monkeypatch.setattr(participants_mod, "_known", None)
+    inbox(WORLD, on_message=Inbox().on_message)
+    inboxes_at_start(open_inboxes)
+    await start_messaging()
+    lane = living_lane()
+
+    real_send = outgoing_mod.send
+    refused: list[str] = []
+
+    async def refuses_her_first(**kwargs):
+        if kwargs["recipient"] == "绫奈" and not refused:
+            refused.append(kwargs["message_id"])
+            raise SendFailed("broker 没有确认", message_id=kwargs["message_id"])
+        return await real_send(**kwargs)
+
+    monkeypatch.setattr(outgoing_mod, "send", refuses_her_first)
+
+    for persona in ("akao", "chinagi"):
+        await note_whereabouts(
+            lane=lane, persona_id=persona, moment_id="before", place="家/客厅",
+            doing="看书", noted_at=_at(21, 0),
+        )
+        await send_what_she_did(lane=lane, persona_id=persona)
+
+    async with in_a_moment("akao", lane=lane, now=_at(21, 30), moment_id="a"):
+        await _do(say, {"what": "饭好了，下来吃。", "to": ["绫奈"]})
+    await send_what_she_did(lane=lane, persona_id="akao")
+    assert refused, "前提没造出来：赤尾那句第一次要没发出去"
+
+    async with in_a_moment("chinagi", lane=lane, now=_at(21, 35), moment_id="c"):
+        await _do(say, {"what": "我先吃了。", "to": ["绫奈"]})
+    await send_what_she_did(lane=lane, persona_id="chinagi")
+
+    async def she_has(n: int) -> bool:
+        return len(await unread_received(lane=lane, persona_id="ayana")) == n
+
+    await eventually(lambda: she_has(1))
+    await send_what_she_did(lane=lane, persona_id="akao")
+    await eventually(lambda: she_has(2))
+
+    her_turn = stub_moment(said="继续")
+    await _round(_at(21, 41), "ayana", lane=lane)
+
+    (what_she_read, _kwargs) = her_turn.runs[-1]
+    seen = what_she_read[-1].content
+    akao_said = seen.index("赤尾：当面对你说：「饭好了，下来吃。」")
+    chinagi_said = seen.index("千凪：当面对你说：「我先吃了。」")
+    assert akao_said < chinagi_said, seen
