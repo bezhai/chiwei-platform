@@ -91,7 +91,6 @@ OWN_RECENT_LIMIT = 12
 PERCEIVED_LIMIT = 60
 
 _HAPPENING_TABLE = _table_name(Happening)
-_WHEREABOUTS_TABLE = _table_name(Whereabouts)
 
 
 @dataclass(frozen=True)
@@ -293,25 +292,6 @@ async def recent_own_happenings(
     ]
     items.reverse()
     return items
-
-
-async def all_whereabouts(*, lane: str) -> list[Whereabouts]:
-    """本 lane 上每个人此刻在哪、在做什么，各取自己 seq 轴上最新的一条。
-
-    跟 :func:`app.living.whereabouts.who_is_where` 是两个问题：那个只回答"谁在
-    哪"（事件写入时拍快照用，位置就够了），这个还要"在做什么"——``look_around``
-    要按三档裁出不同的详细程度，同一地点的人在干嘛是看得见的。
-    """
-    sql = (
-        f"SELECT DISTINCT ON (persona_id) * FROM {_WHEREABOUTS_TABLE} "
-        f"WHERE lane = :lane ORDER BY persona_id, seq DESC"
-    )
-    async with get_session() as s:
-        result = await s.execute(text(sql), {"lane": lane})
-        rows = result.mappings().all()
-    return [
-        Whereabouts(**{k: row[k] for k in Whereabouts.model_fields}) for row in rows
-    ]
 
 
 async def read_snapshot(

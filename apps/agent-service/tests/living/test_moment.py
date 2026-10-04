@@ -489,70 +489,8 @@ def test_the_moment_tool_descriptions_carry_no_medical_examples():
 
 
 # --------------------------------------------------------------------------
-# 四 · 查世界 —— 够得着的地方现在怎么样
+# 四 · 环顾四周 —— 问 world，用例在 ``tests/living/test_look_around.py``
 # --------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-async def test_looking_around_sees_who_is_here_and_what_they_are_doing(
-    moment_db, stub_moment
-):
-    await _stand("akao", "家/客厅", "待着", _at(13))
-    await _stand("ayana", "家/客厅", "看书", _at(13))
-    runner = stub_moment(("look_around", {}))
-
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-
-    seen = runner.results[0]
-    assert "ayana" in seen and "看书" in seen
-
-
-@pytest.mark.integration
-async def test_looking_around_only_places_the_ones_elsewhere_in_the_house(
-    moment_db, stub_moment
-):
-    """同一栋别处：知道她在哪，不知道她在干嘛 —— 信息差归位置管。"""
-    await _stand("akao", "家/客厅", "待着", _at(13))
-    await _stand("ayana", "家/楼上/绫奈房间", "偷偷哭", _at(13))
-    runner = stub_moment(("look_around", {}))
-
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-
-    seen = runner.results[0]
-    assert "家/楼上/绫奈房间" in seen
-    assert "偷偷哭" not in seen
-
-
-@pytest.mark.integration
-async def test_looking_around_does_not_promote_a_vague_location_into_this_room(
-    moment_db, stub_moment
-):
-    """姐姐只定位到「家」，她在「家/客厅」—— 不许判成同处一室、把人家在干嘛吐出来。
-
-    T3 给 ``reach_between`` 加的覆盖档是为**范围事件**服务的（天黑笼罩整栋）。人不是
-    范围：「绫奈在家」不代表她就在客厅。拿覆盖档比两个人 = 位置一粗就泄露。
-    """
-    await _stand("akao", "家/客厅", "待着", _at(13))
-    await _stand("ayana", "家", "在家里某处偷偷哭", _at(13))
-    runner = stub_moment(("look_around", {}))
-
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-
-    seen = runner.results[0]
-    assert "偷偷哭" not in seen, "位置一粗她就把姐姐在干嘛看光了"
-    assert "ayana" in seen, "知道姐姐在这栋楼里是对的，不知道的只是她在干嘛"
-
-
-@pytest.mark.integration
-async def test_looking_around_cannot_reach_someone_who_is_out(moment_db, stub_moment):
-    await _stand("akao", "家/客厅", "待着", _at(13))
-    await _stand("chinagi", "学校/图书馆", "自习", _at(13))
-    runner = stub_moment(("look_around", {}))
-
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-
-    seen = runner.results[0]
-    assert "chinagi" not in seen and "自习" not in seen
 
 
 # --------------------------------------------------------------------------
@@ -1580,27 +1518,6 @@ async def test_moving_is_not_switching_to_something_else(moment_db, stub_moment)
 
     assert moment.switched is False, "走一步被算成了换事情"
     assert moment.doing == "等第一节课"
-
-
-@pytest.mark.integration
-async def test_after_she_moves_the_others_can_reach_her_there(
-    moment_db, stub_moment, in_a_moment
-):
-    """位置是别人能不能感知到她的全部依据 —— 挪完，同处的人就该看得见她。
-
-    这条是上面那个 bug 真正的代价：绫奈叙述自己在教室里，而全家看到的她一直在
-    走廊。她不是"状态标签滞后"，是**两小时对所有人不可见**。
-    """
-    await _stand("ayana", "学校/教学楼走廊", "等第一节课", _at(9))
-    await _stand("akao", "学校/二年三班教室", "趴桌上发呆", _at(9))
-    stub_moment(("move_to", {"place": "学校/二年三班教室"}))
-
-    await run_moment(lane=LANE, persona_id="ayana", now=_at(9, 20))
-
-    async with in_a_moment("ayana", lane=LANE, now=_at(9, 30)):
-        seen = await look_around.invoke({})
-
-    assert "akao" in seen, f"挪过来了却还是看不见同一个地方的人：\n{seen}"
 
 
 @pytest.mark.integration

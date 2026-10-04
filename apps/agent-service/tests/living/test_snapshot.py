@@ -31,7 +31,7 @@ from app.living.records import (
     MEDIUM_PHONE,
     OUTBOUND_HAPPENING_PREFIX,
 )
-from app.living.snapshot import OWN_RECENT_LIMIT, all_whereabouts, read_snapshot
+from app.living.snapshot import OWN_RECENT_LIMIT, read_snapshot
 from app.living.whereabouts import note_whereabouts
 
 LANE = "coe-living"
@@ -559,40 +559,7 @@ async def test_a_phone_message_beside_her_is_not_something_she_can_overhear(snap
 
 
 # --------------------------------------------------------------------------
-# 五 · 够得着的地方现在什么样（look_around 的底层查询）
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-async def test_everyone_now_is_each_persons_latest_spot(snap_db):
-    await _stand("akao", "家/客厅", "待着", _at(9))
-    await _stand("akao", "家/厨房", "煮抹茶", _at(13))
-    await _stand("ayana", "家/楼上/绫奈房间", "画画", _at(12))
-
-    now = {w.persona_id: (w.place, w.doing) for w in await all_whereabouts(lane=LANE)}
-
-    assert now == {
-        "akao": ("家/厨房", "煮抹茶"),
-        "ayana": ("家/楼上/绫奈房间", "画画"),
-    }
-
-
-@pytest.mark.integration
-async def test_everyone_now_stays_inside_this_lane(snap_db):
-    await note_whereabouts(
-        lane="prod",
-        persona_id="akao",
-        moment_id="m",
-        place="线上/某处",
-        doing="线上的事",
-        noted_at=_at(13),
-    )
-
-    assert await all_whereabouts(lane=LANE) == []
-
-
-# --------------------------------------------------------------------------
-# 六 · 跨夜之后，昨晚那行不能读成今晚
+# 五 · 跨夜之后，昨晚那行不能读成今晚
 # --------------------------------------------------------------------------
 
 

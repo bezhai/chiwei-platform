@@ -60,7 +60,7 @@
     "该在几点"，到点了她自己看得见，见 :mod:`app.living.loose_ends`）
   * :func:`say` / :func:`act`  当面说一句话 / 做一个别人看得见的动作。这一轮结束时，她在
     世界里做的事一条发给 world，只对姐妹说的话直接给那位姐妹（:mod:`app.living.outgoing`）
-  * :func:`look_around`  够得着的地方现在怎么样
+  * :func:`look_around`  问 world 她这里现在什么样、有谁在；没人回答就如实告诉她
   * :func:`stop_for_now` 这一轮我到此为止（零参数，调完这一轮就结束）
   * ``look_at_phone``    拿起手机打开某条会话，看说了什么（:mod:`app.living.phone`）
   * ``look_through_your_phone`` 翻一翻手机上都有哪些会话（同上，三层里的第二层：
@@ -132,7 +132,8 @@ from app.living.loose_ends import (
     rewrite_loose_ends,
 )
 from app.living.mouth import MOUTH_TOOLS
-from app.living.outgoing import send_what_she_did
+from app.living.outgoing import SEND_SECONDS, send_what_she_did
+from app.living.participants import WORLD, residents
 
 # 谁住在这个家、她是谁那两个 prompt 变量：住在叶子模块 ``persona`` 而不是这里，
 # 因为日记那一页（``app.living.day_page``）也要用，而它在 ``snapshot`` 之下、本模块
@@ -147,18 +148,14 @@ from app.living.phone import (
     render_unread,
 )
 from app.living.pictures import PICTURE_TOOLS
-from app.living.place import (
-    PLACE_IS_EVERYONES,
-    PLACE_SHAPE,
-    Reach,
-    reach_between_people,
-)
+from app.living.place import PLACE_IS_EVERYONES, PLACE_SHAPE
 from app.living.reading import READING_TOOLS
 from app.living.received import mark_read, render_received, unread_received
 from app.living.records import (
     KIND_ACT,
     KIND_SPEECH,
     MEDIUM_IN_PERSON,
+    Whereabouts,
     _require_aware,
     legacy_null_is,
     living_lane,
@@ -178,10 +175,11 @@ from app.living.scope import (
     note_recorded,
 )
 from app.living.serial import hold
-from app.living.snapshot import all_whereabouts, read_snapshot
+from app.living.snapshot import read_snapshot
 from app.living.takeback import TAKEBACK_TOOLS
 from app.living.web import WEB_TOOLS
 from app.living.whereabouts import current_whereabouts, note_whereabouts
+from app.messaging.sending import ask
 from app.runtime.data import Data, Key
 from app.runtime.migrator import _table_name
 from app.runtime.node import node
@@ -682,43 +680,92 @@ async def stop_for_now() -> str:
     return "就到这儿。"
 
 
+# ---------------------------------------------------------------------------
+# 环顾四周：问 world
+#
+# 这里现在什么样、有谁在，由 world 回答，life 不按地名比对谁跟谁在一处：地名是三个人各自写的
+# 字符串，同一个家会被写成两条不一样的路径，比对的结果就是她跟同在厨房的妹妹"不在一个地方"。
+# world 读的是自然语言，依据是它的记录、各人自己报的位置和现实里的天气。
+# ---------------------------------------------------------------------------
+
+# 她环顾四周时最多等 world 回答多久。world 那边每个问题起一个应答 agent（一次模型调用，中间可能
+# 查几次记录），coe 上实测 12–16 秒；45 秒是它的三倍左右，慢一些的那次也等得到。再久就不等了，
+# 如实告诉她没人回答，她过一会儿可以再看一眼。这个时刻随问题带过去（通信机制的截止时刻），过了
+# 它 world 那边不再答。
+#
+# 等的这段时间她这一轮一直占着她的 moment 占用（上限 :data:`app.living.serial.HELD_SECONDS`，
+# 900 秒）。她一轮最多走 12 步（``_MOMENT_CFG`` 的 recursion_limit），就算每一步都在环顾四周、
+# 每一次都等满（加上下面问出去那一步的上限，一次 55 秒），也是 660 秒，碰不到那个上限。
+# 不做成配置：这是"不让她干等"的上限，不是她生活里的一个参数。
+LOOK_AROUND_ANSWER_SECONDS = 45.0
+
+# 没等到回答时交给她的那一句。只说没人回答，不说为什么：超时、world 没在跑、出错，对她来说都
+# 是同一件事——这一眼没看到。原因记在日志和通信机制的记录里。
+NOBODY_ANSWERED = "没人回答：你不知道这里现在什么样。"
+
+
+def _looking_around_from(me: Whereabouts) -> str:
+    """她问 world 的那一句：先说她自己此刻在哪、在做什么，再问这里现在什么样、有谁在。
+
+    **她在哪必须写在问题里。** 她这一轮做的事要等这一轮结束才汇总发给 world
+    （:mod:`app.living.outgoing`），提问又不排在普通消息后面，所以同一轮里她刚换了地方就环顾
+    四周，world 还不知道她挪了。她自己知道，就由她说；``me`` 是她此刻最新的那条位置，这一轮
+    里 ``switch_to`` / ``move_to`` 刚写下的也在内。
+    """
+    return f"我现在在 {me.place}，正在 {me.doing}。我看一眼周围：这里现在什么样？有谁在？"
+
+
 @tool
 @tool_error("看一眼周围失败")
 async def look_around() -> str:
-    """看一眼够得着的地方现在什么样。
+    """看一眼你这里现在什么样、有谁在。
 
-    同一个地方的人，你看得见她在干嘛；同一栋别处的人，你只知道她在哪；不在这栋
-    里的人，你不知道。
+    你在哪、在做什么，以你最后一次定下的为准，这一轮里刚换过、刚挪过的也算。
+
+    回来的就是此刻这里的样子。回来的是"没人回答"时，你就是不知道这里现在什么样，
+    别自己补上。
 
     Returns:
-        一段自然语言描述。
+        此刻这里的样子；没人回答时如实说没人回答。
     """
     lane, _now, persona_id, _moment_id = moment_scope()
     me = await current_whereabouts(lane=lane, persona_id=persona_id)
     if me is None:
+        # 没有"这里"可问：她自己没定下在哪，world 也不知道。
         return "你还没定下自己在哪，所以什么都够不着。先用 switch_to 落个位置。"
 
-    here: list[str] = []
-    elsewhere: list[str] = []
-    for other in await all_whereabouts(lane=lane):
-        if other.persona_id == persona_id:
-            continue
-        # **人跟人比位置走 reach_between_people，不是 reach_between。** 后者有一档
-        # "事情发生在一整片范围上、站在这片里的人都在场"，那是给天黑这种范围事件
-        # 用的；套到人身上，一个只粗略定位到「家」的姐姐会被判成就在这屋里，她正在
-        # 做什么就此泄露出去。
-        reach = reach_between_people(observer=me.place, other=other.place)
-        if reach is Reach.SAME_PLACE:
-            here.append(f"{other.persona_id} 正在 {other.doing}")
-        elif reach is Reach.SAME_BUILDING:
-            # 只给位置，不给她在干嘛 —— 信息差归位置管。
-            elsewhere.append(f"{other.persona_id} 在 {other.place}")
-
-    lines = [f"你在 {me.place}。"]
-    lines.append("这里还有：" + "、".join(here) + "。" if here else "这里没别人。")
-    if elsewhere:
-        lines.append("这栋里别处：" + "、".join(elsewhere) + "。")
-    return "\n".join(lines)
+    asker = residents().by_persona[persona_id]
+    try:
+        # 通信机制只给等回答那一段封了顶。问出去那一步（查 world 开没开收件箱、记几行记录、
+        # 发给 broker 等确认）跟发一条消息是同一套动作，broker 不应答时会一直挂着，所以整个
+        # 提问再按发一条消息的上限（:data:`app.living.outgoing.SEND_SECONDS`）多给一段。
+        async with asyncio.timeout(LOOK_AROUND_ANSWER_SECONDS + SEND_SECONDS):
+            answer = await ask(
+                sender=asker,
+                recipient=WORLD,
+                body=_looking_around_from(me),
+                timeout_seconds=LOOK_AROUND_ANSWER_SECONDS,
+            )
+    except Exception:
+        # 提问不重试（通信机制的约定）。什么原因没问成，都是这一眼没看到。
+        logger.warning(
+            "living look_around lane=%s persona=%s 问 world 没问成",
+            lane,
+            persona_id,
+            exc_info=True,
+        )
+        return NOBODY_ANSWERED
+    if answer.text is None:
+        logger.info(
+            "living look_around lane=%s persona=%s world 没有回答：%s",
+            lane,
+            persona_id,
+            answer.reason,
+        )
+        return NOBODY_ANSWERED
+    # 原样交给她，不加一个字，也不过 :func:`app.living.records.esc`：回答是 world 的应答 agent
+    # 写的，经过模型的字不转义（判据见 esc）。
+    return answer.text
 
 
 # 手上的事 + 手机 + 嘴 + 上网 + 读东西 + 图 + 手边那几份说明，合在一起才是"她这个 moment
@@ -749,7 +796,7 @@ MOMENT_TOOLS = [
 
 # 她读到的素材：读完就该沉淀成她自己的东西，过了保留期换成一句短语。
 #
-#   * ``look_around``      够得着的地方现在什么样 —— 快照每轮重发一份
+#   * ``look_around``      world 回答的那一刻这里什么样，过了一阵早就变了，想知道就再看一眼
 #   * ``search_online`` / ``browse_online``  搜索结果和信息流，没有任何工具吃它们的 URL
 #   * ``read_a_guide``     说明书全文，想再看就再读一遍
 #   * ``run_a_script``     命令的输出。上限 4000 字（``app.capabilities.sandbox``），

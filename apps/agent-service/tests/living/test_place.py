@@ -6,11 +6,7 @@
 """
 from __future__ import annotations
 
-from app.living.place import (
-    Reach,
-    reach_between,
-    reach_between_people,
-)
+from app.living.place import Reach, reach_between
 
 
 def test_identical_place_is_same_place():
@@ -85,50 +81,3 @@ def test_trailing_slash_and_whitespace_do_not_change_the_verdict():
         reach_between(observer=" 家/客厅/ ", happening="家/客厅") is Reach.SAME_PLACE
     )
 
-
-# ---------------------------------------------------------------------------
-# 人跟人比位置：**不是**同一条规则。
-#
-# 上面那条覆盖档（事情发生在 ``家`` 这一整片 → 站在 ``家/客厅`` 的人在场）是给
-# **范围事件**用的：天黑、停电、饭菜的味道确实笼罩整栋。人不是范围——"绫奈在家"
-# 不代表她跟站在客厅的赤尾同处一室。拿覆盖档去比两个人，会让一个只粗略定位到
-# ``家`` 的人被判成"就在你旁边"，她在做什么就此泄露出去。
-# ---------------------------------------------------------------------------
-
-
-def test_two_people_in_the_very_same_spot_are_together():
-    assert reach_between_people(observer="家/客厅", other="家/客厅") is Reach.SAME_PLACE
-
-
-def test_a_coarsely_located_person_is_never_in_the_same_room():
-    """她只定位到 ``家``、我在 ``家/客厅`` —— 我不知道她是不是就在这屋里。
-
-    这条要 fail-closed：判成同处一室，她正在做什么会被 ``look_around`` 直接吐出来。
-    """
-    assert reach_between_people(observer="家/客厅", other="家") is Reach.SAME_BUILDING
-    assert reach_between_people(observer="家", other="家/客厅") is Reach.SAME_BUILDING
-
-
-def test_two_people_in_different_rooms_only_share_the_house():
-    assert (
-        reach_between_people(observer="家/客厅", other="家/楼上/绫奈房间")
-        is Reach.SAME_BUILDING
-    )
-
-
-def test_someone_out_of_the_house_is_out_of_reach():
-    assert (
-        reach_between_people(observer="家/客厅", other="学校/图书馆")
-        is Reach.OUT_OF_REACH
-    )
-
-
-def test_someone_who_cannot_be_located_is_out_of_reach():
-    assert reach_between_people(observer="家/客厅", other=None) is Reach.OUT_OF_REACH
-    assert reach_between_people(observer=None, other="家/客厅") is Reach.OUT_OF_REACH
-
-
-def test_whitespace_does_not_change_the_verdict_between_people():
-    assert (
-        reach_between_people(observer=" 家/客厅/ ", other="家/客厅") is Reach.SAME_PLACE
-    )
