@@ -10,6 +10,8 @@ import (
 )
 
 // applySecret 创建或更新一个由 paas-engine 维护的 Secret（带 managed-by 标签）。
+// 只用 get / create / update 三个动词：paas-builds 的 Role 对 secrets 只给了这三个，
+// 换成 patch / apply 在那里会被 RBAC 拒绝。
 func applySecret(ctx context.Context, client kubernetes.Interface, namespace, name string, data map[string]string) error {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

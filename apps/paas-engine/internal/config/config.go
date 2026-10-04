@@ -26,10 +26,15 @@ type Config struct {
 	ChiweiTestDatabaseURL string
 	SidecarImage          string
 
+	// 本实例所在泳道，deployer 给每个 Release 注入 LANE；不是经 Release 跑起来的进程为空。
+	Lane string
+	// kaniko 构建克隆用的 git 凭据 Secret 名为 <前缀>-<Lane>，建在 KanikoNamespace 里。
+	KanikoGitAuthSecretPrefix string
+
 	// CI Pipeline
 	CINamespace     string        // K8s namespace for CI test jobs
 	CIGitRepo       string        // monorepo git URL for CI test jobs
-	GitHubToken     string        // GitHub PAT for polling branch commits
+	GitHubToken     string        // GitHub PAT：GitPoller 轮询分支，kaniko 构建认证克隆
 	GitPollInterval time.Duration // git polling interval (default 60s)
 
 	// Lane 命名前缀强制校验的历史兼容白名单。CSV，例如 "dev,old-lane"。
@@ -57,6 +62,9 @@ func Load() *Config {
 		ChiweiDatabaseURL:     os.Getenv("CHIWEI_DATABASE_URL"),
 		ChiweiTestDatabaseURL: os.Getenv("CHIWEI_TEST_DATABASE_URL"),
 		SidecarImage:          os.Getenv("SIDECAR_IMAGE"),
+
+		Lane:                      os.Getenv("LANE"),
+		KanikoGitAuthSecretPrefix: getEnv("KANIKO_GIT_AUTH_SECRET_PREFIX", "kaniko-git-auth"),
 
 		CINamespace:     getEnv("CI_NAMESPACE", "paas-builds"),
 		CIGitRepo:       os.Getenv("CI_GIT_REPO"),

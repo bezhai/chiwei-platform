@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/chiwei-platform/paas-engine/internal/domain"
@@ -20,6 +21,15 @@ var _ port.BuildExecutor = (*KanikoBuildExecutor)(nil)
 
 const labelBuildID = "paas.chiwei/build-id"
 
+// kaniko v1.24.0 用 GIT_USERNAME / GIT_PASSWORD 做 basic auth；GitHub 对 PAT 的标准用法是
+// 用户名 x-access-token、密码填 token。不要用 GIT_TOKEN：它会被当成用户名、密码为空，还会盖掉这两个变量。
+// Secret 的键名和容器里的变量名一致。
+const (
+	gitUsernameKey = "GIT_USERNAME"
+	gitPasswordKey = "GIT_PASSWORD"
+	gitUsername    = "x-access-token"
+)
+
 type KanikoBuildExecutor struct {
 	client             kubernetes.Interface
 	namespace          string
@@ -30,6 +40,8 @@ type KanikoBuildExecutor struct {
 	cacheRepo          string
 	httpProxy          string
 	noProxy            string
+	gitToken           string
+	gitAuthSecret      string // 空串表示本实例的构建不带 git 凭据
 }
 
 type KanikoBuildConfig struct {
@@ -41,9 +53,16 @@ type KanikoBuildConfig struct {
 	CacheRepo          string
 	HttpProxy          string
 	NoProxy            string
+
+	GitToken            string // 克隆用的 GitHub token，空则匿名克隆
+	GitAuthSecretPrefix string
+	Lane                string // 本实例所在泳道，决定它写哪个 Secret
 }
 
 func NewKanikoBuildExecutor(client kubernetes.Interface, cfg KanikoBuildConfig) *KanikoBuildExecutor {
+	if cfg.GitToken != "" && cfg.Lane == "" {
+		slog.Warn("GITHUB_TOKEN is set but LANE is empty, kaniko builds will clone anonymously")
+	}
 	return &KanikoBuildExecutor{
 		client:             client,
 		namespace:          cfg.Namespace,
@@ -54,7 +73,40 @@ func NewKanikoBuildExecutor(client kubernetes.Interface, cfg KanikoBuildConfig) 
 		cacheRepo:          cfg.CacheRepo,
 		httpProxy:          cfg.HttpProxy,
 		noProxy:            cfg.NoProxy,
+		gitToken:           cfg.GitToken,
+		gitAuthSecret:      gitAuthSecretName(cfg),
 	}
+}
+
+// gitAuthSecretName 返回本实例维护的 git 凭据 Secret 名，空串表示本实例的构建不带凭据。
+// 名字带上实例所在泳道：prod / blue / ppe-* 的 paas-engine 都会提交构建，token 只在启动时读一次，
+// 共用一个 Secret 的话，轮换后没重新部署的实例会把旧 token 写回去，覆盖别的实例刚写的新 token。
+// LANE 为空时不带凭据，而不是退回一个不带泳道的公共名字 —— 那又成了共用。
+func gitAuthSecretName(cfg KanikoBuildConfig) string {
+	if cfg.GitToken == "" || cfg.Lane == "" {
+		return ""
+	}
+	return cfg.GitAuthSecretPrefix + "-" + cfg.Lane
+}
+
+// syncGitAuthSecret 把本实例的 token 写进它自己的 Secret，返回本次 Job 该引用的 Secret 名；
+// 返回空串时 Job 不带凭据，按匿名克隆。每次提交都写一遍，Secret 被误删或被改，下一次构建就自愈。
+// 是否引用只看这一次写没写成功：旧 Secret 还在而这次更新失败时，引用它就会带着可能已撤销的旧 token 去克隆，
+// Secret 引用上的 optional 只管 Secret 不存在，挡不住这种情况。
+func (e *KanikoBuildExecutor) syncGitAuthSecret(ctx context.Context) string {
+	if e.gitAuthSecret == "" {
+		return ""
+	}
+	err := applySecret(ctx, e.client, e.namespace, e.gitAuthSecret, map[string]string{
+		gitUsernameKey: gitUsername,
+		gitPasswordKey: e.gitToken,
+	})
+	if err != nil {
+		slog.Warn("sync git auth secret failed, this build clones anonymously",
+			"namespace", e.namespace, "secret", e.gitAuthSecret, "error", err)
+		return ""
+	}
+	return e.gitAuthSecret
 }
 
 func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmission) (string, error) {
@@ -105,6 +157,8 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 		args = append(args, fmt.Sprintf("--skip-tls-verify-registry=%s", reg))
 	}
 
+	gitAuthSecret := e.syncGitAuthSecret(ctx)
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -121,7 +175,7 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{labelBuildID: sub.BuildID},
 				},
-				Spec: e.podSpec(args),
+				Spec: e.podSpec(args, gitAuthSecret),
 			},
 		},
 	}
@@ -132,7 +186,7 @@ func (e *KanikoBuildExecutor) Submit(ctx context.Context, sub *port.BuildSubmiss
 	return jobName, nil
 }
 
-func (e *KanikoBuildExecutor) podSpec(args []string) corev1.PodSpec {
+func (e *KanikoBuildExecutor) podSpec(args []string, gitAuthSecret string) corev1.PodSpec {
 	spec := corev1.PodSpec{
 		RestartPolicy: corev1.RestartPolicyNever,
 		// 构建需要外网（git clone + base 镜像），只有 app 节点有可用出口。
@@ -160,6 +214,12 @@ func (e *KanikoBuildExecutor) podSpec(args []string) corev1.PodSpec {
 			)
 		}
 	}
+	if gitAuthSecret != "" {
+		spec.Containers[0].Env = append(spec.Containers[0].Env,
+			gitAuthEnv(gitUsernameKey, gitAuthSecret),
+			gitAuthEnv(gitPasswordKey, gitAuthSecret),
+		)
+	}
 	if e.registrySecret != "" {
 		volumeName := "docker-config"
 		spec.Volumes = []corev1.Volume{
@@ -180,6 +240,22 @@ func (e *KanikoBuildExecutor) podSpec(args []string) corev1.PodSpec {
 		}
 	}
 	return spec
+}
+
+// gitAuthEnv 让 kaniko 容器从 Secret 读一个 git 凭据变量，token 不以明文出现在 Job / Pod spec 里。
+// optional：Pod 启动前 Secret 被删的话退回匿名克隆，而不是卡在 CreateContainerConfigError 直到 deadline。
+func gitAuthEnv(key, secretName string) corev1.EnvVar {
+	optional := true
+	return corev1.EnvVar{
+		Name: key,
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				Key:                  key,
+				Optional:             &optional,
+			},
+		},
+	}
 }
 
 func (e *KanikoBuildExecutor) Cancel(ctx context.Context, jobName string) error {
