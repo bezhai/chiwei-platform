@@ -132,8 +132,8 @@ async def week_material(
     这一层存在的意义就是让她读自己真的写下的东西，在摆材料这一步先压一遍等于把被否掉
     的"机器折叠原文"从后门放回来。
 
-    这里不做任何裁剪（谁在场、够不够得着那些在写日记那一步已经裁过了）：一页日记本来
-    就是她自己的视角。
+    这里不做任何裁剪：一页日记本来就是她自己的视角，写的是她自己的经历
+    （:func:`app.living.day_page.day_material`）。
     """
     return await read_day_pages_between(
         lane=lane, persona_id=persona_id, since=since, until=until

@@ -8,14 +8,13 @@
 只是每天凌晨把刚过去那一天摆给她，让她**另写**一页 —— 跟 :mod:`app.living.loose_ends`
 同一个性质：她自己写下的那一层。
 
-六件必须真的成立，各占一节：
+五件必须真的成立，各占一节：
 
   * **生活日不是日历日**。凌晨三点还醒着的时候，那是昨天的延续，不是新的一天。
   * **一天只写一页，写不成就不写**。页存在本身就是"这天复盘过了"的权威 —— 不另设
     标记列（旧实现在这上面炸过一次，改了七处才收住）。
-  * **摆给她的是她的那一天**，不是全世界的那一天：够不着的事她本来就不知道，日记里
-    不该冒出来。
-  * **她自己做的事必须在里面**。感知那条路抑制回声，照抄过来的话她的一天里只有别人。
+  * **摆给她的是她自己的经历**：她做过的事、说过的话，加上那一天传到她这里的消息，按
+    发生的先后排。别人做了什么，只有传到她这里的那一部分才算她知道。
   * **注入的那一页严格早于当前生活日**。她凌晨写下的那页是"刚过去那天"的，如果同一
     天里又被当成"你的昨天"喂回去，她会把今天当成昨天过。
   * **写页那一轮看得见上一页**，不然每一页都是孤立的一天，链断在第二天。
@@ -42,7 +41,8 @@ from app.living.day_page import (
 )
 from app.living.happening import record_happening
 from app.living.loose_ends import LooseEnd
-from app.living.records import KIND_ACT, KIND_SPEECH
+from app.living.received import ReceivedMessage
+from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, MEDIUM_PHONE
 from app.living.snapshot import read_snapshot
 from app.living.whereabouts import note_whereabouts
 
@@ -124,6 +124,7 @@ async def _happened(
     place: str = "家/客厅",
     to=(),
     kind: str = KIND_SPEECH,
+    medium: str = MEDIUM_IN_PERSON,
 ):
     return await record_happening(
         lane=LANE,
@@ -134,15 +135,31 @@ async def _happened(
         content=content,
         occurred_at=at,
         audience=list(to),
+        medium=medium,
+    )
+
+
+async def _received(persona: str, sender: str, body: str, at: dt.datetime) -> None:
+    """一条传到她这里的消息，跟收件箱存下的一样（:func:`app.living.received.receive`）。"""
+    from app.runtime.persist import insert_idempotent
+
+    await insert_idempotent(
+        ReceivedMessage(
+            lane=LANE,
+            persona_id=persona,
+            message_id=f"{persona}:{at.isoformat()}:{body[:8]}",
+            sender=sender,
+            body=body,
+            message_time=at,
+        )
     )
 
 
 async def _a_day_worth_of_stuff() -> None:
-    """三姐妹都在客厅，那一天发生过几件事。"""
-    for who in ("akao", "ayana"):
-        await _stand(who, "家/客厅", _on(25, 6))
+    """赤尾那一天：自己做了一件事，绫奈当面跟她说的一句直接传到了她这里。"""
+    await _stand("akao", "家/客厅", _on(25, 6))
     await _happened("akao", "把胶片摊了一茶几", _on(25, 10), kind=KIND_ACT)
-    await _happened("ayana", "今天要下雨吧", _on(25, 15), to=["akao"])
+    await _received("akao", "绫奈", "当面对你说：「今天要下雨吧」", _on(25, 15))
 
 
 # --------------------------------------------------------------------------
@@ -267,13 +284,12 @@ async def test_a_round_that_writes_nothing_leaves_no_page(page_db, stub_page):
 
 
 # --------------------------------------------------------------------------
-# 三 · 摆给她的是她的那一天
+# 三 · 摆给她的是她自己的经历
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.integration
 async def test_what_she_did_herself_is_in_it(page_db):
-    """感知那条路抑制回声，照抄过来的话她的一天里只有别人做的事。"""
     await _a_day_worth_of_stuff()
 
     lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
@@ -284,28 +300,144 @@ async def test_what_she_did_herself_is_in_it(page_db):
 
 
 @pytest.mark.integration
-async def test_what_was_said_to_her_is_in_it(page_db):
+async def test_what_reached_her_is_in_it_with_who_sent_it(page_db):
     await _a_day_worth_of_stuff()
 
     lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
 
-    assert any("今天要下雨吧" in line for line in lines), lines
+    assert "15:00 CST 绫奈：当面对你说：「今天要下雨吧」" in lines, lines
 
 
 @pytest.mark.integration
-async def test_what_she_could_not_reach_never_enters_her_day(page_db):
-    """她够不着的地方发生的事，她当时就不知道 —— 日记里不该冒出来。"""
-    await _stand("akao", "家/客厅", _on(25, 6))
-    await _stand("chinagi", "学校/操场", _on(25, 6))
-    await _happened("chinagi", "把球踢进了树丛", _on(25, 11), place="学校/操场", kind=KIND_ACT)
-    await _happened("akao", "煮了壶抹茶", _on(25, 12), kind=KIND_ACT)
+async def test_what_world_told_her_is_in_it_as_it_was_told(page_db):
+    """world 告诉她的是她察觉到的事，原样摆，不标是谁说的（跟她每一轮读到的一样）。"""
+    await _received("akao", "world", "窗外开始下雨了。", _on(25, 16))
 
     lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
 
-    assert any("煮了壶抹茶" in line for line in lines)
-    assert not any("树丛" in line for line in lines), (
-        f"她当时在客厅，操场上那一脚她不可能知道：{lines}"
+    assert lines == ["16:00 CST 窗外开始下雨了。"], lines
+
+
+@pytest.mark.integration
+async def test_what_her_sisters_did_never_enters_her_day_on_its_own(page_db):
+    """别的姐妹的经历是她们自己的。哪怕两个人站在同一间屋里、那句话还是冲着她说的，
+    她知道的也只是传到她这里的那一条，不是从别人的记录里按位置读出来的。"""
+    await _stand("akao", "家/客厅", _on(25, 6))
+    await _stand("ayana", "家/客厅", _on(25, 6))
+    await _happened("ayana", "今天要下雨吧", _on(25, 15), to=["akao"])
+    await _happened("ayana", "把伞挂到了门口", _on(25, 15, 1), kind=KIND_ACT)
+    await _happened("akao", "煮了壶抹茶", _on(25, 12), kind=KIND_ACT)
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
+    joined = "\n".join(lines)
+
+    assert "煮了壶抹茶" in joined
+    assert "今天要下雨吧" not in joined, f"绫奈的记录被当成了她的经历：{lines}"
+    assert "把伞挂到了门口" not in joined, f"绫奈的记录被当成了她的经历：{lines}"
+
+
+@pytest.mark.integration
+async def test_her_phone_messages_and_take_backs_stay_in_her_day(page_db):
+    """手机上发的、撤回的照常是她的经历（不进 world 的汇总，但她自己回看得到）。"""
+    await _happened(
+        "akao", "你去过那家抹茶店吗？", _on(25, 11), to=["bezhai"], medium=MEDIUM_PHONE
     )
+    await _happened(
+        "akao",
+        "去撤回自己说过的那句「你去过那家抹茶店吗？」",
+        _on(25, 11, 5),
+        kind=KIND_ACT,
+        medium=MEDIUM_PHONE,
+    )
+
+    joined = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY))
+
+    assert "你对 bezhai 说：「你去过那家抹茶店吗？」" in joined
+    assert "去撤回自己说过的那句" in joined
+
+
+@pytest.mark.integration
+async def test_her_day_reads_in_the_order_things_happened(page_db):
+    """按事情发生的先后排，不按到达的先后：早发生的告知晚到了，也排在它发生的那一刻。"""
+    await _happened("akao", "出门去车站", _on(25, 10), kind=KIND_ACT)
+    await _received("akao", "千凪", "当面对你说：「路上小心」", _on(25, 10, 30))
+    # 这条最后才存下，可它说的是九点半的事。
+    await _received("akao", "world", "九点半的时候楼下的猫跑掉了。", _on(25, 9, 30))
+    await _happened("akao", "在车站买了票", _on(25, 11), kind=KIND_ACT)
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
+
+    assert lines == [
+        "09:30 CST 九点半的时候楼下的猫跑掉了。",
+        "10:00 CST 你 出门去车站",
+        "10:30 CST 千凪：当面对你说：「路上小心」",
+        "11:00 CST 你 在车站买了票",
+    ], lines
+
+
+@pytest.mark.integration
+async def test_what_reached_her_comes_before_what_she_did_at_the_same_moment(page_db):
+    """同一刻的，收到的排在前面：先传到她这里，她才接着做。"""
+    await _happened("akao", "去开门", _on(25, 10), kind=KIND_ACT)
+    await _received("akao", "world", "有人敲门。", _on(25, 10))
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
+
+    assert lines == ["10:00 CST 有人敲门。", "10:00 CST 你 去开门"], lines
+
+
+@pytest.mark.integration
+async def test_her_own_things_keep_the_order_she_did_them_in(page_db):
+    """她自己的几件按提交序排，不按钟点：提前来的那一轮先落地、钟点更早的那一轮后落地时，
+    钟点的先后跟她做事的先后是反的。"""
+    await _happened("akao", "被叫醒去接电话", _on(25, 21, 34), kind=KIND_ACT)
+    await _happened("akao", "接着看胶片", _on(25, 21, 30), kind=KIND_ACT)
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
+
+    assert lines == ["21:34 CST 你 被叫醒去接电话", "21:30 CST 你 接着看胶片"], lines
+
+
+@pytest.mark.integration
+async def test_messages_outside_that_day_are_not_in_that_page(page_db):
+    """传到她这里的消息按它说的那一刻归到哪一天，跟她自己做的事同一条边界。"""
+    await _received("akao", "world", "前一天晚上停了电。", _on(24, 22))
+    await _received("akao", "world", "凌晨一点打雷了。", _on(26, 1))
+    await _received("akao", "world", "新的一天出太阳了。", _on(26, 5))
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
+
+    assert lines == ["07-26 01:00 CST 凌晨一点打雷了。"], lines
+
+
+@pytest.mark.integration
+async def test_three_sisters_get_three_different_days(page_db):
+    """一个人的日记材料不是另一个人的：她自己做的事、传到她这里的消息，都只是她的。"""
+    await _a_day_worth_of_stuff()
+    await _happened("chinagi", "把球踢进了树丛", _on(25, 11), place="学校/操场", kind=KIND_ACT)
+    await _received("chinagi", "world", "操场边的树丛里有只猫。", _on(25, 11, 5))
+
+    mine = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY))
+    hers = "\n".join(await day_material(lane=LANE, persona_id="chinagi", day=_DAY))
+
+    assert "今天要下雨吧" in mine and "把胶片摊了一茶几" in mine
+    assert "树丛" not in mine, mine
+    assert "把球踢进了树丛" in hers and "操场边的树丛里有只猫" in hers
+    assert "今天要下雨吧" not in hers and "把胶片摊了一茶几" not in hers, hers
+
+
+@pytest.mark.integration
+async def test_a_day_where_only_messages_reached_her_still_gets_a_page(
+    page_db, stub_page
+):
+    """她那天一件事都没做，可传到她这里的消息就是她那一天 —— 那一天不是空的。"""
+    await _received("akao", "world", "下了一整天的雨。", _on(25, 13))
+    runner = stub_page("下了一整天的雨，我哪儿也没去。")
+
+    page = await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+
+    assert page is not None and page.happenings == 1
+    assert "下了一整天的雨。" in runner.material
 
 
 @pytest.mark.integration
@@ -335,21 +467,6 @@ async def test_the_small_hours_are_dated_so_she_can_tell_them_apart(page_db):
         if "翻论坛" in line
     ]
     assert "07-26" in line, f"跨过午夜那几行没标日子：{line!r}"
-
-
-@pytest.mark.integration
-async def test_three_sisters_get_three_different_days(page_db):
-    """信息差在这里同样成立：一个人的日记材料不是另一个人的。"""
-    await _stand("akao", "家/客厅", _on(25, 6))
-    await _stand("ayana", "家/客厅", _on(25, 6))
-    await _stand("chinagi", "学校/操场", _on(25, 6))
-    await _happened("ayana", "今天要下雨吧", _on(25, 15), to=["akao"])
-
-    mine = await day_material(lane=LANE, persona_id="akao", day=_DAY)
-    hers = await day_material(lane=LANE, persona_id="chinagi", day=_DAY)
-
-    assert any("今天要下雨吧" in line for line in mine)
-    assert hers == [], f"千凪在操场上，客厅那句话不该进她的一天：{hers}"
 
 
 # --------------------------------------------------------------------------
@@ -549,11 +666,10 @@ async def test_the_tick_writes_a_page_for_each_of_them(page_db, stub_page, monke
     """忘了挂钟的症状是静默的：模块写好了、测试全绿，而线上一页都不会有。"""
     from app.living import day_page as page_mod
 
-    # 千凪要**先**站进客厅再让那几件事发生：``record_happening`` 在写入那一刻把"谁在
-    # 哪"拍进事件行，读取侧一次位置查询都不做（见 app.living.happening 的模块
-    # docstring）。反过来写的话她那一天是空的，而这条用例验的是"钟推到了几个人"。
-    await _stand("chinagi", "家/客厅", _on(25, 6))
+    # 三个人那一天各有自己的经历：材料是空的那一个不写页，而这条用例验的是"钟推到了几个人"。
     await _a_day_worth_of_stuff()
+    await _happened("ayana", "在厨房煮乌冬", _on(25, 12), kind=KIND_ACT)
+    await _received("chinagi", "赤尾", "当面对你说：「吃饭了」", _on(25, 12, 30))
     stub_page("这天。")
 
     monkeypatch.setattr(page_mod, "living_lane", lambda: LANE)

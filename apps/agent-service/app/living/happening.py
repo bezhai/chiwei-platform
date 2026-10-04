@@ -47,7 +47,6 @@ from datetime import datetime
 from sqlalchemy import text
 
 from app.data.session import get_session
-from app.infra.cst_time import dated_clock
 from app.living.participants import residents
 from app.living.place import Reach, reach_between
 from app.living.records import (
@@ -316,29 +315,29 @@ async def read_perceived_by(
     )
 
 
-async def read_happenings_between(
-    *, lane: str, since: datetime, until: datetime
+async def read_her_happenings_between(
+    *, lane: str, persona_id: str, since: datetime, until: datetime
 ) -> list[Happening]:
-    """``[since, until)`` 之间发生过的全部原始记录，按提交序升序。
+    """她自己 ``[since, until)`` 之间做过、说过的事，按提交序升序。
 
-    **开窗按 ``occurred_at``、排序按 ``seq``**，两者各管一件事：一整个生活日的边界
-    是钟点（凌晨四点到凌晨四点），而"哪件先哪件后"只有提交序说了算——``occurred_at``
-    跨 persona 并发时跟落库顺序无关，拿它排会让同一刻的几条随机换位。
+    **开窗按 ``occurred_at``、排序按 ``seq``**，两者各管一件事：一整个生活日的边界是钟点
+    （凌晨四点到凌晨四点），而她自己的几件事谁先谁后只有提交序说得清——同一轮里的几件
+    ``occurred_at`` 都是那一轮的『现在』，提前来的那一轮先落地、钟点更早的那一轮后落地时，
+    钟点的先后跟她做事的先后是反的。
 
-    **不裁给任何人看**：返回的是原始行，谁感知到什么由 :func:`perceive` 另判。
-
-    没有条数上限，因为它答的是"这一天"这个有界的问题——截断意味着某一天的某几个
-    小时静默消失，而那正是日记要接住的东西。代价是异常量的一天（补数据、重放）会
-    一次读进内存；真撞上再说，不预先加一个会造成静默失明的上限。
+    没有条数上限，因为它答的是"这一天"这个有界的问题——截断意味着某一天的某几个小时静默
+    消失，而那正是日记要接住的东西。
     """
     sql = (
         f"SELECT * FROM {_TABLE} "
-        f"WHERE lane = :lane AND occurred_at >= :since AND occurred_at < :until "
+        f"WHERE lane = :lane AND actor = :actor "
+        f"AND occurred_at >= :since AND occurred_at < :until "
         f"ORDER BY seq ASC"
     )
     async with get_session() as s:
         result = await s.execute(
-            text(sql), {"lane": lane, "since": since, "until": until}
+            text(sql),
+            {"lane": lane, "actor": persona_id, "since": since, "until": until},
         )
         rows = result.mappings().all()
     return [
@@ -422,25 +421,3 @@ def perceived_line(p: Perceived, *, me: str) -> str:
     if p.audience:
         return f"{p.actor} 对 {'、'.join(p.audience)} 说：「{content}」"
     return f"{p.actor} 说：「{content}」"
-
-
-def happening_line(h: Happening, *, me: str, now: datetime) -> str | None:
-    """一条原始记录在 ``me`` 眼里的一整行（带时刻）；她感知不到就 ``None``。
-
-    **她自己做的走 :func:`own_line`，别人的先过 :func:`perceive`。** 少了前半句就是
-    把回声抑制照抄进来——她的一天里只剩别人做的事，自己那些一件不剩
-    （:func:`read_perceived_by` 丢掉 ``actor == persona_id``，那对这一轮是对的，对
-    "回看这一整天"是致命的）。
-
-    时刻走 :func:`app.infra.cst_time.dated_clock`：同一个日历日给 ``HH:MM CST``，
-    跨天补 ``MM-DD``。一个生活日跨两个日历日（04:00 到次日 04:00），凌晨那几行只给
-    时分的话读起来像"这天很早"。
-    """
-    if h.actor == me:
-        said = own_line(h)
-    else:
-        got = perceive(h, persona_id=me)
-        if got is None:
-            return None
-        said = perceived_line(got, me=me)
-    return f"{dated_clock(h.occurred_at, now=now)} {said}"

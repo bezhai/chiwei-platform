@@ -191,23 +191,52 @@ async def unread_received(
     ]
 
 
+async def read_received_between(
+    *, lane: str, persona_id: str, since: datetime, until: datetime
+) -> list[ReceivedMessage]:
+    """她收到的消息里，说的是 ``[since, until)`` 之间的事的那些，按消息自带的时间排。
+
+    日记那一页（:mod:`app.living.day_page`）读的就是这个。按消息自带的时间开窗，不按到达先后：
+    一条说九点半的事、十点才到的告知，属于九点半所在的那一天。看没看过都算：日记是在那一天过完
+    之后才写的，传到她这里的就是她那一天的一部分，跟哪一轮先摆给她看无关。
+
+    同一刻的几条按消息 id 排，只是为了每次读出来的顺序一样（同 :func:`unread_received`）。
+    """
+    sql = (
+        f"SELECT * FROM {_RECEIVED_TABLE} "
+        f"WHERE lane = :lane AND persona_id = :persona_id "
+        f"AND message_time >= :since AND message_time < :until "
+        f"ORDER BY message_time, message_id"
+    )
+    params = {"lane": lane, "persona_id": persona_id, "since": since, "until": until}
+    async with get_session() as s:
+        rows = (await s.execute(text(sql), params)).mappings().all()
+    return [
+        ReceivedMessage(**{k: row[k] for k in ReceivedMessage.model_fields})
+        for row in rows
+    ]
+
+
 def render_received(items: list[ReceivedMessage], *, now: datetime) -> str:
-    """这一轮摆到她眼前的那一段：每条带着它自己的时刻。
+    """这一轮摆到她眼前的那一段：每条带着它自己的时刻。"""
+    if not items:
+        return f"{_HEAD}（没有）"
+    lines = [
+        f"- {dated_clock(m.message_time, now=now)} {received_line(m)}" for m in items
+    ]
+    return _HEAD + "\n" + "\n".join(lines)
+
+
+def received_line(item: ReceivedMessage) -> str:
+    """收到的一条在她眼里的样子。她每一轮读到的、日记材料里摆的，都是这一个样子。
 
     world 发来的是她察觉到的事（窗外下雨了、有人敲门），原样摆，不标是谁说的——那不是谁对她
     说的话。别人发来的带着发送方的名字。
 
     发送方和正文都过 :func:`app.living.records.esc`：正文由发送方写下，world 和姐妹那边是
-    模型、人工参与者那边是人，哪一种都不归她管；这一列上转义没有代价（同
-    :func:`app.living.happening.perceived_line`）。
+    模型、人工参与者那边是人，哪一种都不归她管，而这一列上转义没有代价。她自己的经历不过
+    （:func:`app.living.happening.own_line`），判据写在 esc 上。
     """
-    if not items:
-        return f"{_HEAD}（没有）"
-    lines = [f"- {dated_clock(m.message_time, now=now)} {_line(m)}" for m in items]
-    return _HEAD + "\n" + "\n".join(lines)
-
-
-def _line(item: ReceivedMessage) -> str:
     if item.sender == WORLD:
         return esc(item.body)
     return f"{esc(item.sender)}：{esc(item.body)}"

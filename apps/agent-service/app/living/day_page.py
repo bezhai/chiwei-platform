@@ -10,7 +10,7 @@
 写**一页 —— 跟 :mod:`app.living.loose_ends` 同一个性质，这个包里第二处「她自己写下
 的东西」。
 
-六件必须真的成立：
+五件必须真的成立：
 
   * **生活日不是日历日。** 凌晨三点还醒着的时候那是昨天的延续，边界在 CST 04:00
     （:data:`DAY_STARTS_AT`）。按日历日切会把一段连续的清醒劈成两天，而她自己不会
@@ -20,10 +20,9 @@
   * **``run`` 返回不等于成功。** 这一轮**不给她任何工具**，她的回复正文**就是**那一
     页，于是"调了工具却没写成"这整类失败根本不存在。正文 strip 后为空 = 这一轮没
     成：不落库、不占位，下一拍还会来（:func:`write_day_page`）。
-  * **摆给她的是她的那一天**，不是全世界的那一天：够不着的事她当时就不知道，日记里
-    不该冒出来（:func:`day_material` 逐条过 :func:`app.living.happening.happening_line`）。
-  * **她自己做的事必须在材料里。** 感知那条路抑制回声，照抄过来的话她的一天里只剩
-    别人做的事，自己那些一件不剩。
+  * **摆给她的是她自己的经历**（:func:`day_material`）：她做过的事、说过的话，加上那
+    一天传到她这里的消息。别人做了什么，只有传到她这里的那一部分才算她知道；别的姐妹的
+    记录是她们自己的，这里一条都不读。
   * **注入侧读的是 ``day < 当前生活日`` 的最新一页**，不是"最新一页"
     （:func:`read_day_page_before`）。她凌晨写下的是刚过去那天的页，不卡这一条的话
     第二天的页会在写下的当天就被当成"你的昨天"喂回去，她会把今天当昨天过。
@@ -36,6 +35,7 @@ prompt 在 Langfuse（:data:`DAY_PAGE_PROMPT_ID`），变量只有 persona 那�
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 from datetime import date, datetime, time, timedelta
 from typing import Annotated
@@ -50,9 +50,10 @@ from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
 from app.data.session import get_session
 from app.domain.thinking_cost import record_round_cost
-from app.infra.cst_time import CST, now_cst
-from app.living.happening import happening_line, read_happenings_between
+from app.infra.cst_time import CST, dated_clock, now_cst
+from app.living.happening import own_line, read_her_happenings_between
 from app.living.persona import LIVING_PERSONAS, persona_prompt_vars
+from app.living.received import read_received_between, received_line
 from app.living.records import _require_aware, living_lane
 from app.living.serial import hold
 from app.runtime.data import Data, Key
@@ -179,26 +180,41 @@ def living_day_bounds(day: date) -> tuple[datetime, datetime]:
 
 
 async def day_material(*, lane: str, persona_id: str, day: date) -> list[str]:
-    """这一天在她眼里发生过的每一件事，一件一行；她感知不到的不出现。
+    """这一天她自己的经历，一件一行：她做过的事、说过的话，和传到她这里的消息。
 
     **原文照搬，中间没有第二次概括** —— 整个模块存在的理由就是"不折叠原文"，在摆材
     料这一步先压一遍等于把否掉的方案从后门放回来。
 
-    逐条过 :func:`app.living.happening.happening_line`：她自己做的走
-    :func:`~app.living.happening.own_line`，别人的先过
-    :func:`~app.living.happening.perceive` 按当时在不在场裁。直接用
-    :func:`~app.living.happening.read_perceived_by` 是错的——那条路抑制回声（丢掉
-    ``actor == persona_id``），对每一轮是对的，对"回看这一整天"是致命的：她的一天里会
-    只剩别人做的事。
+    两样各有各的样子，跟她每一轮读到的一样：她自己的走
+    :func:`~app.living.happening.own_line`（手机上发的、撤回的也在，她自己回看得到），
+    收到的走 :func:`~app.living.received.received_line`。
+
+    **按事情发生的先后合成一条**：她的经历按提交序（同一轮里的几件钟点相同，谁先谁后只有
+    提交序说得清），收到的按消息自带的时间（world 的告知和姐妹的话走两条路，到达先后不代表
+    发生先后）。两列各自的先后不动，按时刻交错合起来；时刻相同的，收到的排在前面——先传到
+    她这里，她才接着做。
 
     每行的时刻用**这个生活日的起点**当 ``now`` 判跨不跨天，不是用"现在"：一个生活日
     跨两个日历日，凌晨那几行只给 ``HH:MM`` 的话读起来像"这天很早"，而拿真正的现在去
     判会让整整一天的行全都带上日期、把"这几行是跨过午夜的"这个信号稀释掉。
     """
     since, until = living_day_bounds(day)
-    rows = await read_happenings_between(lane=lane, since=since, until=until)
-    lines = [happening_line(h, me=persona_id, now=since) for h in rows]
-    return [line for line in lines if line is not None]
+    received = [
+        (m.message_time, received_line(m))
+        for m in await read_received_between(
+            lane=lane, persona_id=persona_id, since=since, until=until
+        )
+    ]
+    did = [
+        (h.occurred_at, own_line(h))
+        for h in await read_her_happenings_between(
+            lane=lane, persona_id=persona_id, since=since, until=until
+        )
+    ]
+    return [
+        f"{dated_clock(at, now=since)} {line}"
+        for at, line in heapq.merge(received, did, key=lambda item: item[0])
+    ]
 
 
 async def read_day_page(
