@@ -18,7 +18,7 @@ from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, Route, mq
 from app.messaging.broker import inbox_route, opened
 from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.message import Kind, Message
-from app.messaging.receiving import inbox
+from app.messaging.receiving import inbox, inboxes_at_start
 from app.messaging.sending import send
 from app.runtime.wire import RetryPolicy
 
@@ -432,3 +432,84 @@ async def test_when_the_retry_copy_cannot_be_published_the_message_is_put_back_n
     await eventually(lambda: done, timeout=15)
     assert broken["left"] == 0, "故障没注入上"
     assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0
+
+
+# ---------------------------------------------------------------------------
+# 名字到进程启动时才知道的收件箱
+# ---------------------------------------------------------------------------
+
+
+async def test_inboxes_named_at_start_are_opened_when_receiving_starts(broker):
+    """名字存在库里的收件箱：接线时只声明"启动时再开"，开始接收时才去取名字、开设。"""
+    got: list[Message] = []
+    named: list[str] = []
+
+    async def on_message(message) -> None:
+        got.append(message)
+
+    async def open_by_name() -> None:
+        named.append("绫奈")  # 真实的拥有者在这里读库
+        inbox("绫奈", on_message=on_message)
+
+    inboxes_at_start(open_by_name)
+    assert named == [], "声明时就去取名字了：接线 import 的时候库还没准备好"
+
+    await start_messaging()
+    delivery = await send(sender="world", recipient="绫奈", body="窗外下起了雨。")
+
+    assert named == ["绫奈"]
+    assert delivery.delivered
+    await eventually(lambda: got)
+    assert [m.message_id for m in got] == [delivery.message_id]
+
+
+async def test_inboxes_named_at_start_are_named_once_per_process(broker):
+    """停了再开始接收，开设的还是第一次取到的那几个名字，不再取一次。"""
+    named: list[str] = []
+
+    async def on_message(message) -> None:
+        return None
+
+    async def open_by_name() -> None:
+        named.append("绫奈")
+        inbox("绫奈", on_message=on_message)
+
+    inboxes_at_start(open_by_name)
+    await start_messaging()
+    await stop_messaging()
+    await start_messaging()
+
+    assert named == ["绫奈"]
+    assert await opened(inbox_route("绫奈"))
+
+
+async def test_a_failure_while_naming_inboxes_at_start_fails_the_start(broker):
+    """取名字那一步失败，启动就失败，而且一个收件箱都不开：名字就是地址，名字有问题时不能
+    带着一部分收件箱看起来一切正常。"""
+
+    async def on_message(message) -> None:
+        return None
+
+    async def names_are_wrong() -> None:
+        raise RuntimeError("两个人的显示名一样")
+
+    inbox("operator", on_message=on_message)
+    inboxes_at_start(names_are_wrong)
+
+    with pytest.raises(RuntimeError, match="两个人的显示名一样"):
+        await start_messaging()
+    assert not await opened(inbox_route("operator"))
+
+
+def test_clearing_the_inboxes_also_drops_the_ones_named_at_start():
+    """测试之间靠 ``clear_inboxes`` 回到干净状态：留下一个启动时才取名字的声明，下一个用例
+    开始接收时就会替上一个用例去读库。"""
+    from app.messaging import receiving
+
+    async def open_by_name() -> None:
+        inbox("绫奈", on_message=None)  # 不会被调到
+
+    inboxes_at_start(open_by_name)
+    receiving.clear_inboxes()
+
+    assert receiving.INBOXES_AT_START == []

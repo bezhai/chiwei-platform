@@ -45,6 +45,13 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
   上下文。进了上下文之后 ``on_open`` 失败，就退出上下文、隔 :data:`OPEN_RETRY_SECONDS`
   再来一次——这时启动早已返回，失败不能再靠让启动失败来暴露。
 
+**名字到进程启动时才知道的收件箱**（:func:`inboxes_at_start`）。:func:`inbox` 在接线模块
+import 时就要名字，可有的名字存在库里（三姐妹的名字取自人设表），import 的时候库还没准备好。
+这类拥有者在接线里只声明一个"开设它们"的函数，:func:`start_receiving` 在开设任何收件箱之前
+调它一次，它在里面取名字、对每个名字调 :func:`inbox`。它抛异常，启动就失败，一个收件箱都
+不开：名字就是地址，名字有问题时不该带着其中一部分收件箱运行。每个声明在一个进程里只调一次，
+停了再开始接收时开设的还是第一次取到的那几个名字。
+
 **问题不排在普通消息后面。** 问题走自己的队列、自己的消费通道（prefetch :data:`_PREFETCH`），
 队列一建好就开始消费：不等 ``on_open``，不受 ``one_at_a_time`` 限制，也不等 ``consume_while``。
 所以一个收件箱正在处理一条要跑很久的消息、后面还排着几条时，问它的问题照样在提问方的截止
@@ -221,6 +228,21 @@ def inbox(
     )
 
 
+OpenAtStart = Callable[[], Awaitable[None]]
+
+# 还没调过的"启动时再开"的声明（:func:`inboxes_at_start`）。开始接收时逐个调掉、清空。
+INBOXES_AT_START: list[OpenAtStart] = []
+
+
+def inboxes_at_start(open_them: OpenAtStart) -> None:
+    """声明一组名字到进程启动时才知道的收件箱。在 App 的接线模块里调，见模块说明。
+
+    ``open_them`` 在 :func:`start_receiving` 开设任何收件箱之前调一次，在里面取名字、对每个
+    名字调 :func:`inbox`。它抛异常，启动就失败。
+    """
+    INBOXES_AT_START.append(open_them)
+
+
 def _lease_ms(spec: InboxSpec) -> int:
     """这个收件箱的消息占位多久。声明了处理时限的，放长到时限之上。"""
     if spec.processing_timeout is None:
@@ -230,6 +252,7 @@ def _lease_ms(spec: InboxSpec) -> int:
 
 def clear_inboxes() -> None:
     INBOX_REGISTRY.clear()
+    INBOXES_AT_START.clear()
 
 
 # (channel, queue, consumer_tag)，停的时候逐个取消。
@@ -306,9 +329,13 @@ async def start_receiving() -> None:
     """开设本进程声明的全部收件箱并开始消费；同时消费本泳道的定时队列。
 
     每个收件箱建两条队列，问题队列马上开始消费。声明了 ``consume_while`` 的收件箱，普通消息在
-    后台等到持有之后才开始消费，这里不等它。
+    后台等到持有之后才开始消费，这里不等它。名字到启动时才知道的那几组先取名字，再开设
+    （:func:`inboxes_at_start`）。
     """
     global _let_go
+    pending, INBOXES_AT_START[:] = list(INBOXES_AT_START), []
+    for open_them in pending:
+        await open_them()
     _let_go = asyncio.Event()
     await mq.declare_route(SCHEDULED, lane=lane())
     await _consume(SCHEDULED, _on_scheduled)
