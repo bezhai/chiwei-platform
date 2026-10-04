@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import uuid
@@ -57,9 +58,10 @@ def _ms(moment: dt.datetime) -> int:
 @pytest.fixture
 async def nudge_db(living_db):
     from app.living.loose_ends import LooseEnd
+    from app.living.nudge import NudgeBegun
     from tests.runtime.conftest import migrate
 
-    for cls in (LooseEnd, LifeMoment):
+    for cls in (LooseEnd, LifeMoment, NudgeBegun):
         await migrate(cls, living_db)
     async with session_mod.get_session() as s:
         await s.execute(
@@ -159,6 +161,8 @@ class FakeLife:
         self.prompts: list[str] = []
         # 模型那一步跑着的时候发生的事（比如又到了一条消息）。
         self.meanwhile = None
+        # 她调完工具之后发生的事（比如这一轮在她已经做了些什么之后失败）。
+        self.after = None
 
     async def run(self, messages, **kwargs):
         self.prompts.append(messages[-1].content)
@@ -170,6 +174,8 @@ class FakeLife:
             tools = {t.name: t for t in MOMENT_TOOLS}
             for name, args in self.calls:
                 await tools[name].invoke(args)
+        if self.after is not None:
+            await self.after()
         return Message(role=Role.ASSISTANT, content=self.said)
 
 
@@ -611,3 +617,239 @@ async def test_a_phone_call_she_ignored_does_not_keep_a_received_message_from_wa
 
     assert moment is not None, "一条躺着的未读私聊挡住了收件箱里的新消息"
     assert "千凪在厨房喊你吃饭。" in stub_life.prompts[-1]
+
+
+# --------------------------------------------------------------------------
+# 八 · 叫醒她的那条一定在那一轮里；没跑完的那一轮重跑时还是它自己
+#
+# 那一轮的身份就是叫醒她的那条消息，所以这两件事是同一个承诺的两半：
+#
+#   * 那一轮落地，叫醒她的那条就算看过了。它要是不在那一轮里，那一轮落地了它还没看过，
+#     之后每一拍都拿它去叫醒她、每一拍都撞上"这一轮已经跑过"，收件箱的提前叫醒就卡在那儿，
+#     直到一个常规轮次把它看掉；
+#   * 那一轮在她已经做了些什么之后失败，重跑必须还是那个身份。她这一轮里做的事、发出去的
+#     话，id 都由身份派生；换了身份重跑，同一个动作就落两遍、同一句话就发两遍。这是工程上
+#     的幂等，不是替她决定什么：重跑时她照样看到这期间新到的一切，怎么做由她。
+# --------------------------------------------------------------------------
+
+
+async def _acts(persona_id: str = "akao") -> int:
+    async with session_mod.get_session() as s:
+        return (
+            await s.execute(
+                text(
+                    "SELECT count(*) FROM data_happening "
+                    "WHERE lane = :l AND actor = :p AND kind = 'act'"
+                ),
+                {"l": LANE, "p": persona_id},
+            )
+        ).scalar_one()
+
+
+async def _unread_ids(persona_id: str = "akao") -> set[str]:
+    from app.living.received import unread_received
+
+    return {
+        m.message_id
+        for m in await unread_received(lane=LANE, persona_id=persona_id)
+    }
+
+
+async def _queued_behind(key: str) -> None:
+    """等到有人排在这把占用后面（``asyncio.Lock`` 的等待队列不空）。"""
+    from app.living.serial import _lock_for
+
+    lock = _lock_for(key)
+    for _ in range(500):
+        if lock._waiters:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"没有人排在 {key} 后面")
+
+
+async def _fails() -> None:
+    raise RuntimeError("这一轮在她做完那些事之后失败了")
+
+
+@pytest.mark.integration
+async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_pile_up(
+    nudge_db, stub_life, named
+):
+    """她正在跑一轮，这条钟排在后面等；等的时候到了一批发生得更早的消息，多到一轮摆不下。
+    醒来的那一轮是谁叫醒的，那条就得在那一轮里，落地后就算看过；剩下的接着一条一条叫醒她。"""
+    from app.living.moment import life_moment_lock_key
+    from app.living.received import RECEIVED_LIMIT, receive
+    from app.living.serial import hold
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    doorbell = _to_her("楼下有人按门铃。", at=_at(21, 31))
+    await receive(doorbell)
+    bodies = {doorbell.message_id: doorbell.body}
+
+    key = life_moment_lock_key(LANE, "akao")
+    async with hold(key):  # 她正在跑的那一轮
+        waiting = asyncio.create_task(
+            nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+        )
+        await _queued_behind(key)
+        for i in range(RECEIVED_LIMIT):
+            earlier = _to_her(f"第 {i} 件事。", at=_at(21, 0, i))
+            await receive(earlier)
+            bodies[earlier.message_id] = earlier.body
+    woken = await waiting
+
+    assert woken is not None
+    woke_for = woken.moment_id.removeprefix("nudge:inbox:")
+    assert bodies[woke_for] in stub_life.prompts[-1], (
+        f"叫醒她的那条（{bodies[woke_for]}）不在那一轮里"
+    )
+    assert woke_for not in await _unread_ids(), "那一轮落地了，叫醒她的那条却还没看过"
+
+    # 还有没看过的，下一拍就接着叫醒她，直到看完；不会卡在哪一条上。
+    for minute in range(33, 40):
+        if not await _unread_ids():
+            break
+        assert await nudge_once(
+            lane=LANE, persona_id="akao", now=_at(21, minute)
+        ) is not None, "收件箱的提前叫醒卡住了：还有没看过的，却叫不醒她"
+    assert await _unread_ids() == set()
+    assert any("楼下有人按门铃。" in seen for seen in stub_life.prompts)
+    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 40)) is None
+
+
+@pytest.mark.integration
+async def test_two_ticks_queued_behind_her_round_wake_her_once(nudge_db, stub_life, named):
+    """她正在跑一轮，这条钟的两拍叠在一起排在后面（钟每一拍都不等上一拍跑完）。叫醒她的那条
+    只叫醒她一次：先轮到的那一拍跑那一轮，后轮到的那一拍什么都不做，也不出错。判"是什么叫醒
+    了她"跟跑那一轮不在同一次占用里的话，两拍会各自判出同一条、各记一遍"开始了"。"""
+    from app.living.moment import life_moment_lock_key
+    from app.living.received import receive
+    from app.living.serial import hold
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    doorbell = _to_her("楼下有人按门铃。", at=_at(21, 31))
+    await receive(doorbell)
+
+    async with hold(life_moment_lock_key(LANE, "akao")):  # 她正在跑的那一轮
+        ticks = asyncio.gather(
+            nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32)),
+            nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33)),
+            return_exceptions=True,
+        )
+        await asyncio.sleep(0.5)  # 两拍都走到占用门口
+    outcomes = await ticks
+
+    assert not [o for o in outcomes if isinstance(o, BaseException)], outcomes
+    woke = [o for o in outcomes if o is not None]
+    assert [o.moment_id for o in woke] == [f"nudge:inbox:{doorbell.message_id}"]
+    assert len(await _all_moments()) == 2
+
+
+@pytest.mark.integration
+async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_arrive_as_it_starts(
+    nudge_db, stub_life, named, monkeypatch
+):
+    """那一轮已经定下是谁叫醒的、还没读收件箱的那一刻，到了一批发生得更早的消息，多到一轮
+    摆不下：叫醒她的那条照样在那一轮里。"""
+    from app.living import moment as moment_mod
+    from app.living.received import RECEIVED_LIMIT, receive
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    doorbell = _to_her("楼下有人按门铃。", at=_at(21, 31))
+    await receive(doorbell)
+
+    real = moment_mod.read_snapshot
+
+    async def a_pile_arrives_first(**kwargs):
+        for i in range(RECEIVED_LIMIT):
+            await receive(_to_her(f"第 {i} 件事。", at=_at(21, 0, i)))
+        return await real(**kwargs)
+
+    monkeypatch.setattr(moment_mod, "read_snapshot", a_pile_arrives_first)
+    woken = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+
+    assert woken is not None
+    assert woken.moment_id == f"nudge:inbox:{doorbell.message_id}"
+    assert "楼下有人按门铃。" in stub_life.prompts[-1], "叫醒她的那条不在那一轮里"
+    assert doorbell.message_id not in await _unread_ids()
+
+
+@pytest.mark.integration
+async def test_a_round_a_message_woke_that_failed_is_retried_as_itself_whatever_arrives(
+    nudge_db, stub_life, named
+):
+    """收件箱里那条叫醒她，她做了一个动作，这一轮失败了。之后到了一批发生得更早的消息、手机
+    上也有人叫她：下一拍重跑的还是那一轮，同一个动作不落第二遍；叫她的那些排在它之后。"""
+    from app.living.received import RECEIVED_LIMIT, receive
+
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
+        doing="翻胶片", noted_at=_at(21, 20),
+    )
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    rain = _to_her("窗外下起了雨。", at=_at(21, 31))
+    await receive(rain)
+
+    stub_life.calls = [("act", {"what": "起身把窗关上了"})]
+    stub_life.after = _fails
+    with pytest.raises(RuntimeError, match="做完那些事之后失败"):
+        await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+    stub_life.after = None
+    assert await _acts() == 1, "前提没造出来：失败之前那个动作要已经落下"
+
+    for i in range(RECEIVED_LIMIT):
+        await receive(_to_her(f"第 {i} 件事。", at=_at(21, 0, i)))
+    summons = await _incoming(_DM, body="在吗", at=_at(21, 33))
+
+    again = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+
+    assert again is not None
+    assert again.moment_id == f"nudge:inbox:{rain.message_id}", (
+        "没跑完的那一轮重跑时换了身份"
+    )
+    assert "窗外下起了雨。" in stub_life.prompts[-1], "重跑的那一轮里没有叫醒她的那条"
+    assert await _acts() == 1, "失败之前做过的那个动作，重跑时又落了一遍"
+    assert rain.message_id not in await _unread_ids()
+
+    then = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 35))
+    assert then is not None and then.moment_id == f"nudge:{summons}", (
+        "手机上叫她的那条被重跑那一轮挡掉了，没有轮到它"
+    )
+
+
+@pytest.mark.integration
+async def test_a_round_a_summons_woke_that_failed_is_retried_as_itself_whatever_arrives(
+    nudge_db, stub_life, named
+):
+    """手机上那条叫醒她，她做了一个动作，这一轮失败了。之后手机上来了更新的一条叫她、收件箱
+    里也到了一条：下一拍重跑的还是那一轮，同一个动作不落第二遍。"""
+    from app.living.received import receive
+
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
+        doing="翻胶片", noted_at=_at(21, 20),
+    )
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    first = await _incoming(_DM, body="在吗", at=_at(21, 31))
+
+    stub_life.calls = [("act", {"what": "放下胶片去拿手机"})]
+    stub_life.after = _fails
+    with pytest.raises(RuntimeError, match="做完那些事之后失败"):
+        await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+    stub_life.after = None
+    assert await _acts() == 1, "前提没造出来：失败之前那个动作要已经落下"
+
+    newer = await _incoming(
+        _GROUP, body=" 你说呢", at=_at(21, 33), sender=_SOMEONE,
+        sender_name="路人", names_bot=_AKAO_BOT_UID,
+    )
+    await receive(_to_her("千凪在厨房喊你吃饭。", at=_at(21, 33)))
+
+    again = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+
+    assert again is not None
+    assert again.moment_id == f"nudge:{first}", "没跑完的那一轮重跑时换了身份"
+    assert await _acts() == 1, "失败之前做过的那个动作，重跑时又落了一遍"
+
+    then = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 35))
+    assert then is not None and then.moment_id == f"nudge:{newer}"

@@ -22,7 +22,7 @@
 
 **她下一轮醒来时读**（:func:`unread_received` → :func:`render_received`，由
 :func:`app.living.moment.run_moment` 摆进这一轮的输入）。按每条消息自带的时间排，不按到达
-先后。world 发来的是她察觉到的事，原样摆，不标是谁说的；别人发来的带着发送方的名字。
+先后。收件箱里一条消息把她提前叫醒的那一轮，那一条一定在里面（``including``）。world 发来的是她察觉到的事，原样摆，不标是谁说的；别人发来的带着发送方的名字。
 
 **读到哪里逐条记，不是一个水位**（:class:`ReceivedRead`）。按消息自带的时间开水位会漏：
 姐妹直接说的话和 world 的告知走两条路，一条早发生的可能晚到，水位已经越过它的时间，它就再也
@@ -151,26 +151,40 @@ async def receive(message: Message) -> None:
 
 
 async def unread_received(
-    *, lane: str, persona_id: str, limit: int = RECEIVED_LIMIT
+    *,
+    lane: str,
+    persona_id: str,
+    limit: int = RECEIVED_LIMIT,
+    including: str | None = None,
 ) -> list[ReceivedMessage]:
     """她收到、还没看过的消息里最早的 ``limit`` 条，按消息自带的时间排。
 
+    ``including`` 是叫醒她这一轮的那条消息的 id（:mod:`app.living.nudge`）：它还没看过而又
+    不在最早那几条里时，也摆进来，这一轮就多出这一条。那一轮的身份就是它，那一轮落地它就该
+    算看过；只取最早那几条的话，叫醒她之后才到、发生得更早的消息一多，就会把它挤出去。
+
     同一刻的几条按消息 id 排，只是为了每次读出来的顺序一样。
     """
-    sql = (
+    unread = (
         f"SELECT m.* FROM {_RECEIVED_TABLE} m "
         f"WHERE m.lane = :lane AND m.persona_id = :persona_id "
         f"AND NOT EXISTS (SELECT 1 FROM {_READ_TABLE} r "
         f"WHERE r.lane = m.lane AND r.persona_id = m.persona_id "
-        f"AND r.message_id = m.message_id) "
-        f"ORDER BY m.message_time, m.message_id LIMIT :limit"
+        f"AND r.message_id = m.message_id)"
     )
+    sql = (
+        f"({unread} ORDER BY m.message_time, m.message_id LIMIT :limit) "
+        f"UNION ({unread} AND m.message_id = :including) "
+        f"ORDER BY message_time, message_id"
+    )
+    params = {
+        "lane": lane,
+        "persona_id": persona_id,
+        "limit": limit,
+        "including": including,
+    }
     async with get_session() as s:
-        rows = (
-            await s.execute(
-                text(sql), {"lane": lane, "persona_id": persona_id, "limit": limit}
-            )
-        ).mappings().all()
+        rows = (await s.execute(text(sql), params)).mappings().all()
     return [
         ReceivedMessage(**{k: row[k] for k in ReceivedMessage.model_fields})
         for row in rows

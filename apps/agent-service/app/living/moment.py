@@ -1036,6 +1036,11 @@ async def _remember_this_round(
         )
 
 
+def nudged_moment_id(nudged_by: str) -> str:
+    """被叫来提前的那个 moment 的身份：``nudge:<把她叫来的那条>``（理由见 :func:`run_moment`）。"""
+    return f"nudge:{nudged_by}"
+
+
 async def run_moment(
     *, lane: str, persona_id: str, now: datetime, nudged_by: str | None = None
 ) -> LifeMoment | None:
@@ -1065,7 +1070,9 @@ async def run_moment(
 
       顺带说清为什么不落格子也不丢幂等：一个 moment 里所有派生 id（happening_id、whereabouts
       的自然键）都从 ``moment_id`` 来，**不从 ``now`` 来**；``moment_id`` 已经稳了，
-      重跑照样是 no-op。
+      重跑照样是 no-op。前提是重跑时身份不变：被叫来的那一轮没落地，重跑它的是
+      :mod:`app.living.nudge` 那条钟，它记着开始了而没落地的那一轮
+      （:class:`app.living.nudge.NudgeBegun`），不会因为这期间又来了别的消息就换一个身份。
 
     **她被带到那一刻，回不回是她的输出。** 这里只负责把她带到，不看她说了什么、也没有
     任何"她该不该回"的判断——那是替她做决定。
@@ -1090,209 +1097,239 @@ async def run_moment(
     瞬时失败会整轮重放、重放已经执行过的 durable 写。派生 id 让重放无害，但重放
     仍然是白花的一次钱，而且下一拍再来就行。
     """
+    async with hold(life_moment_lock_key(lane, persona_id)):
+        return await run_moment_held(
+            lane=lane, persona_id=persona_id, now=now, nudged_by=nudged_by
+        )
+
+
+async def run_moment_held(
+    *,
+    lane: str,
+    persona_id: str,
+    now: datetime,
+    nudged_by: str | None = None,
+    must_show: str | None = None,
+) -> LifeMoment | None:
+    """:func:`run_moment` 占住之后的那一段。**调用方必须已经占着**
+    :func:`life_moment_lock_key` 那条 key——这里不再占一次，``hold`` 不可重入，嵌套就是
+    永久自锁死。
+
+    单独拿出来，是因为被叫来提前的那条钟要在**同一次占用里**先判"是什么叫醒了她"，再跑
+    这一轮（:func:`app.living.nudge.nudge_once`）。判在占用外面的话，判完到轮到她之间
+    可能隔着一整轮：那一轮会把判据改掉（看过了、跑过了），判出来的就是过期的结论。
+
+    ``must_show`` 是收件箱里叫醒她这一轮的那条消息的 id：它还没看过，就一定摆进这一轮
+    （:func:`app.living.received.unread_received` 的 ``including``），这一轮落地它就算
+    看过。这一轮的身份就是它；它不在这一轮里的话，这一轮落地了它还没看过，之后每一拍拿它
+    叫醒她都撞上"这一轮跑过了"。
+    """
     minutes = await life_moment_minutes()
     interval = timedelta(minutes=minutes)
     anchor = anchor_on_grid(now, minutes=minutes)
     nudged = nudged_by is not None
     began_at = now if nudged else anchor
     moment_id = (
-        f"nudge:{nudged_by}" if nudged else anchor.isoformat(timespec="minutes")
+        nudged_moment_id(nudged_by)
+        if nudged_by is not None
+        else anchor.isoformat(timespec="minutes")
     )
 
-    async with hold(life_moment_lock_key(lane, persona_id)):
-        if nudged:
-            if await moment_ran(
-                lane=lane, persona_id=persona_id, moment_id=moment_id
-            ):
-                return None
-        else:
-            last_regular = await latest_regular_moment(
-                lane=lane, persona_id=persona_id
-            )
-            if (
-                last_regular is not None
-                and anchor - last_regular.began_at < interval
-            ):
-                return None
+    if nudged:
+        if await moment_ran(
+            lane=lane, persona_id=persona_id, moment_id=moment_id
+        ):
+            return None
+    else:
+        last_regular = await latest_regular_moment(
+            lane=lane, persona_id=persona_id
+        )
+        if (
+            last_regular is not None
+            and anchor - last_regular.began_at < interval
+        ):
+            return None
 
-        # 游标跨两种 moment 共用一条轴：取"最近一次"，不筛 nudged。
-        last = await latest_moment(lane=lane, persona_id=persona_id)
-        after_seq = last.next_seq if last is not None else 0
-        # "离上一次过了多久"就摆在她眼前那一行上。取最后落地的那个 moment 的『现在』，
-        # 跟游标同一行 —— 两者问的是同一件事："她上一次回到自己身上是什么时候"。
-        previous_at = last.began_at if last is not None else None
-        # 她上一个 moment 说到哪了。**键不分天**，她接着昨天往下想；版本号一路带到
-        # 收尾去做 CAS（:func:`app.agent.continuity.commit_transcript`）。
-        transcript_id = transcript_key(lane=lane, persona_id=persona_id)
-        history, transcript_ver = await load_session(transcript_id)
-        # 上一轮的上下文落地了没有。没落地的话这一轮眼前的历史停在更早的地方，而刺激
-        # 写着"离上一次过了十分钟"，指的是她看不到的那一轮 —— 所以要重铺一次状态。
-        gap = lost_last_round(last, loaded_ver=transcript_ver)
-        if gap:
-            CONTEXT_GAP.labels(lane=lane, persona_id=persona_id).inc()
-            logger.error(
-                "上一轮的上下文没落地：%s 读到 ver=%d，上一个 moment（%s）记的是 "
-                "ver=%d。这一轮把她的状态重铺一次",
-                transcript_id,
-                transcript_ver,
-                last.moment_id if last is not None else "",
-                last.context_ver if last is not None else 0,
-            )
-        snapshot = await read_snapshot(
-            lane=lane, persona_id=persona_id, after_seq=after_seq, now=began_at
-        )
-        # 传到她这里、她还没看过的消息（:mod:`app.living.received`）。读在模型调用之前：
-        # 只有这几条会跟这一轮一起记成看过，这一轮跑着的时候新到的留给下一轮。
-        received = await unread_received(lane=lane, persona_id=persona_id)
-        # 「她是谁」那两个变量由 :mod:`app.living.persona` 一处组装（这一轮和日记那两
-        # 条路共用同一份）。手边有哪些说明可读**只加在这个 moment 上**：只有这个 moment
-        # 有读它、跑它的那两只手，塞进那个共用函数就等于把一份写日记时用不上的清单也
-        # 灌进那个 agent 的 prompt。
-        prompt_vars = {
-            **await persona_prompt_vars(lane=lane, persona_id=persona_id),
-            GUIDES_VAR: guides_she_can_read(),
-        }
-        context = AgentContext(
-            persona_id=persona_id,
-            # 一个人的一整天在 langfuse 里读成一条流，逐个 moment 翻起来才不用大海捞针。
-            session_id=f"living-life:{lane}:{persona_id}",
-            features={
-                FEATURE_LANE: lane,
-                FEATURE_NOW: began_at.isoformat(),
-                FEATURE_PERSONA: persona_id,
-                FEATURE_MOMENT: moment_id,
-                FEATURE_SWITCHES: [],
-                FEATURE_RECORDED: [],
-                FEATURE_GLANCES: [],
-            },
-        )
-        # 手机上只给通知（谁、多少条、多密、你上次在那儿开口是什么时候），按时间排、
-        # 只给最新那几条。内容要她自己调 look_at_phone，整张会话名单要她自己调
-        # look_through_your_phone —— 白送进来的话，"她没看见"这个状态就再也不会发生。
-        #
-        # **通知在这个 moment 的 context 里算**，所以"她看得见哪些会话"这份名单在她看到第
-        # 一眼时就定下来，之后整个 moment（看手机、找人、发消息、找可读文件）用的都是那一份
-        # （:mod:`app.living.whitelist`）。摆在 context 外面算的话名单会被算两遍，
-        # 而两遍之间到达的消息会让一条会话半路出现在她眼前。
-        #
-        # **查一次，渲两次**：摆到她眼前的只有这一轮新到的
-        # （:func:`app.living.phone.render_arrived`），还没看的全貌铺在界桩上
-        # （:func:`app.living.phone.render_unread`）。两次渲染是纯函数，查库那一遍
-        # 一条会话一次往返，不能为了两段文本走两遍。
-        with agent_context(context):
-            unread = await envelopes_for(
-                lane=lane, persona_id=persona_id, now=began_at
-            )
-        # 这一轮新摆到她眼前的那条，接在连续上下文后面 —— 所以它永远是最后一条。
-        #
-        # **只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、传到她这里
-        # 的消息、手机上刚来了什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里
-        # 挂着什么、刚做过说过什么、手机上还有什么没看）不在这里 —— 那份读一百遍字字一样，
-        # 每轮重发就是把同一段话抄一遍，而她上一轮读过的还在上下文里。它由清理那一下作为
-        # 新起点重铺（:func:`app.agent.continuity.trim_for_round`，默认一小时一次；一天的
-        # 第一轮上下文是空的，那一下也会立一根界桩，所以冷启动她照样知道自己站在哪）。
-        #
-        # **未读必须在界桩上**：眼前那份只给新到的，一条她一直不看的通知会随着摆出它的
-        # 那一轮刺激一起在 own_minutes 之后被裁掉，界桩不重铺的话之后再没有第二处说得出
-        # 有人找过她。
-        state = f"{snapshot.render_state()}\n\n{render_unread(unread, now=began_at)}"
-        arrived = render_arrived(unread, since=previous_at, now=began_at)
-        stimulus = Message(
-            role=Role.USER,
-            content=(
-                f"{snapshot.render_new(previous_at=previous_at)}\n\n"
-                f"{render_received(received, now=began_at)}\n\n{arrived}"
-            ),
-        )
-        # 裁在这里，不在收尾：喂进去的和存下去的是同一份前缀，而且一段带着过期图片
-        # 地址的历史不会在模型调用那一步先炸掉、永远轮不到被裁。
-        history = trim_for_round(
-            history,
-            material_tools=MATERIAL_TOOLS,
-            now=began_at,
-            state=state,
-            policy=MOMENT_TRIM_POLICY,
-            lost_last_round=gap,
-        )
-        # 这一轮模型产出的每一条（她的每次发言、每次工具调用和工具返回）都收在这里，
-        # 收尾时连同历史和这条刺激一起写成下一版上下文。
-        produced: list[Message] = []
-        # **本轮用量落 durable PG，不指望 langfuse。** `app.agent.trace` 记着实测
-        # 结论：langfuse 会系统性丢 trace（这一版实测整夜 225 个 moment 只到 125 条，丢
-        # 44%），所以"这一晚花了多少"只能从 PG 数。usage 来自 LLM response 本身，
-        # 跟 langfuse 死活无关。
-        with collect_usage() as usage:
-            reply = await build_moment_runner().run(
-                [*history, stimulus],
-                prompt_vars=prompt_vars,
-                context=context,
-                max_retries=1,
-                transcript_sink=produced,
-            )
-
-        # 记成本是旁路：落库失败只 log 不抛（swallow 在 record_round_cost 里），
-        # 绝不能因为记账失败把一个 moment 真实的生活搞成失败。
-        await record_round_cost(
-            lane=lane,
-            actor=persona_id,
-            round_id=moment_id,
-            usage=usage,
-            observed_at=began_at.isoformat(),
-        )
-
-        switches = context.features[FEATURE_SWITCHES]
-        where = await current_whereabouts(lane=lane, persona_id=persona_id)
-        # 落地号在收尾这一步才取：占用还没放开，所以取号到 commit 之间没有别人插进来，
-        # 号的先后 == 提交的先后。崩在这之后的话这个号作废，在轴上留一个永远为空的洞
-        # ——读侧问的是"号最大的那一行"，一个从没出现过的号不会让任何人被跳过。
-        seq = await _next_moment_seq(lane=lane, persona_id=persona_id)
-        moment = LifeMoment(
-            lane=lane,
-            persona_id=persona_id,
-            moment_id=moment_id,
-            seq=seq,
-            began_at=began_at,
-            after_seq=after_seq,
-            next_seq=snapshot.perceived.next_cursor,
-            perceived=len(snapshot.perceived.items),
-            switched=bool(switches),
-            pulled_by=switches[-1]["because"] if switches else "",
-            recorded=len(set(context.features[FEATURE_RECORDED])),
-            doing=where.doing if where is not None else "",
-            open_ends=len(
-                await list_open_loose_ends(lane=lane, persona_id=persona_id)
-            ),
-            said=reply.text().strip(),
-            context_ver=transcript_ver + 1,
-            nudged=nudged,
-        )
-        # **这个 moment 落地和她看过的手机是同一个事务。** 工具返回不等于她看见了——
-        # 只有这个 moment 跑完，工具结果才真的进过她的上下文。分开写的话，崩在两者之间
-        # 就是"已读了但内容从没到她眼前"，那几条消息永久消失且一句报错都没有。绑在一起
-        # 之后崩掉的代价只是她下一个 moment 原样再来一遍：宁可重看，不可漏看。传到她这里的
-        # 消息同理：只把这一轮摆进去的那几条记成看过，也在这个事务里。
-        #
-        # **她记住的这一段在这次提交之后单独写**（:func:`_remember_this_round`）：两种
-        # 代价不对称，理由见 :func:`_remember_this_round`。下一版上下文在提交
-        # 之前就算好：算它是纯函数，但放在提交和写入之间的任何一步出错都会变成"记录落了
-        # 而这一段连试都没试过写"。
-        remembered = next_transcript(
-            history, [stimulus, *produced], policy=MOMENT_TRIM_POLICY
-        )
-        async with get_session() as s:
-            await insert_idempotent(moment, session=s)
-            await commit_glances(
-                glances=context.features[FEATURE_GLANCES], session=s
-            )
-            await mark_read(received, moment_id=moment_id, session=s)
-        await _remember_this_round(
+    # 游标跨两种 moment 共用一条轴：取"最近一次"，不筛 nudged。
+    last = await latest_moment(lane=lane, persona_id=persona_id)
+    after_seq = last.next_seq if last is not None else 0
+    # "离上一次过了多久"就摆在她眼前那一行上。取最后落地的那个 moment 的『现在』，
+    # 跟游标同一行 —— 两者问的是同一件事："她上一次回到自己身上是什么时候"。
+    previous_at = last.began_at if last is not None else None
+    # 她上一个 moment 说到哪了。**键不分天**，她接着昨天往下想；版本号一路带到
+    # 收尾去做 CAS（:func:`app.agent.continuity.commit_transcript`）。
+    transcript_id = transcript_key(lane=lane, persona_id=persona_id)
+    history, transcript_ver = await load_session(transcript_id)
+    # 上一轮的上下文落地了没有。没落地的话这一轮眼前的历史停在更早的地方，而刺激
+    # 写着"离上一次过了十分钟"，指的是她看不到的那一轮 —— 所以要重铺一次状态。
+    gap = lost_last_round(last, loaded_ver=transcript_ver)
+    if gap:
+        CONTEXT_GAP.labels(lane=lane, persona_id=persona_id).inc()
+        logger.error(
+            "上一轮的上下文没落地：%s 读到 ver=%d，上一个 moment（%s）记的是 "
+            "ver=%d。这一轮把她的状态重铺一次",
             transcript_id,
-            remembered,
-            expected_ver=transcript_ver,
-            lane=lane,
-            persona_id=persona_id,
+            transcript_ver,
+            last.moment_id if last is not None else "",
+            last.context_ver if last is not None else 0,
         )
-        return moment
+    snapshot = await read_snapshot(
+        lane=lane, persona_id=persona_id, after_seq=after_seq, now=began_at
+    )
+    # 传到她这里、她还没看过的消息（:mod:`app.living.received`）。读在模型调用之前：
+    # 只有这几条会跟这一轮一起记成看过，这一轮跑着的时候新到的留给下一轮。
+    received = await unread_received(
+        lane=lane, persona_id=persona_id, including=must_show
+    )
+    # 「她是谁」那两个变量由 :mod:`app.living.persona` 一处组装（这一轮和日记那两
+    # 条路共用同一份）。手边有哪些说明可读**只加在这个 moment 上**：只有这个 moment
+    # 有读它、跑它的那两只手，塞进那个共用函数就等于把一份写日记时用不上的清单也
+    # 灌进那个 agent 的 prompt。
+    prompt_vars = {
+        **await persona_prompt_vars(lane=lane, persona_id=persona_id),
+        GUIDES_VAR: guides_she_can_read(),
+    }
+    context = AgentContext(
+        persona_id=persona_id,
+        # 一个人的一整天在 langfuse 里读成一条流，逐个 moment 翻起来才不用大海捞针。
+        session_id=f"living-life:{lane}:{persona_id}",
+        features={
+            FEATURE_LANE: lane,
+            FEATURE_NOW: began_at.isoformat(),
+            FEATURE_PERSONA: persona_id,
+            FEATURE_MOMENT: moment_id,
+            FEATURE_SWITCHES: [],
+            FEATURE_RECORDED: [],
+            FEATURE_GLANCES: [],
+        },
+    )
+    # 手机上只给通知（谁、多少条、多密、你上次在那儿开口是什么时候），按时间排、
+    # 只给最新那几条。内容要她自己调 look_at_phone，整张会话名单要她自己调
+    # look_through_your_phone —— 白送进来的话，"她没看见"这个状态就再也不会发生。
+    #
+    # **通知在这个 moment 的 context 里算**，所以"她看得见哪些会话"这份名单在她看到第
+    # 一眼时就定下来，之后整个 moment（看手机、找人、发消息、找可读文件）用的都是那一份
+    # （:mod:`app.living.whitelist`）。摆在 context 外面算的话名单会被算两遍，
+    # 而两遍之间到达的消息会让一条会话半路出现在她眼前。
+    #
+    # **查一次，渲两次**：摆到她眼前的只有这一轮新到的
+    # （:func:`app.living.phone.render_arrived`），还没看的全貌铺在界桩上
+    # （:func:`app.living.phone.render_unread`）。两次渲染是纯函数，查库那一遍
+    # 一条会话一次往返，不能为了两段文本走两遍。
+    with agent_context(context):
+        unread = await envelopes_for(
+            lane=lane, persona_id=persona_id, now=began_at
+        )
+    # 这一轮新摆到她眼前的那条，接在连续上下文后面 —— 所以它永远是最后一条。
+    #
+    # **只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、传到她这里
+    # 的消息、手机上刚来了什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里
+    # 挂着什么、刚做过说过什么、手机上还有什么没看）不在这里 —— 那份读一百遍字字一样，
+    # 每轮重发就是把同一段话抄一遍，而她上一轮读过的还在上下文里。它由清理那一下作为
+    # 新起点重铺（:func:`app.agent.continuity.trim_for_round`，默认一小时一次；一天的
+    # 第一轮上下文是空的，那一下也会立一根界桩，所以冷启动她照样知道自己站在哪）。
+    #
+    # **未读必须在界桩上**：眼前那份只给新到的，一条她一直不看的通知会随着摆出它的
+    # 那一轮刺激一起在 own_minutes 之后被裁掉，界桩不重铺的话之后再没有第二处说得出
+    # 有人找过她。
+    state = f"{snapshot.render_state()}\n\n{render_unread(unread, now=began_at)}"
+    arrived = render_arrived(unread, since=previous_at, now=began_at)
+    stimulus = Message(
+        role=Role.USER,
+        content=(
+            f"{snapshot.render_new(previous_at=previous_at)}\n\n"
+            f"{render_received(received, now=began_at)}\n\n{arrived}"
+        ),
+    )
+    # 裁在这里，不在收尾：喂进去的和存下去的是同一份前缀，而且一段带着过期图片
+    # 地址的历史不会在模型调用那一步先炸掉、永远轮不到被裁。
+    history = trim_for_round(
+        history,
+        material_tools=MATERIAL_TOOLS,
+        now=began_at,
+        state=state,
+        policy=MOMENT_TRIM_POLICY,
+        lost_last_round=gap,
+    )
+    # 这一轮模型产出的每一条（她的每次发言、每次工具调用和工具返回）都收在这里，
+    # 收尾时连同历史和这条刺激一起写成下一版上下文。
+    produced: list[Message] = []
+    # **本轮用量落 durable PG，不指望 langfuse。** `app.agent.trace` 记着实测
+    # 结论：langfuse 会系统性丢 trace（这一版实测整夜 225 个 moment 只到 125 条，丢
+    # 44%），所以"这一晚花了多少"只能从 PG 数。usage 来自 LLM response 本身，
+    # 跟 langfuse 死活无关。
+    with collect_usage() as usage:
+        reply = await build_moment_runner().run(
+            [*history, stimulus],
+            prompt_vars=prompt_vars,
+            context=context,
+            max_retries=1,
+            transcript_sink=produced,
+        )
+
+    # 记成本是旁路：落库失败只 log 不抛（swallow 在 record_round_cost 里），
+    # 绝不能因为记账失败把一个 moment 真实的生活搞成失败。
+    await record_round_cost(
+        lane=lane,
+        actor=persona_id,
+        round_id=moment_id,
+        usage=usage,
+        observed_at=began_at.isoformat(),
+    )
+
+    switches = context.features[FEATURE_SWITCHES]
+    where = await current_whereabouts(lane=lane, persona_id=persona_id)
+    # 落地号在收尾这一步才取：占用还没放开，所以取号到 commit 之间没有别人插进来，
+    # 号的先后 == 提交的先后。崩在这之后的话这个号作废，在轴上留一个永远为空的洞
+    # ——读侧问的是"号最大的那一行"，一个从没出现过的号不会让任何人被跳过。
+    seq = await _next_moment_seq(lane=lane, persona_id=persona_id)
+    moment = LifeMoment(
+        lane=lane,
+        persona_id=persona_id,
+        moment_id=moment_id,
+        seq=seq,
+        began_at=began_at,
+        after_seq=after_seq,
+        next_seq=snapshot.perceived.next_cursor,
+        perceived=len(snapshot.perceived.items),
+        switched=bool(switches),
+        pulled_by=switches[-1]["because"] if switches else "",
+        recorded=len(set(context.features[FEATURE_RECORDED])),
+        doing=where.doing if where is not None else "",
+        open_ends=len(
+            await list_open_loose_ends(lane=lane, persona_id=persona_id)
+        ),
+        said=reply.text().strip(),
+        context_ver=transcript_ver + 1,
+        nudged=nudged,
+    )
+    # **这个 moment 落地和她看过的手机是同一个事务。** 工具返回不等于她看见了——
+    # 只有这个 moment 跑完，工具结果才真的进过她的上下文。分开写的话，崩在两者之间
+    # 就是"已读了但内容从没到她眼前"，那几条消息永久消失且一句报错都没有。绑在一起
+    # 之后崩掉的代价只是她下一个 moment 原样再来一遍：宁可重看，不可漏看。传到她这里的
+    # 消息同理：只把这一轮摆进去的那几条记成看过，也在这个事务里。
+    #
+    # **她记住的这一段在这次提交之后单独写**（:func:`_remember_this_round`）：两种
+    # 代价不对称，理由见 :func:`_remember_this_round`。下一版上下文在提交
+    # 之前就算好：算它是纯函数，但放在提交和写入之间的任何一步出错都会变成"记录落了
+    # 而这一段连试都没试过写"。
+    remembered = next_transcript(
+        history, [stimulus, *produced], policy=MOMENT_TRIM_POLICY
+    )
+    async with get_session() as s:
+        await insert_idempotent(moment, session=s)
+        await commit_glances(
+            glances=context.features[FEATURE_GLANCES], session=s
+        )
+        await mark_read(received, moment_id=moment_id, session=s)
+    await _remember_this_round(
+        transcript_id,
+        remembered,
+        expected_ver=transcript_ver,
+        lane=lane,
+        persona_id=persona_id,
+    )
+    return moment
 
 
 @node

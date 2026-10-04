@@ -19,13 +19,25 @@
 它挡不住收件箱里的新消息：两边各认各的那条。
 
 收件箱里取的是**最早**那条没看过的，不是最新那条：她那一轮按消息自带的时间从最早的摆起
-（一轮最多摆 :data:`app.living.received.RECEIVED_LIMIT` 条），取最早那条，叫醒她的那条就
-一定在那一轮里，那一轮落地它就算看过了。取最新那条的话，积压多时它可能排在一轮摆得下的范围
-之外，那一轮叫过它、它却还没看过。
+（一轮最多摆 :data:`app.living.received.RECEIVED_LIMIT` 条），积压的时候最早的先被看掉，
+后面的接着一条一条叫醒她。叫醒她的那条**一定**在那一轮里（``must_show``，见
+:func:`app.living.moment.run_moment_held`）：叫醒她之后才到、发生得更早的消息再多，也挤不掉
+它。那一轮的身份就是它，那一轮落地它就算看过；不然它会一直排在最前，每一拍拿它叫醒她都撞上
+"这一轮跑过了"，收件箱的提前叫醒就卡在那儿。
 
-她正在跑一轮的时候，这条钟等那一轮结束才判（一轮最长占锁 15 分钟，见
-:func:`app.living.moment.run_moment`）：那一轮跑着时到的消息没摆进去，还没看过，也还没叫醒过
-她，所以一轮结束后的下一拍叫醒她一次。
+**判"是什么叫醒了她"和跑那一轮在同一次占用里**（:func:`app.living.moment.life_moment_lock_key`）。
+她正在跑一轮的时候，这条钟排在后面，等那一轮结束才判（一轮最长占锁 15 分钟，见
+:func:`app.living.moment.run_moment`）。判在占用外面的话，判完到轮到她之间隔着的那一轮会把
+判据改掉（看过了、跑过了），判出来的是过期的结论。那一轮跑着时到的消息没摆进去，还没看过，
+也还没叫醒过她，所以一轮结束后的下一拍叫醒她一次。
+
+**开始了却没落地的那一轮，下一拍重跑的还是它自己**（:class:`NudgeBegun`）。她在那一轮里做的
+事、发出去的话，id 都从那一轮的身份派生（见 :func:`app.living.moment.run_moment`）；那一轮
+在她已经做了些什么之后失败、超时、赶上部署，重跑时换了身份，同一个动作就落两遍、同一句话就
+对真人发两遍。所以开跑之前先记下"被什么叫醒的那一轮开始了"，之后每一拍先看有没有开始了而
+没落地的那一轮，有就原样重跑它，不管这期间手机上来了更新的一条、收件箱里到了更早的一条。
+这是工程上的幂等，不是替她做决定：重跑的那一轮里她照样看得到这期间新到的一切，怎么做由她；
+叫她的那些等它落地之后照常叫醒她。
 
 **这条钟只看她视野里的会话**（:mod:`app.living.whitelist`）：名单外的那些整个不进她
 视野，那里的一次点名也把她带不到那一刻。这一拍算出来的名单跟随后被唤醒的那一轮**是
@@ -55,14 +67,26 @@ import logging
 from datetime import datetime
 from typing import Annotated
 
+from sqlalchemy import text
+
+from app.data.session import get_session
 from app.infra.cst_time import now_cst
-from app.living.moment import LifeMoment, run_moment
+from app.living.moment import (
+    LifeMoment,
+    life_moment_lock_key,
+    moment_ran,
+    nudged_moment_id,
+    run_moment_held,
+)
 from app.living.persona import LIVING_PERSONAS
 from app.living.phone import newest_unread_summons
 from app.living.received import unread_received
 from app.living.records import living_lane
+from app.living.serial import hold
 from app.runtime.data import Data, Key
+from app.runtime.migrator import _table_name
 from app.runtime.node import node
+from app.runtime.persist import insert_append
 
 logger = logging.getLogger(__name__)
 
@@ -88,37 +112,109 @@ class PhoneNudgeTick(Data):
         transient = True
 
 
+class NudgeBegun(Data):
+    """被什么叫醒的那一轮开始了：模型还没调、她还什么都没做的那一刻记下。
+
+    自然键 ``(lane, persona_id, nudged_by)``：一个身份只开始一次。没落地的那一轮由
+    :func:`nudge_once` 原样重跑，不再开始新的一轮。纯 append：落没落地不记在这一行上，看的是
+    那一轮的 ``LifeMoment`` 在不在（:func:`app.living.moment.moment_ran`），那一轮落地的那次
+    提交就是它的了结，不用回来改这一行。
+    """
+
+    lane: Annotated[str, Key]
+    persona_id: Annotated[str, Key]
+    nudged_by: Annotated[str, Key]
+
+    class Meta:
+        # 读侧唯一形状：这个人最近开始的那一轮。
+        indexes = (("lane", "persona_id", "created_at"),)
+
+
+_BEGUN_TABLE = _table_name(NudgeBegun)
+
+
 async def nudge_once(
     *, lane: str, persona_id: str, now: datetime
 ) -> LifeMoment | None:
     """有人在叫她、或者有传到她这里的消息她还没看过，就把她带到这一刻；都没有、或者都已经
     叫过了，返回 ``None``。
 
-    先看手机：那条已经叫过她（``run_moment`` 交回 ``None``）不算数，接着看收件箱。
+    整段在她的 moment 占用里：先看有没有开始了而没落地的那一轮，有就原样重跑它；没有再看
+    现在有什么在叫她（:func:`_calling_her`），记下这一轮开始了，再跑。
 
     返回值只回答"这一轮跑了没有"。**她回不回是她的输出**，不在这里判、也不该有人在
     这里判。
     """
-    summons = await newest_unread_summons(
-        lane=lane, persona_id=persona_id, now=now
-    )
-    if summons is not None:
-        moment = await run_moment(
+    async with hold(life_moment_lock_key(lane, persona_id)):
+        nudged_by = await _begun_not_landed(lane=lane, persona_id=persona_id)
+        if nudged_by is None:
+            nudged_by = await _calling_her(lane=lane, persona_id=persona_id, now=now)
+            if nudged_by is None:
+                return None
+            await insert_append(
+                NudgeBegun(lane=lane, persona_id=persona_id, nudged_by=nudged_by)
+            )
+        return await run_moment_held(
             lane=lane,
             persona_id=persona_id,
             now=now,
-            nudged_by=summons.message_id,
+            nudged_by=nudged_by,
+            must_show=(
+                nudged_by.removeprefix(_INBOX) if nudged_by.startswith(_INBOX) else None
+            ),
         )
-        if moment is not None:
-            return moment
+
+
+async def _begun_not_landed(*, lane: str, persona_id: str) -> str | None:
+    """最近开始的那一轮要是还没落地，它是被什么叫醒的；没有这样的一轮返回 ``None``。
+
+    只看最近开始的那一轮就够：有一轮开始了而没落地时，:func:`nudge_once` 只重跑它、不开始
+    新的一轮，所以没落地的至多一轮，而且就是最近开始的那一轮。
+    """
+    sql = (
+        f"SELECT nudged_by FROM {_BEGUN_TABLE} "
+        f"WHERE lane = :lane AND persona_id = :persona_id "
+        f"ORDER BY created_at DESC LIMIT 1"
+    )
+    async with get_session() as s:
+        nudged_by = (
+            await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
+        ).scalar_one_or_none()
+    if nudged_by is None or await _woke_her(
+        lane=lane, persona_id=persona_id, nudged_by=nudged_by
+    ):
+        return None
+    return nudged_by
+
+
+async def _calling_her(*, lane: str, persona_id: str, now: datetime) -> str | None:
+    """现在有什么在叫她、而且还没叫醒过她：先看手机，再看收件箱；都没有返回 ``None``。
+
+    手机上那条已经叫醒过她（她没看手机，所以它一直是最新那条未读）不算数，接着看收件箱。
+    收件箱里最早那条按理不会已经叫醒过她（叫醒她的那一轮落地时它一起算看过），照样问一句：
+    改成这样之前的版本留下过"那一轮落地了、它还没看过"的状态，不问的话每一拍都会拿它再开始
+    一轮，撞上已经记过的"开始了"。
+    """
+    summons = await newest_unread_summons(
+        lane=lane, persona_id=persona_id, now=now
+    )
+    if summons is not None and not await _woke_her(
+        lane=lane, persona_id=persona_id, nudged_by=summons.message_id
+    ):
+        return summons.message_id
     earliest = await unread_received(lane=lane, persona_id=persona_id, limit=1)
     if not earliest:
         return None
-    return await run_moment(
-        lane=lane,
-        persona_id=persona_id,
-        now=now,
-        nudged_by=f"{_INBOX}{earliest[0].message_id}",
+    nudged_by = f"{_INBOX}{earliest[0].message_id}"
+    if await _woke_her(lane=lane, persona_id=persona_id, nudged_by=nudged_by):
+        return None
+    return nudged_by
+
+
+async def _woke_her(*, lane: str, persona_id: str, nudged_by: str) -> bool:
+    """被这一条叫醒的那一轮落地了吗。"""
+    return await moment_ran(
+        lane=lane, persona_id=persona_id, moment_id=nudged_moment_id(nudged_by)
     )
 
 

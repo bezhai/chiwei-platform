@@ -22,6 +22,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.living.day_page import LivingDayPage
+from app.living.nudge import NudgeBegun
 from app.living.persona import PersonaVersion
 from app.living.pictures import Picture
 from app.living.reading import FilePickedUp, FileRead
@@ -119,6 +120,11 @@ _VALID: dict[type, dict] = {
         "persona_id": "ayana",
         "message_id": "0123456789abcdef0123456789abcdef",
         "moment_id": "2026-07-25T10:00+08:00",
+    },
+    NudgeBegun: {
+        "lane": "coe-x",
+        "persona_id": "ayana",
+        "nudged_by": "inbox:0123456789abcdef0123456789abcdef",
     },
 }
 
@@ -227,6 +233,14 @@ _PINNED: dict[type, dict[str, str]] = {
         "message_id": "TEXT",
         "moment_id": "TEXT",
     },
+    # 被什么叫醒的那一轮开始了。**没有"落地了没有"的列**：落没落地看那一轮的
+    # ``LifeMoment`` 在不在，落地那次提交就是它的了结。**没有时刻列**：开始的先后是框架的
+    # ``created_at``。
+    NudgeBegun: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "nudged_by": "TEXT",
+    },
 }
 
 
@@ -254,6 +268,7 @@ def test_living_data_reaches_the_registry_via_app_wiring():
         "PersonaVersion",
         "ReceivedMessage",
         "ReceivedRead",
+        "NudgeBegun",
     ):
         assert f"'{name}'" in registered, (
             f"{name} 没进 DATA_REGISTRY —— migrate_schema 不会建它的表。"

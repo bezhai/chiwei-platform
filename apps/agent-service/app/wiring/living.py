@@ -51,7 +51,8 @@ import 链拉到才会进 ``DATA_REGISTRY``，否则 ``Runtime.migrate_schema()`
 ``LooseEnd`` 由 ``moment`` -> ``loose_ends`` 带进来，``PhoneRead`` 由 ``moment`` ->
 ``phone`` 带进来，``PersonaVersion``（「她是谁」那份正文的版本链）由 ``moment`` ->
 ``persona`` 带进来，``FileRead`` / ``FilePickedUp`` 由下面那行 ``living.reading`` 直接
-带进来，``ReceivedMessage`` 由开收件箱那行的 ``living.received`` 带进来。``PersonaVersion`` 值得多说一句：这条链搬进 ``app.living.persona`` 之前住在
+带进来，``ReceivedMessage`` 由开收件箱那行的 ``living.received`` 带进来，``NudgeBegun``
+由挂提前叫醒那条钟的 ``living.nudge`` 带进来。``PersonaVersion`` 值得多说一句：这条链搬进 ``app.living.persona`` 之前住在
 ``app/life/persona_chain.py``，进 registry 靠的是 ``living.reading`` ->
 ``agent.reading`` -> ``memory._persona`` -> ``life.persona_chain`` 这条**跟 living 引擎
 毫无关系的意外链**——谁顺手清掉读书那条路里的一行 import，这张表就静默不建，而 prod
