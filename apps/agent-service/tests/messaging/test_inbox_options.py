@@ -501,6 +501,54 @@ async def test_a_failure_while_naming_inboxes_at_start_fails_the_start(broker):
     assert not await opened(inbox_route("operator"))
 
 
+async def test_a_failure_while_naming_inboxes_at_start_fails_every_later_start_too(broker):
+    """同一个进程里再开始接收一次：取名字那一步照样再跑、照样失败，仍然一个收件箱都不开。
+    第一次失败之前已经按名字开设了一半的那几个，也不能在第二次被当成"已经开好的"开出去。"""
+
+    async def on_message(message) -> None:
+        return None
+
+    async def names_are_wrong() -> None:
+        inbox("赤尾", on_message=on_message)  # 开了一个，下一个名字才发现有问题
+        raise RuntimeError("两个人的显示名一样")
+
+    inbox("operator", on_message=on_message)
+    inboxes_at_start(names_are_wrong)
+
+    with pytest.raises(RuntimeError, match="两个人的显示名一样"):
+        await start_messaging()
+    with pytest.raises(RuntimeError, match="两个人的显示名一样"):
+        await start_messaging()
+
+    assert not await opened(inbox_route("operator"))
+    assert not await opened(inbox_route("赤尾"))
+
+
+async def test_naming_inboxes_at_start_is_tried_again_in_full_after_a_failure(broker):
+    """取名字那一步失败过（比如库一时连不上），再开始接收时整组重新取一遍：开出来的是完整的
+    一组，不会因为上一次开了一半而撞上"已经声明过"。"""
+    attempts: list[int] = []
+
+    async def on_message(message) -> None:
+        return None
+
+    async def flaky() -> None:
+        attempts.append(len(attempts) + 1)
+        inbox("赤尾", on_message=on_message)
+        if len(attempts) == 1:
+            raise RuntimeError("库一时连不上")
+        inbox("绫奈", on_message=on_message)
+
+    inboxes_at_start(flaky)
+    with pytest.raises(RuntimeError, match="库一时连不上"):
+        await start_messaging()
+    await start_messaging()
+
+    assert attempts == [1, 2]
+    assert await opened(inbox_route("赤尾"))
+    assert await opened(inbox_route("绫奈"))
+
+
 def test_clearing_the_inboxes_also_drops_the_ones_named_at_start():
     """测试之间靠 ``clear_inboxes`` 回到干净状态：留下一个启动时才取名字的声明，下一个用例
     开始接收时就会替上一个用例去读库。"""

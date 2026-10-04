@@ -49,8 +49,10 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
 import 时就要名字，可有的名字存在库里（三姐妹的名字取自人设表），import 的时候库还没准备好。
 这类拥有者在接线里只声明一个"开设它们"的函数，:func:`start_receiving` 在开设任何收件箱之前
 调它一次，它在里面取名字、对每个名字调 :func:`inbox`。它抛异常，启动就失败，一个收件箱都
-不开：名字就是地址，名字有问题时不该带着其中一部分收件箱运行。每个声明在一个进程里只调一次，
-停了再开始接收时开设的还是第一次取到的那几个名字。
+不开：名字就是地址，名字有问题时不该带着其中一部分收件箱运行。失败的那一次里已经按名字声明
+的收件箱一并撤掉，声明本身留着：同一个进程再开始接收时整组重新调一遍，名字还有问题就照样失败，
+问题没了就开出完整的一组——不会把上一次开了一半的那几个当成开好的。全部调成功之后，每个声明
+在一个进程里就不再调，停了再开始接收时开设的还是那一次取到的那几个名字。
 
 **问题不排在普通消息后面。** 问题走自己的队列、自己的消费通道（prefetch :data:`_PREFETCH`），
 队列一建好就开始消费：不等 ``on_open``，不受 ``one_at_a_time`` 限制，也不等 ``consume_while``。
@@ -230,15 +232,16 @@ def inbox(
 
 OpenAtStart = Callable[[], Awaitable[None]]
 
-# 还没调过的"启动时再开"的声明（:func:`inboxes_at_start`）。开始接收时逐个调掉、清空。
+# 还没调成功过的"启动时再开"的声明（:func:`inboxes_at_start`）。开始接收时逐个调，全部成功才清空。
 INBOXES_AT_START: list[OpenAtStart] = []
 
 
 def inboxes_at_start(open_them: OpenAtStart) -> None:
     """声明一组名字到进程启动时才知道的收件箱。在 App 的接线模块里调，见模块说明。
 
-    ``open_them`` 在 :func:`start_receiving` 开设任何收件箱之前调一次，在里面取名字、对每个
-    名字调 :func:`inbox`。它抛异常，启动就失败。
+    ``open_them`` 在 :func:`start_receiving` 开设任何收件箱之前调，在里面取名字、对每个
+    名字调 :func:`inbox`。它抛异常，启动就失败，它这一次声明的收件箱撤掉，下一次开始接收时
+    再调一遍。
     """
     INBOXES_AT_START.append(open_them)
 
@@ -325,6 +328,19 @@ async def _open_while_held(spec: InboxSpec, opener: _HeldOpener, let_go: asyncio
         await asyncio.sleep(OPEN_RETRY_SECONDS)
 
 
+async def _open_inboxes_named_at_start() -> None:
+    """调全部"启动时再开"的声明。有一个失败，这一次声明的收件箱全部撤掉、声明全部留着再抛。"""
+    declared_before = dict(INBOX_REGISTRY)
+    try:
+        for open_them in INBOXES_AT_START:
+            await open_them()
+    except BaseException:
+        INBOX_REGISTRY.clear()
+        INBOX_REGISTRY.update(declared_before)
+        raise
+    INBOXES_AT_START.clear()
+
+
 async def start_receiving() -> None:
     """开设本进程声明的全部收件箱并开始消费；同时消费本泳道的定时队列。
 
@@ -333,9 +349,7 @@ async def start_receiving() -> None:
     （:func:`inboxes_at_start`）。
     """
     global _let_go
-    pending, INBOXES_AT_START[:] = list(INBOXES_AT_START), []
-    for open_them in pending:
-        await open_them()
+    await _open_inboxes_named_at_start()
     _let_go = asyncio.Event()
     await mq.declare_route(SCHEDULED, lane=lane())
     await _consume(SCHEDULED, _on_scheduled)
