@@ -77,9 +77,16 @@ still-declared table has a column its class no longer has (`migrator.py:216-224`
 release without the fields crash-loops until this runs. The old code writes all five on
 every insert (`place` and `who_was_where` on each `say` / `act` / phone send /
 take-back, the three cursor columns on each round), so dropping them while the old
-release still runs breaks her rounds. Stop the old agent-service in that lane, run the
-drop, then start the new release. Only agent-service declares these tables; the world
-App imports none of the living code and is not affected.
+release still runs breaks her rounds. An old release that restarts after the drop also
+adds the columns back (its migrator sees them missing from the table), after which the
+new release refuses to start again.
+
+So the stop covers **every agent-service release on the same database**, not one lane:
+the tables are shared by all lanes on that database (prod together with every `ppe-*`
+lane; chiwei-test with every `coe-*` lane). Undeploy each old agent-service release on
+that database (undeploy, not just a restart, so nothing brings it back), run the drop,
+then start the new release. Only agent-service declares these tables; the world App
+imports none of the living code and is not affected.
 
 Existing rows keep everything else; rows written by other sisters stay in the table
 and are simply never read across residents again.
