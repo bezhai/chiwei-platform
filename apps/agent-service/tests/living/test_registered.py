@@ -46,13 +46,11 @@ _VALID: dict[type, dict] = {
         "happening_id": "h1",
         "seq": 1,
         "actor": "akao",
-        "place": "家/客厅",
         "kind": KIND_SPEECH,
         "medium": MEDIUM_IN_PERSON,
         "content": "早",
         "occurred_at": _AWARE,
         "audience": [],
-        "who_was_where": {},
         "channel_id": None,
     },
     Whereabouts: {
@@ -158,13 +156,11 @@ _PINNED: dict[type, dict[str, str]] = {
         "happening_id": "TEXT",
         "seq": "BIGINT",
         "actor": "TEXT",
-        "place": "TEXT",
         "kind": "TEXT",
         "medium": "TEXT",
         "content": "TEXT",
         "occurred_at": "TIMESTAMPTZ",
         "audience": "JSONB",
-        "who_was_where": "JSONB",
         "channel_id": "TEXT",
     },
     Whereabouts: {
@@ -441,11 +437,11 @@ async def test_a_row_written_before_the_column_existed_still_reads_back(living_d
         await s.execute(
             _text(
                 "INSERT INTO data_life_moment "
-                "(lane, persona_id, moment_id, began_at, after_seq, next_seq,"
-                " perceived, switched, pulled_by, recorded, doing, open_ends,"
+                "(lane, persona_id, moment_id, began_at,"
+                " switched, pulled_by, recorded, doing, open_ends,"
                 " said, nudged, dedup_hash) "
                 "VALUES ('coe-living', 'akao', '2026-07-25T14:00+08:00',"
-                " :at, 0, 3, 1, false, '', 0, '看书', 0, '继续', NULL, 'legacy-1')"
+                " :at, false, '', 0, '看书', 0, '继续', NULL, 'legacy-1')"
             ),
             {"at": dt.datetime(2026, 7, 25, 14, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))},
         )
@@ -465,12 +461,12 @@ async def test_a_row_written_before_the_column_existed_still_reads_back(living_d
 
 @pytest.mark.integration
 async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living_db):
-    """加 ``seq`` 列之后，"读到哪了"不许被旧行钉死。
+    """加 ``seq`` 列之后，"最后落地的是哪一轮"不许被旧行钉死。
 
     这是同一个陷阱的另一面，而且比 ``ValidationError`` 更阴：DESC 排序下 pg 把 NULL
     放**最前**，所以 ``ORDER BY seq DESC`` 会让加列之前的每一行永远压在新一轮前面 ——
-    游标从此取回那条旧行、再也推不动，她每一轮把同一批动静重新感知一遍，一句报错
-    都没有。
+    从此每一轮取回的都是那条旧行：离上一次过了多久算错，上下文丢没丢也判不出来，一句
+    报错都没有。
 
     钟点故意造反：新一轮的 ``began_at`` 比两条旧行都早。落地顺序赢的必须是新一轮。
     """
@@ -493,10 +489,10 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
             await s.execute(
                 _text(
                     "INSERT INTO data_life_moment "
-                    "(lane, persona_id, moment_id, seq, began_at, after_seq,"
-                    " next_seq, perceived, switched, pulled_by, recorded, doing,"
+                    "(lane, persona_id, moment_id, seq, began_at,"
+                    " switched, pulled_by, recorded, doing,"
                     " open_ends, said, nudged, dedup_hash) "
-                    "VALUES ('coe-living', 'akao', :mid, NULL, :at, 0, 3, 1,"
+                    "VALUES ('coe-living', 'akao', :mid, NULL, :at,"
                     " false, '', 0, '看书', 0, '继续', false, :tag)"
                 ),
                 {
@@ -512,9 +508,6 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
         moment_id="nudge:m-1",
         seq=1,
         began_at=dt.datetime(2026, 7, 25, 13, 0, tzinfo=cst),  # 比旧行都早
-        after_seq=3,
-        next_seq=9,
-        perceived=2,
         switched=False,
         pulled_by="",
         recorded=0,
@@ -528,10 +521,8 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
 
     got = await latest_moment(lane="coe-living", persona_id="akao")
     assert got.moment_id == "nudge:m-1", (
-        "加列之前的旧行（seq 是 NULL）压在了新一轮前面 —— 游标从此钉死，"
-        "她每一轮把同一批动静重新感知一遍"
+        "加列之前的旧行（seq 是 NULL）压在了新一轮前面 —— 从此每一轮取回的都是那条旧行"
     )
-    assert got.next_seq == 9
 
 
 @pytest.mark.integration
@@ -546,19 +537,19 @@ async def test_a_happening_written_before_channel_id_existed_still_reads_back(
     from sqlalchemy import text as _text
 
     from app.data import session as session_mod
-    from app.living.happening import read_perceived_by
+    from app.living.snapshot import recent_own_happenings
 
     async with session_mod.get_session() as s:
         await s.execute(
             _text(
                 "INSERT INTO data_happening "
-                "(lane, happening_id, seq, actor, place, kind, medium, content,"
-                " occurred_at, audience, who_was_where, channel_id, dedup_hash) "
-                "VALUES ('coe-living', 'legacy-h', 1, 'ayana', '家/客厅',"
-                " 'speech', 'in_person', '早', NOW(), '[\"akao\"]'::jsonb,"
-                " '{}'::jsonb, NULL, 'legacy-h1')"
+                "(lane, happening_id, seq, actor, kind, medium, content,"
+                " occurred_at, audience, channel_id, dedup_hash) "
+                "VALUES ('coe-living', 'legacy-h', 1, 'akao',"
+                " 'speech', 'in_person', '早', NOW(), '[\"ayana\"]'::jsonb,"
+                " NULL, 'legacy-h1')"
             )
         )
 
-    window = await read_perceived_by(lane="coe-living", persona_id="akao")
-    assert [p.content for p in window.items] == ["早"]
+    got = await recent_own_happenings(lane="coe-living", persona_id="akao")
+    assert [(h.content, h.channel_id) for h in got] == [("早", None)]

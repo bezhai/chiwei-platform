@@ -317,7 +317,7 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
         assert isinstance(said, str), f"她这条没发出去，后面无从谈起。拿到：{said!r}"
 
         shown = await read_snapshot(
-            lane=LANE, persona_id="akao", after_seq=0, now=_at(21, 30)
+            lane=LANE, persona_id="akao", now=_at(21, 30)
         )
         rendered = shown.render_state()
         handles = re.findall(r"［([^］]+)］", rendered)
@@ -636,7 +636,6 @@ async def test_taking_it_back_lands_as_its_own_happening_and_leaves_the_old_one_
         lane=LANE,
         happening_id=f"{OUTBOUND_HAPPENING_PREFIX}{spoke.outbound_id}",
         actor="akao",
-        place="家/我房间",
         kind=KIND_SPEECH,
         content=_SAID,
         occurred_at=_at(21, 0),

@@ -26,10 +26,10 @@ from app.agent.continuity import (
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.agent.session import load_session
 from app.data.session import get_session
-from app.living.happening import record_happening
 from app.living.moment import LifeMoment, latest_moment, run_moment, transcript_key
-from app.living.records import KIND_SPEECH
+from app.living.received import ReceivedMessage, ReceivedRead
 from app.living.whereabouts import note_whereabouts
+from app.runtime.persist import insert_idempotent
 
 # 真 pg + 替身 life 这两样跟逐个 moment 的用例是同一份，不在这里再抄一遍。
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
@@ -57,6 +57,20 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
         place=place,
         doing=doing,
         noted_at=at,
+    )
+
+
+async def _reaches_her(body: str, at: dt.datetime) -> None:
+    """一条传到赤尾这里的消息，跟收件箱存下的一样（:func:`app.living.received.receive`）。"""
+    await insert_idempotent(
+        ReceivedMessage(
+            lane=LANE,
+            persona_id="akao",
+            message_id=f"akao:{at.isoformat()}",
+            sender="绫奈",
+            body=body,
+            message_time=at,
+        )
     )
 
 
@@ -372,17 +386,7 @@ async def test_a_failed_context_write_leaves_the_round_standing(
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(13, 50))
     await _stand("akao", "家/客厅", "待着", _at(13))
-    await _stand("ayana", "家/客厅", "看书", _at(13))
-    await record_happening(
-        lane=LANE,
-        happening_id="ay-x",
-        actor="ayana",
-        place="家/客厅",
-        kind=KIND_SPEECH,
-        content="你在看什么",
-        occurred_at=_at(13, 59),
-        audience=["akao"],
-    )
+    await _reaches_her("当面对你说：「你在看什么」", _at(13, 59))
 
     from app.living import moment as moment_mod
 
@@ -398,7 +402,7 @@ async def test_a_failed_context_write_leaves_the_round_standing(
     assert moment is not None, "上下文写失败把整轮拖垮了"
     landed = await latest_moment(lane=LANE, persona_id="akao")
     assert landed is not None and landed.moment_id == moment.moment_id
-    assert landed.next_seq > 0, "游标没跟着这一轮推进"
+    assert await _rows(ReceivedRead) == 1, "收到的那条没跟着这一轮记成看过"
 
     from app.living.phone import PhoneRead
 
@@ -576,23 +580,13 @@ async def test_the_gap_is_only_reported_once(moment_db, stub_moment, monkeypatch
 async def test_the_replay_after_a_failed_close_stores_the_round_once(
     moment_db, stub_moment, monkeypatch
 ):
-    """收尾崩掉之后下一拍重跑：她重新感知那条，上下文里这一轮只留一份。
+    """收尾崩掉之后下一拍重跑：她重新看到那条，上下文里这一轮只留一份。
 
     重跑读到的历史跟上一次是同一份（上次什么都没提交），所以它是一次真正的重放，
     而不是"世界往前走了、她的上下文却停在原地"。
     """
     await _stand("akao", "家/客厅", "待着", _at(13))
-    await _stand("ayana", "家/客厅", "看书", _at(13))
-    await record_happening(
-        lane=LANE,
-        happening_id="ay-x",
-        actor="ayana",
-        place="家/客厅",
-        kind=KIND_SPEECH,
-        content="你在看什么",
-        occurred_at=_at(13, 59),
-        audience=["akao"],
-    )
+    await _reaches_her("当面对你说：「你在看什么」", _at(13, 59))
 
     from app.living import moment as moment_mod
 
@@ -610,10 +604,9 @@ async def test_the_replay_after_a_failed_close_stores_the_round_once(
     again = await run_moment(lane=LANE, persona_id="akao", now=_at(14, 1))
 
     assert again is not None
-    assert again.after_seq == 0, "崩掉那一轮的感知被静默吞了"
     replayed = runner.runs[-1][0]
     assert len(replayed) == 2, "重放读到的历史不该带上没提交的那一轮"
-    assert "你在看什么" in replayed[-1].content
+    assert "你在看什么" in replayed[-1].content, "崩掉那一轮看到的那条被静默吞了"
 
     tid = transcript_key(lane=LANE, persona_id="akao")
     stored, ver = await load_session(tid)

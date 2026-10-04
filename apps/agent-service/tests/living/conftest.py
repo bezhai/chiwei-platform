@@ -7,7 +7,7 @@ fixtures along the rootdir→test-file path.
 
 **``living_db`` 在 docker 不可用时红，不 skip。** ``test_db_dsn`` 那边统一
 ``pytest.skip("docker unavailable")``——对大多数套件是对的，但 ``app.living``
-的读写契约（提交序、旁听裁剪、到期消费）**全部**只在真 pg 上才有意义：静默跳过
+的读写契约（提交序、收件去重、到期消费）**全部**只在真 pg 上才有意义：静默跳过
 之后整个套件绿着过去，等于没有门禁。所以这里把"跳过"翻译成"炸"，且只影响
 ``tests/living``——别人的 conftest 一个字不改。
 """
@@ -128,10 +128,10 @@ def real_pg_required() -> None:
         pytest.fail(
             "tests/living 需要真实 Postgres（testcontainers），但 "
             f"{reason}\n"
-            "这些用例验的是提交序、按位置旁听、到期消费这些只在真库上成立的"
+            "这些用例验的是提交序、收件去重、到期消费这些只在真库上成立的"
             "契约，静默 skip 会让整个套件绿着过去 —— 等于没有门禁。\n"
             "起 docker 后重跑；确实要在无 docker 的机器上只跑纯函数部分，"
-            "显式点名：pytest tests/living/test_place.py tests/living/test_serial.py",
+            "显式点名：pytest tests/living/test_serial.py tests/living/test_only_her_own_records.py",
             pytrace=False,
         )
 

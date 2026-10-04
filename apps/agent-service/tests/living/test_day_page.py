@@ -121,7 +121,6 @@ async def _happened(
     content: str,
     at: dt.datetime,
     *,
-    place: str = "家/客厅",
     to=(),
     kind: str = KIND_SPEECH,
     medium: str = MEDIUM_IN_PERSON,
@@ -130,7 +129,6 @@ async def _happened(
         lane=LANE,
         happening_id=f"{actor}:{at.isoformat()}:{content[:8]}",
         actor=actor,
-        place=place,
         kind=kind,
         content=content,
         occurred_at=at,
@@ -414,7 +412,7 @@ async def test_messages_outside_that_day_are_not_in_that_page(page_db):
 async def test_three_sisters_get_three_different_days(page_db):
     """一个人的日记材料不是另一个人的：她自己做的事、传到她这里的消息，都只是她的。"""
     await _a_day_worth_of_stuff()
-    await _happened("chinagi", "把球踢进了树丛", _on(25, 11), place="学校/操场", kind=KIND_ACT)
+    await _happened("chinagi", "把球踢进了树丛", _on(25, 11), kind=KIND_ACT)
     await _received("chinagi", "world", "操场边的树丛里有只猫。", _on(25, 11, 5))
 
     mine = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY))
@@ -482,7 +480,7 @@ async def test_the_snapshot_carries_the_page_she_wrote(page_db, stub_page):
     await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
 
     snap = await read_snapshot(
-        lane=LANE, persona_id="akao", after_seq=0, now=_on(26, 14)
+        lane=LANE, persona_id="akao", now=_on(26, 14)
     )
 
     assert snap.day_page is not None
@@ -523,7 +521,7 @@ async def test_a_page_of_the_current_living_day_is_never_served_as_yesterday(
 async def test_with_no_page_yet_the_snapshot_says_so_plainly(page_db):
     """冷启动第一天一页都没有 —— 如实说空，不留白洞。"""
     snap = await read_snapshot(
-        lane=LANE, persona_id="akao", after_seq=0, now=_on(26, 14)
+        lane=LANE, persona_id="akao", now=_on(26, 14)
     )
 
     assert snap.day_page is None
@@ -538,7 +536,7 @@ async def test_a_page_older_than_yesterday_is_labelled_by_its_date(page_db, stub
     await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
 
     snap = await read_snapshot(
-        lane=LANE, persona_id="akao", after_seq=0, now=_on(29, 14)
+        lane=LANE, persona_id="akao", now=_on(29, 14)
     )
 
     rendered = snap.render_state()

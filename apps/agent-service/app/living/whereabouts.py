@@ -2,10 +2,10 @@
 
 纯 append，"当前"就是这条轴上最新的一条。位置是客观事实。
 
-**旁听不在这里查位置。** :mod:`app.living.happening` 在**写入事件的那一刻**调
-:func:`who_is_where` 拍一张快照存进事件行里，读取时不再回来问。理由见
-:class:`app.living.records.Happening` 的 ``who_was_where``：读取时查最新位置会让
-同一条事件在她换房间前后被裁成两个样子。
+**只给她自己读。** 每一条查询都按 ``persona_id`` 筛到一个人
+（``tests/living/test_only_her_own_records.py`` 守着）。别人在哪，world 按各人自己报的
+位置判断（:mod:`app.living.outgoing` 的汇总末尾、:func:`app.living.moment.look_around`
+的提问里都写着她在哪），life 不读。
 """
 
 from __future__ import annotations
@@ -54,7 +54,8 @@ async def current_whereabouts(
     """她当前在哪、在做什么；从没记过返回 ``None``。
 
     按 ``seq`` 取最新——``created_at`` 会有同刻并列，``seq`` 是这条轴上唯一确定的
-    先后。查不到不是异常：定位不到她时旁听一律够不着，定向送达照送。
+    先后。查不到不是异常：她还没定下自己在哪，调用方各自如实说（"手上"那一句、
+    环顾四周、``say`` / ``act`` 拒绝）。
     """
     sql = (
         f"SELECT * FROM {_TABLE} "
@@ -69,22 +70,3 @@ async def current_whereabouts(
     if row is None:
         return None
     return Whereabouts(**{k: row[k] for k in Whereabouts.model_fields})
-
-
-async def who_is_where(*, lane: str) -> dict[str, str]:
-    """本 lane 上每个人**此刻**在哪：``persona_id -> 位置路径``。
-
-    每人取自己 seq 轴上最新的一条。从没记过位置的人根本不在返回值里——"不知道她
-    在哪"和"她在某处"是两件事，前者对旁听等于不在场（定向送达不走这条路，所以位置
-    缺失不会让一句对她说的话丢掉）。
-
-    调用方是 :func:`app.living.happening.record_happening`，把结果原样存进事件行。
-    """
-    sql = (
-        f"SELECT DISTINCT ON (persona_id) persona_id, place FROM {_TABLE} "
-        f"WHERE lane = :lane ORDER BY persona_id, seq DESC"
-    )
-    async with get_session() as s:
-        result = await s.execute(text(sql), {"lane": lane})
-        rows = result.mappings().all()
-    return {row["persona_id"]: row["place"] for row in rows}

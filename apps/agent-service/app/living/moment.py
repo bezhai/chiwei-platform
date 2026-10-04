@@ -15,9 +15,9 @@
 （:func:`transcript_key`），在这条记录和手机已读提交之后单独写，写失败只记一行 ERROR、
 这一轮照样算数（:func:`_remember_this_round`））。
 
-**所以醒来只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么
+**所以醒来只送新发生的事**：几点了、离上一次隔了多久、她在哪在做什么、有什么到点了
 （:meth:`app.living.snapshot.MomentSnapshot.render_new`）、传到她这里的消息里还没看过的
-（:func:`app.living.received.render_received`）、手机上刚来了什么
+（:func:`app.living.received.render_received`；别人做了什么，只有传到她这里的这一段）、手机上刚来了什么
 （:func:`app.living.phone.render_arrived`）。她此刻的样子（在哪、在做什么、上一次写下的
 那天、心里挂着什么、刚做过说过什么、手机上还有什么没看）读一百遍字字一样，上一轮读过的
 还在上下文里，所以它只在清理那一下作为新起点重铺一次
@@ -26,13 +26,13 @@
 
 **位置和手上的事是例外，每轮都给**（``render_new`` 里那一行）：那两样她自己就能改
 （:func:`switch_to`、:func:`move_to`），铺在界桩上的那份到下一个清理点之前一直是旧的，
-而位置决定谁看得见她。
+而她在哪是她这一轮里最不能过期的一样（world 按她报的位置判断谁看得见她）。
 
 **挂线头是独立的一件事，不绑在 ``switch_to`` 上。** 「是否换事」不等于「是否记住」：
 绫奈跟她说"周末陪我去祭典"，她手上的书没放下（这个 moment 答「继续」），但她记住了——这是
-真人每天都在做的事。把清单绑在换事情上，这条感知在游标推进之后就永久消失了：她自己
-最近那十二条里只有她**自己**说做的，别人说的话不在里面，谁也救不回来。而"跨 moment 因果
-延续"恰好是整个实验最想验证的东西。
+真人每天都在做的事。把清单绑在换事情上，这句话在她看过之后就永久消失了：传到她这里的消息
+只摆一次，她自己最近那十二条里只有她**自己**说做的，别人说的话不在里面，谁也救不回来。
+而"跨 moment 因果延续"恰好是整个实验最想验证的东西。
 
 **每个 moment 串行。** 一个人不能同时想两件事——这是物理事实，不是给她加冷却。用 T1 的
 :func:`app.living.serial.hold`，后到的排队等前一次做完（两条路：固定的钟，和
@@ -49,8 +49,8 @@
 **"她这个 moment 的钟点"和"这个 moment 第几个落地"是两个问题，各有各的列。** 排队是正常的
 （``hold`` 让后到的等，不丢），所以提前来的 moment 先跑完、常规 moment 后跑完时，落地顺序跟
 ``began_at`` 顺序**是反的**——常规 moment 的 ``began_at`` 是它的格子，可能比先落地那个提前
-来的 moment 的真实时刻还早。游标问的是"最后落地的那个 moment 读到哪"，拿钟点去答就会把后落地那个 moment
-读过的整段丢回去（见 :class:`LifeMoment` 的 ``seq``）。
+来的 moment 的真实时刻还早。"最后落地的是哪个 moment"拿钟点去答就会答错（见 :class:`LifeMoment`
+的 ``seq``）。
 
 工具：
 
@@ -148,7 +148,6 @@ from app.living.phone import (
     render_unread,
 )
 from app.living.pictures import PICTURE_TOOLS
-from app.living.place import PLACE_IS_EVERYONES, PLACE_SHAPE
 from app.living.reading import READING_TOOLS
 from app.living.received import mark_read, render_received, unread_received
 from app.living.records import (
@@ -227,14 +226,11 @@ _ID_NS = uuid.UUID("9c1e4f70-3b28-4a56-8d0f-1e7a2c5b6934")
 
 
 class LifeMoment(Data):
-    """她跑过的一个 moment：读到哪、感知到几条、换没换事情、为什么换、最后说了什么。
+    """她跑过的一个 moment：换没换事情、为什么换、最后说了什么。
 
     自然键 ``(lane, persona_id, moment_id)``，纯 append 无版本链——一个 moment 过完就是过完
     了。``moment_id`` 是这个 moment 的**身份**：常规 moment 取时间锚（精确到分，同一格的重放落回
     同一行），提前来的 moment 取把她叫来的那条消息。
-
-    **这张表同时是游标的家。** ``next_seq`` 是她这个 moment 读到的最大提交序，下一个 moment 的
-    ``after_seq`` 就是它——续接不靠内存、不靠 Redis，重启后原地接上。
 
     **``began_at`` 和 ``seq`` 回答的是两个问题，别互相顶替。**
 
@@ -248,8 +244,9 @@ class LifeMoment(Data):
     （:func:`app.living.serial.hold` 不丢），21:34 被叫来那个 moment 先跑完、21:35 那一拍
     的常规 moment（格子 21:30）后跑完——先落地的钟点反而更晚。所以：
 
-      * "读到哪了"必须问 ``seq``（:func:`latest_moment`）。问 ``began_at`` 会取回
-        21:34 那一行的游标，把常规 moment 已经读过的一整段丢回去，她原样再感知一遍；
+      * "上一个落地的是谁"必须问 ``seq``（:func:`latest_moment`）：她的上下文是一版接一版
+        写下去的，``context_ver`` 要跟最后落地的那一轮比。问 ``began_at`` 会取回 21:34
+        那一行，它的版本号比后落地那一轮小一版，后落地那一轮的上下文没写成也判不出来；
       * 常规节奏问的是"最近跑过的**哪一格**"，那是 ``began_at``
         （:func:`latest_regular_moment`）。换成 ``seq`` 就会在乱序落地后把更早的格子
         当成最近一格，已经跑过的晚格子被判成还没跑。
@@ -262,8 +259,8 @@ class LifeMoment(Data):
     有真实的机制后果，不是标签——常规间隔只跟**上一个常规 moment**比
     （:func:`latest_regular_moment`）。不分开的话，每来一条私聊就把她的固定节奏往后
     推一次：一天被搭话十次，她的十分钟就成了不定期。
-    而"读到哪了"仍然跨两种 moment 共用一条轴（:func:`latest_moment` 不筛这一列），不然
-    提前那个 moment 读过的东西，常规 moment 会原样再读一遍。
+    而"上一个落地的是谁"仍然跨两种 moment 共用一条轴（:func:`latest_moment` 不筛这一列）：
+    她的上下文只有一条，两种 moment 都接在它后面写。
 
     ``context_ver`` 是**这一轮的上下文该写成第几版**（读到的那一版加一），它让下一个
     moment 判得出"上一轮到底写进去没有"：这条记录先提交、上下文后写，所以下一轮读到的
@@ -277,12 +274,9 @@ class LifeMoment(Data):
     moment_id: Annotated[str, Key]
     seq: int             # 这个 moment 第几个落地（本 lane + 本人一条轴）
     began_at: datetime   # 她这个 moment 的『现在』：常规 = 格子，提前 = 真实时刻
-    after_seq: int       # 这个 moment 开始时读到哪了
-    next_seq: int        # 这个 moment 结束时读到哪了 —— 下一个 moment 的起点
-    perceived: int       # 这个 moment 她感知到几条
     switched: bool       # 换事情了吗（False = 「继续」）
     pulled_by: str       # 什么把她带走的（她自己那句）；没换 = ""
-    recorded: int        # 这个 moment 她说 / 做了几件别人感知得到的事
+    recorded: int        # 这个 moment 她说 / 做了几件事（当面的、手机上的都算）
     doing: str           # moment 末她手上是什么事
     open_ends: int       # moment 末她心里还挂着几件
     said: str            # 她这个 moment 最后那句话
@@ -372,20 +366,49 @@ def _derive(*parts: str) -> str:
 # ---------------------------------------------------------------------------
 # place 这个参数交给她的字
 #
-# 说形状那两句（:data:`~app.living.place.PLACE_SHAPE` /
-# :data:`~app.living.place.PLACE_IS_EVERYONES`）定义在 :mod:`app.living.place`：路径怎么
-# 比对写在那儿，说它长什么样的措辞跟规则住在一起。一个样本都不给的原委写在它们上方那段。
+# 说这几句的是她那两只落位置的手（:func:`switch_to` / :func:`move_to`）。她写下的位置是她
+# 自己"手上"那一句，也是 world 判断谁会察觉到她的依据：一轮的汇总末尾写着她在哪
+# （:mod:`app.living.outgoing`），环顾四周时她先说自己在哪（:func:`look_around`）。三个人
+# 写的是同一个世界里的地方，同一个地方说法一致，world 才认得出是同一处。
 #
-# 这儿只剩把它们拼成**她这两只手**要说的话：落位置的参数怎么问、空 place 怎么回绝。
+# **举例就是词表。** 她不读文档，唯一见过的地名样本就是这段描述，写在这儿的地名会被
+# 逐字抄走。两次线上事故都是这么来的（那时谁跟谁在一处由代码按路径字符串比对）：
+#
+#   * 举例写 ``家/楼上/我房间`` —— "我房间"是说话人相对的说法，而 place 是三个人共用
+#     的同一套字符串。prod 实测 45 次 ``家/楼上/我房间`` 加 9 次 ``家/我房间`` 全部出
+#     自绫奈和千凪两个人，2026-09-13 21:00 两人同一分钟落在这个地名上，各自在自己屋
+#     里，判定却是同处一室，私下说的话被对方原话听见。
+#   * 举例写 ``学校/二年三班教室`` —— 被一字不差抄走，而设定集里那间教室叫
+#     ``学校/初二三班教室``。同一个地方从此分成两半。
+#
+# 换上一批新的写死字符串（家/浴室、学校/操场这些）只是把同一次事故往后推：那些名字是从
+# 世界的初始设定里抄来的，而世界随时可以改名、删掉、重写它们，这段描述不会跟着变。
+#
+# 所以这里**一个样本都不给**，只说规则。占位符（``A/B``、``某地/某处``、
+# ``<建筑>/<房间>``）同样不给：那仍然是一个可以照着填的模板，而且比直说更难懂。
+# 也不写"去查一下设定集有哪些地名"——她不读文档是既定边界。守这条的是
+# ``tests/living/conftest.py`` 里那两道检查：说明里没有具体地名，也没有贴着字的路径。
 # ---------------------------------------------------------------------------
 
-PLACE_DESCRIPTION = f"你人在哪。{PLACE_SHAPE}{PLACE_IS_EVERYONES}"
+_PLACE_SHAPE = (
+    "写成一条层级路径：最外面一层是这个世界里一处独立的地方，"
+    "往里一层层是它内部的分隔，层与层之间用 / 隔开；"
+    "就在那一处本身、底下没有更细的分隔时，只写一层也行。"
+)
 
-# 空 place 那一句。两只手共用同一句：后果一模一样（位置是别人能不能感知到你的全部
-# 依据），分成两份写只会让其中一份悄悄变旧。
+# 第一次事故的病根单列一句：形状写对了，"我房间"这种写法照样会把两个人写到同一个说法上。
+_PLACE_IS_EVERYONES = (
+    "这套地名三个人共用，同一个地方谁写都得写成同一条路径，"
+    "所以别用只有站在你自己的位置上才指得明白的说法。"
+)
+
+PLACE_DESCRIPTION = f"你人在哪。{_PLACE_SHAPE}{_PLACE_IS_EVERYONES}"
+
+# 空 place 那一句。两只手共用同一句：后果一模一样（world 判断谁会察觉到她，靠的就是她
+# 报的位置），分成两份写只会让其中一份悄悄变旧。
 PLACE_CANNOT_BE_EMPTY = (
     "place 不能是空的：位置是别人能不能感知到你的全部依据，"
-    "空位置会让你从此谁也听不见、也没人听得见你。" + PLACE_SHAPE
+    "空位置会让你从此谁也听不见、也没人听得见你。" + _PLACE_SHAPE
 )
 
 
@@ -395,7 +418,7 @@ async def switch_to(
     doing: Annotated[
         str, Field(description="你现在改去做的这件事，一句话，例如「去洗澡」")
     ],
-    # 这段描述里一个地名都不给，为什么见 :data:`app.living.place.PLACE_SHAPE` 上方那段。
+    # 这段描述里一个地名都不给，为什么见 :data:`PLACE_DESCRIPTION` 上方那段。
     place: Annotated[str, Field(description=PLACE_DESCRIPTION)],
     because: Annotated[
         str, Field(description="什么把你从刚才那件事里带走的，一句话")
@@ -445,7 +468,7 @@ async def switch_to(
 @tool
 @tool_error("挪个地方失败")
 async def move_to(
-    # 同上，一个地名都不给：见 :data:`app.living.place.PLACE_SHAPE` 上方那段。
+    # 同上，一个地名都不给：见 :data:`PLACE_DESCRIPTION` 上方那段。
     place: Annotated[str, Field(description=PLACE_DESCRIPTION)],
 ) -> str:
     """我人换地方了，手上的事没变。
@@ -591,7 +614,7 @@ async def act(
 ) -> str:
     """做一个别人看得见的动作。
 
-    同一个地方的人会看见，同一栋别处的人只知道那边有动静。
+    谁会看见，要看当时的情形。
 
     只用来记**别人感知得到**的动作。你自己安静做的事不用调它——那是你手上的事，
     在 switch_to 里。
@@ -620,8 +643,10 @@ async def act(
 async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     """``say`` / ``act`` 共用的落库：位置必须是真的，说给谁是她的事。
 
-    位置这条 fail-loud，是因为错了会**静默**：没定下位置 = 这条事件落在一个空地点
-    上，谁也感知不到，而她那边一片安静。
+    位置这条 fail-loud：当面做的事这一轮结束时汇总给 world，汇总末尾那句她在哪、在做什么，
+    是 world 判断谁会察觉的依据（:mod:`app.living.outgoing` 靠这一条断言汇总一定说得出她在
+    哪）。没定下位置就做事，world 不知道这件事发生在哪，而她那边一片安静。位置本身不记进
+    这件事里：它在她自己的位置记录上（:mod:`app.living.whereabouts`）。
 
     **收件人不校验，故意的。** 这里曾经拿 :data:`~app.living.persona.LIVING_PERSONAS`
     当白名单挡下"不是这三个人"的名字。那是把"这个世界里住着谁"这条断言存在了代码
@@ -637,8 +662,7 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     said = content.strip()
     if not said:
         raise ValueError("内容不能是空的：说一句真的话 / 写清楚你做了什么。")
-    where = await current_whereabouts(lane=lane, persona_id=persona_id)
-    if where is None:
+    if await current_whereabouts(lane=lane, persona_id=persona_id) is None:
         raise ValueError(
             "你还没定下自己在哪 —— 先用 switch_to 说清楚你人在哪、在做什么，"
             "再说话或者动作。"
@@ -650,7 +674,6 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
         lane=lane,
         happening_id=happening_id,
         actor=persona_id,
-        place=where.place,
         kind=kind,
         content=said,
         occurred_at=now,
@@ -931,16 +954,18 @@ async def _one_moment(sql: str, params: dict) -> LifeMoment | None:
 async def latest_moment(*, lane: str, persona_id: str) -> LifeMoment | None:
     """这个人**最后落地**的那个 moment，两种 moment 都算；一个 moment 都没跑过返回 ``None``。
 
-    这是"读到哪了"的来源：感知游标跨两种 moment 共用一条轴，被叫来那个 moment 读过的东西，常规 moment
-    不该原样再读一遍。
+    这一轮要问它两件事：离上一次过了多久（它的『现在』），和上一轮的上下文落地了没有（它的
+    ``context_ver``，见 :func:`lost_last_round`）。她的上下文只有一条，两种 moment 都接在它
+    后面写，所以不筛 ``nudged``。
 
     **按 ``seq`` 排，不按 ``began_at``。** 后者是她那个 moment 的钟点，跟落库先后无关：
     提前来的 moment（真实时刻）先跑完、常规 moment（格子，钟点更早）后跑完是排队的正常结果，按钟点
-    取就会取回提前来的 moment 那一行，游标退回去，常规 moment 读过的一整段被她原样再感知一遍。
+    取就会取回提前来的 moment 那一行——它的 ``context_ver`` 比后落地那一轮小一版，后落地那一轮
+    的上下文没写成也判不出来。
 
     ``COALESCE(seq, 0)`` 是加列的另一半防线：DESC 排序下 pg 把 NULL 放**最前**，
-    不接住的话已有数据的泳道会一直取回某一条旧行，游标从此钉死在那儿。旧行统一是
-    0 号，它们之间的先后退回 ``began_at``——加列之前唯一有过的那个口径。
+    不接住的话已有数据的泳道会一直取回某一条旧行。旧行统一是 0 号，它们之间的先后退回
+    ``began_at``——加列之前唯一有过的那个口径。
     """
     sql = (
         f"SELECT * FROM {_MOMENT_TABLE} "
@@ -978,8 +1003,8 @@ async def _next_moment_seq(*, lane: str, persona_id: str) -> int:
     """这个 moment 在 (lane, persona) 轴上的落地号。
 
     **只能在 moment 的排他占用里调**（:func:`life_moment_lock_key`）：取号和落库之间不放开
-    占用，所以号的先后就是提交的先后，可见的号永远是一段连续前缀，游标推到"最后落地
-    那个 moment"不会把一条还在飞的记录越过去。这和
+    占用，所以号的先后就是提交的先后，可见的号永远是一段连续前缀，"最后落地的那个 moment"
+    不会是一条还在飞的记录后面那一个。这和
     :func:`app.living.serial.append_in_commit_order` 是同一条论证——不复用它，是因为
     它自己要 ``hold`` 一次，而这个 moment 已经占着同一条 key，``asyncio.Lock`` 不可重入，
     嵌套等于永久自锁死。
@@ -1211,11 +1236,9 @@ async def run_moment_held(
     # 走不到下面的收尾（:mod:`app.living.outgoing`）。
     await send_what_she_did(lane=lane, persona_id=persona_id)
 
-    # 游标跨两种 moment 共用一条轴：取"最近一次"，不筛 nudged。
+    # 最后落地的那个 moment，两种都算，不筛 nudged（:func:`latest_moment`）。
     last = await latest_moment(lane=lane, persona_id=persona_id)
-    after_seq = last.next_seq if last is not None else 0
-    # "离上一次过了多久"就摆在她眼前那一行上。取最后落地的那个 moment 的『现在』，
-    # 跟游标同一行 —— 两者问的是同一件事："她上一次回到自己身上是什么时候"。
+    # "离上一次过了多久"就摆在她眼前那一行上：她上一次回到自己身上是什么时候。
     previous_at = last.began_at if last is not None else None
     # 她上一个 moment 说到哪了。**键不分天**，她接着昨天往下想；版本号一路带到
     # 收尾去做 CAS（:func:`app.agent.continuity.commit_transcript`）。
@@ -1234,9 +1257,7 @@ async def run_moment_held(
             last.moment_id if last is not None else "",
             last.context_ver if last is not None else 0,
         )
-    snapshot = await read_snapshot(
-        lane=lane, persona_id=persona_id, after_seq=after_seq, now=began_at
-    )
+    snapshot = await read_snapshot(lane=lane, persona_id=persona_id, now=began_at)
     # 传到她这里、她还没看过的消息（:mod:`app.living.received`）。读在模型调用之前：
     # 只有这几条会跟这一轮一起记成看过，这一轮跑着的时候新到的留给下一轮。
     received = await unread_received(
@@ -1283,8 +1304,8 @@ async def run_moment_held(
         )
     # 这一轮新摆到她眼前的那条，接在连续上下文后面 —— 所以它永远是最后一条。
     #
-    # **只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、传到她这里
-    # 的消息、手机上刚来了什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里
+    # **只送新发生的事**：几点了、离上一次隔了多久、她在哪在做什么、有什么到点了、
+    # 传到她这里的消息、手机上刚来了什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里
     # 挂着什么、刚做过说过什么、手机上还有什么没看）不在这里 —— 那份读一百遍字字一样，
     # 每轮重发就是把同一段话抄一遍，而她上一轮读过的还在上下文里。它由清理那一下作为
     # 新起点重铺（:func:`app.agent.continuity.trim_for_round`，默认一小时一次；一天的
@@ -1350,9 +1371,6 @@ async def run_moment_held(
         moment_id=moment_id,
         seq=seq,
         began_at=began_at,
-        after_seq=after_seq,
-        next_seq=snapshot.perceived.next_cursor,
-        perceived=len(snapshot.perceived.items),
         switched=bool(switches),
         pulled_by=switches[-1]["because"] if switches else "",
         recorded=len(set(context.features[FEATURE_RECORDED])),
@@ -1424,10 +1442,9 @@ async def life_moment_tick(tick: LifeMomentTick) -> None:
             )
         elif outcome is not None:
             logger.info(
-                "living moment lane=%s persona=%s 感知 %d 条、%s、说：%s",
+                "living moment lane=%s persona=%s %s、说：%s",
                 lane,
                 persona_id,
-                outcome.perceived,
                 f"改去 {outcome.doing}（{outcome.pulled_by}）"
                 if outcome.switched
                 else "继续",

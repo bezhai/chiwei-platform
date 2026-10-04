@@ -114,7 +114,6 @@ from app.living.records import (
     _require_aware,
 )
 from app.living.scope import moment_scope, note_recorded
-from app.living.whereabouts import current_whereabouts
 from app.runtime.data import Data, Key, Version
 from app.runtime.emit import emit
 from app.runtime.migrator import _table_name
@@ -651,16 +650,13 @@ async def send_message(
             f"这一轮里不会再发一遍。"
         )
 
-    # 落进她自己的记录里 —— 不落的话，她下一轮不知道自己说过这句话。
-    # 位置缺失不拦：手机隔着设备，旁边的人本来就一个字都感知不到，所以位置算不算得
-    # 出来都不影响谁听得见（跟当面说话不一样，那条必须有位置）。
-    where = await current_whereabouts(lane=lane, persona_id=persona_id)
+    # 落进她自己的记录里 —— 不落的话，她下一轮不知道自己说过这句话。手机隔着设备，
+    # 这条不进 world 的汇总（:mod:`app.living.outgoing` 按 medium 分），只她自己回看得到。
     happening_id = f"{OUTBOUND_HAPPENING_PREFIX}{outbound_id}"
     await record_happening(
         lane=lane,
         happening_id=happening_id,
         actor=persona_id,
-        place=where.place if where is not None else "",
         kind=KIND_SPEECH,
         content=said,
         occurred_at=now,

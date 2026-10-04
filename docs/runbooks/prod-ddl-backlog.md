@@ -56,6 +56,42 @@ DROP TABLE IF EXISTS data_world_state;
 DROP TABLE IF EXISTS data_npc_roster;
 ```
 
+### Location-based perception: drop five columns from `data_happening` and `data_life_moment`
+
+Phase 2 of the life/world split removes the code that decided, by place, which sister
+perceived another sister's happening. What reaches her from others now arrives in her
+inbox (`data_received_message`, created by migrator). The columns that only served the
+old path are gone from the classes:
+
+- `Happening.place` and `Happening.who_was_where` (the place string each happening was
+  compared against, and the snapshot of where everyone was when it happened);
+- `LifeMoment.after_seq`, `LifeMoment.next_seq` and `LifeMoment.perceived` (the
+  per-round cursor over everyone's happenings, and how many she perceived).
+
+Same DDL for prod and chiwei-test, each statement with `IF EXISTS`. None of these
+columns carries an index of its own.
+
+**Order matters, same as `lasts_until`.** The migrator refuses to start while a
+still-declared table has a column its class no longer has (`migrator.py:216-224` →
+`MigrationError: column data_happening.place dropped from Happening`), so the first
+release without the fields crash-loops until this runs. The old code writes all five on
+every insert (`place` and `who_was_where` on each `say` / `act` / phone send /
+take-back, the three cursor columns on each round), so dropping them while the old
+release still runs breaks her rounds. Stop the old agent-service in that lane, run the
+drop, then start the new release. Only agent-service declares these tables; the world
+App imports none of the living code and is not affected.
+
+Existing rows keep everything else; rows written by other sisters stay in the table
+and are simply never read across residents again.
+
+```sql
+ALTER TABLE data_happening DROP COLUMN IF EXISTS place;
+ALTER TABLE data_happening DROP COLUMN IF EXISTS who_was_where;
+ALTER TABLE data_life_moment DROP COLUMN IF EXISTS after_seq;
+ALTER TABLE data_life_moment DROP COLUMN IF EXISTS next_seq;
+ALTER TABLE data_life_moment DROP COLUMN IF EXISTS perceived;
+```
+
 ### `message_record` (messaging record)
 
 Declared at `apps/agent-service/app/data/models.py` (`MessageRecord`); written and read
@@ -160,8 +196,8 @@ tables.
 Migrator also fails the batch if a still-declared table has a column the class no
 longer has (`migrator.py:218-224`) or if a column's pg type no longer matches the
 declaration (`:232-238`). Both say "write explicit migration script" — meaning an
-entry in this file. `data_happening` losing `lasts_until` takes the first path; its
-entry is under Pending. `data_persona_version` moved from `app/life/persona_chain.py` to
+entry in this file. `data_happening` losing `lasts_until` takes the first path, and so
+do the five location-based perception columns; both entries are under Pending. `data_persona_version` moved from `app/life/persona_chain.py` to
 `app/living/persona.py:58` with its fields unchanged.
 
 ## Tables prod keeps but nothing reads

@@ -8,7 +8,7 @@
   1. 提前的那一轮会成为"最近一轮"，把常规节奏往后推 —— 常规的间隔判断只认常规轮次；
   2. 同一分钟会跟常规轮次撞 ``moment_id`` —— 提前轮次的身份是**把她叫来的那条消息**，
      不是钟点，天然撞不上；
-  3. 提前轮次推进共享感知游标是对的，不该让常规轮次重复感知 —— 游标在同一张表上续接。
+  3. 提前轮次看过的，常规轮次不该再看一遍 —— 传到她这里的消息逐条记看过，跟着那一轮落地。
 
 顺带还有一条不是坑但会烧钱的：**同一条消息只提前一次**。真人手机是新消息才震，
 躺着的未读不会一直震；提前轮次的身份就是那条消息，所以"只震一次"是结构，不是冷却。
@@ -27,7 +27,6 @@ from sqlalchemy import text
 from app.agent.neutral import Message, Role
 from app.agent.runtime_context import agent_context
 from app.data import session as session_mod
-from app.living.happening import record_happening
 from app.living.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
     LifeMoment,
@@ -35,7 +34,6 @@ from app.living.moment import (
     run_moment,
 )
 from app.living.nudge import nudge_once
-from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON
 from app.living.whereabouts import note_whereabouts
 
 LANE = "coe-living"
@@ -328,35 +326,31 @@ async def test_an_early_moment_in_the_same_minute_is_still_its_own_moment(
 
 
 # --------------------------------------------------------------------------
-# 四 · 坑 3：提前轮次推进游标，常规轮次不重复感知
+# 四 · 坑 3：提前轮次看过的，常规轮次不再看一遍
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_the_regular_moment_does_not_re_perceive_what_the_early_one_read(
-    nudge_db, stub_life
+async def test_the_regular_moment_does_not_show_again_what_the_early_one_showed(
+    nudge_db, stub_life, named
 ):
+    from app.living.received import receive
+
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
         doing="翻胶片", noted_at=_at(21, 20),
     )
     await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
-    await record_happening(
-        lane=LANE, happening_id="h1", actor="ayana", place="家/客厅",
-        kind=KIND_SPEECH, content="姐我出门了。", occurred_at=_at(21, 32),
-        audience=["akao"], medium=MEDIUM_IN_PERSON,
-    )
+    await receive(_to_her("当面对你说：「姐我出门了。」", at=_at(21, 32), sender="绫奈"))
     await _incoming(_DM, body="在吗", at=_at(21, 33))
 
     early = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
-    assert early.perceived == 1, "提前轮次没读到刚发生的事"
+    assert early is not None
+    assert "姐我出门了。" in stub_life.prompts[-1], "提前轮次没看到刚传到她这里的话"
 
-    on_time = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
 
-    assert on_time.after_seq == early.next_seq, (
-        "常规轮次的起点没接上提前轮次 —— 游标各推各的"
-    )
-    assert on_time.perceived == 0, "同一句话她听见了两遍"
+    assert "姐我出门了。" not in stub_life.prompts[-1], "同一句话她看了两遍"
 
 
 # --------------------------------------------------------------------------

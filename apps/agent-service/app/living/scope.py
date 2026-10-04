@@ -69,5 +69,5 @@ def moment_scope() -> tuple[str, datetime, str, str]:
 
 
 def note_recorded(happening_id: str) -> None:
-    """记下这次 moment 又落了一件别人感知得到的事（当面说的、手机上发的，一视同仁）。"""
+    """记下这次 moment 她又做了一件事（当面说的、手机上发的，一视同仁）。"""
     get_context().features.setdefault(FEATURE_RECORDED, []).append(happening_id)

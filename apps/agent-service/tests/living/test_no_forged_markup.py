@@ -444,44 +444,19 @@ async def test_an_image_title_from_the_internet_cannot_carry_markup(
 
 
 # ---------------------------------------------------------------------------
-# 别人做的事：落到她眼前时一样不带结构
+# 别人发给她的：落到她眼前时一样不带结构
 #
-# ``Happening.content`` 上的字是别的参与者写下的。``perceived_line`` 对它无条件转义，
-# 这一列上转义没有代价（理由写在 :func:`app.living.happening.perceived_line` 上）。
+# 别人做了什么、说了什么，只从她的收件箱进来（:mod:`app.living.received`）。她每一轮读到的、
+# 日记材料里摆的，是同一个样子（:func:`app.living.received.received_line`），这一处转义就管住
+# 两头。
 # ---------------------------------------------------------------------------
-
-
-def test_what_someone_else_did_cannot_carry_markup_into_what_she_perceived():
-    """别人记下的一件事落到她眼前时不能带结构。"""
-    from app.living.happening import Perceived, perceived_line
-    from app.living.place import Reach
-    from app.living.records import KIND_ACT, MEDIUM_IN_PERSON
-
-    line = perceived_line(
-        Perceived(
-            seq=1,
-            happening_id="ayana:deadbeef",
-            actor="ayana",
-            place="家",
-            kind=KIND_ACT,
-            medium=MEDIUM_IN_PERSON,
-            occurred_at=dt.datetime(2026, 7, 25, 8, tzinfo=dt.UTC),
-            audience=(),
-            reach=Reach.SAME_PLACE,
-            directed=False,
-            content=f"把便当放在桌上，{POISON}",
-        ),
-        me="akao",
-    )
-
-    assert_only_our_own_markup(line, where="这段时间你感知到的")
 
 
 def test_a_received_message_cannot_carry_markup_into_her_round():
     """别的参与者发给她的消息落到她眼前时不能带结构。
 
     正文由发送方写下：world 和姐妹那边是模型，人工参与者那边是人，哪一种都不归她管，
-    所以跟 ``perceived_line`` 一样无条件转义。
+    所以无条件转义。
     """
     from app.living.received import ReceivedMessage, render_received
 

@@ -5,13 +5,12 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
 
 骨头层——持久的事和一条并发纪律，不含任何循环 / 轮次 / prompt：
 
-  * :mod:`app.living.records`     发生过的事、她在哪，两类持久数据的形态
+  * :mod:`app.living.records`     她做过的事、她在哪，两类持久数据的形态（都只是她自己的）
   * :mod:`app.living.persona`     这个家里的人：谁住在这儿、「她是谁」那份正文的版本链
     （她自己每周改的那条），以及喂进 prompt 的那两个变量——三条注入路一处组装
-  * :mod:`app.living.place`       位置比对规则（三档，纯函数，不问模型）
   * :mod:`app.living.anchor`      时间锚：moment 的身份，派生 id 全挂在它上面
   * :mod:`app.living.serial`      进程内排他占用 + 提交序 append
-  * :mod:`app.living.happening`   谁在哪、对谁、通过什么渠道、做了什么说了什么
+  * :mod:`app.living.happening`   她自己的经历：对谁、通过什么渠道、做了什么说了什么
   * :mod:`app.living.whereabouts` 她此刻在做什么、在哪
 
 她一直在推进（T2）+ 她对外说话（T4）——嘴在外面，收到什么都不会直接让她跑一轮：
@@ -51,12 +50,13 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
 
 三条贯穿全包的判断，散在各模块里容易只看到一半：
 
-  * **"谁收得到"在写入时就定死。** 事件行里存着"发生那一刻谁在哪"的快照，读取侧
-    一次位置查询都不做——同一条记录什么时候读都裁成一个样子。
+  * **每个人只读她自己的记录。** 她做过的事、她在哪，只给她自己读；别人做了什么由 world
+    判断谁会察觉后告诉她，或者姐妹直接对她说，都进她的收件箱。life 里没有一条按位置把别人
+    的经历分给她的路（``tests/living/test_only_her_own_records.py`` 守着）。
   * **占用是进程内的**，前提是 agent-service 单副本；这个前提本来就压在 framework
     的 interval time source 上，见 :mod:`app.living.serial`。
-  * **游标按提交序。** 身边发生的事按提交序 ``seq`` 往前读（她在场就是感知到了，
-    没有"已读"这个动作）；按发生时刻开窗会漏掉晚提交的记录。
+  * **游标按提交序。** 她的经历按提交序 ``seq`` 往外讲（:mod:`app.living.outgoing`）；按发生
+    时刻开窗会漏掉晚提交的记录。
 
 旧引擎（``app/life`` / ``app/world`` / ``app/nodes/life_wake.py``）已经整批删掉，这个
 包一行都没复用过它。最后留下的是「她是谁」那条版本链——它有 prod 数据、而且是活的，

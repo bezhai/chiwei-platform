@@ -87,7 +87,6 @@ from app.living.mouth import SpokenOutbound
 from app.living.phone import conversation_her_bot_is_in, medium_for
 from app.living.records import KIND_ACT
 from app.living.scope import moment_scope, note_recorded
-from app.living.whereabouts import current_whereabouts
 from app.runtime.emit import emit
 from app.runtime.migrator import _table_name
 from app.runtime.persist import insert_append, select_latest
@@ -141,7 +140,6 @@ async def _remember_she_took_it_back(
     lane: str,
     persona_id: str,
     line: SpokenOutbound,
-    where: str,
     medium: str,
     now: datetime,
 ) -> None:
@@ -154,7 +152,7 @@ async def _remember_she_took_it_back(
     结果。
 
     ``medium`` 跟她说那句话时同一档（手机 / 群聊）：撤回是在手机上按的，坐她旁边的
-    姐姐一个字都看不见。落成当面的动作会让姐姐凭空看见她在撤消息。
+    姐姐一个字都看不见。落成当面的动作会让它进 world 的汇总，姐姐凭空看见她在撤消息。
 
     **一个字都不许往外抛。** 走到这里撤回已经交出去了，抛出去会被 :func:`tool_error`
     转成"这条撤回没送出去"喂回给她 —— 那是假话。
@@ -165,7 +163,6 @@ async def _remember_she_took_it_back(
             lane=lane,
             happening_id=happening_id,
             actor=persona_id,
-            place=where,
             kind=KIND_ACT,
             content=f"去撤回自己说过的那句「{line.said}」",
             occurred_at=now,
@@ -312,10 +309,6 @@ async def take_back_message(
             f"「{line.said}」发在一条你现在够不着的会话上，撤不了。"
         )
 
-    # 位置在 ``emit`` **之前**读：它只是给下面那条记录用的，而 ``emit`` 之后的任何
-    # 一处抛错都会被 :func:`tool_error` 转成"这条撤回没送出去"，那是假话。
-    where = await current_whereabouts(lane=lane, persona_id=persona_id)
-
     # 顺序钉死：先交出去，成功了才写台账。反过来的话，台账写下了而撤回没发出去，
     # 她会以为自己撤过了。
     #
@@ -339,8 +332,7 @@ async def take_back_message(
         lane=lane,
         persona_id=persona_id,
         line=line,
-        where=where.place if where is not None else "",
-        # 撤回是在手机上按的，跟她说那句话时同一档：坐她旁边的姐姐一个字都看不见。
+        # 撤回是在手机上按的，跟她说那句话时同一档：不进 world 的汇总。
         medium=medium_for(conv.scope),
         now=now,
     )

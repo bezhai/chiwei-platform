@@ -1,6 +1,7 @@
 """「她此刻在做什么、在哪」的读写契约。
 
-纯 append，读最新一条。位置是客观事实——旁听判档拿的就是这里的 place。
+纯 append，读最新一条。位置是客观事实，只给她自己读：她每一轮眼前那句"手上"、环顾四周
+时她告诉 world 自己在哪、汇总末尾那句她在哪。
 """
 from __future__ import annotations
 
@@ -8,11 +9,7 @@ import datetime as dt
 
 import pytest
 
-from app.living.whereabouts import (
-    current_whereabouts,
-    note_whereabouts,
-    who_is_where,
-)
+from app.living.whereabouts import current_whereabouts, note_whereabouts
 
 LANE = "coe-living"
 _TEN_AM = dt.datetime(2026, 7, 25, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
@@ -69,24 +66,6 @@ async def test_noted_at_round_trips_as_a_real_instant(living_db):
     got = await current_whereabouts(lane=LANE, persona_id="akao")
     assert got is not None
     assert got.noted_at == _TEN_AM
-
-
-@pytest.mark.integration
-async def test_who_is_where_gives_everyone_s_latest_place(living_db):
-    """写事件时拍的那张快照：每人各取自己最新的一条，没记过位置的人不在里面。"""
-    await _note("akao", "m1", "家/客厅", "看视觉小说")
-    await _note("akao", "m2", "家/厨房", "煮抹茶")
-    await _note("ayana", "m1", "学校", "上课")
-    await note_whereabouts(
-        lane="prod",
-        persona_id="mio",
-        moment_id="m1",
-        place="线上/别处",
-        doing="线上的事",
-        noted_at=_TEN_AM,
-    )
-
-    assert await who_is_where(lane=LANE) == {"akao": "家/厨房", "ayana": "学校"}
 
 
 @pytest.mark.integration

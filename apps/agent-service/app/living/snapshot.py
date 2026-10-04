@@ -14,24 +14,24 @@
   上一次写下的那天    ``read_day_page_before``    1 页（严格早于当前生活日的最新一页）
   挂着没了结的事      还开着的 ``LooseEnd``       她自己列多少就是多少
   她刚做过 / 说过     她自己的 ``Happening``      最近 N 条
-  这段时间感知到的    ``read_perceived_by``       一条游标 + 每轮的条数上限
   ==================  ==========================  ==============================
 
-**为什么这么长不会失真**：五层没有一层是"机器对历史的概括"。头两层是当下状态，读一
-百遍字字一样；后两层是原文照搬的最近若干条，只是**少**，不是**歪**。失真来自压缩，
-这里一处压缩都没有。会被遗忘的只有第四层滚出窗口的那些——而第三层正是她把重要的东
+**四层全是她自己的。** 别人做了什么、说了什么，不从这里读：谁会察觉由 world 判断后告诉她，
+姐妹对她说的话直接送到她那里，都进她的收件箱，那一段由 :mod:`app.living.received` 读、由
+:func:`app.living.moment.run_moment_held` 摆进这一轮（它要跟这一轮在同一个事务里记成看过）。
+
+**为什么这么长不会失真**：四层没有一层是"机器对历史的概括"。头两层是当下状态，读一
+百遍字字一样；最后一层是原文照搬的最近若干条，只是**少**，不是**歪**。失真来自压缩，
+这里一处压缩都没有。会被遗忘的只有最后一层滚出窗口的那些——而第三层正是她把重要的东
 西从滚动窗口里救出来的那只手，救不救是她的决定（见 :mod:`app.living.loose_ends`）。
 
-**这五层分两半送，因为她的上下文是连续的。**
+**这几层分两半送，因为她的上下文是连续的。**
 
-  * :meth:`MomentSnapshot.render_state` —— 前四层，**她此刻的样子**。读一百遍字字一
-    样，所以每轮重发就是把同一段话抄一遍。只在清理那一下作为新起点重铺
-    （:func:`app.agent.continuity.trim_for_round`），默认一小时一次。
-  * :meth:`MomentSnapshot.render_new` —— **这一轮新发生的**：几点了、离上一次隔了多
-    久、这期间别人做了什么、有什么到点了。每轮都送，因为每轮都不一样。
-
-第五层（这段时间你感知到的）本来就是增量：它按游标取，读过的不会再来第二遍，所以它
-在新发生的那一半里，重铺那一半一个字都不带它。
+  * :meth:`MomentSnapshot.render_state` —— **她此刻的样子**（上一次写下的那天、心里挂着
+    什么、刚做过说过什么）。读一百遍字字一样，所以每轮重发就是把同一段话抄一遍。只在
+    清理那一下作为新起点重铺（:func:`app.agent.continuity.trim_for_round`），默认一小时一次。
+  * :meth:`MomentSnapshot.render_new` —— **这一轮的实况**：几点了、离上一次隔了多久、她在
+    哪在做什么、有什么到点了。每轮都送，因为每轮都不一样。
 
 "刚到点的"是这条线上唯一一处从状态里**分出来**的东西：那份清单跟着状态走，但"这件事
 到点了"是这一轮真的发生的变化。等下一次重铺的话，一件 15:30 该做的事要到 16:00 她才
@@ -43,13 +43,8 @@
 东西没有任何一层接得住。这里只负责读和摆，"读哪一页"那条严格早于当前生活日的判据在
 :func:`~app.living.day_page.read_day_page_before` 里。
 
-**"她刚做过、说过"那层为什么必须单独存在**：:func:`~app.living.happening.read_perceived_by` 抑制
-回声（``actor == persona_id`` 直接丢），所以她从感知那条路**看不见自己刚说过什么**。
-少了这一层，她上一轮答应姐姐的话下一轮就凭空消失，"接得上昨天"永远无从谈起。
-
-**裁剪不在这里重做。** 谁感知得到什么由 T1 的读取路径说了算；这里只负责把已经裁好
-的东西摆成她读得懂的样子。只听见动静的那条 ``content`` 本来就是 ``None``，渲染层
-再怎么写也漏不出原话。
+**"她刚做过、说过"那层为什么必须单独存在**：她的上下文会被裁剪，传到她这里的消息也只摆
+一次。少了这一层，她上一轮答应姐姐的话下一轮就凭空消失，"接得上昨天"永远无从谈起。
 
 唯一一处在这里**算**出来的东西是线头那层的「到点了 / 还没到」：她给线头挂的时刻当场跟
 ``now`` 比，库里没有这个状态（:func:`_open_end_line`）。这不是压缩，是把同一个事实
@@ -67,12 +62,7 @@ from sqlalchemy import text
 from app.data.session import get_session
 from app.infra.cst_time import dated_clock, to_cst_full
 from app.living.day_page import LivingDayPage, living_day_of, read_day_page_before
-from app.living.happening import (
-    PerceivedWindow,
-    own_line,
-    perceived_line,
-    read_perceived_by,
-)
+from app.living.happening import own_line
 from app.living.loose_ends import LooseEnd, format_entry, list_open_loose_ends
 from app.living.records import Happening, Whereabouts
 from app.living.whereabouts import current_whereabouts
@@ -85,22 +75,12 @@ from app.runtime.migrator import _table_name
 # 小时的行为轨迹 —— 足够让"刚答应姐姐的事"活到她下一次换事情、把它列进心上为止。
 OWN_RECENT_LIMIT = 12
 
-# 每一轮最多读多少条感知记录。不是截断上下文：游标推到本次扫过的最大 seq，剩下的
-# 下一轮接着拿（见 ``PerceivedWindow``）。60 条约等于半小时的动静，积压时过几轮就
-# 追平。
-PERCEIVED_LIMIT = 60
-
 _HAPPENING_TABLE = _table_name(Happening)
 
 
 @dataclass(frozen=True)
 class MomentSnapshot:
-    """她这一轮读到的全部。
-
-    ``perceived`` 原样带着 :class:`~app.living.happening.PerceivedWindow`，因为
-    调用方要拿 ``next_cursor`` 续接下一轮——把游标拆出去传会让"读到哪了"变成两个
-    地方各记一份。
-    """
+    """她这一轮读到的、她自己的那几层。"""
 
     lane: str
     persona_id: str
@@ -109,7 +89,6 @@ class MomentSnapshot:
     day_page: LivingDayPage | None
     open_ends: list[LooseEnd]
     own_recent: list[Happening]
-    perceived: PerceivedWindow
 
     def render_state(self) -> str:
         """她此刻的样子：上一次写下的那一天、心里挂着什么、刚做过说过什么。
@@ -124,8 +103,8 @@ class MomentSnapshot:
 
         **"她在哪、在做什么"不在这一半里**，它归 :meth:`render_new`。"读一百遍字字
         一样"这条对下面三段成立，对位置不成立：她自己每一轮都可能改（``move_to`` /
-        ``switch_to``），改完到下一个清理点之间，重铺那份说的还是旧位置 —— 而位置决定
-        谁看得见她、她看得见谁，是这一轮里最不能过期的一样。
+        ``switch_to``），改完到下一个清理点之间，重铺那份说的还是旧位置 —— 而她在哪是
+        这一轮里最不能过期的一样（world 按她报的位置判断谁看得见她）。
         """
         return "\n\n".join(
             (
@@ -136,8 +115,7 @@ class MomentSnapshot:
         )
 
     def render_new(self, *, previous_at: datetime | None) -> str:
-        """这一轮的实况：几点了、离上一次隔了多久、**你在哪在干嘛**、有什么到点了、
-        这期间别人做了什么。
+        """这一轮的实况：几点了、离上一次隔了多久、**你在哪在干嘛**、有什么到点了。
 
         ``previous_at`` 是上一个落地的 moment 的『现在』；一个都没跑过传 ``None``。
 
@@ -150,7 +128,6 @@ class MomentSnapshot:
         just_due = self._render_just_due(previous_at)
         if just_due is not None:
             parts.append(just_due)
-        parts.append(self._render_perceived())
         return "\n\n".join(parts)
 
     # -- 各段 ------------------------------------------------------------
@@ -227,16 +204,6 @@ class MomentSnapshot:
         ]
         return "你刚做过、说过：\n" + "\n".join(lines)
 
-    def _render_perceived(self) -> str:
-        if not self.perceived.items:
-            return "这段时间你感知到的：（没什么动静）"
-        lines = [
-            f"- {dated_clock(p.occurred_at, now=self.now)} "
-            f"{perceived_line(p, me=self.persona_id)}"
-            for p in self.perceived.items
-        ]
-        return "这段时间你感知到的：\n" + "\n".join(lines)
-
 
 def _gap(delta: timedelta) -> str:
     """一段时长摆成她读得懂的样子：``10 分钟`` / ``4 小时`` / ``4 小时 30 分钟``。"""
@@ -295,9 +262,9 @@ async def recent_own_happenings(
 
 
 async def read_snapshot(
-    *, lane: str, persona_id: str, after_seq: int, now: datetime
+    *, lane: str, persona_id: str, now: datetime
 ) -> MomentSnapshot:
-    """读她这一轮的全部输入。各层各读各的，谁也不裁谁。
+    """读她这一轮自己的那几层。各层各读各的，谁也不裁谁。
 
     日记那一页按 ``day < 当前生活日`` 取最新的一页，**不是"最新一页"**：她凌晨写下
     的那页写的是刚过去那一天，而写完的那一刻已经属于新的生活日了。理由和它错了的样子
@@ -313,10 +280,4 @@ async def read_snapshot(
         ),
         open_ends=await list_open_loose_ends(lane=lane, persona_id=persona_id),
         own_recent=await recent_own_happenings(lane=lane, persona_id=persona_id),
-        perceived=await read_perceived_by(
-            lane=lane,
-            persona_id=persona_id,
-            after_seq=after_seq,
-            limit=PERCEIVED_LIMIT,
-        ),
     )

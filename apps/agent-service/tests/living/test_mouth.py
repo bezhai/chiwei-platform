@@ -302,29 +302,6 @@ async def test_a_group_message_is_recorded_as_a_group_message(
     assert h.medium == MEDIUM_GROUP_CHAT
 
 
-@pytest.mark.integration
-async def test_what_she_texts_is_not_overheard_by_the_sister_next_to_her(
-    mouth_db, in_a_moment, spoken, guard
-):
-    """手机隔着设备：坐在她旁边的姐姐也看不见那些字。"""
-    from app.living.happening import read_perceived_by
-
-    await note_whereabouts(
-        lane=LANE, persona_id="akao", moment_id="m1", place="家/客厅",
-        doing="翻胶片", noted_at=_at(21),
-    )
-    await note_whereabouts(
-        lane=LANE, persona_id="ayana", moment_id="m1", place="家/客厅",
-        doing="看书", noted_at=_at(21),
-    )
-
-    async with in_a_moment("akao"):
-        await send_message.invoke({"what": "问问他", "channel_id": str(_DM)})
-
-    heard = await read_perceived_by(lane=LANE, persona_id="ayana")
-    assert heard.items == []
-
-
 # --------------------------------------------------------------------------
 # 四 · 发不出去就说发不出去
 # --------------------------------------------------------------------------

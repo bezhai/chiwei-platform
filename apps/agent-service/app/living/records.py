@@ -1,4 +1,4 @@
-"""living 的两类持久数据：发生过的事、她在哪。
+"""living 的两类持久数据：她做过的事、她在哪。两样都只属于她自己，也只给她自己读。
 
 :class:`Happening` 和 :class:`Whereabouts` 是纯 append + 自然键幂等
 （``insert_idempotent``），不声明 Version：它们记的是"已经发生过的事"和"某一轮她在
@@ -46,7 +46,8 @@ def living_lane() -> str:
 # happening 的形态。机制层硬定的两类，不是让模型自由发挥的字符串：
 #   * ``speech``  说出口的话。``content`` 是原话。
 #   * ``act``     做的事。``content`` 是一句自然语言描述（"我去厨房煮抹茶"）。
-# 两者共用一张表，是因为「谁在哪对谁做了什么说了什么」在读取侧是同一件事。
+# 两者共用一张表，是因为「她对谁做了什么说了什么」在读取侧是同一件事：她回看自己的经历、
+# 一轮结束时把当面做的事按先后汇总给 world（:mod:`app.living.outgoing`）。
 KIND_SPEECH = "speech"
 KIND_ACT = "act"
 _KINDS = frozenset({KIND_SPEECH, KIND_ACT})
@@ -67,9 +68,9 @@ OUTBOUND_HAPPENING_PREFIX = "mouth:"
 # 通过什么渠道。这是**客观事实**——她是当面说的，还是拿手机发的，还是发在群里的。
 # 不是给她的行为分优先级，也不是强度分级：三个值之间没有高低，只有"声音能不能传到
 # 旁边的人耳朵里"这一条物理差别。
-#   * ``in_person``   当面说 / 当场做。同一地点的人听得见，同一栋别处知道有动静。
-#   * ``phone``       私聊消息。隔着设备，旁边的人看不见，只有收件人收得到。
-#   * ``group_chat``  群里说话。同上，只有群里的人（audience）收得到。
+#   * ``in_person``   当面说 / 当场做。进 world 的汇总，谁会察觉由 world 判断。
+#   * ``phone``       私聊消息。隔着设备，旁边的人看不见，只在她自己的记录里。
+#   * ``group_chat``  群里说话。同上。
 MEDIUM_IN_PERSON = "in_person"
 MEDIUM_PHONE = "phone"
 MEDIUM_GROUP_CHAT = "group_chat"
@@ -171,25 +172,24 @@ def _require_aware(name: str, v: datetime | None) -> datetime | None:
 
 
 class Happening(Data):
-    """一件已经发生的事：谁、在哪、对谁、通过什么渠道、说了什么或做了什么。
+    """她做过的一件事：对谁、通过什么渠道、说了什么或做了什么。
+
+    ``actor`` 就是她：每一行都是某一个人自己的经历，也只给那个人自己读（读的一侧每一条查询
+    都按 ``actor`` 筛，``tests/living/test_only_her_own_records.py`` 守着）。别人能不能察觉到，
+    不由这张表决定（见 :mod:`app.living.happening`）。
 
     自然键 ``(lane, happening_id)``——重放同一个 ``happening_id`` 只落一行。
 
     ``seq`` 是**本 lane 内的提交序**，由 :func:`app.living.serial.append_in_commit_order`
     在排他占用下分配：拿号和落库之间占用不放开，所以 seq 的先后 == 提交的先后，
     可见的 seq 集合永远是一段连续前缀。读侧的游标因此可以放心推到"本次读到的最大
-    seq"，不会把一条还在飞的记录永久越过去。**不要用 ``occurred_at`` 当游标**——
-    它是行为发生的时刻，跨 persona 并发时跟落库顺序无关，按它开窗必漏。
+    seq"，不会把一条还在飞的记录永久越过去（:class:`app.living.outgoing.OutgoingUpTo`）。
+    **不要用 ``occurred_at`` 当游标**——同一轮里的几件钟点都一样，而提前来的那一轮和
+    钟点上该来的那一轮落地的先后可以跟钟点反过来。
 
-    ``audience`` 是"说给谁"，**可以是好几个人**：里面的人一定读到原话，跟位置无关
-    （位置数据算错了也不许丢）。空 = 没有特定对象。做成列表而不是单个 persona，是
-    因为"同时对两个姐妹说一句话"是一件事，复制成两条事件会让 seq、回声抑制、旁听
-    裁剪各错一遍。
-
-    ``who_was_where`` 是**事情发生那一刻**各人分别在哪（persona_id → 位置路径）的
-    快照。旁听判档读的是它，不是读取时的最新位置：事件可能在她整轮模型调用期间提交，
-    而她在这一轮快结束时换了房间——用新位置去裁旧事件，在场的人会漏听、不在场的人反而听见。
-    存"当时谁在哪"这个事实而不是存裁好的结果，是因为事实不会变、而三档规则可能改。
+    ``audience`` 是"说给谁"，**可以是好几个人**：她自己在 ``say`` 的 ``to`` 里写下的名字。
+    空 = 没有特定对象。做成列表而不是一个名字，是因为"同时对两个姐妹说一句话"是一件事：
+    姐妹各收到一条直达的，这句话本身只记一次（:mod:`app.living.outgoing`）。
 
     ``channel_id`` 是**哪一条会话**（``common_conversation.common_conversation_id``），
     只有 ``phone`` / ``group_chat`` 这两个 medium 有；当面说的话是 ``None``。形状定成 common 口径的会话 id 而不是渠道裸 id（飞书 ``oc_*``），
@@ -201,14 +201,12 @@ class Happening(Data):
     lane: Annotated[str, Key]
     happening_id: Annotated[str, Key]
     seq: int
-    actor: str           # 谁做的 / 说的（persona_id）
-    place: str           # 发生在哪（层级路径，见 app.living.place）
+    actor: str           # 谁的经历（persona_id）
     kind: str            # KIND_SPEECH | KIND_ACT
     medium: str          # MEDIUM_IN_PERSON | MEDIUM_PHONE | MEDIUM_GROUP_CHAT
     content: str         # 原话 / 做了什么，自然语言
     occurred_at: datetime  # 发生时刻，展示用，**不当游标**
     audience: list[str]  # 说给谁（可以多个）；空 = 没有特定对象
-    who_was_where: dict[str, str]  # 发生时各人在哪的快照
     # 哪条会话上说的（common_conversation_id）；None = 不在任何会话上（当面）。
     # 可空而不是空串：这是后加的列，``ALTER TABLE ADD COLUMN`` 给已有行留的是 NULL，
     # 声明成 ``str`` 会让那些行一读出来就 ValidationError。
@@ -216,11 +214,11 @@ class Happening(Data):
 
     class Meta:
         # 两种读侧形状：
-        #   * (lane, seq)          某 lane 下 seq 之后的一段（每一轮都走这条）
+        #   * (lane, seq)          取下一个号的 MAX(seq)，和按提交序往后讲的那一段
         #   * (lane, occurred_at)  某一整个生活日（日记材料，一天三次）
-        # 第二条按**发生时刻**开窗，跟游标那条不是同一个问题：一天的边界是钟点，
-        # 而 seq 是提交序，两者跨 persona 并发时对不上。频率低但扫的是整张表，
-        # 没有索引的话它会随着这张表一起变慢，而症状只是"日记这一轮有点久"。
+        # 第二条按**发生时刻**开窗，跟提交序那条不是同一个问题：一天的边界是钟点，
+        # 而 seq 是提交序。没有索引的话它会随着这张表一起变慢，而症状只是"日记这一轮
+        # 有点久"。
         indexes = (("lane", "seq"), ("lane", "occurred_at"))
 
     # ``kind`` / ``medium`` 上面写着"机制层硬定的枚举"，这里让它真的是。
@@ -228,7 +226,7 @@ class Happening(Data):
     # 对未知泛型 origin 的兜底），列类型一旦落地就改不回来了。
     #
     # 值得单独挡一下，是因为写错的表现完全是静默的：``medium="in-person"``（连字符）
-    # 会走进"隔着设备"那一支，同屋的人从此一句都听不见，日志里什么都没有。
+    # 会走进"隔着设备"那一支，她当面做的事从此一件都不进 world 的汇总，日志里什么都没有。
     @field_validator("kind")
     @classmethod
     def _known_kind(cls, v: str) -> str:
@@ -255,9 +253,9 @@ class Whereabouts(Data):
     自然键 ``(lane, persona_id, moment_id)``：``moment_id`` 是写这条的那一轮的
     标识，让同一轮重放只落一行。纯 append——上一轮的位置留在表里，不是被覆盖。
 
-    ``place`` 是**客观事实**。旁听判档不在读事件时回来查它——
-    :func:`app.living.happening.record_happening` 在写入事件的那一刻把"此刻谁在哪"
-    拍进 :attr:`Happening.who_was_where`，之后这条位置再怎么变都不影响已经发生过的事。
+    **只给她自己读**：她每一轮眼前那句"手上"、环顾四周时她告诉 world 自己在哪
+    （:func:`app.living.moment.look_around`）、汇总末尾那句她在哪在做什么
+    （:mod:`app.living.outgoing`）。别人在哪，world 按各人自己报的位置判断，life 不读。
     ``seq`` 同 :class:`Happening`（这里是 per-(lane, persona) 的轴），作用是让
     "最新一条"有唯一确定的答案，不靠 ``created_at`` 的同刻并列去猜。
     """

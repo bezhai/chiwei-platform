@@ -27,7 +27,6 @@ import pytest
 from app.agent.core import _normalise_tool_result
 from app.agent.neutral import Message, Role, ToolCall, ToolResult
 from app.agent.runtime_context import agent_context
-from app.living.happening import read_perceived_by
 from app.living.loose_ends import LooseEnd, list_open_loose_ends
 from app.living.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
@@ -47,7 +46,7 @@ from app.living.moment import (
     switch_to,
 )
 from app.living.persona import LIVING_PERSONAS
-from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON
+from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from app.runtime.schema_types import pg_type
 
@@ -173,6 +172,23 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
         place=place,
         doing=doing,
         noted_at=at,
+    )
+
+
+async def _reaches_her(persona: str, sender: str, body: str, at: dt.datetime) -> None:
+    """一条传到她这里的消息，跟收件箱存下的一样（:func:`app.living.received.receive`）。"""
+    from app.living.received import ReceivedMessage
+    from app.runtime.persist import insert_idempotent
+
+    await insert_idempotent(
+        ReceivedMessage(
+            lane=LANE,
+            persona_id=persona,
+            message_id=f"{persona}:{at.isoformat()}:{body[:8]}",
+            sender=sender,
+            body=body,
+            message_time=at,
+        )
     )
 
 
@@ -385,28 +401,6 @@ async def test_she_can_speak_to_someone_the_code_never_heard_of(
 
 
 @pytest.mark.integration
-async def test_a_name_nobody_answers_to_still_lands_in_the_room(
-    moment_db, stub_moment
-):
-    """说给一个没人接的名字，那句话就落在屋子里没人接 —— 这本身是真实的。
-
-    没人匹配上 ``audience`` 时定向送达那条路落空，只剩按位置旁听：屋里的人照样听见
-    原话，读到的是"赤尾对 xu_yi 说"。这条钉的是下游（:func:`app.living.happening.perceive`）
-    对一个它不认识的收件人名不挑剔 —— 挡在工具里的那道门拆掉之后，这里才是真正兜底的地方。
-    """
-    await _stand("akao", "家/玄关", "应门", _at(13))
-    await _stand("ayana", "家/玄关", "穿鞋", _at(13))
-    stub_moment(("say", {"what": "许阿姨，进来坐。", "to": ["xu_yi"]}))
-
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-
-    heard = await read_perceived_by(lane=LANE, persona_id="ayana")
-    assert [(p.content, p.directed, p.audience) for p in heard.items] == [
-        ("许阿姨，进来坐。", False, ("xu_yi",))
-    ]
-
-
-@pytest.mark.integration
 async def test_saying_nothing_is_not_saying(moment_db, stub_moment):
     await _stand("akao", "家/客厅", "待着", _at(13))
     runner = stub_moment(("say", {"what": "   ", "to": ["绫奈"]}))
@@ -417,22 +411,8 @@ async def test_saying_nothing_is_not_saying(moment_db, stub_moment):
 
 
 @pytest.mark.integration
-async def test_an_act_is_something_the_room_can_see(moment_db, stub_moment):
-    await _stand("akao", "家/客厅", "待着", _at(13))
-    await _stand("ayana", "家/客厅", "看书", _at(13))
-    stub_moment(("act", {"what": "把胶片摊了一茶几"}))
-
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-
-    heard = await read_perceived_by(lane=LANE, persona_id="ayana")
-    assert [(p.kind, p.content) for p in heard.items] == [
-        (KIND_ACT, "把胶片摊了一茶几")
-    ]
-
-
-@pytest.mark.integration
 async def test_she_cannot_act_before_she_is_anywhere(moment_db, stub_moment):
-    """还没定下位置就动作 —— 那条记录会落在一个空地点上，谁也感知不到。"""
+    """还没定下位置就动作 —— world 不知道这件事发生在哪，谁也察觉不到。"""
     runner = stub_moment(("act", {"what": "发了会儿呆"}))
 
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
@@ -446,7 +426,7 @@ def test_an_act_does_not_get_to_declare_what_the_world_is_like():
     上一代 prod 审计（06-11..08-30）里每一条"家人生病"剧情都是同一个起法：life 在
     ``act`` 里顺带塞一句关于世界的断言（别人的身体、外面出的事、测出来的结果），
     下游把它当既成事实吃进去。这一版**没有任何人能否认**——:func:`_record` 不裁定，
-    渲染出来更是逐字原话，落在别人快照的"这段时间你感知到的"里，所以这条边界只能立在
+    她的原话逐字进 world 的汇总，world 当成她做了的事，所以这条边界只能立在
     喂给模型的那份工具描述上。
 
     两层都得在，少一层就坏一边：动作**直接**造成的结果仍要照写（掐掉的话她的动作
@@ -508,28 +488,16 @@ async def test_what_a_sister_said_can_be_kept_in_a_moment_that_carries_on(
     是 False），但她心里记住了。接下来她一个 moment 接一个 moment 什么都没做，跨过一个
     清理点之后那件事还在她眼前，而且指得出是从哪个 moment 带过来的。
 
-    「是否换事」不等于「是否记住」——把挂心事绑在 ``switch_to`` 上，这条感知在游标
-    推进之后就永久消失了：她自己最近那十二条里只有她**自己**说做的，别人说的话不在
-    里面，谁也救不回来。
+    「是否换事」不等于「是否记住」——把挂心事绑在 ``switch_to`` 上，这句话在她看过之后
+    就永久消失了：传到她这里的消息只摆一次，她自己最近那十二条里只有她**自己**说做的，
+    别人说的话不在里面，谁也救不回来。
 
     **看的是她这一轮读到的全部，不只是最后那条刺激。** 每轮的刺激只送新发生的事；她挂
     着什么是状态，跟着连续上下文走，清理那一下再重铺一次
     （:mod:`app.agent.continuity`）。
     """
     await _stand("akao", "家/客厅", "看书", _at(13))
-    await _stand("ayana", "家/客厅", "待着", _at(13))
-    from app.living.happening import record_happening
-
-    await record_happening(
-        lane=LANE,
-        happening_id="ay-1",
-        actor="ayana",
-        place="家/客厅",
-        kind=KIND_SPEECH,
-        content="周末陪我去祭典好不好",
-        occurred_at=_at(13, 58),
-        audience=["akao"],
-    )
+    await _reaches_her("akao", "绫奈", "当面对你说：「周末陪我去祭典好不好」", _at(13, 58))
 
     stub_moment(
         ("keep_in_mind", {"still_on_my_mind": ["绫奈问我周末陪不陪她去祭典"]}),
@@ -642,22 +610,10 @@ async def test_a_moment_only_puts_what_is_new_in_front_of_her(
     是把同一段话抄二十四遍。
     """
     await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(13))
-    await _stand("ayana", "家/客厅", "待着", _at(13))
     stub_moment(("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台"]}))
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
-    from app.living.happening import record_happening
-
-    await record_happening(
-        lane=LANE,
-        happening_id="ay-new",
-        actor="ayana",
-        place="家/客厅",
-        kind=KIND_SPEECH,
-        content="姐，抹茶还有吗",
-        occurred_at=_at(14, 5),
-        audience=["akao"],
-    )
+    await _reaches_her("akao", "绫奈", "当面对你说：「姐，抹茶还有吗」", _at(14, 5))
     quiet = stub_moment(said="继续")
     await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
 
@@ -809,59 +765,29 @@ def test_the_shape_she_is_taught_to_write_is_the_shape_that_parses():
 
 
 @pytest.mark.integration
-async def test_a_moment_only_sees_what_happened_since_the_last_one(
-    moment_db, stub_moment
+async def test_what_a_sister_does_beside_her_reaches_her_only_through_her_inbox(
+    moment_db, stub_moment, post
 ):
-    await _stand("akao", "家/客厅", "待着", _at(13))
+    """别的姐妹做了什么、说了什么，是她们自己的经历。同一间屋里也一样：谁会察觉由 world
+    判断后告诉她，传到她这里的只有收件箱里那一段，没有一条路按位置从别人的记录里读。"""
+    await _stand("akao", "家/客厅", "看胶片", _at(13))
     await _stand("ayana", "家/客厅", "看书", _at(13))
+    stub_moment(
+        ("say", {"what": "这本书好难懂", "to": []}),
+        ("act", {"what": "把书合上了"}),
+    )
+    await run_moment(lane=LANE, persona_id="ayana", now=_at(14))
+
     runner = stub_moment(said="继续")
-
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-    from app.living.happening import record_happening
 
-    await record_happening(
-        lane=LANE,
-        happening_id="h-later",
-        actor="ayana",
-        place="家/客厅",
-        kind=KIND_SPEECH,
-        content="你在看什么",
-        occurred_at=_at(14, 5),
-        audience=["akao"],
+    everything = _all_she_read(runner.runs[0])
+    assert "这本书好难懂" not in everything and "把书合上了" not in everything, (
+        f"绫奈的经历进了她这一轮：\n{everything}"
     )
-    second = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
-    third = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP * 2)
-
-    second_input = _what_she_read(runner.runs[1])
-    third_input = _what_she_read(runner.runs[2])
-    assert "你在看什么" in second_input
-    assert "你在看什么" not in third_input, "游标没推进 —— 同一句话每次重读一遍"
-    assert third.after_seq == second.next_seq
-
-
-@pytest.mark.integration
-async def test_the_cursor_is_carried_by_the_moment_record(moment_db, stub_moment):
-    await _stand("akao", "家/客厅", "待着", _at(13))
-    await _stand("ayana", "家/客厅", "看书", _at(13))
-    stub_moment(said="继续")
-    from app.living.happening import record_happening
-
-    said = await record_happening(
-        lane=LANE,
-        happening_id="h1",
-        actor="ayana",
-        place="家/客厅",
-        kind=KIND_SPEECH,
-        content="早",
-        occurred_at=_at(13, 59),
-        audience=["akao"],
-    )
-
-    first = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-    second = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
-
-    assert (first.after_seq, first.next_seq, first.perceived) == (0, said.seq, 1)
-    assert (second.after_seq, second.perceived) == (said.seq, 0)
+    seen = _what_she_read(runner.runs[0])
+    assert "这段时间你感知到的" not in seen, seen
+    assert "这段时间传到你这里的" in seen, seen
 
 
 # --------------------------------------------------------------------------
@@ -1025,7 +951,7 @@ async def test_replaying_the_same_moment_lands_one_row(moment_db, stub_moment):
     from app.runtime.persist import insert_idempotent, select_all_versions
 
     replayed = LifeMoment(
-        **{**first.model_dump(), "said": "这一遍她说了别的", "perceived": 99}
+        **{**first.model_dump(), "said": "这一遍她说了别的", "recorded": 99}
     )
     assert await insert_idempotent(replayed) == 0
 
@@ -1170,45 +1096,6 @@ async def test_a_moment_is_stamped_on_its_grid_cell(moment_db, stub_moment):
     assert moment.moment_id == _at(14, 0).isoformat(timespec="minutes")
 
 
-@pytest.mark.integration
-async def test_the_cursor_only_advances_when_the_record_lands(
-    moment_db, stub_moment, monkeypatch
-):
-    """记录没落地 = 游标没推进 = 那批感知不会被静默吞掉。"""
-    from app.living import moment as moment_mod
-    from app.living.happening import record_happening
-
-    await _stand("akao", "家/客厅", "看书", _at(13))
-    await _stand("ayana", "家/客厅", "待着", _at(13))
-    await record_happening(
-        lane=LANE,
-        happening_id="ay-x",
-        actor="ayana",
-        place="家/客厅",
-        kind=KIND_SPEECH,
-        content="你在看什么",
-        occurred_at=_at(13, 59),
-        audience=["akao"],
-    )
-
-    runner = stub_moment(said="继续")
-
-    async def crash(row, **_kw):
-        raise RuntimeError("崩")
-
-    real_insert = moment_mod.insert_idempotent
-    monkeypatch.setattr(moment_mod, "insert_idempotent", crash)
-    with pytest.raises(RuntimeError):
-        await run_moment(lane=LANE, persona_id="akao", now=_at(14, 0))
-
-    monkeypatch.setattr(moment_mod, "insert_idempotent", real_insert)
-    again = await run_moment(lane=LANE, persona_id="akao", now=_at(14, 1))
-
-    assert again.after_seq == 0
-    retried_input = _what_she_read(runner.runs[-1])
-    assert "你在看什么" in retried_input, "崩掉那个 moment 的感知被静默吞了"
-
-
 def test_one_wake_has_room_for_more_than_one_whole_thing():
     """上限的含义是"她一口气能做几件事"，不是"一次思考多深"。
 
@@ -1234,67 +1121,41 @@ def test_the_moment_runs_on_the_life_model():
 
 
 @pytest.mark.integration
-async def test_an_early_moment_that_lands_first_does_not_rewind_the_cursor(
+async def test_an_early_moment_that_lands_first_is_not_taken_as_the_last_one(
     moment_db, stub_moment
 ):
-    """提前来的 moment 先落地、常规 moment 后落地 —— 游标不许退回提前来的 moment 那一格。
+    """提前来的 moment 先落地、常规 moment 后落地 —— "上一个"是后落地的那个。
 
     两条钟并发打到同一个人时 :func:`app.living.serial.hold` 让后到的**排队**而不是
     丢掉，所以这个次序完全正常：21:34 被叫来的那个 moment 先拿到占用、先跑完
     （``began_at`` 是真实时刻 21:34），21:35 那一拍的常规 moment 随后才轮到、跑完
     （``began_at`` 是它的格子 21:30）。**落地顺序和 ``began_at`` 顺序是反的。**
 
-    "读到哪了"问的是"**最后落地**的那个 moment 读到哪"。按 ``began_at`` 排会取回 21:34
-    那一行的游标，把常规 moment 已经读过的那一段整个丢回去——她把同一批动静又感知一遍，
-    而且一句报错都没有。
+    下一轮问"离上一次过了多久"、"上一轮的上下文落地了没有"，问的都是**最后落地**的那个。
+    按 ``began_at`` 排会取回 21:34 那一行：隔了多久报错，后落地那一轮的上下文丢了也判不出来。
     """
-    from app.living.happening import record_happening
-
     await _stand("akao", "家/客厅", "看书", _at(21, 20))
-    await _stand("ayana", "家/客厅", "待着", _at(21, 20))
-    stub_moment(said="继续")
+    runner = stub_moment(said="继续")
 
     await run_moment(lane=LANE, persona_id="akao", now=_at(21, 20))
-
-    await record_happening(
-        lane=LANE,
-        happening_id="h-before-nudge",
-        actor="ayana",
-        place="家/客厅",
-        kind=KIND_SPEECH,
-        content="姐我出门了。",
-        occurred_at=_at(21, 31),
-        audience=["akao"],
-    )
     early = await run_moment(
         lane=LANE, persona_id="akao", now=_at(21, 34), nudged_by="msg-1"
     )
     assert early is not None and early.began_at == _at(21, 34)
-
-    await record_happening(
-        lane=LANE,
-        happening_id="h-after-nudge",
-        actor="ayana",
-        place="家/客厅",
-        kind=KIND_SPEECH,
-        content="我回来了。",
-        occurred_at=_at(21, 34) + dt.timedelta(seconds=30),
-        audience=["akao"],
-    )
     regular = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 35))
-
-    # 前提：常规 moment 的格子比提前来的 moment 的真实时刻早，而它读到了提前来的 moment 之后的新动静。
+    # 前提：常规 moment 的格子比提前来的 moment 的真实时刻早，而它后落地。
     assert regular is not None and regular.began_at == _at(21, 30)
-    assert regular.next_seq > early.next_seq
+    assert regular.seq > early.seq
 
     latest = await latest_moment(lane=LANE, persona_id="akao")
     assert latest.moment_id == regular.moment_id, (
         "「最近一个 moment」取成了钟点最靠后的那个 moment，不是最后落地的那个 moment"
     )
 
-    nxt = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 45))
-    assert nxt.after_seq == regular.next_seq, "游标退回提前来的 moment 那一格了"
-    assert nxt.perceived == 0, "游标退回去 —— 同一句话她又听了一遍"
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 45))
+    assert "离上一次过了 10 分钟" in _what_she_read(runner.runs[-1]), (
+        "「离上一次」从提前来的那个 moment 算了 —— 那一轮之后还有一轮"
+    )
 
 
 @pytest.mark.integration
@@ -1424,9 +1285,6 @@ def test_the_life_column_shapes_are_pinned():
         "moment_id": "TEXT",
         "seq": "BIGINT",
         "began_at": "TIMESTAMPTZ",
-        "after_seq": "BIGINT",
-        "next_seq": "BIGINT",
-        "perceived": "BIGINT",
         "switched": "BOOLEAN",
         "pulled_by": "TEXT",
         "recorded": "BIGINT",
@@ -1449,9 +1307,6 @@ def test_the_life_records_refuse_a_naive_instant():
             moment_id="m",
             seq=1,
             began_at=naive,
-            after_seq=0,
-            next_seq=0,
-            perceived=0,
             switched=False,
             pulled_by="",
             recorded=0,
@@ -1800,7 +1655,6 @@ async def test_landing_somewhere_hands_back_only_where_she_is(
         lane=LANE,
         happening_id="ayana-on-the-field",
         actor="ayana",
-        place="学校/操场",
         kind="act",
         content="在操场边上跑圈",
         occurred_at=_at(9),
