@@ -31,9 +31,14 @@ world 的三轮，每一轮只看到一部分。她这一段在世界里什么�
 去重。
 
 **发**（:func:`send_unsent`）：还没有结果的逐条发，发完记一条结果（:class:`OutgoingResult`）。
-没确认（通信机制抛错、进程没了、记结果失败）就什么都不记，下一次原样再发；对方没开收件箱是
-一个确定的结果，记下来，不再发。一位收件人失败不影响别的收件人；同一位收件人前一条没发出去，
-后一条等它——她那边按消息到的时刻排，后一句先到就倒了。
+没确认（通信机制抛错、:data:`SEND_SECONDS` 内没结果、进程没了、这一轮被取消、记结果失败）就
+什么都不记，下一次原样再发；对方没开收件箱是一个确定的结果，记下来，不再发。一位收件人没确认
+不耽误别的收件人；同一位收件人前一条没确认，后一条等它——前一条可能到了也可能没到，先发后一条
+就可能倒过来。
+
+每一步都是要么做完、要么等于没做，所以这一轮在哪一步被取消都不留下对不上的状态：要发的消息
+和"讲到哪了"一个事务；一次发送被取消，结果未知，没有结果的那条下一次原样再发；结果那一行
+写进去了就是送到了，没写进去就再发一次，对方按 id 去重。
 
 **什么时候发**：她每一轮开始前、结束时（:func:`app.living.moment.run_moment_held`）。开始前那
 一次接住上一轮没发完的（失败、超时、进程没了）；结束时那一次发这一轮做的。都在她的 moment
@@ -44,6 +49,7 @@ world 的三轮，每一轮只看到一部分。她这一段在世界里什么�
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime
@@ -67,6 +73,21 @@ _ID_NS = uuid.UUID("5b0e2d71-9a4c-4f38-b6e1-7c2d94a0f153")
 
 # 给 world 的那条的开头和结尾。
 _DIGEST_HEAD = "我做了这些（按先后）："
+
+# 发一条最多等多久。到点不再等：这一次结果未知，跟没确认一样，留着下一次原样再发（对方按 id
+# 去重），接着发别的收件人的。不封顶的话，一次挂住的发送会占着她这一轮直到占用到顶被掐断
+# （:data:`app.living.serial.HELD_SECONDS`），下一轮开始前又先去发同一条、又挂住，别的收件人
+# 永远轮不到。
+#
+# 正常一次发送是查一下对方的收件箱在不在、记几行记录、发给 broker 等确认，几十毫秒。里面最慢的
+# 合法一步是等 broker 确认，通信机制自己给它封了 5 秒（``mq.publish_with_confirm``）；10 秒是它
+# 的两倍，慢但还活着的 broker 掐不到。上限这一头：一次往外发最多碰到三位收件人（world 和两个
+# 姐妹；同一位收件人前一条没确认，后面的这一次不试），一轮发两次（开始前、结束时），最坏
+# 3 × 2 × 10 = 60 秒，比 900 秒的占用上限小得多。不做成配置：这是"别被挂死"的兜底，不是业务参数。
+#
+# 到点是协作式的取消（同 :func:`app.living.serial.hold`）：被取消的那次发送收拾自己（比如关掉
+# 查收件箱用的那条临时 channel）也要时间，这一段由 broker 客户端自己的超时兜着。
+SEND_SECONDS = 10.0
 
 
 class OutgoingMessage(Data):
@@ -239,20 +260,22 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
 async def send_unsent(*, lane: str, persona_id: str) -> None:
     """还没有结果的逐条发出去，发完一条记一条结果。
 
-    一条没确认就记一行 WARNING、留着下一次再发，接着发别人的；同一位收件人后面的几条这一次先
-    不发，等前面那条。不往外抛：这一次没发出去的，下一次一定再试。
+    一条没确认（出错，或者 :data:`SEND_SECONDS` 内没结果）就记一行 WARNING、留着下一次再发，
+    接着发别人的；同一位收件人后面的几条这一次先不发，等前面那条。不往外抛：这一次没发出去的，
+    下一次一定再试。这一轮被取消不算没确认，原样往外抛。
     """
     waiting: set[str] = set()
     for message in await unsent(lane=lane, persona_id=persona_id):
         if message.recipient in waiting:
             continue
         try:
-            delivery = await send(
-                sender=message.sender,
-                recipient=message.recipient,
-                body=message.body,
-                message_id=message.message_id,
-            )
+            async with asyncio.timeout(SEND_SECONDS):
+                delivery = await send(
+                    sender=message.sender,
+                    recipient=message.recipient,
+                    body=message.body,
+                    message_id=message.message_id,
+                )
             await insert_append(
                 OutgoingResult(
                     lane=lane,

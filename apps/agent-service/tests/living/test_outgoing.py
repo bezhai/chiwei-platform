@@ -65,6 +65,19 @@ async def _tell(persona: str = "akao") -> None:
     await send_what_she_did(lane=LANE, persona_id=persona)
 
 
+async def _within(seconds: float, step) -> None:
+    """``step`` 要在 ``seconds`` 秒内做完。一次发送挂住时，挂住的应该是那一次，不是这条用例。"""
+    async with asyncio.timeout(seconds):
+        await step
+
+
+async def _until(predicate, *, seconds: float = 5.0) -> None:
+    """等到 ``predicate()`` 为真。"""
+    async with asyncio.timeout(seconds):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
 async def _do(hand, args: dict) -> str:
     """在这一轮里用一只手；它没做成就当场红，不然后面验的是一件没发生的事。"""
     done = await hand.invoke(args)
@@ -251,25 +264,32 @@ async def test_a_name_that_is_not_a_sisters_is_someone_in_the_world(started, in_
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("unconfirmed", ["fails", "hangs"])
 async def test_what_she_said_to_one_sister_reaches_her_in_the_order_she_said_it(
-    started, in_a_moment
+    started, in_a_moment, monkeypatch, unconfirmed
 ):
-    """同一位姐妹的两句，前一句没发出去，后一句等它：她那边按到的先后排，先发后一句就倒了。"""
+    """同一位姐妹的两句，前一句没确认（出错，或者一直没结果），后一句等它：前一句可能已经到了，
+    也可能还没到，先发后一句就可能倒过来。别的姐妹不用等。"""
     post = started
+    monkeypatch.setattr(outgoing_mod, "SEND_SECONDS", 0.2)
     async with in_a_moment("akao", now=_at(21, 30)):
         await _do(say, {"what": "饭好了。", "to": ["绫奈"]})
+        await _do(say, {"what": "你也来。", "to": ["千凪"]})
         await _do(say, {"what": "快下来。", "to": ["绫奈"]})
-    post.failing.add("绫奈")
+    (post.failing if unconfirmed == "fails" else post.hanging).add("绫奈")
 
-    await _tell()
-    assert [s.body for s in post.sent] == ["当面对你说：「饭好了。」"]
+    await _within(5, _tell())
+    assert [(s.recipient, s.body) for s in post.sent] == [
+        ("绫奈", "当面对你说：「饭好了。」"),
+        ("千凪", "当面对你说：「你也来。」"),
+    ]
 
     post.failing.clear()
-    await _tell()
-    assert [s.body for s in post.sent] == [
-        "当面对你说：「饭好了。」",
-        "当面对你说：「饭好了。」",
-        "当面对你说：「快下来。」",
+    post.hanging.clear()
+    await _within(5, _tell())
+    assert [(s.recipient, s.body) for s in post.sent[2:]] == [
+        ("绫奈", "当面对你说：「饭好了。」"),
+        ("绫奈", "当面对你说：「快下来。」"),
     ]
 
 
@@ -381,6 +401,34 @@ async def test_one_sister_failing_does_not_hold_back_the_other(started, in_a_mom
         ("千凪", "当面对你和 绫奈 说：「抹茶煮多了，要不要？」"),
     ]
     assert post.sent[1].message_id == post.sent[2].message_id
+
+
+@pytest.mark.integration
+async def test_a_send_that_hangs_is_given_up_on_and_her_other_recipients_still_hear_her(
+    started, in_a_moment, monkeypatch
+):
+    """发给绫奈的那一次一直不返回：等到上限就不等了，结果未知，跟没确认一样留着下一次原样再发；
+    千凪和 world 这一次照常发出去。"""
+    post = started
+    monkeypatch.setattr(outgoing_mod, "SEND_SECONDS", 0.2)
+    async with in_a_moment("akao", now=_at(21, 30)):
+        await _do(say, {"what": "抹茶煮多了，要不要？", "to": ["绫奈", "千凪"]})
+        await _do(act, {"what": "把锅端上桌"})
+    post.hanging.add("绫奈")
+
+    await _within(5, _tell())
+
+    assert [s.recipient for s in post.sent] == ["绫奈", "千凪", "world"]
+    still = await outgoing_mod.unsent(lane=LANE, persona_id="akao")
+    assert [m.recipient for m in still] == ["绫奈"]
+
+    post.hanging.clear()
+    await _within(5, _tell())
+
+    first, *_, again = post.sent
+    assert again.recipient == "绫奈"
+    assert (again.message_id, again.body) == (first.message_id, first.body)
+    assert await outgoing_mod.unsent(lane=LANE, persona_id="akao") == []
 
 
 @pytest.mark.integration
@@ -551,6 +599,94 @@ async def test_what_she_did_in_a_round_cut_off_for_taking_too_long_is_told_next_
     assert [s.body for s in before_the_model] == [
         "我做了这些（按先后）：\n- 21:30 CST 把锅端上桌\n做完这些，我在 家/客厅，正在 看书。"
     ]
+
+
+async def _delivered_to() -> list[str]:
+    """已经确认送到的那几条，各发给了谁。"""
+    by_id = {
+        m.message_id: m.recipient
+        for m in await _composed()
+    }
+    return sorted(by_id[r.message_id] for r in await _results() if r.delivered)
+
+
+async def _composed() -> list:
+    """她要发的消息，全部（有没有结果都算），按先后。"""
+    async with session_mod.get_session() as s:
+        rows = (
+            await s.execute(
+                text(
+                    f"SELECT * FROM {outgoing_mod._MESSAGE_TABLE} "
+                    f"WHERE lane = :l ORDER BY persona_id, seq"
+                ),
+                {"l": LANE},
+            )
+        ).mappings().all()
+    return [
+        outgoing_mod.OutgoingMessage(
+            **{k: r[k] for k in outgoing_mod.OutgoingMessage.model_fields}
+        )
+        for r in rows
+    ]
+
+
+@pytest.mark.integration
+async def test_a_send_that_hangs_does_not_cut_off_her_rounds(
+    started, stub_moment, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+):
+    """发给绫奈的那一次挂住。不给一次发送封顶的话，这一轮在占用到顶时被掐断，下一轮开始前又先去
+    发同一条、又挂住：她一轮一轮被掐断，千凪和 world 一直轮不到。"""
+    from app.living import serial as serial_mod
+
+    post = started
+    # 不封顶的那一版红在这里：要等满占用上限。压到 5 秒，红得快一点。
+    monkeypatch.setattr(serial_mod, "HELD_SECONDS", 5.0)
+    monkeypatch.setattr(outgoing_mod, "SEND_SECONDS", 0.2)
+    post.hanging.add("绫奈")
+    stub_moment(
+        ("say", {"what": "抹茶煮多了，要不要？", "to": ["绫奈", "千凪"]}),
+        ("act", {"what": "把锅端上桌"}),
+    )
+
+    assert await _round(_at(21, 30)) is not None
+    stub_moment(said="继续")
+    assert await _round(_at(21, 40)) is not None
+
+    assert await _delivered_to() == ["world", "千凪"]
+    assert [m.recipient for m in await outgoing_mod.unsent(lane=LANE, persona_id="akao")] == [
+        "绫奈"
+    ]
+
+
+@pytest.mark.integration
+async def test_a_round_cancelled_while_a_send_is_in_flight_loses_nothing_and_doubles_nothing(
+    started, stub_moment  # noqa: F811 — 形参名就是 fixture 名
+):
+    """这一轮在一次发送还没结果时被取消（占用到顶、部署）。那一次结果未知，没有结果的那条下一次
+    原样再发；已经有结果的不再发；要发的消息不多也不少。"""
+    post = started
+    post.hanging.add("千凪")
+    stub_moment(
+        ("say", {"what": "抹茶煮多了，要不要？", "to": ["绫奈", "千凪"]}),
+        ("act", {"what": "把锅端上桌"}),
+    )
+    first = asyncio.create_task(_round(_at(21, 30)))
+    await _until(lambda: [s.recipient for s in post.sent] == ["绫奈", "千凪"])
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    post.hanging.clear()
+    stub_moment(said="继续")
+    await _round(_at(21, 40))
+
+    assert [s.recipient for s in post.sent] == ["绫奈", "千凪", "千凪", "world"]
+    assert (post.sent[1].message_id, post.sent[1].body) == (
+        post.sent[2].message_id,
+        post.sent[2].body,
+    )
+    assert [m.recipient for m in await _composed()] == ["绫奈", "千凪", "world"]
+    assert await _delivered_to() == ["world", "千凪", "绫奈"]
 
 
 def test_the_say_hand_asks_for_names_in_the_world_and_offers_none():

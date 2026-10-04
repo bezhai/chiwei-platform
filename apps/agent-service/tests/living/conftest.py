@@ -50,20 +50,27 @@ class Sent:
 
 
 class Post:
-    """替身通信机制：记下她每一次发送；可以让发给某个名字的这一次失败，或者那个名字没开收件箱。
+    """替身通信机制：记下她每一次发送；可以让发给某个名字的这一次失败、一直不返回，或者那个名字
+    没开收件箱。
 
-    失败的那一次也记下：发送方眼里那是"试过了、没确认"，结果可能已经到了对方那里。
+    失败的、挂住的那一次也记下：发送方眼里那是"试过了、没确认"，结果可能已经到了对方那里。
+    挂住的那一次就是 broker 那头不应答的样子：不返回、也不报错，直到被取消。
     """
 
     def __init__(self) -> None:
         self.sent: list[Sent] = []
         self.failing: set[str] = set()
+        self.hanging: set[str] = set()
         self.no_inbox: set[str] = set()
 
     async def send(self, *, sender, recipient, body, message_id=None):
+        import asyncio
+
         from app.messaging.message import Delivery, SendFailed
 
         self.sent.append(Sent(sender, recipient, body, message_id))
+        if recipient in self.hanging:
+            await asyncio.Event().wait()
         if recipient in self.failing:
             raise SendFailed("broker 没有确认", message_id=message_id)
         if recipient in self.no_inbox:
