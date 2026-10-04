@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from app.living.day_page import LivingDayPage
 from app.living.nudge import NudgeBegun
+from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
 from app.living.persona import PersonaVersion
 from app.living.pictures import Picture
 from app.living.reading import FilePickedUp, FileRead
@@ -125,6 +126,27 @@ _VALID: dict[type, dict] = {
         "lane": "coe-x",
         "persona_id": "ayana",
         "nudged_by": "inbox:0123456789abcdef0123456789abcdef",
+    },
+    OutgoingMessage: {
+        "lane": "coe-x",
+        "message_id": "0123456789abcdef0123456789abcdef",
+        "persona_id": "akao",
+        "seq": 1,
+        "sender": "赤尾",
+        "recipient": "绫奈",
+        "body": "当面对你说：「饭好了。」",
+    },
+    OutgoingResult: {
+        "lane": "coe-x",
+        "message_id": "0123456789abcdef0123456789abcdef",
+        "delivered": True,
+        "reason": "",
+    },
+    OutgoingUpTo: {
+        "lane": "coe-x",
+        "persona_id": "akao",
+        "happening_seq": 12,
+        "whereabouts_seq": 3,
     },
 }
 
@@ -241,6 +263,33 @@ _PINNED: dict[type, dict[str, str]] = {
         "persona_id": "TEXT",
         "nudged_by": "TEXT",
     },
+    # 她要发出去的一条消息：id、发给谁、正文生成那一刻就定死，补发时原样再发。``seq`` 是她
+    # 要发的消息里的先后（同一位收件人按它的先后发）。**没有"发没发出去"的列**：结果是另一件
+    # 事、另一张表。**没有时刻列**：她什么时候做的写在正文里，生成的先后是框架的 ``created_at``。
+    OutgoingMessage: {
+        "lane": "TEXT",
+        "message_id": "TEXT",
+        "persona_id": "TEXT",
+        "seq": "BIGINT",
+        "sender": "TEXT",
+        "recipient": "TEXT",
+        "body": "TEXT",
+    },
+    # 一条消息发出去的结果：送到了，或者对方没开收件箱。有这一行就不再发；没确认的那次什么都
+    # 不记，下一次再发。
+    OutgoingResult: {
+        "lane": "TEXT",
+        "message_id": "TEXT",
+        "delivered": "BOOLEAN",
+        "reason": "TEXT",
+    },
+    # 她的经历讲到哪了：两张表各自的 seq（经历是全泳道一条轴，位置是她自己一条轴）。
+    OutgoingUpTo: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "happening_seq": "BIGINT",
+        "whereabouts_seq": "BIGINT",
+    },
 }
 
 
@@ -269,6 +318,9 @@ def test_living_data_reaches_the_registry_via_app_wiring():
         "ReceivedMessage",
         "ReceivedRead",
         "NudgeBegun",
+        "OutgoingMessage",
+        "OutgoingResult",
+        "OutgoingUpTo",
     ):
         assert f"'{name}'" in registered, (
             f"{name} 没进 DATA_REGISTRY —— migrate_schema 不会建它的表。"

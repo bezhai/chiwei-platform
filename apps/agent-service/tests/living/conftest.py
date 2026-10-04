@@ -14,10 +14,71 @@ fixtures along the rootdir→test-file path.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 import pytest
 
 from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
+
+# 三姐妹在世界里的名字（线上取自人设表的显示名）。
+RESIDENT_NAMES = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
+
+
+@pytest.fixture(autouse=True)
+def residents_named(monkeypatch):
+    """三姐妹的名字已经读好了，跟线上一样。
+
+    线上进程开始接收消息时就读好这份对照（:func:`app.living.received.open_inboxes`），
+    在任何一条钟开始拍之前；之后她每一轮发消息查地址、按名字认出她对谁说话，用的都是这一份。
+    验"还没读"和"读的时候出错"的用例自己把它清掉再读。
+    """
+    from app.living import participants as participants_mod
+
+    monkeypatch.setattr(
+        participants_mod, "_known", participants_mod.Residents(dict(RESIDENT_NAMES))
+    )
+
+
+@dataclass(frozen=True)
+class Sent:
+    """她发出去的一条：交给通信机制时的样子。"""
+
+    sender: str
+    recipient: str
+    body: str
+    message_id: str
+
+
+class Post:
+    """替身通信机制：记下她每一次发送；可以让发给某个名字的这一次失败，或者那个名字没开收件箱。
+
+    失败的那一次也记下：发送方眼里那是"试过了、没确认"，结果可能已经到了对方那里。
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[Sent] = []
+        self.failing: set[str] = set()
+        self.no_inbox: set[str] = set()
+
+    async def send(self, *, sender, recipient, body, message_id=None):
+        from app.messaging.message import Delivery, SendFailed
+
+        self.sent.append(Sent(sender, recipient, body, message_id))
+        if recipient in self.failing:
+            raise SendFailed("broker 没有确认", message_id=message_id)
+        if recipient in self.no_inbox:
+            return Delivery(message_id, delivered=False, reason="对方没有开设收件箱")
+        return Delivery(message_id, delivered=True)
+
+
+@pytest.fixture
+def post(monkeypatch) -> Post:
+    """她往外发消息走这个替身，不碰 broker。"""
+    from app.living import outgoing as outgoing_mod
+
+    stand_in = Post()
+    monkeypatch.setattr(outgoing_mod, "send", stand_in.send)
+    return stand_in
 
 
 def glance_text(shown) -> str:
@@ -110,6 +171,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     from app.domain.session_transcript import SessionTranscript
     from app.living.day_page import LivingDayPage
     from app.living.mouth import SpokenOutbound
+    from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
     from app.living.persona import PersonaVersion
     from app.living.phone import PhoneRead
     from app.living.pictures import Picture
@@ -124,10 +186,12 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     # ``SessionTranscript`` 也是：每一轮开头读连续上下文、结尾写回下一版
     # （``app.agent.continuity``），少了它 ``run_moment`` 第一步就炸。收到的消息那两张
     # 也是：每一轮都读她还没看过的收件、收尾时记下看过哪几条（``app.living.received``）。
+    # 她往外发的那三张也是：每一轮开始前和结束时都把她做的事发出去（``app.living.outgoing``）。
     for cls in (
         Happening, Whereabouts, PhoneRead, SpokenOutbound, Picture,
         LivingDayPage, PersonaVersion, SessionTranscript,
         ReceivedMessage, ReceivedRead,
+        OutgoingMessage, OutgoingResult, OutgoingUpTo,
     ):
         await migrate(cls, test_db)
     tables = [

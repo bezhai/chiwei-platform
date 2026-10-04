@@ -52,6 +52,19 @@ class Residents:
                 return persona_id
         return None
 
+    def sisters_in(self, names: list[str], *, speaker: str) -> list[str]:
+        """``names`` 里哪几个是 ``speaker``（persona_id）的姐妹：三姐妹之一、又不是她自己。
+
+        按出现的先后，同一个名字只留一次。不是姐妹名字的（世界里别的人、写错的名字、life
+        内部的 id）都不在里面——那是"世界里的某个人"，由 world 判断有没有这个人、听没听见。
+        """
+        found: list[str] = []
+        for name in names:
+            persona_id = self.persona_of(name)
+            if persona_id is not None and persona_id != speaker and name not in found:
+                found.append(name)
+        return found
+
 
 # 启动时读好的那一份（:func:`load_residents`）。读之前是 ``None``。
 _known: Residents | None = None

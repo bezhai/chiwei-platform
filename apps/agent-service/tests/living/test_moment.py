@@ -309,16 +309,18 @@ async def test_switching_nowhere_is_refused_instead_of_silently_losing_her(
 
 
 @pytest.mark.integration
-async def test_what_she_says_reaches_her_sister_word_for_word(moment_db, stub_moment):
+async def test_what_she_says_reaches_her_sister_word_for_word(
+    moment_db, stub_moment, post
+):
+    """按世界里的名字说给姐妹的，原话直接送到她那里，跟她在哪没关系（:mod:`app.living.outgoing`）。"""
     await _stand("akao", "家/客厅", "待着", _at(13))
     await _stand("ayana", "家/楼上/绫奈房间", "画画", _at(13))
-    stub_moment(("say", {"what": "周末祭典我陪你去。", "to": ["ayana"]}))
+    stub_moment(("say", {"what": "周末祭典我陪你去。", "to": ["绫奈"]}))
 
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
-    heard = await read_perceived_by(lane=LANE, persona_id="ayana")
-    assert [(p.actor, p.content, p.directed) for p in heard.items] == [
-        ("akao", "周末祭典我陪你去。", True)
+    assert [(s.sender, s.recipient, s.body) for s in post.sent] == [
+        ("赤尾", "绫奈", "当面对你说：「周末祭典我陪你去。」")
     ]
 
 
@@ -327,7 +329,7 @@ async def test_speaking_face_to_face_is_what_the_house_can_overhear(
     moment_db, stub_moment
 ):
     await _stand("akao", "家/客厅", "待着", _at(13))
-    stub_moment(("say", {"what": "抹茶好了。", "to": ["ayana"]}))
+    stub_moment(("say", {"what": "抹茶好了。", "to": ["绫奈"]}))
 
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
@@ -337,23 +339,23 @@ async def test_speaking_face_to_face_is_what_the_house_can_overhear(
     assert (said[0].kind, said[0].medium, said[0].audience) == (
         KIND_SPEECH,
         MEDIUM_IN_PERSON,
-        ["ayana"],
+        ["绫奈"],
     )
 
 
 @pytest.mark.integration
 async def test_speaking_to_two_sisters_at_once_is_one_thing_not_two(
-    moment_db, stub_moment
+    moment_db, stub_moment, post
 ):
+    """她做的是一件事（一条经历）；送到的是两个人，一人一条。"""
     await _stand("akao", "家/客厅", "待着", _at(13))
-    stub_moment(("say", {"what": "抹茶煮多了，谁要。", "to": ["ayana", "chinagi"]}))
+    stub_moment(("say", {"what": "抹茶煮多了，谁要。", "to": ["绫奈", "千凪"]}))
 
     moment = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 
     assert moment.recorded == 1
-    for who in ("ayana", "chinagi"):
-        heard = await read_perceived_by(lane=LANE, persona_id=who)
-        assert [p.content for p in heard.items] == ["抹茶煮多了，谁要。"]
+    assert sorted(s.recipient for s in post.sent) == ["千凪", "绫奈"]
+    assert all("「抹茶煮多了，谁要。」" in s.body for s in post.sent)
 
 
 @pytest.mark.integration
@@ -407,7 +409,7 @@ async def test_a_name_nobody_answers_to_still_lands_in_the_room(
 @pytest.mark.integration
 async def test_saying_nothing_is_not_saying(moment_db, stub_moment):
     await _stand("akao", "家/客厅", "待着", _at(13))
-    runner = stub_moment(("say", {"what": "   ", "to": ["ayana"]}))
+    runner = stub_moment(("say", {"what": "   ", "to": ["绫奈"]}))
 
     await run_moment(lane=LANE, persona_id="akao", now=_at(14))
 

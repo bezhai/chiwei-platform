@@ -58,7 +58,8 @@
   * :func:`move_to`      人挪了地方，手上的事没变
   * :func:`keep_in_mind` 我心里挂着没了结的事，全部（哪个 moment 都能调；每条可以带一个
     "该在几点"，到点了她自己看得见，见 :mod:`app.living.loose_ends`）
-  * :func:`say` / :func:`act`  跟姐妹说话 / 做一个她们看得见的动作
+  * :func:`say` / :func:`act`  当面说一句话 / 做一个别人看得见的动作。这一轮结束时，她在
+    世界里做的事一条发给 world，只对姐妹说的话直接给那位姐妹（:mod:`app.living.outgoing`）
   * :func:`look_around`  够得着的地方现在怎么样
   * :func:`stop_for_now` 这一轮我到此为止（零参数，调完这一轮就结束）
   * ``look_at_phone``    拿起手机打开某条会话，看说了什么（:mod:`app.living.phone`）
@@ -131,6 +132,7 @@ from app.living.loose_ends import (
     rewrite_loose_ends,
 )
 from app.living.mouth import MOUTH_TOOLS
+from app.living.outgoing import send_what_she_did
 
 # 谁住在这个家、她是谁那两个 prompt 变量：住在叶子模块 ``persona`` 而不是这里，
 # 因为日记那一页（``app.living.day_page``）也要用，而它在 ``snapshot`` 之下、本模块
@@ -553,26 +555,27 @@ async def say(
         list[str],
         # 这里**不举例**：举出来的名字就是词表，她会逐字抄走（同 switch_to / move_to
         # 的 place 举例事故）。而且一旦举的是"这个家里的三个人"，就等于把"世界上有
-        # 谁"重新写回了工具描述里 —— 那正是这只手刚拆掉的那道门。
+        # 谁"重新写回了工具描述里 —— 那正是这只手刚拆掉的那道门。姐妹的名字在人设表里
+        # （:mod:`app.living.participants`），代码里一个都不写。
         Field(
             description=(
-                "说给谁（可以同时对好几个人）；自言自语就传空数组。"
-                "名字要跟这个人在世界里被记成的那个对上 —— 对不上，这句话就只剩"
-                "同一个地方的人听得见"
+                "说给谁，写这个人在世界里的名字，可以同时对好几个人；"
+                "不冲着谁说就传空数组"
             )
         ),
     ],
 ) -> str:
     """当面说一句话。
 
-    写你**真的说出口的那句话**。「我和绫奈说了几句」不是说话，那是记账——记账在
+    写你**真的说出口的那句话**。「我和她说了几句」不是说话，那是记账——记账在
     这个家里等于什么都没发生过，别人读到的就是一句空话。
 
-    to 里的人一定听得到原话，跟她在哪没关系；同一个地方的其他人也听得见。
+    说给你姐妹的，她一定听到原话，跟她在哪没关系。说给别人的、不冲着谁说的，谁听得见
+    要看当时的情形。
 
     Args:
         what: 你说出口的那句话，原话。
-        to: 说给谁，可以多个。
+        to: 说给谁，写名字，可以多个。
 
     Returns:
         一句确认文本。
@@ -627,9 +630,9 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     往前走一步，代码就离世界远一步。世界里有谁由 world 说了算。
 
     换成"去 world 那边查一遍有没有这个人"同样不对：life 不读 world 的存储，而且 world
-    可能还没来得及记下这个人。说给一个没人接的名字，那句话就落在世界里没人接（定向
-    送达那条路匹配不上，只剩位置旁听，见 :func:`app.living.happening.perceive`）——
-    这本身是真实的，不是错误。
+    可能还没来得及记下这个人。名字原样记进这件事里；这一轮结束时，姐妹的名字直接把原话
+    送到她那里，其余的名字连同这句话交给 world（:mod:`app.living.outgoing`）。说给一个
+    没人接的名字，那句话就落在世界里没人接——这本身是真实的，不是错误。
     """
     lane, now, persona_id, moment_id = moment_scope()
     said = content.strip()
@@ -1150,6 +1153,10 @@ async def run_moment_held(
         ):
             return None
 
+    # 她之前做了、还没确认发出去的，这一轮开始前先发：上一轮失败、超时、赶上部署时，那一轮
+    # 走不到下面的收尾（:mod:`app.living.outgoing`）。
+    await send_what_she_did(lane=lane, persona_id=persona_id)
+
     # 游标跨两种 moment 共用一条轴：取"最近一次"，不筛 nudged。
     last = await latest_moment(lane=lane, persona_id=persona_id)
     after_seq = last.next_seq if last is not None else 0
@@ -1329,6 +1336,10 @@ async def run_moment_held(
         lane=lane,
         persona_id=persona_id,
     )
+    # 这一轮她在世界里做的事一条发给 world，只对姐妹说的话直接发给那位姐妹。放在这一轮落地
+    # 之后：她做了的事不随这一轮落不落地而改变，读的是她存下的经历；这一步没做完的，下一轮
+    # 开始前那一次接着做。
+    await send_what_she_did(lane=lane, persona_id=persona_id)
     return moment
 
 

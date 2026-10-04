@@ -46,6 +46,8 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * :mod:`app.living.participants` life 认识的参与者：三姐妹在世界里的名字（取自人设表，
     启动时检查）和 world 的名字。名字就是地址
   * :mod:`app.living.received`    她收到的消息：三姐妹的收件箱，收件只存储
+  * :mod:`app.living.outgoing`    她做的事发出去：一段经历一条汇总给 world，只对姐妹说的话
+    直接给那位姐妹；从她存下的经历里取，没确认发出去的原样再发
 
 三条贯穿全包的判断，散在各模块里容易只看到一半：
 
