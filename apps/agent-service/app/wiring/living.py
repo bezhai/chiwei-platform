@@ -1,4 +1,4 @@
-"""Wiring: living 引擎的 Data 注册、五条时间源与那条出站边。
+"""Wiring: living 引擎的 Data 注册、五条时间源、那条出站边和三姐妹的收件箱。
 
   interval 60s  -> LifeMomentTick    -> life_moment_tick    （三个 life 共用的这一轮，门在节点里）
   interval 60s  -> PhoneNudgeTick    -> phone_nudge_tick    （有人叫她就提前叫醒她一次）
@@ -7,6 +7,8 @@
   interval 300s -> PersonaReviewTick -> persona_review_tick （周一早上重写一版「我是谁」）
 
   ChatResponseSegment -> Sink.mq("chat_response")        （她开口，出 graph）
+
+  收件箱 赤尾 / 千凪 / 绫奈（名字取自人设表）-> received.receive （只存一行）
 
 五条钟都直接挂在单字段 ``ts`` 的 tick 上，没有中间翻译节点：泳道由节点自己从进程
 环境读（:func:`app.living.records.living_lane`），tick 本身不需要携带任何内容。挂时间源的
@@ -20,15 +22,20 @@ Pod**，所以这五个 Data 的形状由 ``tests/wiring/test_time_source_payloa
 import 时就固定了——想让间隔成为可调的业务参数（Dynamic Config），只能让钟拍得比最密的
 间隔更密、然后在节点里判"够不够久"。
 
-**这里没有、也不会有任何入站边。** 五条钟全是 interval，一条 ``Source.mq`` /
-``Source.http`` 都没有：chat 是嘴，没有耳朵，而这件事靠"根本没有接消息的地方"来
-保证，不靠哪个分支里的 if。她收消息走的是每一轮直接查 ``common_message``
+**这里没有、也不会有任何 dataflow 入站边。** 五条钟全是 interval，一条 ``Source.mq`` /
+``Source.http`` 都没有。手机上的消息她每一轮直接查 ``common_message``
 （``app.living.phone``），不碰队列。
 
-守这条的是 ``tests/living/test_no_inbound.py``，它判的是**这条来源通向谁**：时间源
-以外的每一种来源都算外部，消费者落在 ``app.living`` 里就红。所以"把一条已经放行的
+**她唯一的入口是三姐妹的收件箱**（通信机制，:mod:`app.living.received`）：world 告诉她
+察觉到了什么、姐妹直接对她说的话从这里来。收件处理只存一行，不调模型、不跑她的一轮；她在
+自己的钟上醒来时才读到。名字在人设表里，import 的时候库还没准备好，所以这里只声明"开始
+接收时再开"（:func:`app.messaging.receiving.inboxes_at_start`）。
+
+守这两条的是 ``tests/living/test_no_inbound.py``。dataflow 那一半判的是**这条来源通向谁**：
+时间源以外的每一种来源都算外部，消费者落在 ``app.living`` 里就红。所以"把一条已经放行的
 运维 HTTP 接到 living 的节点上"同样拦得住——那和新挂一个源一样是长耳朵。运维那几条
-要连消费者一起逐字命中白名单才放行。
+要连消费者一起逐字命中白名单才放行。收件箱那一半判的是：life 开的收件箱只有这一组，处理
+函数只存储、手边没有任何能跑模型的代码。
 
 出站方向的回执也走这条口径：``LandingTick`` 那条钟是**自己去查**公共层对账，不是
 让渠道回调进来（那就是第一只耳朵）。
@@ -44,7 +51,7 @@ import 链拉到才会进 ``DATA_REGISTRY``，否则 ``Runtime.migrate_schema()`
 ``LooseEnd`` 由 ``moment`` -> ``loose_ends`` 带进来，``PhoneRead`` 由 ``moment`` ->
 ``phone`` 带进来，``PersonaVersion``（「她是谁」那份正文的版本链）由 ``moment`` ->
 ``persona`` 带进来，``FileRead`` / ``FilePickedUp`` 由下面那行 ``living.reading`` 直接
-带进来。``PersonaVersion`` 值得多说一句：这条链搬进 ``app.living.persona`` 之前住在
+带进来，``ReceivedMessage`` 由开收件箱那行的 ``living.received`` 带进来。``PersonaVersion`` 值得多说一句：这条链搬进 ``app.living.persona`` 之前住在
 ``app/life/persona_chain.py``，进 registry 靠的是 ``living.reading`` ->
 ``agent.reading`` -> ``memory._persona`` -> ``life.persona_chain`` 这条**跟 living 引擎
 毫无关系的意外链**——谁顺手清掉读书那条路里的一行 import，这张表就静默不建，而 prod
@@ -82,6 +89,8 @@ from app.living.persona_review import (
     persona_review_tick,
 )
 from app.living.reading import FilePickedUp, read_a_round
+from app.living.received import open_inboxes
+from app.messaging.receiving import inboxes_at_start
 from app.runtime import Sink, Source, wire
 
 wire(LifeMomentTick).from_(Source.interval(LIFE_MOMENT_TICK_SECONDS)).to(
@@ -134,3 +143,7 @@ wire(FilePickedUp).durable().to(read_a_round)
 #
 # ``ChatResponseSegment`` 是 transient 且出 graph，不需要 ``.durable()``。
 wire(ChatResponseSegment).to(Sink.mq("chat_response"))
+
+# 三姐妹的收件箱：world 告诉她察觉到了什么、姐妹直接对她说的话从这里来，收件只存储
+# （``app.living.received``）。名字取自人设表，开始接收时才读、才开；名字有问题进程起不来。
+inboxes_at_start(open_inboxes)

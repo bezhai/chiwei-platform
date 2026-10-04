@@ -14,7 +14,7 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * :mod:`app.living.happening`   谁在哪、对谁、通过什么渠道、做了什么说了什么
   * :mod:`app.living.whereabouts` 她此刻在做什么、在哪
 
-她一直在推进（T2）+ 她对外说话（T4）——嘴在外面，耳朵没有：
+她一直在推进（T2）+ 她对外说话（T4）——嘴在外面，收到什么都不会直接让她跑一轮：
 
   * :mod:`app.living.scope`       这一轮里每个工具都要问的那四样（谁 / 哪个泳道 / 几点 / 哪一轮）
   * :mod:`app.living.snapshot`    她进入这一轮时读到的东西：状态快照，不是历史回放
@@ -40,6 +40,12 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * :mod:`app.living.takeback`    撤回自己说过的话，按她自己台账上的编号指
   * :mod:`app.living.landing`     渠道那边关于她这次开口的事实，事后按 id 取回来
   * :mod:`app.living.nudge`       有人叫她就提前叫醒她一次，但不代她回复
+
+她在通信机制里的那一面（第二期）——收件箱是她唯一的入口，收件只存储：
+
+  * :mod:`app.living.participants` life 认识的参与者：三姐妹在世界里的名字（取自人设表，
+    启动时检查）和 world 的名字。名字就是地址
+  * :mod:`app.living.received`    她收到的消息：三姐妹的收件箱，收件只存储
 
 三条贯穿全包的判断，散在各模块里容易只看到一半：
 

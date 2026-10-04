@@ -25,6 +25,7 @@ from app.living.day_page import LivingDayPage
 from app.living.persona import PersonaVersion
 from app.living.pictures import Picture
 from app.living.reading import FilePickedUp, FileRead
+from app.living.received import ReceivedMessage
 from app.living.records import (
     KIND_SPEECH,
     MEDIUM_IN_PERSON,
@@ -104,6 +105,14 @@ _VALID: dict[type, dict] = {
         "source": "review",
         "written_at": "2026-07-25T10:00:00+08:00",
         "version": 1,
+    },
+    ReceivedMessage: {
+        "lane": "coe-x",
+        "persona_id": "ayana",
+        "message_id": "0123456789abcdef0123456789abcdef",
+        "sender": "world",
+        "body": "窗外下起了雨。",
+        "message_time": _AWARE,
     },
 }
 
@@ -192,6 +201,17 @@ _PINNED: dict[type, dict[str, str]] = {
         "written_at": "TEXT",
         "version": "BIGINT",
     },
+    # 她收到的一条消息，原样：通信机制外层只有 id、发送方、时间，其余都在正文里。**没有
+    # 到达时刻列**：那是框架的 ``created_at``。**没有"读过没有"的列**：看过哪几条是另一件
+    # 事、另一张表，跟这一轮一起落地。
+    ReceivedMessage: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "message_id": "TEXT",
+        "sender": "TEXT",
+        "body": "TEXT",
+        "message_time": "TIMESTAMPTZ",
+    },
 }
 
 
@@ -217,6 +237,7 @@ def test_living_data_reaches_the_registry_via_app_wiring():
         "Picture",
         "LivingDayPage",
         "PersonaVersion",
+        "ReceivedMessage",
     ):
         assert f"'{name}'" in registered, (
             f"{name} 没进 DATA_REGISTRY —— migrate_schema 不会建它的表。"
@@ -289,6 +310,7 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
         ("Happening", "occurred_at"),
         ("LivingDayPage", "written_at"),
         ("Picture", "made_at"),
+        ("ReceivedMessage", "message_time"),
         ("Whereabouts", "noted_at"),
     ]
 

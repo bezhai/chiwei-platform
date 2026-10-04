@@ -1,17 +1,24 @@
-"""chat 是嘴，没有耳朵 —— 这是结构，不是纪律。
+"""收到什么都不会直接让她跑一轮 —— 这是结构，不是纪律。
 
-「被 @ 不能触发 chat」这件事，靠的**不是**哪个分支里写了 if：靠的是新引擎这一侧
-**根本没有接消息的地方**。纪律会被下一个人绕过去，结构不会。
+「被 @ 不能触发 chat」「收到一条消息不能当场让她开口」这两件事，靠的**不是**哪个分支里
+写了 if：靠的是**能把东西送进来的地方只有一个，而它只存储**。她只在自己的钟上醒来
+（常规的那一拍，或者有新东西时提前的那一拍，见 :mod:`app.living.nudge`），醒来之后自己去
+读。纪律会被下一个人绕过去，结构不会。
 
-所以这里验的全是"存在性"而不是"行为"：
+第二期之前 life 一个收件箱都没有。现在三姐妹各有一个收件箱（通信机制，
+:mod:`app.living.received`），这是她唯一的入口：world 告诉她察觉到了什么、姐妹直接对她说
+的话都从这里来。所以这里验的是：
 
-  * 实验泳道上没有任何外部来源（消息队列 / HTTP / 将来别的 kind）能到达
+  * 实验泳道上没有任何 dataflow 外部来源（消息队列 / HTTP / 将来别的 kind）能到达
     ``app.living`` 里的消费者；
+  * life 开设的收件箱只有三姐妹那一组，处理函数是 :func:`app.living.received.receive`，
+    它只存一行、不碰模型：跑一遍看得到一行、看不到任何一次模型调用；它所在的模块连同
+    它 import 的一切，一行能跑模型的代码都没有；
   * ``app.living`` 的源码里一次都没有出现旧 chat 入站那几个名字；
   * living 自己挂的钟全是 interval，而且钟上那条 Data 除了 ``ts`` 什么都装不下——
     装不下内容的钟，天然没法当入站口用。
 
-第三条是最要紧的一条：只要哪天有人给 tick 加一个 ``content`` 字段，"钟"就变成了
+最后一条是最要紧的一条：只要哪天有人给 tick 加一个 ``content`` 字段，"钟"就变成了
 "信箱"，而这一步在 code review 里看起来毫无杀伤力。
 
 第一条判的是**来源通向谁**，不是**来源长什么样**。判来源长相的版本（"data_type 叫
@@ -169,10 +176,13 @@ _OPS_ONLY_EXTERNAL_SOURCES = frozenset({
     ),
     # 通信机制的人工参与者入口（``app.messaging.operator``）。
     #
-    # **它们的消费者不在 app.living 里，也到不了 living。** 这六条把消息投进具名收件箱、
-    # 读通信记录、看或重放本泳道的死信，而 living 这一侧一个收件箱都没有开设——第一期里 life 不接入
-    # 通信机制。发给三姐妹名字的消息按"没开设"处理：不投递、只记一行。等第二期 life
-    # 开设收件箱时，这份名单要跟着重新判断：那时候外面的请求就能送到她那里了。
+    # **它们的消费者不在 app.living 里。** 这六条把消息投进具名收件箱、读通信记录、看或
+    # 重放本泳道的死信。第二期起三姐妹有了收件箱，所以 ``send`` / ``send-at`` / 死信重放
+    # 送出的消息能到她的收件箱——跟 world 发来的一样，只经过
+    # :func:`app.living.received.receive` 存一行，等她自己醒来再读，一次模型都不当场跑
+    # （下面 ``test_her_inbox_only_stores`` 那几条守着）。这六条要内网凭据、经 dashboard
+    # 落审计，用来以 world 或任何身份给她发一条验证用的消息。``ask`` 到不了她：她的收件箱
+    # 不接受提问。
     _ops_http(
         "app.messaging.operator.OperatorSendRequest",
         "POST", "/admin/messaging/send",
@@ -296,8 +306,9 @@ def test_no_external_source_reaches_the_living_engine():
     assert ears == [], (
         "外面的东西能到达 living 的消费者了 —— 新引擎长出了耳朵：\n  "
         + "\n  ".join(ears)
-        + "\nliving 只能自己按钟醒；她收消息走的是每一轮直接查 common_message，"
-        "不接任何人推进来的东西。"
+        + "\nliving 只能自己按钟醒；手机上的消息她每一轮直接查 common_message，"
+        "别人发给她的消息只经她的收件箱存下（app.living.received），"
+        "不接任何人推进来、直接调进 living 的东西。"
     )
 
     unlisted = [s for s in external if _fingerprint(s) not in _OPS_ONLY_EXTERNAL_SOURCES]
@@ -315,6 +326,115 @@ def test_no_external_source_reaches_the_living_engine():
         assert all(not s.data_type.endswith("." + name) for s in registered), (
             f"{name} 还挂着源。拿到：{registered}"
         )
+
+
+# 她的收件箱：开设它的那一个函数、处理每一条消息的那一个函数。
+_OPEN_HER_INBOXES = "app.living.received.open_inboxes"
+_HER_INBOX_HANDLER = "app.living.received"
+
+# 能跑模型的代码住在这几处。收件处理所在的模块连同它 import 的一切，一个都不许碰到。
+_MODEL_RUNNING = ("app.agent", "app.capabilities", "app.living.moment")
+
+
+def test_the_only_inboxes_living_opens_are_the_residents():
+    """life 开设的收件箱只有三姐妹那一组，由 :func:`app.living.received.open_inboxes` 开。
+
+    名字在人设表里，接线时只声明"开始接收时再开"；所以 import 完之后，接线里直接开设的
+    收件箱一个都不许落在 ``app.living`` 里，"启动时再开"的声明只许是那一个。多出任何一个，
+    都是又一条能把东西送进 life 的路，要重新判断。
+    """
+    out = _in_a_fresh_process(
+        "from app.messaging.receiving import INBOX_REGISTRY, INBOXES_AT_START;"
+        "print(repr(("
+        "sorted((n, s.on_message.__module__) for n, s in INBOX_REGISTRY.items()),"
+        "sorted(f.__module__ + '.' + f.__qualname__ for f in INBOXES_AT_START))))",
+        lane=LANE,
+    )
+    static, at_start = ast.literal_eval(out.strip())
+
+    assert [n for n, module in static if _lives_in_living(module)] == [], static
+    assert at_start == [_OPEN_HER_INBOXES]
+
+
+def test_the_inbox_handler_cannot_reach_a_model():
+    """收件处理所在的模块，连同它 import 的一切，一行能跑模型的代码都没有。
+
+    "只存储"在这里是结构：处理函数手边根本没有能叫醒她、能调模型的东西。哪天有人在收件
+    处理里 import 一轮 moment 或者一个 agent，这条就红。
+    """
+    # 不走 ``_in_a_fresh_process``：它先 import 整个 ``app.wiring``，那时模型代码早就在了。
+    env = dict(os.environ)
+    env["LANE"] = LANE
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; import {_HER_INBOX_HANDLER};"
+            "print(repr(sorted(m for m in sys.modules if m.startswith('app.'))))",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    loaded = ast.literal_eval(proc.stdout.strip().splitlines()[-1])
+    assert _HER_INBOX_HANDLER in loaded, "用例前提没成立：处理函数的模块根本没被 import"
+    reached = [
+        m
+        for m in loaded
+        if any(m == root or m.startswith(root + ".") for root in _MODEL_RUNNING)
+    ]
+    assert reached == [], (
+        f"收件处理（{_HER_INBOX_HANDLER}）能碰到跑模型的代码了：{reached}。"
+        "收件只存储，她自己醒来时再读。"
+    )
+
+
+@pytest.mark.integration
+async def test_her_inbox_only_stores(living_db, monkeypatch):
+    """跑一遍她的收件处理：落一行，一次模型都不调，也不推进她的任何一轮。"""
+    from types import SimpleNamespace
+
+    from sqlalchemy import text
+
+    from app.capabilities.agent import AgentRunner
+    from app.data.session import get_session
+    from app.living import moment as moment_mod
+    from app.living import participants as participants_mod
+    from app.living.received import open_inboxes
+    from app.messaging.message import Kind, new_message
+    from app.messaging.receiving import INBOX_REGISTRY
+
+    monkeypatch.setenv("LANE", LANE)
+    names = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
+
+    async def find_persona(persona_id: str):
+        return SimpleNamespace(persona_id=persona_id, display_name=names[persona_id])
+
+    monkeypatch.setattr(participants_mod, "find_persona", find_persona)
+    monkeypatch.setattr(participants_mod, "_known", None)
+
+    def no_model(*args, **kwargs):
+        raise AssertionError("收件处理调到模型了")
+
+    monkeypatch.setattr(AgentRunner, "run", no_model)
+    monkeypatch.setattr(moment_mod, "build_moment_runner", no_model)
+    monkeypatch.setattr(moment_mod, "run_moment", no_model)
+
+    await open_inboxes()
+    for name in names.values():
+        await INBOX_REGISTRY[name].on_message(
+            new_message(sender="world", recipient=name, body="窗外下起了雨。", kind=Kind.MESSAGE)
+        )
+
+    async with get_session() as s:
+        stored = (
+            await s.execute(
+                text("SELECT persona_id FROM data_received_message ORDER BY persona_id")
+            )
+        ).scalars().all()
+    assert stored == sorted(names)
 
 
 def test_no_living_module_ever_mentions_the_old_inbound_chain():

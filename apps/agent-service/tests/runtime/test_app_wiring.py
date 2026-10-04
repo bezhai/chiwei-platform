@@ -26,12 +26,13 @@ _PROBE = (
     "load_dataflow_graph({app!r});"
     "import app.workers.runtime_entry, app.main, app.messaging.lifecycle;"
     "from app.runtime.wire import WIRING_REGISTRY;"
-    "from app.messaging.receiving import INBOX_REGISTRY;"
+    "from app.messaging.receiving import INBOX_REGISTRY, INBOXES_AT_START;"
     "print(json.dumps({{"
     "'living': sorted(m for m in sys.modules if m == 'app.living' or m.startswith('app.living.')),"
     "'world': sorted(m for m in sys.modules if m == 'app.world' or m.startswith('app.world.')),"
     "'wired_types': sorted(w.data_type.__module__ + '.' + w.data_type.__name__ for w in WIRING_REGISTRY),"
-    "'inboxes': sorted(INBOX_REGISTRY)}}))"
+    "'inboxes': sorted(INBOX_REGISTRY),"
+    "'inboxes_at_start': sorted(f.__module__ + '.' + f.__qualname__ for f in INBOXES_AT_START)}}))"
 )
 
 
@@ -57,6 +58,7 @@ def test_the_world_app_loads_none_of_the_life_code():
         "world 的进程里出现了 life 的代码：" + ", ".join(loaded["living"])
     )
     assert loaded["inboxes"] == ["world"]
+    assert loaded["inboxes_at_start"] == [], "world 的进程不开三姐妹的收件箱"
     assert all(t.startswith("app.world.") for t in loaded["wired_types"])
 
 
@@ -73,7 +75,10 @@ def test_the_agent_service_app_loads_its_own_wiring():
 
     assert "app.living.moment" in loaded["living"]
     assert "app.living.moment.LifeMomentTick" in loaded["wired_types"]
+    # 三姐妹的收件箱名字在人设表里，接线时只声明"开始接收时再开"，所以 import 完只看得到
+    # ``operator``；开出来的是哪几个名字由 ``tests/living/test_received.py`` 验。
     assert loaded["inboxes"] == ["operator"]
+    assert loaded["inboxes_at_start"] == ["app.living.received.open_inboxes"]
 
 
 def test_an_app_nobody_declared_cannot_load():

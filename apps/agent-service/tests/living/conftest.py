@@ -113,6 +113,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     from app.living.persona import PersonaVersion
     from app.living.phone import PhoneRead
     from app.living.pictures import Picture
+    from app.living.received import ReceivedMessage
     from app.living.records import Happening, Whereabouts
     from tests.runtime.conftest import migrate
 
@@ -124,7 +125,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     # （``app.agent.continuity``），少了它 ``run_moment`` 第一步就炸。
     for cls in (
         Happening, Whereabouts, PhoneRead, SpokenOutbound, Picture,
-        LivingDayPage, PersonaVersion, SessionTranscript,
+        LivingDayPage, PersonaVersion, SessionTranscript, ReceivedMessage,
     ):
         await migrate(cls, test_db)
     tables = [
