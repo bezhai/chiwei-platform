@@ -1,7 +1,7 @@
 """Wiring: living 引擎的 Data 注册、五条时间源、那条出站边和三姐妹的收件箱。
 
   interval 60s  -> LifeMomentTick    -> life_moment_tick    （三个 life 共用的这一轮，门在节点里）
-  interval 60s  -> PhoneNudgeTick    -> phone_nudge_tick    （有人叫她就提前叫醒她一次）
+  interval 60s  -> PhoneNudgeTick    -> phone_nudge_tick    （有人叫她、或有她没看过的收件，就提前叫醒她一次）
   interval 300s -> LandingTick       -> landing_tick        （她那次开口落地成哪一行）
   interval 300s -> DayPageTick       -> day_page_tick       （凌晨把昨天写成一页，窗口在节点里）
   interval 300s -> PersonaReviewTick -> persona_review_tick （周一早上重写一版「我是谁」）

@@ -39,7 +39,7 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * :mod:`app.living.mouth`       嘴：把她写下的那句话发出去（**没有入口**）
   * :mod:`app.living.takeback`    撤回自己说过的话，按她自己台账上的编号指
   * :mod:`app.living.landing`     渠道那边关于她这次开口的事实，事后按 id 取回来
-  * :mod:`app.living.nudge`       有人叫她就提前叫醒她一次，但不代她回复
+  * :mod:`app.living.nudge`       有人叫她、或者有她没看过的收件，就提前叫醒她一次，但不代她回复
 
 她在通信机制里的那一面（第二期）——收件箱是她唯一的入口，收件只存储：
 

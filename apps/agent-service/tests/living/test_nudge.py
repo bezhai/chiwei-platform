@@ -157,9 +157,13 @@ class FakeLife:
         self.calls: list[tuple[str, dict]] = []
         self.said = "继续"
         self.prompts: list[str] = []
+        # 模型那一步跑着的时候发生的事（比如又到了一条消息）。
+        self.meanwhile = None
 
     async def run(self, messages, **kwargs):
         self.prompts.append(messages[-1].content)
+        if self.meanwhile is not None:
+            await self.meanwhile()
         with agent_context(kwargs["context"]):
             from app.living.moment import MOMENT_TOOLS
 
@@ -464,3 +468,146 @@ async def test_both_people_waiting_on_her_are_in_the_envelope(nudge_db, stub_lif
     assert str(_DM) in seen and str(_GROUP) in seen, (
         f"只有最新那条会话进了信封，先来的那个人她根本不知道在等她。拿到：\n{seen}"
     )
+
+
+# --------------------------------------------------------------------------
+# 七 · 传到她这里的消息也提前叫醒她，每条只叫一次
+#
+# world 告诉她察觉到了什么、姐妹直接对她说的话，存进她的收件箱（:mod:`app.living.received`）。
+# 有她没看过的就提前叫醒她，跟手机上有人叫她同一套：那一轮的身份就是那条消息，跑过就是
+# 跑过了。同一条重投一遍（world 补发没发完的告知）不是新消息，不再叫醒她。
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def named(monkeypatch):
+    """三姐妹的名字已经读好，``receive`` 才认得收件人。"""
+    from app.living import participants as participants_mod
+
+    names = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
+
+    async def find_persona(persona_id: str):
+        return SimpleNamespace(persona_id=persona_id, display_name=names[persona_id])
+
+    monkeypatch.setenv("LANE", LANE)
+    monkeypatch.setattr(participants_mod, "find_persona", find_persona)
+    monkeypatch.setattr(participants_mod, "_known", None)
+    await participants_mod.load_residents()
+
+
+def _to_her(body: str, *, at: dt.datetime, sender: str = "world"):
+    from app.messaging.message import Kind, new_message
+
+    return new_message(sender=sender, recipient="赤尾", body=body, kind=Kind.MESSAGE, time=at)
+
+
+@pytest.mark.integration
+async def test_a_received_message_brings_her_to_that_moment_once(
+    nudge_db, stub_life, named
+):
+    from app.living.received import receive
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    rain = _to_her("窗外下起了雨。", at=_at(21, 31))
+    await receive(rain)
+
+    first = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+    second = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33))
+
+    assert first is not None and first.nudged is True
+    assert first.moment_id == f"nudge:inbox:{rain.message_id}", (
+        "那一轮的身份不是叫醒她的那条消息"
+    )
+    assert "窗外下起了雨。" in stub_life.prompts[-1]
+    assert second is None
+    assert len(await _all_moments()) == 2
+
+
+@pytest.mark.integration
+async def test_a_woken_round_that_fails_is_the_same_moment_when_it_runs_again(
+    nudge_db, stub_life, named
+):
+    """叫醒她的那一轮失败了：那条还没看过，下一拍再叫醒她，而且还是同一个 moment。
+
+    身份由那条消息定、不由钟点定，所以重跑时她这一轮里所有派生 id 原样对上，失败之前
+    已经做了的事重放一遍写不出第二行（见 :func:`app.living.moment.run_moment`）。
+    """
+    from app.living.received import receive
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    rain = _to_her("窗外下起了雨。", at=_at(21, 31))
+    await receive(rain)
+
+    async def blow_up():
+        raise RuntimeError("这一轮的模型调用失败了")
+
+    stub_life.meanwhile = blow_up
+    with pytest.raises(RuntimeError):
+        await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+    stub_life.meanwhile = None
+    again = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33))
+
+    assert again is not None and again.moment_id == f"nudge:inbox:{rain.message_id}"
+    assert "窗外下起了雨。" in stub_life.prompts[-1], "失败那一轮看到的，重跑时没再给她看"
+
+
+@pytest.mark.integration
+async def test_the_same_message_delivered_again_does_not_wake_her_again(
+    nudge_db, stub_life, named
+):
+    from app.living.received import receive
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    rain = _to_her("窗外下起了雨。", at=_at(21, 31))
+    await receive(rain)
+    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32)) is not None
+
+    await receive(rain)  # world 带着原来的 id 重发
+
+    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33)) is None
+    assert len(await _all_moments()) == 2
+
+
+@pytest.mark.integration
+async def test_a_message_that_arrived_during_her_round_wakes_her_after_it(
+    nudge_db, stub_life, named
+):
+    """一轮跑着的时候到的那条没摆进那一轮，它还没叫醒过她：下一拍叫醒她一次。"""
+    from app.living.received import receive
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    rain = _to_her("窗外下起了雨。", at=_at(21, 31))
+    doorbell = _to_her("楼下有人按门铃。", at=_at(21, 32))
+    await receive(rain)
+
+    async def it_arrives():
+        await receive(doorbell)
+
+    stub_life.meanwhile = it_arrives
+    woke_for_rain = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+    stub_life.meanwhile = None
+    woke_for_doorbell = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33))
+
+    assert woke_for_rain is not None and rain.message_id in woke_for_rain.moment_id
+    assert woke_for_doorbell is not None
+    assert doorbell.message_id in woke_for_doorbell.moment_id
+    assert "楼下有人按门铃。" in stub_life.prompts[-1]
+    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34)) is None
+
+
+@pytest.mark.integration
+async def test_a_phone_call_she_ignored_does_not_keep_a_received_message_from_waking_her(
+    nudge_db, stub_life, named
+):
+    """手机上那条私聊已经叫醒过她、她没看手机所以一直未读；之后收到的消息照样叫醒她。"""
+    from app.living.received import receive
+
+    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await _incoming(_DM, body="在吗", at=_at(21, 31))
+    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32)) is not None
+
+    await receive(_to_her("千凪在厨房喊你吃饭。", at=_at(21, 33)))
+    moment = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+
+    assert moment is not None, "一条躺着的未读私聊挡住了收件箱里的新消息"
+    assert "千凪在厨房喊你吃饭。" in stub_life.prompts[-1]
