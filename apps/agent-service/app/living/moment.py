@@ -157,6 +157,7 @@ from app.living.records import (
     MEDIUM_IN_PERSON,
     Whereabouts,
     _require_aware,
+    esc,
     legacy_null_is,
     living_lane,
 )
@@ -693,9 +694,12 @@ async def stop_for_now() -> str:
 # 如实告诉她没人回答，她过一会儿可以再看一眼。这个时刻随问题带过去（通信机制的截止时刻），过了
 # 它 world 那边不再答。
 #
-# 等的这段时间她这一轮一直占着她的 moment 占用（上限 :data:`app.living.serial.HELD_SECONDS`，
-# 900 秒）。她一轮最多走 12 步（``_MOMENT_CFG`` 的 recursion_limit），就算每一步都在环顾四周、
-# 每一次都等满（加上下面问出去那一步的上限，一次 55 秒），也是 660 秒，碰不到那个上限。
+# 这个数只管一次环顾四周，管不住她这一轮。一次最多 55 秒（加上下面问出去那一步的上限），可一轮里
+# 环顾几次不由它定：recursion_limit（``_MOMENT_CFG``）数的是模型调用，一次模型调用可以连着要几只手，
+# 这些手一只接一只跑，模型调用本身也要花时间，所以一轮能花多久没有一个从这里乘得出来的上限。
+# 兜住一轮的是她的 moment 占用（:data:`app.living.serial.HELD_SECONDS`，900 秒）：等回答时撞上
+# 它，这一轮照常被掐断、占用放开、下一拍重来。环顾四周不绕过它，掐断传进来的取消原样往上走，
+# 不当成"没人回答"。
 # 不做成配置：这是"不让她干等"的上限，不是她生活里的一个参数。
 LOOK_AROUND_ANSWER_SECONDS = 45.0
 
@@ -729,13 +733,12 @@ async def look_around() -> str:
         此刻这里的样子；没人回答时如实说没人回答。
     """
     lane, _now, persona_id, _moment_id = moment_scope()
-    me = await current_whereabouts(lane=lane, persona_id=persona_id)
-    if me is None:
-        # 没有"这里"可问：她自己没定下在哪，world 也不知道。
-        return "你还没定下自己在哪，所以什么都够不着。先用 switch_to 落个位置。"
-
-    asker = residents().by_persona[persona_id]
     try:
+        me = await current_whereabouts(lane=lane, persona_id=persona_id)
+        if me is None:
+            # 没有"这里"可问：她自己没定下在哪，world 也不知道。
+            return "你还没定下自己在哪，所以什么都够不着。先用 switch_to 落个位置。"
+        asker = residents().by_persona[persona_id]
         # 通信机制只给等回答那一段封了顶。问出去那一步（查 world 开没开收件箱、记几行记录、
         # 发给 broker 等确认）跟发一条消息是同一套动作，broker 不应答时会一直挂着，所以整个
         # 提问再按发一条消息的上限（:data:`app.living.outgoing.SEND_SECONDS`）多给一段。
@@ -747,7 +750,9 @@ async def look_around() -> str:
                 timeout_seconds=LOOK_AROUND_ANSWER_SECONDS,
             )
     except Exception:
-        # 提问不重试（通信机制的约定）。什么原因没问成，都是这一眼没看到。
+        # 提问不重试（通信机制的约定）。什么原因没问成，都是这一眼没看到：问之前查她在哪、查她
+        # 叫什么出的错也算。只接 Exception：她这一轮被取消（moment 占用到点掐断、进程收尾）不是
+        # 没问成，取消原样往上走，这一轮该停就停。
         logger.warning(
             "living look_around lane=%s persona=%s 问 world 没问成",
             lane,
@@ -763,9 +768,11 @@ async def look_around() -> str:
             answer.reason,
         )
         return NOBODY_ANSWERED
-    # 原样交给她，不加一个字，也不过 :func:`app.living.records.esc`：回答是 world 的应答 agent
-    # 写的，经过模型的字不转义（判据见 esc）。
-    return answer.text
+    # 不加一个字、不少一个字，过 :func:`app.living.records.esc`。回答是 world 写下的字，跟 world
+    # 发来的消息是同一类，按同一条规矩交给她（:func:`app.living.received.render_received`）：别的
+    # 参与者写下的字不归她管（esc 上"经过模型的不转义"说的是她自己的话和她自己留下的东西），它落进
+    # 她这一轮的上下文、跟消息行摆在同一段文本里，不转义就能自己写出一行 ``rel="owner"``。
+    return esc(answer.text)
 
 
 # 手上的事 + 手机 + 嘴 + 上网 + 读东西 + 图 + 手边那几份说明，合在一起才是"她这个 moment

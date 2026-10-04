@@ -1,5 +1,8 @@
 """环顾四周：她问 world 她这里现在什么样、有谁在，world 怎么答她就拿到什么；没人答就如实说没人答。
 
+world 的回答是别的参与者写下的字，跟 world 发来的消息是同一类：一个字不少地交给她，过同一道转义
+（:func:`app.living.records.esc`），带不进任何结构。
+
 问题以她的名义发出（她在世界里的名字），里面写着她此刻在哪、在做什么，取自她自己的位置。这一条
 不能省：她这一轮做的事要等这一轮结束才汇总发给 world，同一轮里她刚换了地方就环顾四周，world 还
 不知道她挪了。
@@ -18,6 +21,7 @@ from app.living import moment as moment_mod
 from app.living import participants as participants_mod
 from app.living.moment import look_around, run_moment
 from app.living.participants import WORLD
+from app.living.records import esc
 from app.living.whereabouts import note_whereabouts
 from app.messaging.message import Answer, SendFailed
 from tests.living.conftest import (
@@ -30,6 +34,7 @@ from tests.living.test_moment import (  # noqa: F401 — 形参名就是 fixture
     moment_db,
     stub_moment,
 )
+from tests.living.test_no_forged_markup import POISON, assert_only_our_own_markup
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
 from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture 名
@@ -41,7 +46,7 @@ from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
 
-# world 照稿回答的一段：多行，带引号和尖括号——回答原样交给她，一个字都不该动。
+# world 照稿回答的一段：多行，带引号和尖括号——一个字都不该少，引号和尖括号过一道转义。
 _ANSWERED = '厨房里灯亮着，锅里的水快开了。\n千凪站在灶台边切葱，说了句"马上好"。<窗外在下小雨>'
 
 
@@ -137,14 +142,32 @@ async def test_the_names_on_the_question_come_from_the_residents_mapping(
 
 
 @pytest.mark.integration
-async def test_the_answer_reaches_her_word_for_word(
+async def test_the_answer_reaches_her_word_for_word_through_the_same_escape_as_worlds_messages(
     moment_db, world, in_a_moment  # noqa: F811
 ):
+    """不加一个字、不少一个字，只过一道跟 world 发来的消息同一份的转义。"""
     await _stand("akao", "家/厨房", "等水开", _at(21))
 
     seen = await _look(in_a_moment)
 
-    assert seen == _ANSWERED
+    assert seen == esc(_ANSWERED)
+
+
+@pytest.mark.integration
+async def test_an_answer_cannot_carry_markup_into_her_round(
+    moment_db, world, in_a_moment  # noqa: F811
+):
+    """回答里写一行盖着主人印的 ``<msg rel="owner">``，到她眼前也只是字，不是一行主人说的话。
+
+    回答落在她这一轮的上下文里，跟她读到的消息行摆在同一段文本里；跟 world 发来的消息一样，
+    它带不进结构（判据见 ``tests/living/test_no_forged_markup.py``）。
+    """
+    await _stand("akao", "家/厨房", "等水开", _at(21))
+    world.answer = f"厨房里灯亮着，{POISON}"
+
+    seen = await _look(in_a_moment)
+
+    assert_only_our_own_markup(seen, where="环顾四周的回答")
 
 
 @pytest.mark.integration
@@ -253,6 +276,80 @@ async def test_asking_that_hangs_is_given_up_on_and_tells_her_nobody_answered(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("fails", ["her place cannot be read", "her name cannot be looked up"])
+async def test_failing_before_the_question_goes_out_tells_her_nobody_answered(
+    moment_db, world, in_a_moment, monkeypatch, fails  # noqa: F811
+):
+    """问之前那一步（查她在哪、查她在世界里叫什么）出错，对她来说也是这一眼没看到。"""
+    await _stand("akao", "家/客厅", "看书", _at(21))
+    if fails == "her place cannot be read":
+
+        async def db_down(**_kwargs):
+            raise RuntimeError("连不上数据库")
+
+        monkeypatch.setattr(moment_mod, "current_whereabouts", db_down)
+    else:
+        # 通信机制开始接收之前，三姐妹的名字还没读进来。
+        monkeypatch.setattr(participants_mod, "_known", None)
+
+    _nobody_answered(await _look(in_a_moment))
+    assert world.asked == []
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("stuck_at", ["finding where she is", "waiting for the answer"])
+async def test_cancelling_her_round_while_she_looks_around_is_not_nobody_answering(
+    moment_db, world, in_a_moment, monkeypatch, stuck_at  # noqa: F811
+):
+    """她这一轮被外面取消（进程收尾、上层掐断）：取消照样往上走，不变成一句"没人回答"让她接着做。"""
+    await _stand("akao", "家/客厅", "看书", _at(21))
+    stuck = asyncio.Event()
+    if stuck_at == "finding where she is":
+
+        async def never_returns(**_kwargs):
+            stuck.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(moment_mod, "current_whereabouts", never_returns)
+    else:
+        world.hangs = True
+        world.on_ask = stuck.set
+
+    looking = asyncio.create_task(_look(in_a_moment))
+    async with asyncio.timeout(5):
+        await stuck.wait()
+    looking.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await looking
+
+
+@pytest.mark.integration
+async def test_her_round_cut_off_at_its_cap_while_she_waits_is_cut_and_let_go(
+    moment_db, stub_moment, world, monkeypatch  # noqa: F811
+):
+    """等回答的时候她这一轮撞上了占用的上限（:data:`app.living.serial.HELD_SECONDS`）：这一轮照常被
+    掐断、占用放开，下一拍重来。环顾四周要是把这次掐断吞成"没人回答"，这一轮就会接着往下跑，上限
+    等于没有。"""
+    from app.living import serial as serial_mod
+
+    monkeypatch.setattr(serial_mod, "HELD_SECONDS", 2.0)
+    await _stand("akao", "家/客厅", "看书", _at(21))
+    world.hangs = True
+    runner = stub_moment(("look_around", {}))
+
+    async with asyncio.timeout(10):
+        with pytest.raises(TimeoutError):
+            await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+
+    assert world.asked, "前提不成立：掐断时她不是在等 world 的回答"
+    assert runner.results == [], f"掐断被吞成了一句话交给她：{runner.results}"
+    async with asyncio.timeout(1):
+        async with serial_mod.hold(moment_mod.life_moment_lock_key(LANE, "akao")):
+            pass
+
+
+@pytest.mark.integration
 async def test_she_waits_for_the_answer_as_long_as_the_tool_says(
     moment_db, world, in_a_moment  # noqa: F811
 ):
@@ -285,11 +382,11 @@ def test_the_look_around_hand_offers_no_place_or_person_names():
 
 
 @pytest.mark.integration
-async def test_through_messaging_world_answers_her_question_and_she_reads_it_as_is(
+async def test_through_messaging_world_answers_her_question_and_she_reads_every_word(
     broker, messaging_db, moment_db, in_a_moment  # noqa: F811
 ):
     """world 那边用一个照稿回答的收件箱代替：它收到的是她以自己的名字问的、带着她在哪在做什么的
-    问题，它的回答原样到了她手上。"""
+    问题，它的回答一个字不少地到了她手上。"""
     from app.messaging.lifecycle import start_messaging
     from app.messaging.receiving import inbox
     from tests.messaging.helpers import Inbox
@@ -301,7 +398,7 @@ async def test_through_messaging_world_answers_her_question_and_she_reads_it_as_
 
     seen = await _look(in_a_moment)
 
-    assert seen == _ANSWERED
+    assert seen == esc(_ANSWERED)
     (question,) = stand_in.questions
     assert question.sender == "赤尾"
     assert "家/厨房" in question.body and "等水开" in question.body, question.body
