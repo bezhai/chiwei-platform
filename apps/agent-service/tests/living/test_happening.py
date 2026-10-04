@@ -185,6 +185,26 @@ async def test_overheard_excludes_words_aimed_at_her(living_db):
 
 
 @pytest.mark.integration
+async def test_words_said_to_her_by_name_do_not_reach_her_again_through_the_room(
+    living_db,
+):
+    """按她在世界里的名字对她说的话，原话已经直接送进她的收件箱（:mod:`app.living.outgoing`），
+    这条路再给一遍就是同一句话进来两次——哪怕她就站在旁边。屋里没被说到的人照旧听得见：
+    按位置的感知整个删掉是第二期 T4 的事。"""
+    await _stand("ayana", "家/客厅")
+    await _stand("chinagi", "家/客厅")
+    await _say("h1", audience=("绫奈",))
+
+    to_her = await read_perceived_by(lane=LANE, persona_id="ayana", after_seq=0)
+    beside_her = await read_perceived_by(lane=LANE, persona_id="chinagi", after_seq=0)
+
+    assert to_her.items == []
+    assert [(i.happening_id, i.content) for i in beside_her.items] == [
+        ("h1", "绫奈，周末一起去祭典吧")
+    ]
+
+
+@pytest.mark.integration
 async def test_lane_isolation(living_db):
     await _stand("mio", "家/客厅")
     await record_happening(

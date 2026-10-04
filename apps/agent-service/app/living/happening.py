@@ -10,6 +10,10 @@
     裁——同一地点拿原话，同一栋的别处只知道有动静（``content`` 是 ``None``），够
     不着的连这行都看不到。
 
+**按她在世界里的名字当面对她说的话不走这里**（第二期）：原话直接送进她的收件箱
+（:mod:`app.living.outgoing`），这里再给一遍就是同一句话进来两次（:func:`perceive`）。
+``audience`` 里写的是 persona_id 的旧记录照旧按上面两条路读。
+
 **旁听判的是"事情发生时她在不在场"，不是"她现在在哪"。** 依据是写入时拍进事件行
 的 ``who_was_where`` 快照，读取侧一次位置查询都不做。所以同一条 happening 无论什么
 时候被读，裁出来的结果字字一样。按读取时的最新位置判是错的契约：事件可能在她整轮
@@ -44,6 +48,7 @@ from sqlalchemy import text
 
 from app.data.session import get_session
 from app.infra.cst_time import dated_clock
+from app.living.participants import residents
 from app.living.place import Reach, reach_between
 from app.living.records import (
     KIND_SPEECH,
@@ -174,6 +179,8 @@ def perceive(h: Happening, *, persona_id: str) -> Perceived | None:
     if h.actor == persona_id:
         # 自己说的话 / 自己做的事不回灌给自己（回声）。
         return None
+    if _said_to_her_by_name(h, persona_id=persona_id):
+        return None
 
     audience = tuple(h.audience)
     directed = persona_id in audience
@@ -208,6 +215,22 @@ def perceive(h: Happening, *, persona_id: str) -> Perceived | None:
         reach=reach,
         directed=directed,
         content=content,
+    )
+
+
+def _said_to_her_by_name(h: Happening, *, persona_id: str) -> bool:
+    """这是当面按她在世界里的名字对她说的话吗。
+
+    这样的话原话已经直接送进她的收件箱（:mod:`app.living.outgoing`），这条路再给一遍，同一句
+    话就从两条路各进来一次——哪怕她就站在旁边。谁算"被说到的姐妹"跟发的那一侧是同一个判断
+    （:meth:`app.living.participants.Residents.sisters_in`）。屋里没被说到的人照旧按位置听见，
+    按位置的感知整个删掉是第二期 T4 的事。
+    """
+    if h.kind != KIND_SPEECH or h.medium != MEDIUM_IN_PERSON:
+        return False
+    known = residents()
+    return known.by_persona.get(persona_id) in known.sisters_in(
+        h.audience, speaker=h.actor
     )
 
 
