@@ -25,7 +25,7 @@ from app.living.day_page import LivingDayPage
 from app.living.persona import PersonaVersion
 from app.living.pictures import Picture
 from app.living.reading import FilePickedUp, FileRead
-from app.living.received import ReceivedMessage
+from app.living.received import ReceivedMessage, ReceivedRead
 from app.living.records import (
     KIND_SPEECH,
     MEDIUM_IN_PERSON,
@@ -113,6 +113,12 @@ _VALID: dict[type, dict] = {
         "sender": "world",
         "body": "窗外下起了雨。",
         "message_time": _AWARE,
+    },
+    ReceivedRead: {
+        "lane": "coe-x",
+        "persona_id": "ayana",
+        "message_id": "0123456789abcdef0123456789abcdef",
+        "moment_id": "2026-07-25T10:00+08:00",
     },
 }
 
@@ -212,6 +218,15 @@ _PINNED: dict[type, dict[str, str]] = {
         "body": "TEXT",
         "message_time": "TIMESTAMPTZ",
     },
+    # 她在哪一轮看过某一条收到的消息。一条一行，不是一个水位：后到的消息可能更早发生，
+    # 按任何一种先后开水位都会漏。``moment_id`` 不进键（同一条只算看过一次），也**没有时刻
+    # 列**——那一轮的『现在』在 ``LifeMoment.began_at`` 上，按 ``moment_id`` 查得到。
+    ReceivedRead: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "message_id": "TEXT",
+        "moment_id": "TEXT",
+    },
 }
 
 
@@ -238,6 +253,7 @@ def test_living_data_reaches_the_registry_via_app_wiring():
         "LivingDayPage",
         "PersonaVersion",
         "ReceivedMessage",
+        "ReceivedRead",
     ):
         assert f"'{name}'" in registered, (
             f"{name} 没进 DATA_REGISTRY —— migrate_schema 不会建它的表。"

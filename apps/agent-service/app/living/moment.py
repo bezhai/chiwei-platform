@@ -16,7 +16,8 @@
 这一轮照样算数（:func:`_remember_this_round`））。
 
 **所以醒来只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么
-（:meth:`app.living.snapshot.MomentSnapshot.render_new`）、手机上刚来了什么
+（:meth:`app.living.snapshot.MomentSnapshot.render_new`）、传到她这里的消息里还没看过的
+（:func:`app.living.received.render_received`）、手机上刚来了什么
 （:func:`app.living.phone.render_arrived`）。她此刻的样子（在哪、在做什么、上一次写下的
 那天、心里挂着什么、刚做过说过什么、手机上还有什么没看）读一百遍字字一样，上一轮读过的
 还在上下文里，所以它只在清理那一下作为新起点重铺一次
@@ -151,6 +152,7 @@ from app.living.place import (
     reach_between_people,
 )
 from app.living.reading import READING_TOOLS
+from app.living.received import mark_read, render_received, unread_received
 from app.living.records import (
     KIND_ACT,
     KIND_SPEECH,
@@ -1139,6 +1141,9 @@ async def run_moment(
         snapshot = await read_snapshot(
             lane=lane, persona_id=persona_id, after_seq=after_seq, now=began_at
         )
+        # 传到她这里、她还没看过的消息（:mod:`app.living.received`）。读在模型调用之前：
+        # 只有这几条会跟这一轮一起记成看过，这一轮跑着的时候新到的留给下一轮。
+        received = await unread_received(lane=lane, persona_id=persona_id)
         # 「她是谁」那两个变量由 :mod:`app.living.persona` 一处组装（这一轮和日记那两
         # 条路共用同一份）。手边有哪些说明可读**只加在这个 moment 上**：只有这个 moment
         # 有读它、跑它的那两只手，塞进那个共用函数就等于把一份写日记时用不上的清单也
@@ -1180,12 +1185,12 @@ async def run_moment(
             )
         # 这一轮新摆到她眼前的那条，接在连续上下文后面 —— 所以它永远是最后一条。
         #
-        # **只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、手机上刚来
-        # 了什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里挂着什么、刚做过
-        # 说过什么、手机上还有什么没看）不在这里 —— 那份读一百遍字字一样，每轮重发就是
-        # 把同一段话抄一遍，而她上一轮读过的还在上下文里。它由清理那一下作为新起点重铺
-        # （:func:`app.agent.continuity.trim_for_round`，默认一小时一次；一天的第一轮
-        # 上下文是空的，那一下也会立一根界桩，所以冷启动她照样知道自己站在哪）。
+        # **只送新发生的事**：几点了、离上一次隔了多久、这期间别人做了什么、传到她这里
+        # 的消息、手机上刚来了什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里
+        # 挂着什么、刚做过说过什么、手机上还有什么没看）不在这里 —— 那份读一百遍字字一样，
+        # 每轮重发就是把同一段话抄一遍，而她上一轮读过的还在上下文里。它由清理那一下作为
+        # 新起点重铺（:func:`app.agent.continuity.trim_for_round`，默认一小时一次；一天的
+        # 第一轮上下文是空的，那一下也会立一根界桩，所以冷启动她照样知道自己站在哪）。
         #
         # **未读必须在界桩上**：眼前那份只给新到的，一条她一直不看的通知会随着摆出它的
         # 那一轮刺激一起在 own_minutes 之后被裁掉，界桩不重铺的话之后再没有第二处说得出
@@ -1194,7 +1199,10 @@ async def run_moment(
         arrived = render_arrived(unread, since=previous_at, now=began_at)
         stimulus = Message(
             role=Role.USER,
-            content=f"{snapshot.render_new(previous_at=previous_at)}\n\n{arrived}",
+            content=(
+                f"{snapshot.render_new(previous_at=previous_at)}\n\n"
+                f"{render_received(received, now=began_at)}\n\n{arrived}"
+            ),
         )
         # 裁在这里，不在收尾：喂进去的和存下去的是同一份前缀，而且一段带着过期图片
         # 地址的历史不会在模型调用那一步先炸掉、永远轮不到被裁。
@@ -1261,7 +1269,8 @@ async def run_moment(
         # **这个 moment 落地和她看过的手机是同一个事务。** 工具返回不等于她看见了——
         # 只有这个 moment 跑完，工具结果才真的进过她的上下文。分开写的话，崩在两者之间
         # 就是"已读了但内容从没到她眼前"，那几条消息永久消失且一句报错都没有。绑在一起
-        # 之后崩掉的代价只是她下一个 moment 原样再来一遍：宁可重看，不可漏看。
+        # 之后崩掉的代价只是她下一个 moment 原样再来一遍：宁可重看，不可漏看。传到她这里的
+        # 消息同理：只把这一轮摆进去的那几条记成看过，也在这个事务里。
         #
         # **她记住的这一段在这次提交之后单独写**（:func:`_remember_this_round`）：两种
         # 代价不对称，理由见 :func:`_remember_this_round`。下一版上下文在提交
@@ -1275,6 +1284,7 @@ async def run_moment(
             await commit_glances(
                 glances=context.features[FEATURE_GLANCES], session=s
             )
+            await mark_read(received, moment_id=moment_id, session=s)
         await _remember_this_round(
             transcript_id,
             remembered,

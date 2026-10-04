@@ -14,10 +14,18 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import text
 
+from app.agent.neutral import Message as Said
+from app.agent.neutral import Role
 from app.data import session as session_mod
 from app.living import participants as participants_mod
 from app.living import received as received_mod
-from app.living.received import ReceivedMessage, open_inboxes, receive
+from app.living.received import (
+    ReceivedMessage,
+    open_inboxes,
+    receive,
+    render_received,
+    unread_received,
+)
 from app.messaging.message import Kind, Message, new_message
 from app.messaging.receiving import INBOX_REGISTRY
 
@@ -182,6 +190,174 @@ async def test_a_message_for_a_name_she_does_not_go_by_fails_and_is_retried(inbo
     with pytest.raises(RuntimeError, match="赤尾酱"):
         await receive(_from("world", "下雨了。", to="赤尾酱"))
     assert await _stored("akao") == []
+
+
+# ---------------------------------------------------------------------------
+# 她下一轮读到：按消息自带的时间排，只把放进这一轮的那几条记成看过
+# ---------------------------------------------------------------------------
+
+
+def test_world_reads_as_what_she_perceives_and_anyone_else_carries_a_name():
+    """world 发来的是她察觉到的事，不标是谁说的；别人发来的带着发送方的名字。"""
+    def item(sender: str, body: str, at: dt.datetime) -> ReceivedMessage:
+        return ReceivedMessage(
+            lane=LANE,
+            persona_id="ayana",
+            message_id=f"{sender}-{at:%H%M}",
+            sender=sender,
+            body=body,
+            message_time=at,
+        )
+
+    shown = render_received(
+        [
+            item("world", "窗外下起了雨。", _at(21, 25)),
+            item("千凪", "姐姐，饭好了。", _at(21, 26)),
+            item("world", "楼下有人按门铃。", dt.datetime(2026, 7, 24, 23, 50, tzinfo=_CST)),
+        ],
+        now=_at(21, 30),
+    )
+
+    assert shown == (
+        "这段时间传到你这里的：\n"
+        "- 21:25 CST 窗外下起了雨。\n"
+        "- 21:26 CST 千凪：姐姐，饭好了。\n"
+        "- 07-24 23:50 CST 楼下有人按门铃。"
+    )
+    assert render_received([], now=_at(21, 30)) == "这段时间传到你这里的：（没有）"
+
+
+@pytest.mark.integration
+async def test_unread_messages_come_in_the_order_they_happened_not_the_order_they_arrived(
+    inboxes,
+):
+    """world 的告知和姐妹的话走两条路，后到的可能先发生。"""
+    later = _from("千凪", "姐姐，饭好了。", at=_at(21, 28))
+    earlier = _from("world", "窗外下起了雨。", at=_at(21, 20))
+    await receive(later)
+    await receive(earlier)
+
+    unread = await unread_received(lane=LANE, persona_id="ayana")
+
+    assert [m.message_id for m in unread] == [earlier.message_id, later.message_id]
+
+
+@pytest.mark.integration
+async def test_a_round_takes_the_oldest_few_and_leaves_the_rest_for_the_next(inboxes):
+    messages = [_from("world", f"第 {i} 件事。", at=_at(21, i)) for i in (3, 1, 2)]
+    for m in messages:
+        await receive(m)
+
+    unread = await unread_received(lane=LANE, persona_id="ayana", limit=2)
+
+    assert [m.body for m in unread] == ["第 1 件事。", "第 2 件事。"]
+
+
+class _Round:
+    """替身 life：记下每一轮新摆到她眼前的那条，可以在模型那一步做点什么、或者失败。"""
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+        self.meanwhile = None
+        self.fails = False
+
+    async def run(self, messages, **kwargs):
+        self.seen.append(messages[-1].content)
+        if self.meanwhile is not None:
+            await self.meanwhile()
+        if self.fails:
+            raise RuntimeError("这一轮的模型调用失败了")
+        return Said(role=Role.ASSISTANT, content="继续")
+
+
+@pytest.fixture
+async def her_round(inboxes, monkeypatch):
+    """绫奈的一轮：真的 ``run_moment``，只有模型那一步是替身。"""
+    from app.living import moment as moment_mod
+    from app.living import persona as persona_mod
+    from app.living.loose_ends import LooseEnd
+    from app.living.moment import DEFAULT_LIFE_MOMENT_MINUTES, LifeMoment
+    from tests.runtime.conftest import migrate
+
+    for cls in (LooseEnd, LifeMoment):
+        await migrate(cls, inboxes)
+
+    async def find_persona(persona_id: str):
+        return SimpleNamespace(display_name="绫奈", persona_core="她在念初二。")
+
+    async def fixed_minutes() -> int:
+        return DEFAULT_LIFE_MOMENT_MINUTES
+
+    monkeypatch.setattr(persona_mod, "find_persona", find_persona)
+    monkeypatch.setattr(moment_mod, "life_moment_minutes", fixed_minutes)
+    runner = _Round()
+    monkeypatch.setattr(moment_mod, "build_moment_runner", lambda: runner)
+    return runner
+
+
+async def _her_round(at: dt.datetime):
+    from app.living.moment import run_moment
+
+    return await run_moment(lane=LANE, persona_id="ayana", now=at)
+
+
+@pytest.mark.integration
+async def test_what_she_received_is_in_her_next_round_once(her_round):
+    rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
+    dinner = _from("千凪", "姐姐，饭好了。", at=_at(21, 26))
+    await receive(rain)
+    await receive(dinner)
+
+    await _her_round(_at(21, 30))
+    await _her_round(_at(21, 40))
+
+    first, second = her_round.seen
+    assert "- 21:25 CST 窗外下起了雨。\n- 21:26 CST 千凪：姐姐，饭好了。" in first
+    assert "这段时间传到你这里的：（没有）" in second, (
+        f"看过的又摆了一遍：\n{second}"
+    )
+    assert await unread_received(lane=LANE, persona_id="ayana") == []
+
+
+@pytest.mark.integration
+async def test_a_round_that_fails_shows_them_again(her_round):
+    """她跑失败的那一轮里看到的消息，下一轮再给她看一次：没跑完就不算看过。"""
+    rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
+    await receive(rain)
+
+    her_round.fails = True
+    with pytest.raises(RuntimeError, match="模型调用失败"):
+        await _her_round(_at(21, 30))
+    her_round.fails = False
+    await _her_round(_at(21, 31))
+
+    assert len(her_round.seen) == 2
+    assert all("窗外下起了雨。" in seen for seen in her_round.seen)
+    assert await unread_received(lane=LANE, persona_id="ayana") == []
+
+
+@pytest.mark.integration
+async def test_what_arrives_while_she_is_in_a_round_stays_unread_for_the_next(her_round):
+    """这一轮跑着的时候新到的消息，这一轮没给她看，就不能跟着记成看过。"""
+    rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
+    doorbell = _from("world", "楼下有人按门铃。", at=_at(21, 31))
+    await receive(rain)
+
+    async def it_arrives():
+        await receive(doorbell)
+
+    her_round.meanwhile = it_arrives
+    await _her_round(_at(21, 30))
+    her_round.meanwhile = None
+
+    assert [m.message_id for m in await unread_received(lane=LANE, persona_id="ayana")] == [
+        doorbell.message_id
+    ]
+    await _her_round(_at(21, 40))
+
+    first, second = her_round.seen
+    assert "窗外下起了雨。" in first and "楼下有人按门铃。" not in first
+    assert "楼下有人按门铃。" in second and "窗外下起了雨。" not in second
 
 
 # ---------------------------------------------------------------------------

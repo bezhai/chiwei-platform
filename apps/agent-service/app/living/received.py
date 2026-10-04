@@ -1,4 +1,4 @@
-"""她收到的消息：三姐妹的收件箱，收件只存储。
+"""她收到的消息：三姐妹的收件箱，收件只存储；她下一轮醒来时读。
 
 **收件箱开在 agent-service 进程里，名字是她们在世界里的名字**（:mod:`app.living.participants`）。
 名字存在人设表里，接线模块 import 的时候库还没准备好，所以接线只声明"开始接收时再开"
@@ -19,23 +19,50 @@
 
 ``not_delivered`` 告知不存：那是她自己定时发出的消息被退回，而她从不定时发消息；真来了也
 不是她经历的事，只留一条日志。
+
+**她下一轮醒来时读**（:func:`unread_received` → :func:`render_received`，由
+:func:`app.living.moment.run_moment` 摆进这一轮的输入）。按每条消息自带的时间排，不按到达
+先后。world 发来的是她察觉到的事，原样摆，不标是谁说的；别人发来的带着发送方的名字。
+
+**读到哪里逐条记，不是一个水位**（:class:`ReceivedRead`）。按消息自带的时间开水位会漏：
+姐妹直接说的话和 world 的告知走两条路，一条早发生的可能晚到，水位已经越过它的时间，它就再也
+摆不到她眼前。按到达先后开水位也不行：这一轮跑着的时候新到的那条会排在水位之前还是之后，取决于
+谁先落库。所以每一条记下"它放进过哪一轮"，没记的就是没看过，跟顺序无关。不沿用
+``LifeMoment.next_seq``：那是按位置感知那条路的游标，这张表上的消息不在那条轴上。
+
+**只记这一轮实际放进输入的那几条，跟这一轮的 ``LifeMoment`` 在同一个事务里落地**
+（:func:`mark_read`）。这一轮跑着的时候新到的不在这几条里，留到下一轮；这一轮失败了一条都
+不记，下一轮原样再给她看。跟手机已读同一个道理（:func:`app.living.phone.commit_glances`）：
+宁可重看，不可漏看。
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import field_validator
+from sqlalchemy import text
 
-from app.living.participants import load_residents, residents
-from app.living.records import _require_aware, living_lane
+from app.data.session import get_session
+from app.infra.cst_time import dated_clock
+from app.living.participants import WORLD, load_residents, residents
+from app.living.records import _require_aware, esc, living_lane
 from app.messaging.message import Kind, Message
 from app.messaging.receiving import inbox
 from app.runtime.data import Data, Key
+from app.runtime.migrator import _table_name
 from app.runtime.persist import insert_idempotent
 
 logger = logging.getLogger(__name__)
+
+# 一轮最多摆多少条。不是截断：没摆进来的留着没看，下一轮接着拿最早的那几条。跟"这段时间
+# 你感知到的"同一个量级（:data:`app.living.snapshot.PERCEIVED_LIMIT`）：服务停过一阵、world
+# 攒下一批告知时，过几轮就追平，不会一轮塞进几百条。
+RECEIVED_LIMIT = 60
+
+# 她这一轮输入里这一段的开头。空的时候如实说空，不留白洞。
+_HEAD = "这段时间传到你这里的："
 
 
 class ReceivedMessage(Data):
@@ -64,6 +91,28 @@ class ReceivedMessage(Data):
     @classmethod
     def _aware_message_time(cls, v: datetime) -> datetime:
         return _require_aware("message_time", v)
+
+
+class ReceivedRead(Data):
+    """她看过某一条收到的消息：它放进了哪一轮，那一轮落了地。
+
+    自然键 ``(lane, persona_id, message_id)``：一条消息只算看过一次。``moment_id`` 是哪一轮
+    （可查，不进键）。纯 append：这条记的是"她看过这一条"这件发生过的事，不是一个会被改写的
+    水位，理由见模块说明。
+    """
+
+    lane: Annotated[str, Key]
+    persona_id: Annotated[str, Key]
+    message_id: Annotated[str, Key]
+    moment_id: str
+
+    class Meta:
+        # 读侧唯一形状：这个人的某一条看过没有（:func:`unread_received` 的 NOT EXISTS）。
+        indexes = (("lane", "persona_id", "message_id"),)
+
+
+_RECEIVED_TABLE = _table_name(ReceivedMessage)
+_READ_TABLE = _table_name(ReceivedRead)
 
 
 async def open_inboxes() -> None:
@@ -99,3 +148,68 @@ async def receive(message: Message) -> None:
             message_time=message.time,
         )
     )
+
+
+async def unread_received(
+    *, lane: str, persona_id: str, limit: int = RECEIVED_LIMIT
+) -> list[ReceivedMessage]:
+    """她收到、还没看过的消息里最早的 ``limit`` 条，按消息自带的时间排。
+
+    同一刻的几条按消息 id 排，只是为了每次读出来的顺序一样。
+    """
+    sql = (
+        f"SELECT m.* FROM {_RECEIVED_TABLE} m "
+        f"WHERE m.lane = :lane AND m.persona_id = :persona_id "
+        f"AND NOT EXISTS (SELECT 1 FROM {_READ_TABLE} r "
+        f"WHERE r.lane = m.lane AND r.persona_id = m.persona_id "
+        f"AND r.message_id = m.message_id) "
+        f"ORDER BY m.message_time, m.message_id LIMIT :limit"
+    )
+    async with get_session() as s:
+        rows = (
+            await s.execute(
+                text(sql), {"lane": lane, "persona_id": persona_id, "limit": limit}
+            )
+        ).mappings().all()
+    return [
+        ReceivedMessage(**{k: row[k] for k in ReceivedMessage.model_fields})
+        for row in rows
+    ]
+
+
+def render_received(items: list[ReceivedMessage], *, now: datetime) -> str:
+    """这一轮摆到她眼前的那一段：每条带着它自己的时刻。
+
+    world 发来的是她察觉到的事（窗外下雨了、有人敲门），原样摆，不标是谁说的——那不是谁对她
+    说的话。别人发来的带着发送方的名字。
+
+    发送方和正文都过 :func:`app.living.records.esc`：正文由发送方写下，world 和姐妹那边是
+    模型、人工参与者那边是人，哪一种都不归她管；这一列上转义没有代价（同
+    :func:`app.living.happening.perceived_line`）。
+    """
+    if not items:
+        return f"{_HEAD}（没有）"
+    lines = [f"- {dated_clock(m.message_time, now=now)} {_line(m)}" for m in items]
+    return _HEAD + "\n" + "\n".join(lines)
+
+
+def _line(item: ReceivedMessage) -> str:
+    if item.sender == WORLD:
+        return esc(item.body)
+    return f"{esc(item.sender)}：{esc(item.body)}"
+
+
+async def mark_read(
+    items: list[ReceivedMessage], *, moment_id: str, session: Any
+) -> None:
+    """把这一轮放进她输入的那几条记成看过。**由这一轮的收尾调用，跟 ``LifeMoment`` 同一个事务。**"""
+    for item in items:
+        await insert_idempotent(
+            ReceivedRead(
+                lane=item.lane,
+                persona_id=item.persona_id,
+                message_id=item.message_id,
+                moment_id=moment_id,
+            ),
+            session=session,
+        )

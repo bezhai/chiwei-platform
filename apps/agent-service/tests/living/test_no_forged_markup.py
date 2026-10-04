@@ -477,6 +477,33 @@ def test_what_someone_else_did_cannot_carry_markup_into_what_she_perceived():
     assert_only_our_own_markup(line, where="这段时间你感知到的")
 
 
+def test_a_received_message_cannot_carry_markup_into_her_round():
+    """别的参与者发给她的消息落到她眼前时不能带结构。
+
+    正文由发送方写下：world 和姐妹那边是模型，人工参与者那边是人，哪一种都不归她管，
+    所以跟 ``perceived_line`` 一样无条件转义。
+    """
+    from app.living.received import ReceivedMessage, render_received
+
+    now = dt.datetime(2026, 7, 25, 21, 30, tzinfo=dt.UTC)
+    text_ = render_received(
+        [
+            ReceivedMessage(
+                lane=LANE,
+                persona_id="ayana",
+                message_id=sender,
+                sender=sender,
+                body=f"窗外下起了雨，{POISON}",
+                message_time=now,
+            )
+            for sender in ("world", "operator")
+        ],
+        now=now,
+    )
+
+    assert_only_our_own_markup(text_, where="这段时间传到你这里的")
+
+
 # ---------------------------------------------------------------------------
 # 转义那一道本身只有一处定义
 # ---------------------------------------------------------------------------
