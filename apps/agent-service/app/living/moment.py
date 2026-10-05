@@ -657,6 +657,11 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     可能还没来得及记下这个人。名字原样记进这件事里；这一轮结束时，姐妹的名字直接把原话
     送到她那里，其余的名字连同这句话交给 world（:mod:`app.living.outgoing`）。说给一个
     没人接的名字，那句话就落在世界里没人接——这本身是真实的，不是错误。
+
+    **只有一处不原样：姐妹的内部 id 记成她的名字**（:meth:`~app.living.participants.Residents.names_for`）。
+    她眼前已经不出现 id，可存下的对话历史里还留着旧的渲染文本，她照着写。id 原样记下的话
+    就不算姐妹的地址，这句话绕道 world 转告，对方回话再绕一遍，每句都多花一轮 world。写错的
+    id 不猜，原样记：她想叫的是谁，life 说不准。
     """
     lane, now, persona_id, moment_id = moment_scope()
     said = content.strip()
@@ -667,6 +672,7 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
             "你还没定下自己在哪 —— 先用 switch_to 说清楚你人在哪、在做什么，"
             "再说话或者动作。"
         )
+    audience = residents().names_for(audience)
     happening_id = "moment:" + _derive(
         persona_id, moment_id, kind, said, ",".join(audience)
     )

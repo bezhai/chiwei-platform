@@ -53,22 +53,27 @@ class Residents:
         return None
 
     def names_for(self, who: list[str]) -> list[str]:
-        """她记下的"说给谁"摆到她眼前时的样子：三姐妹的 id 换成她在世界里的名字，其余原样。
+        """"说给谁"里三姐妹的 id 换成她在世界里的名字，其余原样。id 和名字的对照只在这里。
 
-        ``say`` 以前收的是 id，那时记下的说给谁就是 ``chinagi`` 这种；她在自己的记录里看到它，
-        下一次就照着它去叫人（还会写错成别的串）。所以她眼前不出现 id，旧记录也一样。不是三姐妹
-        的（世界里的人、写错的名字）原样留着，那是她写下的。同一个人写了两种叫法只留一次，按
-        出现的先后。
+        两处用它：
 
-        只管摆给她看。发消息时谁算姐妹仍然只认名字（:meth:`sisters_in`）。
+          * ``say`` 记下这句话时（:func:`app.living.moment._record`）。她在 ``to`` 里写了姐妹的
+            id，记下来的就是姐妹的名字，发消息时按名字认出是姐妹、直接送到她那里，跟写名字
+            一样。
+          * 她记下的"说给谁"摆到她眼前时（:func:`app.living.happening.own_line`）。``say`` 以前
+            原样记 id，那些旧记录里是 ``chinagi`` 这种；她看到它，下一次就照着它去叫人。
+
+        不是三姐妹的（世界里的人、写错的名字、写错的 id）原样留着，那是她写下的，她想叫的是谁
+        life 不猜。同一个人写了两种叫法只留一次，按出现的先后。
         """
         return list(dict.fromkeys(self.by_persona.get(w, w) for w in who))
 
     def sisters_in(self, names: list[str], *, speaker: str) -> list[str]:
         """``names`` 里哪几个是 ``speaker``（persona_id）的姐妹：三姐妹之一、又不是她自己。
 
-        按出现的先后，同一个名字只留一次。不是姐妹名字的（世界里别的人、写错的名字、life
-        内部的 id）都不在里面——那是"世界里的某个人"，由 world 判断有没有这个人、听没听见。
+        按出现的先后，同一个名字只留一次。不是姐妹名字的（世界里别的人、写错的名字）都不在
+        里面——那是"世界里的某个人"，由 world 判断有没有这个人、听没听见。她写的姐妹 id 在
+        记下时已经换成了名字（:meth:`names_for`），到这里的就是名字。
         """
         found: list[str] = []
         for name in names:

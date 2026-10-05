@@ -12,7 +12,8 @@ world 的三轮，每一轮只看到一部分。她这一段在世界里什么�
 
 **只对姐妹说的话直接发给姐妹**，一位一条，不经过 world。同时还对别人说的，姐妹照样收到直达的
 那条，这句话也进汇总，别人听没听见由 world 判断。姐妹按她们在世界里的名字认
-（:meth:`app.living.participants.Residents.sisters_in`）；不是姐妹名字的，一律是世界里的某个人。
+（:meth:`app.living.participants.Residents.sisters_in`）；她在 ``to`` 里写的姐妹 id，``say`` 记下
+时已经换成了名字。不是姐妹名字的，一律是世界里的某个人。
 
 **汇总从她存下的经历里取，不从这一轮的内存里取**（:class:`~app.living.records.Happening`、
 :class:`~app.living.records.Whereabouts`）。所以这一轮失败、超时、赶上部署被打断，她已经做了的

@@ -362,6 +362,27 @@ async def test_speaking_face_to_face_is_what_the_house_can_overhear(
 
 
 @pytest.mark.integration
+async def test_a_sister_called_by_her_id_is_written_down_by_her_name(
+    moment_db, stub_moment
+):
+    """``to`` 里写姐妹的内部 id，记下来的就是她的名字：她自己回看时、发出去时都是这一份。
+    同一个人两种叫法都写了只记一次；不是姐妹的名字原样记。"""
+    await _stand("akao", "家/客厅", "待着", _at(13))
+    stub_moment(
+        ("say", {"what": "抹茶好了。", "to": ["ayana", "绫奈", "chinagi", "许阿姨"]})
+    )
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
+
+    from app.living.happening import own_line
+    from app.living.snapshot import recent_own_happenings
+
+    (said,) = await recent_own_happenings(lane=LANE, persona_id="akao", limit=5)
+    assert said.audience == ["绫奈", "千凪", "许阿姨"]
+    assert own_line(said) == "你对 绫奈、千凪、许阿姨 说：「抹茶好了。」"
+
+
+@pytest.mark.integration
 async def test_speaking_to_two_sisters_at_once_is_one_thing_not_two(
     moment_db, stub_moment, post
 ):

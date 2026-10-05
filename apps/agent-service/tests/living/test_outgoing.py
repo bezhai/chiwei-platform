@@ -248,17 +248,59 @@ async def test_words_for_a_sister_and_someone_else_go_to_both(started, in_a_mome
 
 
 @pytest.mark.integration
-async def test_a_name_that_is_not_a_sisters_is_someone_in_the_world(started, in_a_moment):
-    """姐妹按世界里的名字认。``ayana`` 是 life 内部的 id，不是谁在世界里的名字。"""
+async def test_a_sister_called_by_her_id_gets_it_straight_and_world_does_not(
+    started, in_a_moment
+):
+    """``to`` 里写的是姐妹的内部 id，记下时就换成她的名字，跟写名字一样直接给她。
+
+    以前 id 不算姐妹的地址，交给 world；world 把这句转告给她并叫醒她，她回话又走一遍 world，
+    姐妹之间每说一句就多花一轮 world。她看不到 id 之后仍然会写，存下的对话历史里还留着。"""
     post = started
     async with in_a_moment("akao", now=_at(21, 30)):
         await _do(say, {"what": "你好。", "to": ["ayana"]})
 
     await _tell()
 
+    assert [(s.sender, s.recipient, s.body) for s in post.sent] == [
+        ("赤尾", "绫奈", "当面对你说：「你好。」")
+    ]
+
+
+@pytest.mark.integration
+async def test_a_sister_called_by_her_id_and_someone_else_go_to_both(started, in_a_moment):
+    """跟写名字一样：姐妹收到直达的那条，还有别人在听，这句也进 world 的汇总，写的是她的名字。"""
+    post = started
+    async with in_a_moment("akao", now=_at(21, 30)):
+        await _do(say, {"what": "许阿姨来了，开下门。", "to": ["chinagi", "许阿姨"]})
+
+    await _tell()
+
+    assert [(s.recipient, s.body) for s in post.sent] == [
+        ("千凪", "当面对你和 许阿姨 说：「许阿姨来了，开下门。」"),
+        (
+            "world",
+            "我做了这些（按先后）：\n"
+            "- 21:30 CST 对 千凪、许阿姨 说：「许阿姨来了，开下门。」\n"
+            "做完这些，我在 家/客厅，正在 看书。",
+        ),
+    ]
+
+
+@pytest.mark.integration
+async def test_a_name_that_is_neither_a_sisters_name_nor_her_id_is_someone_in_the_world(
+    started, in_a_moment
+):
+    """写错的 id（``akago``）、不认识的名字，都是"世界里的某个人"：原样交给 world，由它判断
+    有没有这个人、听没听见。life 不替她猜她想叫的是谁。"""
+    post = started
+    async with in_a_moment("akao", now=_at(21, 30)):
+        await _do(say, {"what": "你好。", "to": ["akago"]})
+
+    await _tell()
+
     (sent,) = post.sent
     assert sent.recipient == "world"
-    assert "对 ayana 说：「你好。」" in sent.body
+    assert "对 akago 说：「你好。」" in sent.body
 
 
 @pytest.mark.integration
