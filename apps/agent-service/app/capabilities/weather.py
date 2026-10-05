@@ -23,9 +23,12 @@
 
 结果分三种，不混：
 
-* 地名匹配不到：:func:`find_places` 返回空列表。这不是故障，是没问对地方。和风现行文档
-  写的是 HTTP 400 + ``error.title = "NO SUCH LOCATION"``，旧版是 body 里 ``code: "404"``，
-  两种都认；成功响应里列表是空的也算。
+* 地名匹配不到：:func:`find_places` 返回空列表。这不是故障，是没问对地方。和风现行的
+  做法是 HTTP 400 + ``error.title`` 为 No Such Location，旧版是 body 里 ``code: "404"``，
+  两种都认；成功响应里列表是空的也算。标题不分大小写比较：错误码文档的小节标题写成全大写
+  ``NO SUCH LOCATION``，响应里实际是首字母大写的 ``No Such Location``。HTTP 400 还对应
+  参数错误等别的错误，只看状态码分不出来，所以要看标题；``error.type`` 线上的取值没有
+  核实过，不拿来判断。
 * 上游出错、或者响应不是认识的结构：抛 :class:`WeatherUnavailable`，原因里只有状态码、
   和风自己的错误标题（一张固定的枚举表）或 GeoAPI body 的 ``code``。两边的约定不一样：
   GeoAPI 的成功响应带顶层 ``code``，v1 没有这个字段，出错只看 HTTP 状态码和
@@ -61,7 +64,7 @@ _DAILY_PATH = "/weather/v1/daily"
 # GeoAPI 是模糊搜索，一个名字可能匹配到好几个地方。多要几条是为了把同名的候选一并交回去，
 # 让调用方看得出这次的名字有歧义。
 _GEO_CANDIDATES = 5
-_NO_SUCH_LOCATION = "NO SUCH LOCATION"
+_NO_SUCH_LOCATION = "no such location"
 _LANG = "zh"
 _TWO_PLACES = Decimal("0.01")
 
@@ -324,7 +327,7 @@ def _place(entry: Any, path: str) -> Place:
 
 async def _lookup(path: str, found_in: str, params: dict[str, str]) -> list[Place]:
     resp, body = await _get(path, {**params, "number": _GEO_CANDIDATES, "lang": _LANG})
-    if resp.status_code != 200 and _error_title(resp) == _NO_SUCH_LOCATION:
+    if resp.status_code != 200 and _error_title(resp).casefold() == _NO_SUCH_LOCATION:
         return []
     if body is not None and body.get("code") == "404":
         return []

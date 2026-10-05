@@ -18,6 +18,11 @@ KEY = "qweather-secret-key"
 ATTRIBUTION = "https://developer.qweather.com/attribution.html"
 _REFER = {"sources": [ATTRIBUTION], "license": ["QWeather Developers License"]}
 
+# 地名查不到时和风真实回的错误标题。错误码文档的小节标题写成全大写（NO SUCH LOCATION），
+# 但响应里的 ``error.title`` 是首字母大写：coe-world 上城市查询查不到时回的是
+# HTTP 400 + "No Such Location"，文档自己的出错示例也是 "Invalid Parameters"。
+NO_SUCH_LOCATION = "No Such Location"
+
 
 class FakeQWeather:
     """按路径回话：路由的键是路径或路径前缀（天气接口的路径里带坐标）。值可以是异常。"""
@@ -58,15 +63,20 @@ def ok(body) -> httpx.Response:
 
 
 def problem(status: int, title: str) -> httpx.Response:
-    """和风文档"错误码"一页的出错格式：HTTP 状态码 + application/problem+json。"""
+    """和风文档"错误码"一页的出错格式：HTTP 状态码 + application/problem+json。
+
+    ``title`` 照响应里的原样写（首字母大写，如 ``"Invalid Host"``），不是文档小节标题的
+    全大写。``type`` 照文档示例的样子，错误码页的地址加上由标题转成的锚点。
+    """
+    anchor = "-".join(title.lower().split())
     return httpx.Response(
         status,
         json={
             "error": {
                 "status": status,
-                "type": "https://dev.qweather.com/docs/resource/error-code/",
+                "type": f"https://dev.qweather.com/docs/resource/error-code/#{anchor}",
                 "title": title,
-                "detail": "see the error code page",
+                "detail": f"{title}, please check your request.",
             }
         },
         headers={"content-type": "application/problem+json"},

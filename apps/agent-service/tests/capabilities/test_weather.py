@@ -24,6 +24,7 @@ from .qweather import (
     HOST,
     HOURLY,
     KEY,
+    NO_SUCH_LOCATION,
     POIS,
     install,
     ok,
@@ -76,11 +77,18 @@ async def test_coordinates_are_rounded_half_up_to_two_decimals(monkeypatch):
 @pytest.mark.parametrize(
     "no_city",
     [
+        problem(400, NO_SUCH_LOCATION),
+        # 标题不分大小写：错误码文档的小节标题是全大写写法
         problem(400, "NO SUCH LOCATION"),
         ok({"code": "404"}),
         ok({"code": "200", "location": []}),
     ],
-    ids=["400-no-such-location", "body-code-404", "empty-list"],
+    ids=[
+        "400-no-such-location",
+        "400-no-such-location-upper-case",
+        "body-code-404",
+        "empty-list",
+    ],
 )
 async def test_a_name_no_city_matches_is_looked_up_once_more_as_a_scenic_spot(
     monkeypatch, no_city
@@ -104,7 +112,7 @@ async def test_a_name_no_city_matches_is_looked_up_once_more_as_a_scenic_spot(
 async def test_a_name_that_matches_neither_is_an_empty_list(monkeypatch):
     fake = install(
         monkeypatch,
-        {CITY: problem(400, "NO SUCH LOCATION"), POI: problem(400, "NO SUCH LOCATION")},
+        {CITY: problem(400, NO_SUCH_LOCATION), POI: problem(400, NO_SUCH_LOCATION)},
     )
 
     assert await weather.find_places("不存在的地方") == []
@@ -113,7 +121,7 @@ async def test_a_name_that_matches_neither_is_an_empty_list(monkeypatch):
 
 @pytest.mark.parametrize(
     ("status", "title"),
-    [(403, "INVALID HOST"), (429, "TOO MANY REQUESTS"), (400, "INVALID PARAMETER")],
+    [(403, "Invalid Host"), (429, "Too Many Requests"), (400, "Invalid Parameters")],
 )
 async def test_an_upstream_error_is_not_mistaken_for_no_match(monkeypatch, status, title):
     fake = install(monkeypatch, {CITY: problem(status, title), POI: ok(POIS)})
@@ -267,7 +275,7 @@ async def test_an_out_of_range_span_is_refused_without_a_request(monkeypatch, as
 
 @pytest.mark.parametrize(
     ("status", "title"),
-    [(403, "NO CREDIT"), (429, "TOO MANY REQUESTS"), (400, "NO SUCH LOCATION")],
+    [(403, "No Credit"), (429, "Too Many Requests"), (400, NO_SUCH_LOCATION)],
 )
 async def test_a_v1_error_is_unavailable_with_its_status_and_title(monkeypatch, status, title):
     install(monkeypatch, {"/weather/v1/current": problem(status, title)})
