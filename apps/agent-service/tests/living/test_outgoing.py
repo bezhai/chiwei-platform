@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import text
 
 from app.data import session as session_mod
+from app.living import moment as moment_mod
 from app.living import outgoing as outgoing_mod
 from app.living.happening import record_happening
 from app.living.moment import act, keep_in_mind, move_to, run_moment, say, switch_to
@@ -301,6 +302,52 @@ async def test_a_name_that_is_neither_a_sisters_name_nor_her_id_is_someone_in_th
     (sent,) = post.sent
     assert sent.recipient == "world"
     assert "对 akago 说：「你好。」" in sent.body
+
+
+@pytest.mark.integration
+async def test_a_line_the_old_version_already_wrote_is_not_said_again_after_the_upgrade(
+    started, in_a_moment
+):
+    """id 换成名字之前的版本已经记下了这句（``to`` 里是 id，没换），这一轮没跑完就赶上发版；
+    新版本把同一轮重跑一遍，她又说了同一句、``to`` 写得一模一样。这句话的 id 按她写下的原样
+    算，所以还是那一句：不多记一条，绫奈也不多收一条。
+
+    id 要是按换好的名字算，同一句话就成了另一件事，绫奈会收到第二条，消息 id 也是新的。"""
+    post = started
+    said, to, moment_id = "你好。", ["ayana", "绫奈"], "cut-off-by-deploy"
+    # 旧版本 ``_record`` 记下的样子：id 和 audience 都按她写下的原样。
+    await record_happening(
+        lane=LANE,
+        happening_id="moment:"
+        + moment_mod._derive("akao", moment_id, KIND_SPEECH, said, ",".join(to)),
+        actor="akao",
+        kind=KIND_SPEECH,
+        content=said,
+        occurred_at=_at(21, 30),
+        audience=to,
+    )
+    await _tell()  # 新版本下一轮开始前，先把上一轮没讲出去的讲出去
+
+    async with in_a_moment("akao", now=_at(21, 30), moment_id=moment_id):
+        await _do(say, {"what": said, "to": to})
+    await _tell()
+
+    # 送出去的是旧版本记下的那一条（audience 里还是 id，正文照它写），只此一条。
+    assert len([s for s in post.sent if s.recipient == "绫奈"]) == 1, post.sent
+    assert len(await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor")) == 1
+
+
+@pytest.mark.integration
+async def test_the_same_round_run_again_says_the_same_line_once(started, in_a_moment):
+    """同一轮重跑（失败、超时、被打断），她又说了同一句、``to`` 写得一样：只记一条、只送一次。"""
+    post = started
+    for _ in range(2):
+        async with in_a_moment("akao", now=_at(21, 30), moment_id="run-again"):
+            await _do(say, {"what": "你好。", "to": ["ayana", "绫奈"]})
+        await _tell()
+
+    assert len(await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor")) == 1
+    assert [(s.recipient, s.body) for s in post.sent] == [("绫奈", "当面对你说：「你好。」")]
 
 
 @pytest.mark.integration

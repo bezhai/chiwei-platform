@@ -662,6 +662,10 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     她眼前已经不出现 id，可存下的对话历史里还留着旧的渲染文本，她照着写。id 原样记下的话
     就不算姐妹的地址，这句话绕道 world 转告，对方回话再绕一遍，每句都多花一轮 world。写错的
     id 不猜，原样记：她想叫的是谁，life 说不准。
+
+    **这件事的 id 仍然按她写下的 ``to`` 原样算，不按换好的名字算。** 换名字之前的版本记下的
+    那些，id 就是按原样算的：那一轮没跑完就赶上发版，新版本重跑同一轮、她说了同一句，id 对得上
+    才认得出是同一件事。按换好的名字算，同一句话就成了另一件事，多记一条，姐妹多收一条。
     """
     lane, now, persona_id, moment_id = moment_scope()
     said = content.strip()
@@ -672,7 +676,6 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
             "你还没定下自己在哪 —— 先用 switch_to 说清楚你人在哪、在做什么，"
             "再说话或者动作。"
         )
-    audience = residents().names_for(audience)
     happening_id = "moment:" + _derive(
         persona_id, moment_id, kind, said, ",".join(audience)
     )
@@ -683,7 +686,7 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
         kind=kind,
         content=said,
         occurred_at=now,
-        audience=audience,
+        audience=residents().names_for(audience),
         medium=MEDIUM_IN_PERSON,
     )
     note_recorded(happening_id)
