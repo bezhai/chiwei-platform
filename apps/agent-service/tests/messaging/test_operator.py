@@ -122,9 +122,31 @@ async def test_send_as_anyone(client, calls):
     assert calls == [
         (
             "send",
-            {"sender": "akao", "recipient": "world", "body": "我走进了厨房。", "message_id": None},
+            {
+                "sender": "akao",
+                "recipient": "world",
+                "body": "我走进了厨房。",
+                "message_id": None,
+                "wakes_recipient": True,
+            },
         )
     ]
+
+
+async def test_send_can_say_not_to_wake_the_recipient(client, calls):
+    """不说就叫醒；可以显式说不叫醒，方便验证收件方的处理。"""
+    r = await client.post(
+        "/admin/messaging/send",
+        json={
+            "sender": "world",
+            "recipient": "赤尾",
+            "body": "窗外起风了。",
+            "wakes_recipient": False,
+        },
+    )
+
+    assert r.status_code == 200
+    assert calls[-1][1]["wakes_recipient"] is False
 
 
 async def test_a_failed_send_can_be_retried_with_the_same_id(client, calls):
@@ -196,6 +218,23 @@ async def test_send_at(client, calls):
     assert r.status_code == 200
     assert r.json() == {"lane": LANE, "message_id": "s-1", "deliver_at": at}
     assert calls[0][1]["at"] == datetime.fromisoformat(at)
+    assert calls[0][1]["wakes_recipient"] is True
+
+
+async def test_send_at_can_say_not_to_wake_the_recipient(client, calls):
+    r = await client.post(
+        "/admin/messaging/send-at",
+        json={
+            "sender": "world",
+            "recipient": "赤尾",
+            "body": "快递到了。",
+            "at": "2026-09-29T18:30:00+08:00",
+            "wakes_recipient": False,
+        },
+    )
+
+    assert r.status_code == 200
+    assert calls[0][1]["wakes_recipient"] is False
 
 
 async def test_send_at_needs_a_timezone(client, calls):
@@ -265,7 +304,13 @@ async def test_chinese_participant_names_pass_through_body_and_query(client, cal
     assert calls == [
         (
             "send",
-            {"sender": "千凪", "recipient": "赤尾", "body": "姐姐，晚饭好了。", "message_id": None},
+            {
+                "sender": "千凪",
+                "recipient": "赤尾",
+                "body": "姐姐，晚饭好了。",
+                "message_id": None,
+                "wakes_recipient": True,
+            },
         ),
         ("read_record", {"message_id": None, "participant": "赤尾", "limit": 50}),
     ]

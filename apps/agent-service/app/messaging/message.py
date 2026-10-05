@@ -1,8 +1,15 @@
 """一条消息的形状、参与者名字的规则、三种操作交回给调用方的结果。
 
-外层只有五样：消息 id、发送方、接收方、时间、类型。其余一切（谁、什么时候、在哪、
-发生了什么）写在正文里，正文是自然语言。没有地点编号、没有房间 id——机制不知道也
-不需要知道世界里的任何结构。
+外层只有六样：消息 id、发送方、接收方、时间、类型、要不要叫醒收件人。其余一切（谁、什么
+时候、在哪、发生了什么）写在正文里，正文是自然语言。没有地点编号、没有房间 id——机制不知道
+也不需要知道世界里的任何结构。
+
+``wakes_recipient`` 是发件方对收件方说的：这一条要不要让你现在就来看。机制只负责把它原样带到
+收件方手里，收件方怎么用是它自己的事（三姐妹那边，不叫醒的消息等她下一次自己醒来时再看）。
+它在信封上，不在消息头里：收件方的处理函数只拿到信封，定时转交重新发布时消息头会换掉；也不写进
+正文：正文是自然语言，收件方不该去解析。它也不是一种 ``kind``：kind 说的是"这是什么"，叫不
+叫醒是另一回事。发件方不说就是叫醒，所以原来的发件方行为不变。旧版本发布的信封里没有这一项
+（还留在队列、定时队列、死信里的），解出来按叫醒，不因为缺它解不开。
 
 ``time`` 是这条消息的时间。定时送达的是指定送达的那个时刻；立即发送的默认是发送那一刻，
 发送方也可以给它所说的事发生的那一刻（比如补发一条早先没发出去的消息，沿用原来的时间），
@@ -105,15 +112,17 @@ class Message:
     recipient: str
     time: datetime
     kind: Kind
+    wakes_recipient: bool
     body: str
 
-    def to_json(self) -> dict[str, str]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "message_id": self.message_id,
             "sender": self.sender,
             "recipient": self.recipient,
             "time": self.time.isoformat(),
             "kind": str(self.kind),
+            "wakes_recipient": self.wakes_recipient,
             "body": self.body,
         }
 
@@ -125,8 +134,17 @@ class Message:
             recipient=participant(data["recipient"]),
             time=datetime.fromisoformat(data["time"]),
             kind=Kind(data["kind"]),
+            # 旧版本发布的没有这一项：按叫醒（见模块说明）。
+            wakes_recipient=_wakes(data.get("wakes_recipient", True)),
             body=str(data["body"]),
         )
+
+
+def _wakes(value: Any) -> bool:
+    """校验"要不要叫醒收件人"，原样交回；不是 ``True`` / ``False`` 就抛 ``ValueError``。"""
+    if not isinstance(value, bool):
+        raise ValueError(f"wakes_recipient must be true or false, not {value!r}")
+    return value
 
 
 def new_message(
@@ -137,6 +155,7 @@ def new_message(
     kind: Kind,
     time: datetime | None = None,
     message_id: str | None = None,
+    wakes_recipient: bool = True,
 ) -> Message:
     """造一条新消息。``message_id`` 只在重试一次失败的发送时给：沿用原来的 id。"""
     if message_id is not None and not (
@@ -149,6 +168,7 @@ def new_message(
         recipient=participant(recipient),
         time=time or datetime.now(UTC),
         kind=kind,
+        wakes_recipient=_wakes(wakes_recipient),
         body=message_body(body),
     )
 

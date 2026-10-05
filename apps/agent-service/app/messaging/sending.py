@@ -6,6 +6,8 @@
 * :func:`send` —— 对方没开设收件箱：不投递、记一行 ``not_delivered``、结果里
   ``delivered=False``。开设过：记一行 ``delivered`` 并投进收件箱（对方不在线也
   一直保留，等它上线）。消息的时间默认是发出那一刻，发送方也可以给它所说的事发生的那一刻。
+  要不要叫醒收件人（``wakes_recipient``，见 :mod:`app.messaging.message`）默认叫醒，
+  :func:`send_at` 一样。
 * :func:`ask` —— 投进对方收件箱旁边的问题队列（不进收件箱，所以不排在对方正在处理的普通
   消息后面），然后在本进程的私有回复队列上等。问题队列不在（对方没开设收件箱，或者还跑着
   没有问题队列的旧代码）就跟 ``send`` 一样不投递、记 ``not_delivered``。对方不在线、处理
@@ -101,12 +103,16 @@ async def send(
     body: str,
     message_id: str | None = None,
     time: datetime | None = None,
+    wakes_recipient: bool = True,
 ) -> Delivery:
     """立即发给 ``recipient``。
 
     ``time`` 是这条消息的时间，必须带时区，不给就是现在。消息说的是早先发生的事、又要按发生的
     先后排在对方那里时给它：比如补发一条当时没发出去的，给它原来的时间，发出那一刻会让它排到
     之后才发生的事后面。它只是消息上的时间，不推迟送达；要到某一刻才送达用 :func:`send_at`。
+
+    ``wakes_recipient`` 告诉收件人要不要现在就来看这一条，不说就是要。补发一条消息时跟 id 一样
+    沿用原来的。
     """
     if time is not None and time.tzinfo is None:
         raise ValueError("send needs a timezone-aware time")
@@ -117,6 +123,7 @@ async def send(
         kind=Kind.MESSAGE,
         time=time,
         message_id=message_id,
+        wakes_recipient=wakes_recipient,
     )
     return await deliver(message)
 
@@ -143,8 +150,12 @@ async def send_at(
     body: str,
     at: datetime,
     message_id: str | None = None,
+    wakes_recipient: bool = True,
 ) -> str:
-    """排一条 ``at`` 时刻送达的消息，返回消息 id。``at`` 必须带时区。"""
+    """排一条 ``at`` 时刻送达的消息，返回消息 id。``at`` 必须带时区。
+
+    ``wakes_recipient`` 同 :func:`send`：它在信封上，分段再排、到点转交都原样带着。
+    """
     if at.tzinfo is None:
         raise ValueError("send_at needs a timezone-aware time")
     if os.getenv("RABBITMQ_DISABLE_DELAYED") == "1":
@@ -159,6 +170,7 @@ async def send_at(
         kind=Kind.MESSAGE,
         time=at,
         message_id=message_id,
+        wakes_recipient=wakes_recipient,
     )
     await publish_recorded(
         message,

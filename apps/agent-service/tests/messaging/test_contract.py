@@ -32,7 +32,7 @@ pytestmark = pytest.mark.usefixtures("messaging_db")
 
 
 async def test_send_reaches_an_open_inbox(broker):
-    """发给某个具名参与者：送到它开设的收件箱，拥有者拿到的外层只有五样。"""
+    """发给某个具名参与者：送到它开设的收件箱，拥有者拿到的是发出去的那个信封。"""
     world = Inbox()
     inbox("world", on_message=world.on_message)
     await start_messaging()
@@ -376,6 +376,7 @@ async def test_the_same_message_delivered_twice_is_handled_once(broker):
         recipient="world",
         time=duplicate["message_time"],
         kind=Kind.MESSAGE,
+        wakes_recipient=True,
         body="一次。",
     ).to_json()
     assert await mq.publish_with_confirm(
@@ -447,6 +448,142 @@ async def test_a_message_held_by_a_crashed_peer_is_processed_after_its_lease(
     assert world.got == []
     await eventually(lambda: world.got, timeout=10)
     assert len(world.got) == 1
+
+
+# ---------------------------------------------------------------------------
+# 要不要叫醒收件人：发件方说了算，消息一路带着它
+#
+# 它在信封上，不在消息头里：拥有者的处理函数只拿到信封，定时转交、重试、重放各自重新发布一遍
+# 信封。所以这一组验的是"发件方说的，经过哪一条路到拥有者手里都还是那样"。
+# ---------------------------------------------------------------------------
+
+
+async def test_the_owner_gets_whether_to_wake_it_as_the_sender_said(broker):
+    """发件方不说就叫醒；说了不叫醒，拥有者拿到的就是不叫醒。"""
+    world = Inbox()
+    inbox("world", on_message=world.on_message)
+    await start_messaging()
+
+    unsaid = await send(sender="operator", recipient="world", body="下雨了。")
+    quiet = await send(
+        sender="operator", recipient="world", body="风停了。", wakes_recipient=False
+    )
+
+    await eventually(lambda: len(world.got) == 2)
+    wakes = {m.message_id: m.wakes_recipient for m in world.got}
+    assert wakes == {unsaid.message_id: True, quiet.message_id: False}
+
+
+async def test_a_scheduled_message_that_does_not_wake_stays_so_across_every_hop(
+    broker, monkeypatch
+):
+    """定时消息到点前要分段再排、到点时再转交一次：每一次都重新发布信封，不叫醒的一直不叫醒。"""
+    from app.messaging import broker as messaging_broker
+
+    monkeypatch.setattr(messaging_broker, "DELAY_LIMIT_MS", 600)
+    world = Inbox()
+    inbox("world", on_message=world.on_message)
+    await start_messaging()
+
+    at = datetime.now(UTC) + timedelta(seconds=2)
+    message_id = await send_at(
+        sender="operator", recipient="world", body="快递到了。", at=at, wakes_recipient=False
+    )
+
+    await eventually(lambda: world.got, timeout=10)
+    assert (world.got[0].message_id, world.got[0].wakes_recipient) == (message_id, False)
+
+
+async def test_a_message_that_does_not_wake_stays_so_through_retries_and_a_dead_letter_replay(
+    broker, monkeypatch
+):
+    from app.messaging import receiving
+    from app.messaging.dead_letters import replay_dead_letters
+
+    monkeypatch.setattr(
+        receiving,
+        "PROCESSING_RETRY",
+        RetryPolicy(n=3, backoff="linear", base_delay_ms=200, max_delay_ms=500, lease_ms=60_000),
+    )
+    world = Inbox(fail_times=3)
+    inbox("world", on_message=world.on_message)
+    await start_messaging()
+
+    delivery = await send(
+        sender="operator", recipient="world", body="会失败三次。", wakes_recipient=False
+    )
+    dead_letters = f"{ISOLATED_DEAD_LETTERS}_{LANE}"
+    await eventually(lambda: broker.depth(dead_letters), timeout=15)
+    await replay_dead_letters(limit=10, operator="test")
+
+    await eventually(lambda: world.got, timeout=10)
+    assert (world.got[0].message_id, world.got[0].wakes_recipient) == (
+        delivery.message_id,
+        False,
+    )
+
+
+async def test_a_message_that_does_not_wake_stays_so_when_put_back_behind_a_peers_lease(
+    broker, test_db
+):
+    """别的进程拿着它时，这一份按剩下的租约重新排回收件箱：排回去的那一份也不叫醒。"""
+    world = Inbox()
+    inbox("world", on_message=world.on_message)
+    await start_messaging()
+
+    message = new_message(
+        sender="operator",
+        recipient="world",
+        body="半路接管。",
+        kind=Kind.MESSAGE,
+        wakes_recipient=False,
+    )
+    async with test_db.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO runtime_inflight (edge_id, idempotent_key, data_table, "
+                "state, attempts, locked_until, worker_id) VALUES "
+                "('inbox:world@coe-msg', :k, 'inbox_world', 'processing', 1, "
+                "now() + interval '1 seconds', 'dead-peer:1')"
+            ),
+            {"k": message.message_id},
+        )
+    assert await mq.publish_with_confirm(
+        Route("inbox_world", "inbox.world", isolated=True), message.to_json(), lane=LANE
+    )
+
+    await eventually(lambda: world.got, timeout=10)
+    assert world.got[0].wakes_recipient is False
+
+
+async def test_a_message_an_older_version_left_behind_is_delivered_as_waking(broker):
+    """旧版本发布的信封没有这一项：在收件箱里的、在定时队列里的，都照常送到，按叫醒，不进死信。"""
+    from app.messaging.broker import SCHEDULED, headers, publish
+
+    world = Inbox()
+    inbox("world", on_message=world.on_message)
+    await start_messaging()
+
+    def old_format(body: str) -> dict:
+        envelope = new_message(
+            sender="operator", recipient="world", body=body, kind=Kind.MESSAGE
+        ).to_json()
+        del envelope["wakes_recipient"]
+        return envelope
+
+    waiting = old_format("在收件箱里等着的。")
+    scheduled = old_format("在定时队列里的。")
+    assert await mq.publish_with_confirm(
+        Route("inbox_world", "inbox.world", isolated=True), waiting, lane=LANE
+    )
+    await publish(SCHEDULED, scheduled, headers=headers(), delay_ms=0)
+
+    await eventually(lambda: len(world.got) == 2, timeout=10)
+    assert {m.message_id: m.wakes_recipient for m in world.got} == {
+        waiting["message_id"]: True,
+        scheduled["message_id"]: True,
+    }
+    assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0
 
 
 # ---------------------------------------------------------------------------

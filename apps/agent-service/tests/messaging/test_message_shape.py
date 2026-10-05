@@ -114,28 +114,56 @@ def test_the_longest_name_in_the_longest_lane_fits_every_queue_name_and_routing_
             assert len(_lane_rk(route.rk, longest_lane).encode()) <= 255
 
 
-def test_a_message_has_exactly_id_sender_recipient_time_kind_and_body():
-    """外层只有这五样加正文，没有地点编号、没有房间 id。"""
+def test_a_message_has_exactly_id_sender_recipient_time_kind_wake_and_body():
+    """外层只有这六样加正文，没有地点编号、没有房间 id。"""
     assert [f.name for f in dataclasses.fields(Message)] == [
         "message_id",
         "sender",
         "recipient",
         "time",
         "kind",
+        "wakes_recipient",
         "body",
     ]
 
 
-def test_a_message_survives_the_wire_unchanged():
+@pytest.mark.parametrize("wakes_recipient", [True, False])
+def test_a_message_survives_the_wire_unchanged(wakes_recipient):
     m = new_message(
         sender="operator",
         recipient="world",
         body="赤尾在 18:02 走进了厨房，打开冰箱。",
         kind=Kind.MESSAGE,
+        wakes_recipient=wakes_recipient,
     )
     back = Message.from_json(m.to_json())
     assert back == m
+    assert back.wakes_recipient is wakes_recipient
     assert back.time.tzinfo is not None
+
+
+def test_a_new_message_wakes_its_recipient_unless_the_sender_says_otherwise():
+    """发件方不说就叫醒：现有的发件方一个字不改，行为跟原来一样。"""
+    m = new_message(sender="world", recipient="akao", body="x", kind=Kind.MESSAGE)
+    assert m.wakes_recipient is True
+
+
+def test_a_message_from_an_older_version_without_the_attribute_wakes_its_recipient():
+    """旧版本留在队列、定时队列、死信里的消息没有这一项：按叫醒解出来，不因为缺它解不开。"""
+    old = new_message(sender="world", recipient="akao", body="x", kind=Kind.MESSAGE).to_json()
+    del old["wakes_recipient"]
+
+    assert Message.from_json(old).wakes_recipient is True
+
+
+@pytest.mark.parametrize("value", ["false", 0, None])
+def test_an_attribute_that_is_not_true_or_false_is_refused(value):
+    """写坏了的一项不猜：解不开，跟别的坏字段一样。"""
+    bad = new_message(sender="world", recipient="akao", body="x", kind=Kind.MESSAGE).to_json()
+    bad["wakes_recipient"] = value
+
+    with pytest.raises(ValueError):
+        Message.from_json(bad)
 
 
 def test_new_messages_get_distinct_ids_and_an_aware_time():

@@ -27,6 +27,7 @@ def _said(sender: str, body: str, *, minutes_ago: int = 0, message_id: str | Non
         recipient="world",
         time=datetime.now(UTC) - timedelta(minutes=minutes_ago),
         kind=Kind.MESSAGE,
+        wakes_recipient=True,
         body=body,
     )
 

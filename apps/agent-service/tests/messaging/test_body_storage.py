@@ -24,6 +24,7 @@ def _message(message_id: str, body: str) -> Message:
         recipient="akao",
         time=datetime.now(UTC),
         kind=Kind.MESSAGE,
+        wakes_recipient=True,
         body=body,
     )
 

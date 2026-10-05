@@ -48,6 +48,7 @@ async def _publish_again(message_id: str, body: str) -> None:
         recipient="world",
         time=datetime.now(UTC),
         kind=Kind.MESSAGE,
+        wakes_recipient=True,
         body=body,
     )
     assert await mq.publish_with_confirm(

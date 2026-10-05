@@ -11,6 +11,9 @@
 
 发送失败时回答里带着消息 id；带着它（请求里的 ``message_id``）重试，接收方按 id 去重。
 
+发和定时发都可以说这一条要不要叫醒收件人（``wakes_recipient``，不说就叫醒），用来验证收件方
+对不叫醒的消息怎么处理。
+
 **请求要去的泳道和实际落在的泳道不一致时，一条都不发。** 泳道没部署这个服务时，sidecar
 会把请求静默落回 prod 的 pod 上；通信机制按进程自己的部署泳道收发，落回 prod 就等于
 往 prod 的收件箱里发。所以六条路由都声明了 ``requires_lane_match``：请求带来的泳道
@@ -64,6 +67,7 @@ class OperatorSendRequest(Data):
     recipient: str
     body: str
     message_id: str | None = None
+    wakes_recipient: bool = True
 
     class Meta:
         transient = True
@@ -88,6 +92,7 @@ class OperatorSendAtRequest(Data):
     body: str
     at: datetime
     message_id: str | None = None
+    wakes_recipient: bool = True
 
     class Meta:
         transient = True
@@ -201,6 +206,7 @@ async def operator_send_node(req: OperatorSendRequest) -> OperatorSendResponse:
             recipient=req.recipient,
             body=req.body,
             message_id=req.message_id,
+            wakes_recipient=req.wakes_recipient,
         )
     return OperatorSendResponse(
         lane=_lane(),
@@ -238,6 +244,7 @@ async def operator_send_at_node(req: OperatorSendAtRequest) -> OperatorSendAtRes
             body=req.body,
             at=req.at,
             message_id=req.message_id,
+            wakes_recipient=req.wakes_recipient,
         )
     return OperatorSendAtResponse(
         lane=_lane(), message_id=message_id, deliver_at=req.at.isoformat()

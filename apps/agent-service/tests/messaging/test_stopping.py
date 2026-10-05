@@ -140,6 +140,7 @@ async def test_a_question_still_being_answered_at_stop_is_never_answered_again(
         recipient="world",
         time=datetime.now(UTC),
         kind=Kind.QUESTION,
+        wakes_recipient=True,
         body="厨房现在什么样？",
     )
     assert await mq.publish_with_confirm(
@@ -213,6 +214,7 @@ async def test_a_question_cancelled_while_being_marked_handled_is_never_answered
         recipient="world",
         time=datetime.now(UTC),
         kind=Kind.QUESTION,
+        wakes_recipient=True,
         body="在吗？",
     )
     assert await mq.publish_with_confirm(
