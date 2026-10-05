@@ -420,21 +420,33 @@ func TestSubmit_TokenChangeUpdatesSecret(t *testing.T) {
 // 旧 Secret 还在而更新失败时如果照样引用，Job 会带着旧 token 去克隆，
 // 旧 token 已撤销的话所有构建都 401 —— 比匿名还糟。optional 只管 Secret 不存在，挡不住这种情况。
 func TestSubmit_SecretSyncFailureClonesAnonymously(t *testing.T) {
+	secrets := schema.GroupResource{Resource: "secrets"}
 	tests := []struct {
 		name     string
 		existing bool
 		verb     string
+		err      error
 		cause    string // 错误原文里不带引号的部分：日志里的错误串会被转义
 	}{
 		{
-			name:     "旧 Secret 存在、更新失败",
+			// 同一实例两次提交并发 Get→Update，后到的那次带着过期的 resourceVersion
+			name:     "旧 Secret 存在、更新冲突",
 			existing: true,
 			verb:     "update",
-			cause:    "object was modified",
+			err:      apierrors.NewConflict(secrets, "kaniko-git-auth-prod", fmt.Errorf("the object has been modified; please apply your changes to the latest version and try again")),
+			cause:    "the object has been modified",
 		},
 		{
-			name:  "Secret 不存在、创建失败",
+			name:     "旧 Secret 存在、无权更新",
+			existing: true,
+			verb:     "update",
+			err:      apierrors.NewForbidden(secrets, "kaniko-git-auth-prod", fmt.Errorf("RBAC: update not allowed")),
+			cause:    "RBAC: update not allowed",
+		},
+		{
+			name:  "Secret 不存在、无权创建",
 			verb:  "create",
+			err:   apierrors.NewForbidden(secrets, "kaniko-git-auth-prod", fmt.Errorf("RBAC: create not allowed")),
 			cause: "RBAC: create not allowed",
 		},
 	}
@@ -448,7 +460,7 @@ func TestSubmit_SecretSyncFailureClonesAnonymously(t *testing.T) {
 				client = fake.NewSimpleClientset()
 			}
 			client.PrependReactor(tt.verb, "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
-				return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "kaniko-git-auth-prod", fmt.Errorf("%s", tt.cause))
+				return true, nil, tt.err
 			})
 			logs := captureLogs(t)
 
@@ -463,6 +475,32 @@ func TestSubmit_SecretSyncFailureClonesAnonymously(t *testing.T) {
 				t.Errorf("日志里不能出现 token")
 			}
 		})
+	}
+}
+
+// 同一实例的两次提交，第一次更新成功、第二次撞上 Conflict：只有第二次退回匿名克隆，
+// 第一次的 Job 照常引用 Secret。是否带凭据按每次提交各自的同步结果定，不是实例级的状态。
+func TestSubmit_ConflictOnlyDropsCredentialsForThatBuild(t *testing.T) {
+	client := fake.NewSimpleClientset(existingGitSecret("kaniko-git-auth-prod", "ghp_old_revoked"))
+	updates := 0
+	client.PrependReactor("update", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		updates++
+		if updates == 1 {
+			return false, nil, nil // 交给 fake 的默认存储，正常写入
+		}
+		return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, "kaniko-git-auth-prod",
+			fmt.Errorf("the object has been modified; please apply your changes to the latest version and try again"))
+	})
+	logs := captureLogs(t)
+	executor := newGitAuthExecutor(client, testGitToken, "prod")
+
+	first := submitBuild(t, client, executor, "build-1")
+	second := submitBuild(t, client, executor, "build-2")
+
+	assertReferencesGitSecret(t, first, "kaniko-git-auth-prod")
+	assertAnonymousClone(t, second)
+	if out := logs.String(); !strings.Contains(out, "secret=kaniko-git-auth-prod") || !strings.Contains(out, "the object has been modified") {
+		t.Errorf("第二次提交应打出点名 Secret 的冲突告警，实际: %s", out)
 	}
 }
 
