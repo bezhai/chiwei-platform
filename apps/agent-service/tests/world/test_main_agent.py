@@ -10,6 +10,9 @@ from datetime import timedelta
 
 import pytest
 
+from app.agent.continuity import CHECKPOINT_HEAD, estimate_tokens
+from app.agent.neutral import Message as Turn
+from app.agent.neutral import Role
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, wake
@@ -198,3 +201,48 @@ async def test_what_the_sources_return_is_trimmed_as_material(world, monkeypatch
 
     assert seen["material_tools"] == sources.material_tools()
     assert "write_record" not in seen["material_tools"]
+
+
+# ---------------------------------------------------------------------------
+# 它带进一轮的历史有多长：两三万 token
+# ---------------------------------------------------------------------------
+
+
+def _turns(n: int) -> list[Turn]:
+    """``n`` 条刚说过的话，每条按 :func:`app.agent.continuity.estimate_tokens` 估约 1k token。"""
+    return [
+        Turn(
+            role=Role.ASSISTANT if i % 2 else Role.USER,
+            content=f"第{i}条：" + "字" * 1000,
+        )
+        for i in range(n)
+    ]
+
+
+async def test_a_history_under_30k_tokens_is_carried_into_the_round_whole(world):
+    world.history = _turns(29)
+    assert 29_000 < estimate_tokens(world.history) < 30_000
+
+    await main_agent.on_world_message(
+        new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
+    )
+
+    *fed, marker, _ = world.runner.runs[0]
+    assert fed == _turns(29)
+    assert marker.content.startswith(CHECKPOINT_HEAD)
+
+
+async def test_a_history_over_30k_tokens_is_cut_back_to_20k_before_the_round(world):
+    world.history = _turns(31)
+    assert estimate_tokens(world.history) > 30_000
+
+    await main_agent.on_world_message(
+        new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
+    )
+
+    *fed, _ = world.runner.runs[0]
+    # 从最老的丢起，一降到 2 万以下就停：留下的是最新的那一段，后面跟着这一轮插入的清理标记。
+    assert 19_000 < estimate_tokens(fed) <= 20_000
+    *kept, marker = fed
+    assert kept == _turns(31)[-len(kept) :]
+    assert marker.content.startswith(CHECKPOINT_HEAD)
