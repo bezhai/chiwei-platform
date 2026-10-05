@@ -228,6 +228,15 @@ def test_perception_has_to_say_whether_to_wake_each_person():
     assert "default" not in parameters["properties"]["right_away"]
 
 
+def test_the_model_is_told_what_not_waking_does():
+    """false 不是"不告诉他"：这段话照样交给他，只是不为它打断他。模型据此判断，说明里要写清楚。"""
+    described = perception.someone_notices.definition.parameters["properties"]["right_away"]
+    assert described["description"] == (
+        "要不要现在就让他注意到。true：现在就打断他，让他注意到这件事；"
+        "false：不为这件事打断他，这段话照样会交给他，他过一会儿自己会看到"
+    )
+
+
 async def test_a_judgment_that_leaves_out_or_garbles_whether_to_wake_is_refused(world):
     async def plan(_input):
         plan.answers = [
