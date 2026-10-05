@@ -246,3 +246,80 @@ async def test_a_history_over_30k_tokens_is_cut_back_to_20k_before_the_round(wor
     *kept, marker = fed
     assert kept == _turns(31)[-len(kept) :]
     assert marker.content.startswith(CHECKPOINT_HEAD)
+
+
+def _says(text: str):
+    """定好下次醒来，最后说 ``text``。"""
+    wakes = sets_wake()
+
+    async def plan():
+        await wakes()
+        return text
+
+    return plan
+
+
+def _checkpoints(messages: list[Turn]) -> list[Turn]:
+    return [
+        m
+        for m in messages
+        if isinstance(m.content, str) and m.content.startswith(CHECKPOINT_HEAD)
+    ]
+
+
+def _from_operator():
+    return new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
+
+
+async def test_a_checkpoint_cut_away_on_write_back_comes_back_with_the_records_next_round(
+    world, monkeypatch
+):
+    """同一个整点里接连跑了很多轮：存回去时硬顶把这个整点的清理标记连同记录目录裁掉了，
+    下一轮再插一条同一时刻的，记录目录跟着回到眼前。"""
+    from app.world import records
+
+    at = now_cst()
+    monkeypatch.setattr(main_agent, "now_cst", lambda: at)
+    records.write("地方/厨房.md", "灶上炖着汤。", expected=None)
+    world.history = []
+    await main_agent.on_world_message(_from_operator())
+    [first] = _checkpoints(world.history)
+    assert "地方/厨房.md" in first.content
+
+    # 这个整点里后来又跑了很多轮，历史快到 3 万；这一轮自己再说一段，存回去时撞上硬顶。
+    world.history = [*world.history, *_turns(28)]
+    world.runner.plan = _says("字" * 6000)
+    await main_agent.on_world_message(_from_operator())
+
+    assert first in world.runner.runs[1]
+    stored = world.committed[-1]["messages"]
+    assert estimate_tokens(stored) <= 20_000
+    assert _checkpoints(stored) == []
+
+    world.runner.plan = sets_wake()
+    await main_agent.on_world_message(_from_operator())
+
+    *fed, again, _ = world.runner.runs[2]
+    assert _checkpoints(fed) == []
+    assert again.content == first.content
+
+
+async def test_a_round_that_alone_runs_over_30k_is_stored_whole_and_cut_on_the_next_read(
+    world,
+):
+    world.history = _turns(5)
+    long = "字" * 31_000
+    world.runner.plan = _says(long)
+    await main_agent.on_world_message(_from_operator())
+
+    # 存回去时这一轮自己的输入和产出一条不丢，哪怕它们自己就超过了 3 万。
+    stored = world.committed[-1]["messages"]
+    assert stored == [world.runner.runs[0][-1], Turn(role=Role.ASSISTANT, content=long)]
+    assert estimate_tokens(stored) > 30_000
+
+    world.runner.plan = sets_wake()
+    await main_agent.on_world_message(_from_operator())
+
+    # 下一轮读出来先裁：超过顶的那一轮整组丢掉，只剩这一轮插入的清理标记。
+    [marker, _] = world.runner.runs[1]
+    assert marker.content.startswith(CHECKPOINT_HEAD)
