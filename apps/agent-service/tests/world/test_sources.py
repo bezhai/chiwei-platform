@@ -268,7 +268,7 @@ async def test_a_name_no_city_matches_is_found_as_a_scenic_spot(monkeypatch):
     fake = qw.install(
         monkeypatch,
         {
-            CITY: qw.problem(400, "NO SUCH LOCATION"),
+            CITY: qw.problem(400, qw.NO_SUCH_LOCATION),
             POI: qw.ok(qw.POIS),
             "/weather/v1/current": qw.ok(qw.CURRENT),
         },
@@ -283,7 +283,10 @@ async def test_a_name_no_city_matches_is_found_as_a_scenic_spot(monkeypatch):
 async def test_a_name_that_matches_nothing_sends_no_weather_request(monkeypatch):
     fake = qw.install(
         monkeypatch,
-        {CITY: qw.problem(400, "NO SUCH LOCATION"), POI: qw.problem(400, "NO SUCH LOCATION")},
+        {
+            CITY: qw.problem(400, qw.NO_SUCH_LOCATION),
+            POI: qw.problem(400, qw.NO_SUCH_LOCATION),
+        },
     )
 
     shown = await _call(reality.check_current_weather, place="不存在")
@@ -315,12 +318,12 @@ async def test_an_out_of_range_span_tells_the_range_without_a_request(
 
 async def test_an_upstream_error_is_a_tool_error_without_the_key(monkeypatch):
     fake = qw.install(
-        monkeypatch, {CITY: qw.problem(403, "INVALID HOST"), POI: qw.ok(qw.POIS)}
+        monkeypatch, {CITY: qw.problem(403, "Invalid Host"), POI: qw.ok(qw.POIS)}
     )
 
     outcome = await _call(reality.check_current_weather, place="甲")
 
     assert outcome["kind"] == "tool_error"
-    assert "403 INVALID HOST" in outcome["message"]
+    assert "403 Invalid Host" in outcome["message"]
     assert qw.KEY not in str(outcome)
     assert fake.paths == [CITY]
