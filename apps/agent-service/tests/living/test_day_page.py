@@ -138,7 +138,9 @@ async def _happened(
     )
 
 
-async def _received(persona: str, sender: str, body: str, at: dt.datetime) -> None:
+async def _received(
+    persona: str, sender: str, body: str, at: dt.datetime, *, wakes_her: bool = True
+) -> None:
     """一条传到她这里的消息，跟收件箱存下的一样（:func:`app.living.received.receive`）。"""
     from app.runtime.persist import insert_idempotent
 
@@ -150,7 +152,7 @@ async def _received(persona: str, sender: str, body: str, at: dt.datetime) -> No
             sender=sender,
             body=body,
             message_time=at,
-            wakes_recipient=True,
+            wakes_recipient=wakes_her,
         )
     )
 
@@ -316,6 +318,16 @@ async def test_what_world_told_her_is_in_it_as_it_was_told(page_db):
     lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
 
     assert lines == ["16:00 CST 窗外开始下雨了。"], lines
+
+
+@pytest.mark.integration
+async def test_what_reached_her_without_waking_her_is_in_her_day_too(page_db):
+    """不叫醒她的告知只是没把她提前叫来，照样是她那一天传到她这里的事。"""
+    await _received("akao", "world", "窗外的雨小了一点。", _on(25, 16), wakes_her=False)
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
+
+    assert lines == ["16:00 CST 窗外的雨小了一点。"], lines
 
 
 @pytest.mark.integration
