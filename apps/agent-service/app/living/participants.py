@@ -52,6 +52,18 @@ class Residents:
                 return persona_id
         return None
 
+    def names_for(self, who: list[str]) -> list[str]:
+        """她记下的"说给谁"摆到她眼前时的样子：三姐妹的 id 换成她在世界里的名字，其余原样。
+
+        ``say`` 以前收的是 id，那时记下的说给谁就是 ``chinagi`` 这种；她在自己的记录里看到它，
+        下一次就照着它去叫人（还会写错成别的串）。所以她眼前不出现 id，旧记录也一样。不是三姐妹
+        的（世界里的人、写错的名字）原样留着，那是她写下的。同一个人写了两种叫法只留一次，按
+        出现的先后。
+
+        只管摆给她看。发消息时谁算姐妹仍然只认名字（:meth:`sisters_in`）。
+        """
+        return list(dict.fromkeys(self.by_persona.get(w, w) for w in who))
+
     def sisters_in(self, names: list[str], *, speaker: str) -> list[str]:
         """``names`` 里哪几个是 ``speaker``（persona_id）的姐妹：三姐妹之一、又不是她自己。
 

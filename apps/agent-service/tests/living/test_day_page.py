@@ -356,6 +356,17 @@ async def test_her_phone_messages_and_take_backs_stay_in_her_day(page_db):
 
 
 @pytest.mark.integration
+async def test_a_sister_named_by_id_in_her_day_reads_as_her_name(page_db):
+    """那一天的记录里说给谁记的是 life 内部的 id 时，摆给她写日记的材料里换成姐妹的名字。"""
+    await _happened("akao", "开饭了。", _on(25, 18), to=["chinagi", "许阿姨"])
+
+    joined = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY))
+
+    assert "你对 千凪、许阿姨 说：「开饭了。」" in joined
+    assert "chinagi" not in joined
+
+
+@pytest.mark.integration
 async def test_her_day_reads_in_the_order_things_happened(page_db):
     """按事情发生的先后排，不按到达的先后：早发生的告知晚到了，也排在它发生的那一刻。"""
     await _happened("akao", "出门去车站", _on(25, 10), kind=KIND_ACT)

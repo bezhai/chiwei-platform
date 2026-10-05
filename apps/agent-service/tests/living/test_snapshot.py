@@ -435,10 +435,28 @@ async def test_what_she_said_face_to_face_carries_no_handle(snap_db):
     )
     text = snap.render_state()
 
-    assert "- 14:05 CST 你对 ayana 说：「布丁我吃了。」" in text
+    assert "- 14:05 CST 你对 绫奈 说：「布丁我吃了。」" in text
     assert "［" not in text, (
         f"当面说的话也带上了编号 —— 她照它去撤只会撤了个空。拿到：\n{text}"
     )
+
+
+@pytest.mark.integration
+async def test_a_sister_named_by_id_in_her_records_reads_as_her_name(snap_db):
+    """她以前的记录里，说给谁记的是 life 内部的 id（``say`` 当时收的就是 id）。摆到她眼前时
+    换成姐妹在世界里的名字：她看到的是 ``chinagi``，下一次就照着 ``chinagi`` 去叫人。
+    不是三姐妹的名字原样摆；同一个人写了两种叫法只摆一次。"""
+    await _say("akao", "布丁我吃了。", _at(14, 5), to=["ayana"])
+    await _say("akao", "开饭了。", _at(14, 6), to=["绫奈", "chinagi", "许阿姨"])
+    await _say("akao", "汤好了。", _at(14, 7), to=["千凪", "chinagi"])
+
+    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 10))
+    text = snap.render_state()
+
+    assert "- 14:05 CST 你对 绫奈 说：「布丁我吃了。」" in text
+    assert "- 14:06 CST 你对 绫奈、千凪、许阿姨 说：「开饭了。」" in text
+    assert "- 14:07 CST 你对 千凪 说：「汤好了。」" in text
+    assert "ayana" not in text and "chinagi" not in text, text
 
 
 @pytest.mark.integration

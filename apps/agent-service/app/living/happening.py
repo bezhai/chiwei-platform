@@ -28,6 +28,7 @@ from datetime import datetime
 from sqlalchemy import text
 
 from app.data.session import get_session
+from app.living.participants import residents
 from app.living.records import (
     KIND_SPEECH,
     MEDIUM_IN_PERSON,
@@ -146,7 +147,8 @@ def own_line(h: Happening) -> str:
     **``content`` 不过 :func:`app.living.records.esc`，这是有意的。** 这一段印的全是
     她自己这一侧的模型写下的字：她说的话（``say`` / 嘴发出去的那句）、她做的事
     （``act``）、她去撤的那句原话，``audience`` 里也是她自己在 ``say`` 的 ``to`` 里写下的
-    名字。没有任何一条逐字通道让第三方决定这里的字节。别的参与者写下的字（她收到的消息）
+    名字（三姐妹的 id 换成她们的名字，见 :meth:`app.living.participants.Residents.names_for`）。
+    没有任何一条逐字通道让第三方决定这里的字节。别的参与者写下的字（她收到的消息）
     过，见 :func:`app.living.received.received_line`。给她自己的话套上 ``&quot;`` 是拿她读
     自己记忆的清晰度，换一个这条路上根本不存在的威胁。完整判据写在
     :func:`app.living.records.esc` 上。
@@ -156,5 +158,6 @@ def own_line(h: Happening) -> str:
     if h.kind != KIND_SPEECH:
         return f"你 {h.content}{tail}"
     if h.audience:
-        return f"你对 {'、'.join(h.audience)} 说：「{h.content}」{tail}"
+        to = "、".join(residents().names_for(h.audience))
+        return f"你对 {to} 说：「{h.content}」{tail}"
     return f"你说：「{h.content}」{tail}"
