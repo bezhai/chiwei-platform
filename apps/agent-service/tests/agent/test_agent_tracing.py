@@ -35,6 +35,8 @@ TYPE = LangfuseOtelSpanAttributes.OBSERVATION_TYPE
 PROMPT_NAME = LangfuseOtelSpanAttributes.OBSERVATION_PROMPT_NAME
 PROMPT_VERSION = LangfuseOtelSpanAttributes.OBSERVATION_PROMPT_VERSION
 TRACE_NAME = LangfuseOtelSpanAttributes.TRACE_NAME
+LEVEL = LangfuseOtelSpanAttributes.OBSERVATION_LEVEL
+STATUS = LangfuseOtelSpanAttributes.OBSERVATION_STATUS_MESSAGE
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +363,83 @@ async def test_extract_records_the_model_it_hands_back_on_the_root_span(
 
     root = _one(exported_spans, "post-safety-check")
     assert json.loads(root.attributes[OUTPUT]) == verdict.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
+# 没答完就结束的调用，根和 generation 都记成错误，带上为什么
+# ---------------------------------------------------------------------------
+
+
+async def test_a_failed_model_call_is_an_error_on_the_generation_and_the_root(
+    exported_spans, models, prompts
+):
+    prompts["living_life_moment"] = _prompt("living_life_moment", 8)
+    models["life-model"] = _ScriptedModel(
+        "life-model", turns=[RuntimeError("模型挂了")]
+    )
+
+    with pytest.raises(RuntimeError):
+        await Agent(LIFE_MOMENT).run([_user("醒了")], max_retries=1)
+
+    for span in [
+        _one(exported_spans, "living-life-moment"),
+        *_generations(exported_spans),
+    ]:
+        assert span.attributes[LEVEL] == "ERROR"
+        assert span.attributes[STATUS] == "RuntimeError: 模型挂了"
+
+
+async def test_a_run_cut_off_from_outside_is_an_error_on_the_generation_and_the_root(
+    exported_spans, models, prompts
+):
+    """moment 的 900 秒占用就是这样结束卡住的那一轮的。
+
+    取消是 ``BaseException``，OTel 不给它设错误状态：之前根和 generation 在 Langfuse 里都是
+    DEFAULT、没有输出，跟一次没出事的调用看不出区别。
+    """
+    prompts["living_life_moment"] = _prompt("living_life_moment", 8)
+    models["life-model"] = _ScriptedModel("life-model", turns=[HANG])
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await Agent(LIFE_MOMENT).run([_user("醒了")], max_retries=1)
+
+    for span in [
+        _one(exported_spans, "living-life-moment"),
+        *_generations(exported_spans),
+    ]:
+        assert span.attributes[LEVEL] == "ERROR"
+        assert span.attributes[STATUS] == "CancelledError"
+
+
+async def test_a_stream_its_consumer_stops_pulling_is_not_an_error(
+    exported_spans, models, prompts
+):
+    """消费方拿够了就不往下拉（拿到 content_filter 就收手）：这次调用该交的都交了。"""
+    prompts["world_round"] = _prompt("world_round", 3)
+    models["world-model"] = _ScriptedModel(
+        streams=[[StreamChunk(text="先"), StreamChunk(text="看看")]]
+    )
+
+    stream = Agent(WORLD_ROUND).stream([_user("醒了")])
+    await anext(stream)
+    await stream.aclose()
+
+    assert _one(exported_spans, "world-round").attributes.get(LEVEL) != "ERROR"
+
+
+async def test_a_generation_its_consumer_stops_pulling_is_not_an_error(exported_spans):
+    async def chunks() -> AsyncIterator[int]:
+        with generation_span(name="m", model="m", input=[]):
+            yield 1
+            yield 2
+
+    stream = chunks()
+    assert await anext(stream) == 1
+    await stream.aclose()
+
+    [generation] = _generations(exported_spans)
+    assert generation.attributes.get(LEVEL) != "ERROR"
 
 
 # ---------------------------------------------------------------------------

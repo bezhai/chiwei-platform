@@ -83,6 +83,7 @@ from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
     TURN_TRACE_NAME,
     current_turn_trace_id,
+    mark_failed,
     rendered_from,
     under_last_generation,
 )
@@ -255,8 +256,9 @@ def _safe_current_span(
     *entering / exiting* its context manager are guarded: any langfuse / OTel
     failure degrades to a no-op span while the body still runs. The body's own
     exceptions (e.g. a retryable LLM error) are NOT swallowed — they propagate
-    so the Agent's retry logic still sees them; only span ``__exit__`` failures
-    on the way out are swallowed.
+    so the Agent's retry logic still sees them, after the span is marked as
+    failed with the reason (``mark_failed``); only span ``__exit__`` failures on
+    the way out are swallowed.
 
     ``trace_context`` (e.g. ``{"trace_id": ...}``) attaches the span to an
     existing trace; used by ``_root_span`` to fold one turn's guard + main spans
@@ -277,6 +279,7 @@ def _safe_current_span(
         yield span
     except BaseException as exc:  # noqa: BLE001 - re-raised after closing span
         body_exc = exc
+        mark_failed(span, exc)
         raise
     finally:
         try:

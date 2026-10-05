@@ -26,6 +26,7 @@ not take the token accounting with it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -442,6 +443,28 @@ class _SafeSpan:
             logger.warning("langfuse generation end failed: %s", exc)
 
 
+def mark_failed(span: Any, exc: BaseException) -> None:
+    """把这个 span 记成失败（level ERROR），带上为什么；``exc`` 不算失败时什么都不做。
+
+    OTel 只给 ``Exception`` 设错误状态，``CancelledError`` 是 ``BaseException``：被外面的期限
+    掐断的那次调用（moment 的 900 秒占用就是这么结束卡住的那次调用的）不留任何错误，在 Langfuse
+    里是 DEFAULT、没有输出，跟一次没出事的调用看不出区别。所以这里直接写 Langfuse 的 level 和
+    status message，不靠服务端从 OTel 状态推断。
+
+    ``GeneratorExit`` 不算失败：那是流式调用的消费方不再往下拉（拿到 content_filter 就收手），
+    这次调用该交的都交了。
+
+    记不上就算了：tracing 不能把调用本身搞坏。
+    """
+    if not isinstance(exc, (Exception, asyncio.CancelledError)):
+        return
+    reason = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    try:
+        span.update(level="ERROR", status_message=reason)
+    except Exception as err:  # pragma: no cover - tracing must not break the call
+        logger.warning("langfuse span failure mark failed: %s", err)
+
+
 @contextmanager
 def generation_span(
     *,
@@ -456,7 +479,8 @@ def generation_span(
     Yields the generation object; the caller records the result with
     ``span.update(output=..., usage_details=...)`` once the response arrives.
     The span is closed (``.end()``) on context exit — including on exception,
-    so a failed call still produces a (truncated) span rather than vanishing.
+    so a failed call still produces a (truncated) span rather than vanishing,
+    marked as failed with the reason (``mark_failed``).
 
     A langfuse failure (unconfigured keys, network) degrades to a no-op span;
     the wrapped LLM call always proceeds.
@@ -492,6 +516,7 @@ def generation_span(
         yield span
     except BaseException as exc:  # noqa: BLE001 - re-raised after closing span
         body_exc = exc
+        mark_failed(span, exc)
         raise
     finally:
         try:
