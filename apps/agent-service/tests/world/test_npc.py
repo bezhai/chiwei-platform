@@ -8,6 +8,7 @@ from __future__ import annotations
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, npc, perception
 from app.world.actions import let_npc_appear
+from app.world.agents import when
 from app.world.sources import query_tools
 
 from .conftest import LANE, ScriptedAgent, sets_wake, tools_built_for
@@ -28,7 +29,7 @@ def passes_on_what_it_was_told(to: str):
 
     async def plan(perception_input):
         change = perception_input.split("【世界里发生的变化】\n", 1)[1]
-        await perception.someone_notices.invoke({"who": to, "what": change})
+        await perception.someone_notices.invoke({"who": to, "what": change, "right_away": True})
         return "判断完了。"
 
     return ScriptedAgent(plan)
@@ -48,11 +49,14 @@ def lets_appear(*appearances: tuple[str, str]):
     return plan
 
 
+TRIGGER = new_message(
+    sender="ayana", recipient="world", body="我把画拿给老师看。", kind=Kind.MESSAGE
+)
+
+
 async def _a_round(world, plan):
     world.runner.plan = plan
-    await main_agent.on_world_message(
-        new_message(sender="ayana", recipient="world", body="我把画拿给老师看。", kind=Kind.MESSAGE)
-    )
+    await main_agent.on_world_message(TRIGGER)
     return plan.results
 
 
@@ -73,6 +77,23 @@ async def test_what_the_resident_is_told_comes_from_the_npc_agent_not_the_main_a
     assert world.sent == [{"sender": "world", "recipient": "ayana", "body": LINES}]
     # 主 agent 看到他的言行和告知了谁。
     assert LINES in result and "ayana" in result
+
+
+async def test_perception_of_an_npcs_words_sees_the_message_that_woke_this_round(world):
+    """跟报告变化一样：感知判断知道这一轮是谁发来的什么叫醒的，NPC 的言行接在后面。"""
+    judge = passes_on_what_it_was_told("ayana")
+    world.agents[npc.NPC.prompt_id] = plays(LINES)
+    world.agents[perception.PERCEPTION.prompt_id] = judge
+
+    await _a_round(world, lets_appear(("美术老师", SITUATION)))
+
+    [seen] = judge.inputs
+    assert seen.split("\n")[1:] == [
+        f"【叫醒世界的消息】ayana 发来（{when(TRIGGER.time)}）：",
+        "我把画拿给老师看。",
+        "【世界里发生的变化】",
+        LINES,
+    ]
 
 
 async def test_the_npc_agent_has_its_own_prompt_trace_cost_and_only_the_sources_tools(world):

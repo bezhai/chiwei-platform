@@ -13,17 +13,21 @@ import app.world
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, perception
 from app.world.actions import ACTIONS, report_change
+from app.world.agents import when
 from app.world.sources import query_tools
 
 from .conftest import LANE, ScriptedAgent, sets_wake, tools_built_for
 
 
-def judges(*judgments: tuple[str, str], said: str = "判断完了。"):
-    """感知判断替身：按顺序判断这些人会察觉到什么。"""
+def judges(*judgments: tuple, said: str = "判断完了。"):
+    """感知判断替身：按顺序判断这些人会察觉到什么。每条是 (谁, 察觉到什么)，或者再加一项要不要
+    现在就让他注意到（不写就是要）。"""
 
     async def plan(_input):
-        for who, what in judgments:
-            await perception.someone_notices.invoke({"who": who, "what": what})
+        for who, what, *right_away in judgments:
+            await perception.someone_notices.invoke(
+                {"who": who, "what": what, "right_away": right_away[0] if right_away else True}
+            )
         return said
 
     return ScriptedAgent(plan)
@@ -120,9 +124,15 @@ async def test_perception_runs_with_its_own_prompt_trace_and_the_sources_tools(w
 async def test_a_judgment_naming_world_itself_or_an_unusable_name_is_refused(world):
     async def plan(_input):
         plan.answers = [
-            await perception.someone_notices.invoke({"who": "world", "what": "x"}),
-            await perception.someone_notices.invoke({"who": "has space", "what": "x"}),
-            await perception.someone_notices.invoke({"who": "ayana", "what": "  "}),
+            await perception.someone_notices.invoke(
+                {"who": "world", "what": "x", "right_away": True}
+            ),
+            await perception.someone_notices.invoke(
+                {"who": "has space", "what": "x", "right_away": True}
+            ),
+            await perception.someone_notices.invoke(
+                {"who": "ayana", "what": "  ", "right_away": True}
+            ),
         ]
         return "好。"
 
@@ -146,10 +156,16 @@ async def test_a_body_messaging_would_refuse_goes_back_to_perception_and_is_neve
 
     async def plan(_input):
         plan.answers = [
-            await perception.someone_notices.invoke({"who": "akao", "what": "门响了\x00一声。"}),
-            await perception.someone_notices.invoke({"who": "chinagi", "what": "门响了\ud800一声。"}),
+            await perception.someone_notices.invoke(
+                {"who": "akao", "what": "门响了\x00一声。", "right_away": True}
+            ),
+            await perception.someone_notices.invoke(
+                {"who": "chinagi", "what": "门响了\ud800一声。", "right_away": True}
+            ),
         ]
-        await perception.someone_notices.invoke({"who": "ayana", "what": "门响了一声。"})
+        await perception.someone_notices.invoke(
+            {"who": "ayana", "what": "门响了一声。", "right_away": True}
+        )
         return "好。"
 
     world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
@@ -174,6 +190,103 @@ async def test_a_change_messaging_could_not_carry_is_handed_back_before_anyone_j
     assert "没有报告" in result
     assert judge.inputs == [] and world.sent == []
     assert not (volume / LANE / "unfinished.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# 要不要现在就让他注意到：每条告知由感知判断自己说，代码不替它定
+# ---------------------------------------------------------------------------
+
+
+async def test_each_notice_wakes_its_recipient_or_not_as_perception_judged(world):
+    world.agents[perception.PERCEPTION.prompt_id] = judges(
+        ("ayana", "楼下有人喊你的名字。", True), ("akao", "窗外的雨小了一点。", False)
+    )
+
+    await _a_round(world, reports("楼下有人在喊，雨也小了。"))
+
+    assert [s["recipient"] for s in world.sent] == ["ayana", "akao"]
+    assert world.sent_wakes == [True, False]
+
+
+async def test_judging_the_same_person_again_also_replaces_whether_to_wake_them(world):
+    world.agents[perception.PERCEPTION.prompt_id] = judges(
+        ("ayana", "先这么想。", True), ("ayana", "改成这样。", False)
+    )
+
+    await _a_round(world, reports("下雨了。"))
+
+    assert [(s["body"], wakes) for s, wakes in zip(world.sent, world.sent_wakes, strict=True)] == [
+        ("改成这样。", False)
+    ]
+
+
+def test_perception_has_to_say_whether_to_wake_each_person():
+    """这一项必填、没有默认值：每条告知都由模型自己判断，不由代码替它补一个。"""
+    parameters = perception.someone_notices.definition.parameters
+    assert "right_away" in parameters["required"]
+    assert parameters["properties"]["right_away"]["type"] == "boolean"
+    assert "default" not in parameters["properties"]["right_away"]
+
+
+async def test_a_judgment_that_leaves_out_or_garbles_whether_to_wake_is_refused(world):
+    async def plan(_input):
+        plan.answers = [
+            await perception.someone_notices.invoke({"who": "ayana", "what": "下雨了。"}),
+            await perception.someone_notices.invoke(
+                {"who": "akao", "what": "下雨了。", "right_away": "false"}
+            ),
+        ]
+        return "好。"
+
+    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+
+    await _a_round(world, reports("下雨了。"))
+
+    assert [a.get("kind") for a in plan.answers] == ["tool_error", "invalid_args"]
+    assert world.sent == []
+
+
+# ---------------------------------------------------------------------------
+# 感知判断知道这一轮是被谁的什么消息叫醒的：做事的人已经知道自己做了什么
+# ---------------------------------------------------------------------------
+
+
+async def test_perception_sees_who_sent_the_message_that_woke_this_round_and_what_it_said(
+    world,
+):
+    judge = judges()
+    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.runner.plan = reports("窗关上之后，屋里的雨声小了。")
+    trigger = new_message(
+        sender="赤尾", recipient="world", body="我起身把窗关上了。", kind=Kind.MESSAGE
+    )
+
+    await main_agent.on_world_message(trigger)
+
+    [seen] = judge.inputs
+    assert seen.split("\n")[1:] == [
+        f"【叫醒世界的消息】赤尾 发来（{when(trigger.time)}）：",
+        "我起身把窗关上了。",
+        "【世界里发生的变化】",
+        "窗关上之后，屋里的雨声小了。",
+    ]
+
+
+async def test_perception_is_told_when_world_woke_on_its_own(world):
+    judge = judges()
+    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.runner.plan = reports("傍晚了，街灯亮了。")
+    own_wake = new_message(
+        sender="world", recipient="world", body="看看傍晚的街上。", kind=Kind.MESSAGE
+    )
+
+    await main_agent.run_round(own_wake)
+
+    [seen] = judge.inputs
+    assert seen.split("\n")[1:3] == [
+        f"【叫醒世界的消息】世界自己定的一次醒来（{when(own_wake.time)}），不是谁发来的：",
+        "看看傍晚的街上。",
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -183,7 +183,7 @@ async def run_round(trigger: Message) -> None:
             trigger, now=now, planned=read_next_wake(), left_over=left_over
         ),
     )
-    scope = RoundScope()
+    scope = RoundScope(woken_by=trigger)
     context = AgentContext(
         session_id=key, features={ROUND_SCOPE: scope, RECORDS_READ: {}}
     )

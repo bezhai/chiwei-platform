@@ -25,10 +25,14 @@ class Crash(BaseException):
     """进程在这一步死了：什么都接不住它。"""
 
 
-def judges(*judgments: tuple[str, str]):
+def judges(*judgments: tuple):
+    """每条是 (谁, 察觉到什么)，或者再加一项要不要现在就让他注意到（不写就是要）。"""
+
     async def plan(_input):
-        for who, what in judgments:
-            await perception.someone_notices.invoke({"who": who, "what": what})
+        for who, what, *right_away in judgments:
+            await perception.someone_notices.invoke(
+                {"who": who, "what": what, "right_away": right_away[0] if right_away else True}
+            )
         return "判断完了。"
 
     return ScriptedAgent(plan)
@@ -384,6 +388,60 @@ async def test_every_change_a_failed_round_reported_is_kept_in_order(world):
 
 
 # ---------------------------------------------------------------------------
+# 要不要叫醒收件人：跟告知一起记下，补发时原样带着
+# ---------------------------------------------------------------------------
+
+
+async def test_whether_each_notice_wakes_is_kept_and_a_resend_after_a_restart_keeps_it(world):
+    world.agents[perception.PERCEPTION.prompt_id] = judges(
+        ("ayana", "楼下有人喊你。", True), ("akao", "窗外的雨小了一点。", False)
+    )
+    world.before_send = crash_on_send(1, Crash())
+    world.runner.plan = reports("楼下有人在喊，雨也小了。")
+
+    with pytest.raises(Crash):
+        await main_agent.on_world_message(_message())
+    [happening] = unfinished.read()
+    assert [(n.who, n.wakes_recipient) for n in happening.notices] == [
+        ("ayana", True),
+        ("akao", False),
+    ]
+
+    world.before_send = None
+    world.runner.plan = sets_wake()
+    await main_agent.on_world_message(_message())
+
+    assert [s["recipient"] for s in world.sent] == ["ayana", "akao"]
+    assert world.sent_wakes == [True, False]
+    assert world.sent_ids == [n.message_id for n in happening.notices]
+
+
+async def test_a_file_an_older_version_wrote_is_resent_as_waking(world, volume):
+    """旧版本写下的告知没有"要不要叫醒"这一项：照常补发，按叫醒，不把整份文件挪开。"""
+    path = volume / LANE / "unfinished.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "at": "2026-10-02T09:00:00+08:00",
+                    "what": "你报告了一个变化：下雨了。",
+                    "notices": [{"who": "ayana", "what": "下雨了。", "message_id": "kept-1"}],
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    world.runner.plan = sets_wake()
+
+    await main_agent.on_world_message(_message())
+
+    assert (world.sent_ids, world.sent_wakes) == (["kept-1"], [True])
+    assert _set_aside(volume) == []
+    assert "下雨了。" in _round_input(world)
+
+
+# ---------------------------------------------------------------------------
 # 读不出来的文件：挪到旁边留给人，不当成"没有"，也不被覆盖、删掉
 # ---------------------------------------------------------------------------
 
@@ -403,13 +461,39 @@ def _half_broken() -> str:
     )
 
 
+def _garbled_wake() -> str:
+    """一条告知的"要不要叫醒"写坏了：不是 true / false。"""
+    return json.dumps(
+        [
+            {
+                "at": "2026-10-02T09:00:00+08:00",
+                "what": "你报告了一个变化：下雨了。",
+                "notices": [
+                    {
+                        "who": "ayana",
+                        "what": "下雨了。",
+                        "message_id": "kept-1",
+                        "wakes_recipient": "no",
+                    }
+                ],
+            },
+        ],
+        ensure_ascii=False,
+    )
+
+
 def _set_aside(volume) -> list:
     return sorted((volume / LANE).glob("unfinished.json.unreadable-*"))
 
 
 @pytest.mark.parametrize(
     "content",
-    [_half_broken().encode("utf-8"), "不是 JSON".encode(), b"\xff\xfe broken utf-8"],
+    [
+        _half_broken().encode("utf-8"),
+        _garbled_wake().encode("utf-8"),
+        "不是 JSON".encode(),
+        b"\xff\xfe broken utf-8",
+    ],
 )
 async def test_an_unreadable_file_is_set_aside_logged_and_the_round_goes_on(
     world, volume, caplog, content

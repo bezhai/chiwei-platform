@@ -12,6 +12,7 @@ import pytest
 from app.agent.context import AgentContext
 from app.agent.runtime_context import agent_context
 from app.infra.cst_time import CST, now_cst
+from app.messaging.message import Kind, new_message
 from app.world import actions, records
 from app.world.actions import ROUND_SCOPE, RoundScope
 from app.world.sources.records import RECORDS_READ, read_record
@@ -19,7 +20,9 @@ from app.world.sources.records import RECORDS_READ, read_record
 
 @pytest.fixture
 def scope(volume) -> RoundScope:
-    s = RoundScope()
+    s = RoundScope(
+        woken_by=new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
+    )
     ctx = AgentContext(features={ROUND_SCOPE: s, RECORDS_READ: {}})
     with agent_context(ctx):
         yield s
