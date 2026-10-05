@@ -71,6 +71,7 @@ async def _reaches_her(body: str, at: dt.datetime) -> None:
             sender="绫奈",
             body=body,
             message_time=at,
+            wakes_recipient=True,
         )
     )
 

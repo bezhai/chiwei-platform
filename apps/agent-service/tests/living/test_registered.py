@@ -113,6 +113,7 @@ _VALID: dict[type, dict] = {
         "sender": "world",
         "body": "窗外下起了雨。",
         "message_time": _AWARE,
+        "wakes_recipient": True,
     },
     ReceivedRead: {
         "lane": "coe-x",
@@ -242,6 +243,8 @@ _PINNED: dict[type, dict[str, str]] = {
         "sender": "TEXT",
         "body": "TEXT",
         "message_time": "TIMESTAMPTZ",
+        # 发件方说的要不要叫醒她。后加的列：加之前的行是 NULL，读出来当成叫醒。
+        "wakes_recipient": "BOOLEAN",
     },
     # 她在哪一轮看过某一条收到的消息。一条一行，不是一个水位：后到的消息可能更早发生，
     # 按任何一种先后开水位都会漏。``moment_id`` 不进键（同一条只算看过一次），也**没有时刻

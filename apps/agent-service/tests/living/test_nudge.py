@@ -496,10 +496,17 @@ async def named(monkeypatch):
     await participants_mod.load_residents()
 
 
-def _to_her(body: str, *, at: dt.datetime, sender: str = "world"):
+def _to_her(body: str, *, at: dt.datetime, sender: str = "world", wakes_her: bool = True):
     from app.messaging.message import Kind, new_message
 
-    return new_message(sender=sender, recipient="赤尾", body=body, kind=Kind.MESSAGE, time=at)
+    return new_message(
+        sender=sender,
+        recipient="赤尾",
+        body=body,
+        kind=Kind.MESSAGE,
+        time=at,
+        wakes_recipient=wakes_her,
+    )
 
 
 @pytest.mark.integration
@@ -612,6 +619,160 @@ async def test_a_phone_call_she_ignored_does_not_keep_a_received_message_from_wa
 
     assert moment is not None, "一条躺着的未读私聊挡住了收件箱里的新消息"
     assert "千凪在厨房喊你吃饭。" in stub_life.prompts[-1]
+
+
+# --------------------------------------------------------------------------
+# 发件方说了不叫醒她的：不提前叫醒，照样在她下一轮里、看过就算看过
+#
+# 这一条只管"找谁来叫醒她"，不管她一轮读到哪些：被别的叫醒的那一轮、常规的那一轮，摆给她的
+# 还是全部没看过的，按发生的先后。
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_a_message_that_does_not_wake_her_waits_for_her_next_round_and_is_read_there(
+    nudge_db, stub_life, named
+):
+    from app.living.received import receive
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    quiet = _to_her("窗外的雨小了一点。", at=_at(21, 31), wakes_her=False)
+    await receive(quiet)
+
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32))) is None
+
+    regular = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 40)))
+
+    assert regular is not None and not regular.nudged
+    assert "窗外的雨小了一点。" in stub_life.prompts[-1]
+    assert await _unread_ids() == set()
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 41))) is None
+    assert len(await _all_moments()) == 2
+
+
+@pytest.mark.integration
+async def test_an_earlier_message_that_does_not_wake_her_does_not_hold_back_one_that_does(
+    nudge_db, stub_life, named
+):
+    """最早那条没看过的不叫醒她，后面那条叫醒她：叫醒她的是后面那条，那一轮里两条都有。"""
+    from app.living.received import receive
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    quiet = _to_her("窗外的雨小了一点。", at=_at(21, 31), wakes_her=False)
+    doorbell = _to_her("楼下有人按门铃。", at=_at(21, 32))
+    await receive(quiet)
+    await receive(doorbell)
+
+    woken = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33)))
+
+    assert woken is not None
+    assert woken.moment_id == f"nudge:inbox:{doorbell.message_id}"
+    assert "窗外的雨小了一点。" in stub_life.prompts[-1], "不叫醒的那条没摆进被叫醒的那一轮"
+    assert "楼下有人按门铃。" in stub_life.prompts[-1]
+    assert await _unread_ids() == set()
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34))) is None
+
+
+@pytest.mark.integration
+async def test_more_quiet_messages_than_a_round_can_show_do_not_hold_back_one_that_wakes_her(
+    nudge_db, stub_life, named
+):
+    """不叫醒的攒得比一轮能摆的还多，后面一条要叫醒她的照样叫醒她，而且在那一轮里。剩下没摆进
+    去的不叫醒的，也不会因为还没看过就接着叫醒她：它们等她下一轮。"""
+    from app.living.received import RECEIVED_LIMIT, receive
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    for i in range(RECEIVED_LIMIT + 1):
+        await receive(_to_her(f"第 {i} 件小事。", at=_at(21) + dt.timedelta(seconds=i), wakes_her=False))
+    doorbell = _to_her("楼下有人按门铃。", at=_at(21, 32))
+    await receive(doorbell)
+
+    woken = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33)))
+
+    assert woken is not None
+    assert woken.moment_id == f"nudge:inbox:{doorbell.message_id}"
+    assert "楼下有人按门铃。" in stub_life.prompts[-1]
+    assert doorbell.message_id not in await _unread_ids()
+    assert len(await _unread_ids()) == 1, "前提没造出来：要有一条不叫醒的没摆进那一轮"
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34))) is None
+
+
+@pytest.mark.integration
+async def test_a_quiet_message_that_arrives_during_her_round_does_not_wake_her_after_it(
+    nudge_db, stub_life, named
+):
+    """她一轮跑着时到的不叫醒的那条：那一轮之后不叫醒她，下一个常规轮次里看到它。"""
+    from app.living.received import receive
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    rain = _to_her("窗外下起了雨。", at=_at(21, 31))
+    quiet = _to_her("雨声小了一点。", at=_at(21, 32), wakes_her=False)
+    await receive(rain)
+
+    async def it_arrives():
+        await receive(quiet)
+
+    stub_life.meanwhile = it_arrives
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+    stub_life.meanwhile = None
+    assert "雨声小了一点。" not in stub_life.prompts[-1], "前提没造出来：那一轮看到了它"
+
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33))) is None
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 40)))
+    assert "雨声小了一点。" in stub_life.prompts[-1]
+    assert await _unread_ids() == set()
+
+
+@pytest.mark.integration
+async def test_a_message_stored_before_the_attribute_existed_wakes_her(
+    nudge_db, stub_life, named
+):
+    """收件表加这一列之前存下的行：迁移把列加上，这些行这一列为空，按叫醒她处理。
+
+    走一遍真的迁移：先把表退回没有这一列的样子、按旧版本的写法存一行，再按线上启动时的做法
+    读现有表结构、加列。
+    """
+    from app.living.received import ReceivedMessage
+    from app.runtime.migrator import _table_name, plan_migration
+
+    table = _table_name(ReceivedMessage)
+    async with session_mod.get_session() as s:
+        await s.execute(text(f"ALTER TABLE {table} DROP COLUMN wakes_recipient"))
+        await s.execute(
+            text(
+                f"INSERT INTO {table} "
+                "(lane, persona_id, message_id, sender, body, message_time, dedup_hash) "
+                "VALUES (:l, 'akao', 'stored-before', 'world', '窗外下起了雨。', :t, 'h-1')"
+            ),
+            {"l": LANE, "t": _at(21, 31)},
+        )
+    async with session_mod.get_session() as s:
+        columns = (
+            await s.execute(
+                text(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = :t"
+                ),
+                {"t": table},
+            )
+        ).all()
+    plan = plan_migration([ReceivedMessage], {table: dict(columns)})
+    async with session_mod.get_session() as s:
+        for stmt in plan.stmts:
+            await s.execute(text(stmt.sql))
+        stored = (
+            await s.execute(text(f"SELECT wakes_recipient FROM {table}"))
+        ).scalar_one()
+    assert stored is None, "前提没造出来：旧行这一列要是空的"
+    from app.living.received import unread_received
+
+    (read_back,) = await unread_received(lane=LANE, persona_id="akao")
+    assert read_back.wakes_recipient is True, "旧行读出来要当成叫醒，不是 None"
+
+    woken = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+
+    assert woken is not None and woken.moment_id == "nudge:inbox:stored-before"
+    assert "窗外下起了雨。" in stub_life.prompts[-1]
 
 
 # --------------------------------------------------------------------------

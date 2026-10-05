@@ -150,6 +150,7 @@ async def _received(persona: str, sender: str, body: str, at: dt.datetime) -> No
             sender=sender,
             body=body,
             message_time=at,
+            wakes_recipient=True,
         )
     )
 

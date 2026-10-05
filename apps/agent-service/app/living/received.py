@@ -14,8 +14,12 @@
 原来的 id 重发没发完的告知：同一条到两遍只存一行。存之前出事，这次处理失败，通信机制再投；
 存下之后、确认之前出事，再投的那一次撞上自然键，什么都不多写。
 
-存的是消息原样：谁发的、正文、消息自带的时间。没有地点、没有渠道——通信机制的外层只有这几
-样，其余都写在正文里。到达的时刻是框架那一列 ``created_at``。
+存的是消息原样：谁发的、正文、消息自带的时间、发件方说的要不要叫醒她。没有地点、没有渠道——
+通信机制的外层只有这几样，其余都写在正文里。到达的时刻是框架那一列 ``created_at``。
+
+**要不要叫醒她只决定"找谁来提前叫醒她"**（:mod:`app.living.nudge`），不决定她一轮读到哪些：不叫醒
+的消息照样摆进她下一轮的输入（常规的十分钟一轮，或者被别的事叫醒的那一轮），摆进去就记成看过。
+这一列是后加的，加之前存下的行这一列为空，按叫醒处理——那时候收到的每一条本来就叫醒她。
 
 ``not_delivered`` 告知不存：那是她自己定时发出的消息被退回，而她从不定时发消息；真来了也
 不是她经历的事，只留一条日志。
@@ -46,7 +50,7 @@ from sqlalchemy import text
 from app.data.session import get_session
 from app.infra.cst_time import dated_clock
 from app.living.participants import WORLD, load_residents, residents
-from app.living.records import _require_aware, esc, living_lane
+from app.living.records import _require_aware, esc, legacy_null_is, living_lane
 from app.messaging.message import Kind, Message
 from app.messaging.receiving import inbox
 from app.runtime.data import Data, Key
@@ -72,6 +76,11 @@ class ReceivedMessage(Data):
     ``message_time`` 是消息自带的时间（通信机制里的 ``time``：发送方给的、它所说的事发生的那一刻，
     没给就是发出那一刻；定时送达的是指定的那一刻），她的输入按它排。不按到达先后排：world 的告知
     和姐妹直接说的话走两条路，补发的消息也会晚到，到达先后不代表发生先后。
+
+    ``wakes_recipient`` 是发件方说的要不要叫醒她（通信机制信封上的同名一项）。这一列是后加的，
+    加之前存下的行是 NULL，读出来当成叫醒（:func:`app.living.records.legacy_null_is`；按它过滤的
+    SQL 那一侧是 ``COALESCE``，见 :func:`unread_received`）。pydantic 那侧不给默认值：新存的一行
+    漏了它是 bug，该当场炸。
     """
 
     lane: Annotated[str, Key]
@@ -80,10 +89,15 @@ class ReceivedMessage(Data):
     sender: str
     body: str
     message_time: datetime
+    wakes_recipient: bool
 
     class Meta:
         # 读侧唯一形状：这个人收到的消息，按消息自带的时间排。
         indexes = (("lane", "persona_id", "message_time"),)
+
+    _legacy_wakes_recipient = field_validator("wakes_recipient", mode="before")(
+        classmethod(legacy_null_is(True))
+    )
 
     @field_validator("message_time")
     @classmethod
@@ -144,6 +158,7 @@ async def receive(message: Message) -> None:
             sender=message.sender,
             body=message.body,
             message_time=message.time,
+            wakes_recipient=message.wakes_recipient,
         )
     )
 
@@ -154,12 +169,17 @@ async def unread_received(
     persona_id: str,
     limit: int = RECEIVED_LIMIT,
     including: str | None = None,
+    waking_only: bool = False,
 ) -> list[ReceivedMessage]:
     """她收到、还没看过的消息里最早的 ``limit`` 条，按消息自带的时间排。
 
     ``including`` 是叫醒她这一轮的那条消息的 id（:mod:`app.living.nudge`）：它还没看过而又
     不在最早那几条里时，也摆进来，这一轮就多出这一条。那一轮的身份就是它，那一轮落地它就该
     算看过；只取最早那几条的话，叫醒她之后才到、发生得更早的消息一多，就会把它挤出去。
+
+    ``waking_only`` 只取要叫醒她的（发件方没说不叫醒；这一列为空的旧行也算），给
+    :mod:`app.living.nudge` 找"该叫醒她的最早那条"用。过滤在查询里做，不能先取最早的几条再
+    挑：一条更早的不叫醒的会占住那个位置，挡住后面所有该叫醒她的。她一轮读哪些不用它。
 
     同一刻的几条按消息 id 排，只是为了每次读出来的顺序一样。
     """
@@ -170,6 +190,9 @@ async def unread_received(
         f"WHERE r.lane = m.lane AND r.persona_id = m.persona_id "
         f"AND r.message_id = m.message_id)"
     )
+    if waking_only:
+        # 加列之前存下的行这一列是 NULL，按叫醒算（见 ReceivedMessage）。
+        unread += " AND COALESCE(m.wakes_recipient, true)"
     sql = (
         f"({unread} ORDER BY m.message_time, m.message_id LIMIT :limit) "
         f"UNION ({unread} AND m.message_id = :including) "

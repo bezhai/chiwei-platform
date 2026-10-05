@@ -470,6 +470,7 @@ def test_a_received_message_cannot_carry_markup_into_her_round():
                 sender=sender,
                 body=f"窗外下起了雨，{POISON}",
                 message_time=now,
+                wakes_recipient=True,
             )
             for sender in ("world", "operator")
         ],

@@ -189,6 +189,7 @@ async def _reaches_her(persona: str, sender: str, body: str, at: dt.datetime) ->
             sender=sender,
             body=body,
             message_time=at,
+            wakes_recipient=True,
         )
     )
 

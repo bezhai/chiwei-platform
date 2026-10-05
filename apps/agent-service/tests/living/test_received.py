@@ -72,6 +72,7 @@ def _from(
     at: dt.datetime | None = None,
     message_id: str | None = None,
     kind: Kind = Kind.MESSAGE,
+    wakes_her: bool = True,
 ) -> Message:
     return new_message(
         sender=sender,
@@ -80,10 +81,11 @@ def _from(
         kind=kind,
         time=at or _at(21, 30),
         message_id=message_id,
+        wakes_recipient=wakes_her,
     )
 
 
-async def _stored(persona_id: str = "ayana") -> list[ReceivedMessage]:
+async def _stored(persona_id: str = "ayana", *, lane: str = LANE) -> list[ReceivedMessage]:
     async with session_mod.get_session() as s:
         rows = (
             await s.execute(
@@ -91,7 +93,7 @@ async def _stored(persona_id: str = "ayana") -> list[ReceivedMessage]:
                     "SELECT * FROM data_received_message "
                     "WHERE lane = :l AND persona_id = :p ORDER BY created_at"
                 ),
-                {"l": LANE, "p": persona_id},
+                {"l": lane, "p": persona_id},
             )
         ).mappings().all()
     return [ReceivedMessage(**{k: r[k] for k in ReceivedMessage.model_fields}) for r in rows]
@@ -119,7 +121,19 @@ async def test_a_message_is_stored_for_the_resident_it_was_sent_to(inboxes):
     (row,) = await _stored("ayana")
     assert (row.lane, row.persona_id, row.message_id) == (LANE, "ayana", message.message_id)
     assert (row.sender, row.body, row.message_time) == ("world", "窗外下起了雨。", _at(21, 41))
+    assert row.wakes_recipient is True
     assert await _stored("akao") == []
+
+
+@pytest.mark.integration
+async def test_whether_a_message_wakes_her_is_stored_as_the_sender_said(inboxes):
+    """发件方说了不叫醒的，她的收件记录里就记着不叫醒；提前叫醒她的那条钟看的就是这一列。"""
+    quiet = _from("world", "窗外的雨小了一点。", at=_at(21, 41), wakes_her=False)
+
+    await receive(quiet)
+
+    (row,) = await _stored("ayana")
+    assert (row.message_id, row.wakes_recipient) == (quiet.message_id, False)
 
 
 @pytest.mark.integration
@@ -208,6 +222,7 @@ def test_world_reads_as_what_she_perceives_and_anyone_else_carries_a_name():
             sender=sender,
             body=body,
             message_time=at,
+            wakes_recipient=True,
         )
 
     shown = render_received(
@@ -414,18 +429,9 @@ async def test_what_arrives_while_she_is_in_a_round_stays_unread_for_the_next(he
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
-async def test_world_reaches_her_by_name_and_a_resend_is_stored_once(
-    broker, messaging_db, living_db, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
-):
-    """名字从人设表来，收件箱在开始接收时按名字开好；world 发给"绫奈"的那条存到 ayana 名下，
-    带着同一个 id 重发一次（world 补发没发完的告知就是这样）也只有一行。"""
+async def _named_in_the_persona_table(living_db, monkeypatch) -> None:
+    """三姐妹的名字写进人设表，进程还没读过：开始接收时才按它开收件箱，跟线上一样。"""
     from app.data.models import Base, BotPersona
-    from app.living.records import living_lane
-    from app.messaging.lifecycle import start_messaging
-    from app.messaging.receiving import inboxes_at_start
-    from app.messaging.sending import send
-    from tests.messaging.helpers import eventually, outcomes_become
 
     async with living_db.begin() as conn:
         await conn.run_sync(
@@ -445,6 +451,20 @@ async def test_world_reaches_her_by_name_and_a_resend_is_stored_once(
             )
     monkeypatch.setattr(participants_mod, "_known", None)
 
+
+@pytest.mark.integration
+async def test_world_reaches_her_by_name_and_a_resend_is_stored_once(
+    broker, messaging_db, living_db, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+):
+    """名字从人设表来，收件箱在开始接收时按名字开好；world 发给"绫奈"的那条存到 ayana 名下，
+    带着同一个 id 重发一次（world 补发没发完的告知就是这样）也只有一行。"""
+    from app.living.records import living_lane
+    from app.messaging.lifecycle import start_messaging
+    from app.messaging.receiving import inboxes_at_start
+    from app.messaging.sending import send
+    from tests.messaging.helpers import eventually, outcomes_become
+
+    await _named_in_the_persona_table(living_db, monkeypatch)
     inboxes_at_start(open_inboxes)
     await start_messaging()
     delivery = await send(sender="world", recipient="绫奈", body="窗外下起了雨。")
@@ -482,3 +502,57 @@ async def test_world_reaches_her_by_name_and_a_resend_is_stored_once(
     )
     await asyncio.sleep(1.0)  # 让重发的那一份被处理完
     assert await stored() == ["ayana"]
+
+
+@pytest.mark.integration
+async def test_a_quiet_message_stays_quiet_through_a_scheduled_hop_and_a_failed_store(
+    broker, messaging_db, living_db, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+):
+    """world 定时发给她一条不叫醒的：到点前分段再排、到点转交，第一次存的时候出事、通信机制
+    重投——每一步都重新发布信封，存进她收件记录的还是不叫醒。"""
+    from datetime import UTC, datetime, timedelta
+
+    from app.living.records import living_lane
+    from app.messaging import broker as messaging_broker
+    from app.messaging import receiving
+    from app.messaging.lifecycle import start_messaging
+    from app.messaging.receiving import inboxes_at_start
+    from app.messaging.sending import send_at
+    from app.runtime.wire import RetryPolicy
+    from tests.messaging.helpers import eventually
+
+    monkeypatch.setattr(messaging_broker, "DELAY_LIMIT_MS", 600)
+    monkeypatch.setattr(
+        receiving,
+        "PROCESSING_RETRY",
+        RetryPolicy(n=3, backoff="linear", base_delay_ms=200, max_delay_ms=500, lease_ms=60_000),
+    )
+    real = received_mod.insert_idempotent
+    attempts: list[int] = []
+
+    async def crash_the_first_time(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise _Crash("第一次存的时候没了")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(received_mod, "insert_idempotent", crash_the_first_time)
+    await _named_in_the_persona_table(living_db, monkeypatch)
+    inboxes_at_start(open_inboxes)
+    await start_messaging()
+
+    message_id = await send_at(
+        sender="world",
+        recipient="绫奈",
+        body="窗外的雨小了一点。",
+        at=datetime.now(UTC) + timedelta(seconds=1.5),
+        wakes_recipient=False,
+    )
+
+    async def stored() -> list[ReceivedMessage]:
+        return await _stored("ayana", lane=living_lane())
+
+    await eventually(stored, timeout=15)
+    (row,) = await stored()
+    assert (row.message_id, row.wakes_recipient) == (message_id, False)
+    assert len(attempts) == 2, "前提没造出来：要有一次存失败、重投之后才存下"
