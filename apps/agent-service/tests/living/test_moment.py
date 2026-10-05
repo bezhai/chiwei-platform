@@ -1229,6 +1229,36 @@ async def test_each_moment_carries_the_order_it_landed_in(moment_db, stub_moment
     assert hers.seq == 1
 
 
+@pytest.mark.integration
+async def test_ticks_while_her_round_is_stuck_do_not_pile_up_behind_it(
+    moment_db, stub_moment
+):
+    """她那一轮挂住了（最长占着 15 分钟），钟每分钟一拍。排在后面等的只有一拍：后面的拍看见
+    已经有一拍在等，直接过去。等着的那一拍轮到时按那一刻判这一格跑没跑过。"""
+    import asyncio
+
+    from app.living.moment import life_moment_lock_key
+    from app.living.serial import _lock_for, hold
+    from tests.living.conftest import queued_behind
+
+    stub_moment(said="继续")
+    key = life_moment_lock_key(LANE, "akao")
+    async with hold(key):  # 挂住的那一轮
+        ticks = [
+            asyncio.create_task(
+                run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, m)))
+            )
+            for m in (0, 1, 2)
+        ]
+        await queued_behind(key)
+        await asyncio.sleep(0.2)  # 后两拍都走到了占用门口
+        assert len(_lock_for(key)._waiters) == 1, "每一拍都排在了挂住的那一轮后面"
+        assert [t.done() for t in ticks] == [False, True, True]
+        assert [t.result() for t in ticks[1:]] == [None, None]
+
+    assert (await ticks[0]) is not None
+
+
 # --------------------------------------------------------------------------
 # 八 · 建表 / 挂钟：错了就静默，或者错了就起不来
 # --------------------------------------------------------------------------

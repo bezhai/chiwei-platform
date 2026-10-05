@@ -779,6 +779,141 @@ async def test_two_ticks_queued_behind_her_round_wake_her_once(nudge_db, stub_li
 
 
 @pytest.mark.integration
+async def test_ticks_while_her_round_is_stuck_do_not_pile_up_behind_it(
+    nudge_db, stub_life, named
+):
+    """她那一轮挂住了（最长占着 15 分钟），这条钟每分钟一拍。排在后面等的只有一拍：后面的拍
+    看见已经有一拍在等，直接过去，不再排。等着的那一拍轮到时自己判是什么在叫她。"""
+    from app.living.moment import life_moment_lock_key
+    from app.living.received import receive
+    from app.living.serial import _lock_for, hold
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    rain = _to_her("窗外下起了雨。", at=_at(21, 31))
+    await receive(rain)
+
+    key = life_moment_lock_key(LANE, "akao")
+    async with hold(key):  # 挂住的那一轮
+        ticks = [
+            asyncio.create_task(
+                nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, m)))
+            )
+            for m in (32, 33, 34)
+        ]
+        await queued_behind(key)
+        await asyncio.sleep(0.2)  # 后两拍都走到了占用门口
+        assert len(_lock_for(key)._waiters) == 1, "每一拍都排在了挂住的那一轮后面"
+        assert [t.done() for t in ticks] == [False, True, True]
+        assert [t.result() for t in ticks[1:]] == [None, None]
+    woken = await ticks[0]
+
+    assert woken is not None and woken.moment_id == f"nudge:inbox:{rain.message_id}"
+
+
+@pytest.mark.integration
+async def test_a_message_that_arrives_while_her_round_holds_her_wakes_her_after_it(
+    nudge_db, stub_life, named
+):
+    """她那一轮跑着时到了一条，这一拍不排在那一轮后面；那一轮没看到它，那一轮之后的下一拍
+    叫醒她。"""
+    from app.living.received import receive
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    rain = _to_her("窗外下起了雨。", at=_at(21, 31))
+    doorbell = _to_her("楼下有人按门铃。", at=_at(21, 32))
+    await receive(rain)
+
+    during: list[asyncio.Task] = []
+
+    async def it_arrives_and_the_clock_ticks():
+        await receive(doorbell)
+        tick = asyncio.create_task(
+            nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33)))
+        )
+        await asyncio.sleep(0.2)
+        during.append(tick)
+
+    stub_life.meanwhile = it_arrives_and_the_clock_ticks
+    woke_for_rain = await nudge_once(
+        lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32))
+    )
+    stub_life.meanwhile = None
+
+    assert woke_for_rain is not None and rain.message_id in woke_for_rain.moment_id
+    (tick,) = during
+    assert tick.done() and tick.result() is None, "那一拍排在了她正在跑的那一轮后面"
+    assert "楼下有人按门铃。" not in stub_life.prompts[-1], "前提没造出来：那一轮看到了它"
+
+    woke_for_doorbell = await nudge_once(
+        lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34))
+    )
+    assert woke_for_doorbell is not None
+    assert doorbell.message_id in woke_for_doorbell.moment_id
+    assert "楼下有人按门铃。" in stub_life.prompts[-1]
+
+
+@pytest.mark.integration
+async def test_a_tick_that_waited_decides_on_what_is_true_when_it_gets_her(
+    nudge_db, stub_life, named
+):
+    """这一拍排在她正在跑的那一轮后面；那一轮把叫她的那条看掉了。轮到这一拍时已经没有什么在叫
+    她，它不跑、也不记"开始了"。判在占用外面的话，它会拿排队之前判的那条再跑一轮。"""
+    from app.living.moment import life_moment_lock_key
+    from app.living.nudge import NudgeBegun
+    from app.living.received import mark_read, receive, unread_received
+    from app.living.serial import hold
+    from app.runtime.migrator import _table_name
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    await receive(_to_her("窗外下起了雨。", at=_at(21, 31)))
+
+    key = life_moment_lock_key(LANE, "akao")
+    async with hold(key):  # 她正在跑的那一轮
+        tick = asyncio.create_task(
+            nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+        )
+        await queued_behind(key)
+        seen = await unread_received(lane=LANE, persona_id="akao")
+        async with session_mod.get_session() as s:  # 那一轮落地，把它记成看过
+            await mark_read(seen, moment_id="2026-07-25T21:30+08:00", session=s)
+
+    assert await tick is None
+    async with session_mod.get_session() as s:
+        begun = (
+            await s.execute(text(f"SELECT count(*) FROM {_table_name(NudgeBegun)}"))
+        ).scalar_one()
+    assert begun == 0
+
+
+@pytest.mark.integration
+async def test_the_two_clocks_still_queue_behind_each_other(nudge_db, stub_life, named):
+    """各自只排一拍，两条钟之间照样排队、不互相顶掉：常规那一拍和提前叫醒那一拍都等到她。"""
+    from app.living.moment import life_moment_lock_key
+    from app.living.received import receive
+    from app.living.serial import _lock_for, hold
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    rain = _to_her("窗外下起了雨。", at=_at(21, 41))
+    await receive(rain)
+
+    key = life_moment_lock_key(LANE, "akao")
+    async with hold(key):  # 挂住的那一轮
+        nudged = asyncio.create_task(
+            nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 41)))
+        )
+        await queued_behind(key)
+        regular = asyncio.create_task(
+            run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 42)))
+        )
+        await asyncio.sleep(0.2)
+        assert len(_lock_for(key)._waiters) == 2, "一条钟把另一条钟顶掉了"
+
+    woken = await nudged
+    assert woken is not None and woken.moment_id == f"nudge:inbox:{rain.message_id}"
+    assert (await regular) is not None, "21:40 那一格被提前叫醒那一拍顶掉了"
+
+
+@pytest.mark.integration
 async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_arrive_as_it_starts(
     nudge_db, stub_life, named, monkeypatch
 ):

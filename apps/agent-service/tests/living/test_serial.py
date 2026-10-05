@@ -241,3 +241,75 @@ async def test_there_is_a_cap_even_when_nobody_passes_one(monkeypatch):
     with pytest.raises(TimeoutError):
         async with hold("living:turn:coe-x:akao"):
             await asyncio.Event().wait()
+
+
+# --------------------------------------------------------------------------
+# 同一条钟在一个人身上只排一拍
+# --------------------------------------------------------------------------
+
+
+async def test_a_second_one_on_the_same_line_is_turned_away_without_waiting():
+    """一条 line 上已经有一个在里面（排着队或者占着），后来的不等，当场交回 False。"""
+    from app.living.serial import at_most_one
+
+    inside = asyncio.Event()
+    leave = asyncio.Event()
+
+    async def first() -> bool:
+        async with at_most_one("living:moment:coe-x:akao:nudge") as admitted:
+            inside.set()
+            await leave.wait()
+            return admitted
+
+    task = asyncio.create_task(first())
+    await inside.wait()
+    async with asyncio.timeout(1.0):
+        async with at_most_one("living:moment:coe-x:akao:nudge") as second:
+            assert second is False
+    leave.set()
+    assert await task is True
+
+
+async def test_the_line_is_free_again_once_the_one_inside_leaves():
+    from app.living.serial import at_most_one
+
+    async with at_most_one("living:moment:coe-x:akao:nudge") as first:
+        assert first is True
+    async with at_most_one("living:moment:coe-x:akao:nudge") as again:
+        assert again is True
+
+
+async def test_lines_do_not_turn_each_other_away():
+    """不同的 line（另一条钟、另一个人）互不相干。"""
+    from app.living.serial import at_most_one
+
+    async with at_most_one("living:moment:coe-x:akao:nudge") as nudge:
+        async with at_most_one("living:moment:coe-x:akao:regular") as regular:
+            async with at_most_one("living:moment:coe-x:ayana:nudge") as hers:
+                assert (nudge, regular, hers) == (True, True, True)
+
+
+async def test_the_line_is_let_go_when_the_one_inside_fails_or_is_cancelled():
+    """里面那一个炸了、被取消（占用到顶被掐断、部署），line 照样放开；不然这条钟从此再也排不进来。"""
+    from app.living.serial import at_most_one
+
+    with pytest.raises(RuntimeError):
+        async with at_most_one("living:moment:coe-x:akao:nudge"):
+            raise RuntimeError("这一轮炸了")
+    async with at_most_one("living:moment:coe-x:akao:nudge") as after_failure:
+        assert after_failure is True
+
+    started = asyncio.Event()
+
+    async def waits_forever() -> None:
+        async with at_most_one("living:moment:coe-x:akao:nudge"):
+            started.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(waits_forever())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    async with at_most_one("living:moment:coe-x:akao:nudge") as after_cancel:
+        assert after_cancel is True

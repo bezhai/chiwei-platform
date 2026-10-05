@@ -176,7 +176,7 @@ from app.living.scope import (
     moment_scope,
     note_recorded,
 )
-from app.living.serial import hold
+from app.living.serial import at_most_one, hold
 from app.living.snapshot import read_snapshot
 from app.living.takeback import TAKEBACK_TOOLS
 from app.living.web import WEB_TOOLS
@@ -1140,6 +1140,10 @@ async def run_moment(
     时读的），她做的事、发出去的消息带的也就必须是那一刻。拿那一拍的时刻，world 收到的汇总就
     比汇总里回应的那件事还早。
 
+    **这条钟在她身上只排一拍**（:func:`app.living.serial.at_most_one`）：已经有一拍在排队或者
+    正在跑，这一拍直接返回 ``None``。排着的那一拍轮到她时按那一刻判这一格跑没跑过，后面那几拍
+    要判的它都判得到。被叫来提前的那条钟另排一拍（:mod:`app.living.nudge`），两条钟之间照样排队。
+
     **两种 moment，身份和"该不该跑"的判据都不一样。**
 
     *钟点上该来的那种*（``nudged_by is None``）：『现在』先落到间隔网格上
@@ -1187,10 +1191,14 @@ async def run_moment(
     瞬时失败会整轮重放、重放已经执行过的 durable 写。派生 id 让重放无害，但重放
     仍然是白花的一次钱，而且下一拍再来就行。
     """
-    async with hold(life_moment_lock_key(lane, persona_id)):
-        return await run_moment_held(
-            lane=lane, persona_id=persona_id, now=clock(), nudged_by=nudged_by
-        )
+    key = life_moment_lock_key(lane, persona_id)
+    async with at_most_one(f"{key}:regular") as admitted:
+        if not admitted:
+            return None
+        async with hold(key):
+            return await run_moment_held(
+                lane=lane, persona_id=persona_id, now=clock(), nudged_by=nudged_by
+            )
 
 
 async def run_moment_held(

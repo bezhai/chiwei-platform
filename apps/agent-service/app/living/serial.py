@@ -7,6 +7,13 @@
 不是被丢弃——丢弃会让她漏掉事情。所以这里是一把会阻塞的互斥锁，不是撞上就 raise 的
 单飞闸（那种语义是"丢掉"）。
 
+**排队的是两条钟各自的一拍，不是每一拍**（:func:`at_most_one`）。钟每分钟敲一次，不等上
+一拍跑完；她一轮挂住（最长 :data:`HELD_SECONDS`）的时候，每一拍都排到后面的话，十五分钟
+就是十五个等着的，挂住接连发生时越积越多，轮到时一个接一个跑一遍。同一条钟已经有一拍在
+排队（或者正在跑）时，后面的拍直接过去：排着的那一拍轮到她时按那一刻的样子判该做什么，
+后面那几拍要判的它都会判到；它跑完之后新冒出来的，下一拍接着判。两条钟之间仍然排队，
+一条不会把另一条顶掉。
+
 **二、共享记录要有稳定的消费顺序。** 三个 life 并发写同一份记录。若按
 "发生时间"开时间窗，一条提交晚于窗口推进的记录会被永久越过；自然键幂等只防重复
 行，防不了这个。:func:`append_in_commit_order` 在占用里分配 ``seq``、占用放开前
@@ -114,6 +121,34 @@ def _lock_for(key: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         bucket[key] = lock
     return lock
+
+
+# 哪几条 line 上现在有一个在里面，按事件循环分桶（理由同 ``_locks``）。
+_lines: WeakKeyDictionary[asyncio.AbstractEventLoop, set[str]] = WeakKeyDictionary()
+
+
+@asynccontextmanager
+async def at_most_one(line: str) -> AsyncIterator[bool]:
+    """同一条 ``line`` 上同一时刻只放一个：交回 ``True`` 的那一个一直在里面，直到它退出（正常
+    走完、炸了、被取消都算）；它退出之前再来的当场交回 ``False``，不等、不排队。
+
+    用法是一条钟在一个人身上只排一拍（模块说明里那一段）：拿到 ``True`` 再去 :func:`hold`
+    排队，拿到 ``False`` 就这一拍什么都不做。判定和登记之间没有 ``await``，同一个事件循环里
+    不会有两个人同时拿到 ``True``。
+    """
+    loop = asyncio.get_running_loop()
+    inside = _lines.get(loop)
+    if inside is None:
+        inside = set()
+        _lines[loop] = inside
+    if line in inside:
+        yield False
+        return
+    inside.add(line)
+    try:
+        yield True
+    finally:
+        inside.discard(line)
 
 
 @asynccontextmanager

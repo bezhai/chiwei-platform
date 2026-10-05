@@ -26,10 +26,16 @@
 "这一轮跑过了"，收件箱的提前叫醒就卡在那儿。
 
 **判"是什么叫醒了她"和跑那一轮在同一次占用里**（:func:`app.living.moment.life_moment_lock_key`）。
-她正在跑一轮的时候，这条钟排在后面，等那一轮结束才判（一轮最长占锁 15 分钟，见
+她正在跑一轮的时候，这条钟排一拍在后面，等那一轮结束才判（一轮最长占锁 15 分钟，见
 :func:`app.living.moment.run_moment`）。判在占用外面的话，判完到轮到她之间隔着的那一轮会把
 判据改掉（看过了、跑过了），判出来的是过期的结论。那一轮跑着时到的消息没摆进去，还没看过，
 也还没叫醒过她，所以一轮结束后的下一拍叫醒她一次。
+
+**排在后面的只有一拍**（:func:`app.living.serial.at_most_one`）。钟一分钟一拍、不等上一拍
+跑完，她那一轮挂住的十五分钟里每一拍都排进去的话，那一轮放开之后它们一个接一个判、一个接一个
+记日志，挂住接连发生时越积越多。已经有一拍在排队（或者正在跑它叫醒的那一轮）时，这一拍直接
+过去：排着的那一拍轮到她时判的是那一刻的样子，后面那几拍要判的它都判得到。判还是在占用里，
+上面那个"判完到轮到她之间被改掉"的问题不会回来。
 
 **开始了却没落地的那一轮，下一拍重跑的还是它自己**（:class:`NudgeBegun`）。她在那一轮里做的
 事、发出去的话，id 都从那一轮的身份派生（见 :func:`app.living.moment.run_moment`）；那一轮
@@ -83,7 +89,7 @@ from app.living.persona import LIVING_PERSONAS
 from app.living.phone import newest_unread_summons
 from app.living.received import unread_received
 from app.living.records import living_lane
-from app.living.serial import hold
+from app.living.serial import at_most_one, hold
 from app.runtime.data import Data, Key
 from app.runtime.migrator import _table_name
 from app.runtime.node import node
@@ -145,28 +151,40 @@ async def nudge_once(
     的钟（``clock()``），判"什么在叫她"和跑那一轮用的是同一个（理由见
     :func:`app.living.moment.run_moment`）。
 
+    这条钟在她身上只排一拍（:func:`app.living.serial.at_most_one`）：已经有一拍在排队、或者
+    正在跑它叫醒的那一轮，这一拍直接返回 ``None``，不排到后面去。排着的那一拍轮到她时才判，
+    这一拍要判的它都判得到；那一轮跑着时才到、没摆进去的，那一轮之后的下一拍叫醒她。
+
     返回值只回答"这一轮跑了没有"。**她回不回是她的输出**，不在这里判、也不该有人在
     这里判。
     """
-    async with hold(life_moment_lock_key(lane, persona_id)):
-        now = clock()
-        nudged_by = await _begun_not_landed(lane=lane, persona_id=persona_id)
+    key = life_moment_lock_key(lane, persona_id)
+    async with at_most_one(f"{key}:nudge") as admitted:
+        if not admitted:
+            return None
+        async with hold(key):
+            return await _nudge_held(lane=lane, persona_id=persona_id, now=clock())
+
+
+async def _nudge_held(*, lane: str, persona_id: str, now: datetime) -> LifeMoment | None:
+    """:func:`nudge_once` 占住之后的那一段：判是什么叫醒了她，再跑那一轮。"""
+    nudged_by = await _begun_not_landed(lane=lane, persona_id=persona_id)
+    if nudged_by is None:
+        nudged_by = await _calling_her(lane=lane, persona_id=persona_id, now=now)
         if nudged_by is None:
-            nudged_by = await _calling_her(lane=lane, persona_id=persona_id, now=now)
-            if nudged_by is None:
-                return None
-            await insert_append(
-                NudgeBegun(lane=lane, persona_id=persona_id, nudged_by=nudged_by)
-            )
-        return await run_moment_held(
-            lane=lane,
-            persona_id=persona_id,
-            now=now,
-            nudged_by=nudged_by,
-            must_show=(
-                nudged_by.removeprefix(_INBOX) if nudged_by.startswith(_INBOX) else None
-            ),
+            return None
+        await insert_append(
+            NudgeBegun(lane=lane, persona_id=persona_id, nudged_by=nudged_by)
         )
+    return await run_moment_held(
+        lane=lane,
+        persona_id=persona_id,
+        now=now,
+        nudged_by=nudged_by,
+        must_show=(
+            nudged_by.removeprefix(_INBOX) if nudged_by.startswith(_INBOX) else None
+        ),
+    )
 
 
 async def _begun_not_landed(*, lane: str, persona_id: str) -> str | None:
