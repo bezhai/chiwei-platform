@@ -53,8 +53,10 @@ is set: the SDK must NOT execute tools — the Agent layer owns the ReAct loop.
 calls are surfaced as ``tool_call`` chunks, not via finish_reason.
 
 **Retry off** (``HttpRetryOptions(attempts=1)``): retry is the Agent layer's
-sole responsibility (spec). **Proxy**: ``use_proxy`` providers route the genai
-http client through ``settings.forward_proxy_url`` (sync + async client args).
+sole responsibility (spec). **Deadline**: the SDK sends requests with no timeout
+at all, so every wait on it runs under ``answer_deadline`` (``app.agent.client``).
+**Proxy**: ``use_proxy`` providers route the genai http client through
+``settings.forward_proxy_url`` (sync + async client args).
 **Trace**: every call wraps a ``generation_span`` (always — see
 ``app.agent.trace``).
 """
@@ -73,7 +75,12 @@ import httpx
 from google import genai
 from google.genai import types
 
-from app.agent.client import ModelClient, register_adapter
+from app.agent.client import (
+    ModelClient,
+    answer_deadline,
+    register_adapter,
+    stream_within_deadline,
+)
 from app.agent.neutral import (
     ContentBlock,
     Message,
@@ -204,9 +211,10 @@ class GeminiAdapter(ModelClient):
             input=_contents_for_trace(contents),
             model_parameters=_model_parameters(kwargs),
         ) as span:
-            response = await self._client.aio.models.generate_content(
-                model=self._model, contents=contents, config=config
-            )
+            async with answer_deadline(self._model):
+                response = await self._client.aio.models.generate_content(
+                    model=self._model, contents=contents, config=config
+                )
             message = _response_to_message(response)
             span.update(
                 output=message.to_dict(),
@@ -246,10 +254,12 @@ class GeminiAdapter(ModelClient):
             usage: dict[str, int] | None = None
 
             try:
-                stream = await self._client.aio.models.generate_content_stream(
-                    model=self._model, contents=contents, config=config
-                )
-                async for chunk in stream:
+                async for chunk in stream_within_deadline(
+                    self._model,
+                    self._client.aio.models.generate_content_stream(
+                        model=self._model, contents=contents, config=config
+                    ),
+                ):
                     # Gemini reports cumulative usage_metadata per chunk; keep
                     # the latest one that said anything so the final tally lands
                     # on the span (token accounting must match the non-streaming
@@ -307,9 +317,10 @@ class GeminiAdapter(ModelClient):
             input=_contents_for_trace(contents),
             model_parameters=_model_parameters(kwargs),
         ) as span:
-            response = await self._client.aio.models.generate_content(
-                model=self._model, contents=contents, config=config
-            )
+            async with answer_deadline(self._model):
+                response = await self._client.aio.models.generate_content(
+                    model=self._model, contents=contents, config=config
+                )
             text = _join_text(response) or "{}"
             data = json.loads(text)
             span.update(output=data, usage_details=_usage_details(response))

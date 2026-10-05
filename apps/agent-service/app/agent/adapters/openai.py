@@ -35,7 +35,9 @@ says where a thought signature would go, so the sequence recorded here is
 unsigned and the adapter sends none.
 
 **Retry is off** (``max_retries=0``): retry is the Agent layer's sole
-responsibility (spec). **Proxy**: ``use_proxy`` providers get an httpx client
+responsibility (spec). **Deadline**: every wait on the SDK runs under
+``answer_deadline`` (``app.agent.client``), well inside the SDK's own 600 s read
+timeout. **Proxy**: ``use_proxy`` providers get an httpx client
 configured with ``settings.forward_proxy_url``. **Trace**: every call wraps a
 ``generation_span`` (always — see ``app.agent.trace``).
 """
@@ -51,7 +53,12 @@ from typing import Any
 import httpx
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 
-from app.agent.client import ModelClient, register_adapter
+from app.agent.client import (
+    ModelClient,
+    answer_deadline,
+    register_adapter,
+    stream_within_deadline,
+)
 from app.agent.neutral import (
     ContentBlock,
     Message,
@@ -173,7 +180,8 @@ class OpenAIAdapter(ModelClient):
             input=wire_messages,
             model_parameters=_model_parameters(request),
         ) as span:
-            response = await self._client.chat.completions.create(**request)
+            async with answer_deadline(self._model):
+                response = await self._client.chat.completions.create(**request)
             message = self._from_wire_response(response)
             span.update(
                 output=message.to_dict(),
@@ -220,8 +228,9 @@ class OpenAIAdapter(ModelClient):
             usage: dict[str, int] | None = None
 
             try:
-                stream = await self._client.chat.completions.create(**request)
-                async for chunk in stream:
+                async for chunk in stream_within_deadline(
+                    self._model, self._client.chat.completions.create(**request)
+                ):
                     # the usage-only final chunk (no choices) carries token
                     # counts. A chunk whose usage object reported no field at
                     # all is skipped rather than allowed to overwrite a real
@@ -312,7 +321,8 @@ class OpenAIAdapter(ModelClient):
             input=wire_messages,
             model_parameters=_model_parameters(request),
         ) as span:
-            response = await self._client.chat.completions.create(**request)
+            async with answer_deadline(self._model):
+                response = await self._client.chat.completions.create(**request)
             content = response.choices[0].message.content or "{}"
             data = json.loads(content)
             span.update(output=data, usage_details=_usage_details(response))

@@ -23,12 +23,90 @@ test-injected fake adapter via ``register_adapter``.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable
+from contextlib import asynccontextmanager
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from app.agent.models import resolve_model_info
 from app.agent.neutral import Message, StreamChunk, ToolDef
+from app.capabilities._errors import CapabilityTimeout
+
+T = TypeVar("T")
+
+# ---------------------------------------------------------------------------
+# How long one model call waits for the provider
+# ---------------------------------------------------------------------------
+
+# Every ModelClient call waits on its provider for at most this long: for the
+# whole answer of a non-streaming call, and for the opening and then each next
+# chunk of a streamed one. Past it the call fails with ``CapabilityTimeout``.
+#
+# Why it exists: the google-genai SDK sends requests with no timeout at all
+# (``HttpOptions.timeout`` unset → httpx ``timeout=None`` for connect, read,
+# write and pool), and the TLS handshake with the model gateway sometimes never
+# completes. Nothing then ended the call until the per-persona lock
+# (``app.living.serial.HELD_SECONDS``, 900 s) cut the whole round: she was stuck
+# for 15 minutes, and Langfuse showed a generation with no output and no error.
+#
+# Calibrated on measured calls: single-call traces in Langfuse (day page /
+# persona review on gpt-5.5, 2026-09-05..10-05) top out at 59 s; her completed
+# rounds on gemini-3.7-flash (coe-world, 10-03..10-05, n=60) take 37 s at most
+# for the whole multi-call round; the slowest round of any kind measured was
+# 189 s (``app.living.serial``). 180 s is three times the slowest single call,
+# and two attempts (the Agent layer's default retry) still end well inside the
+# 900 s lock.
+#
+# A source constant, not Dynamic Config: it changes nothing about what any agent
+# does, it only turns a hang into a failure — the same judgment as the other
+# hang guards in this service (``app.living.outgoing``, ``app.agent.reading``).
+MODEL_ANSWER_SECONDS = 180.0
+
+
+@asynccontextmanager
+async def answer_deadline(model: str) -> AsyncIterator[None]:
+    """Give ``model`` at most :data:`MODEL_ANSWER_SECONDS` for what this block awaits.
+
+    Past the deadline the wait is cancelled and ``CapabilityTimeout`` is raised,
+    chained to the cancelled wait so its traceback shows where the call was
+    stuck. Only this deadline is turned into one: a ``TimeoutError`` the SDK
+    raises on its own passes through untouched, so the error never reports a
+    wait that did not happen.
+    """
+    try:
+        async with asyncio.timeout(MODEL_ANSWER_SECONDS) as deadline:
+            yield
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise
+        raise CapabilityTimeout(
+            f"{model} gave no answer within {MODEL_ANSWER_SECONDS:g}s",
+            meta={"model": model, "seconds": MODEL_ANSWER_SECONDS},
+        ) from exc
+
+
+async def stream_within_deadline(
+    model: str, opening: Awaitable[AsyncIterable[T]]
+) -> AsyncIterator[T]:
+    """Open a streamed answer and yield its chunks, each wait under :func:`answer_deadline`.
+
+    The deadline covers each wait on the provider — opening the stream, then
+    every next chunk — and never spans a ``yield``: a stream that keeps
+    producing is alive however long it runs, and the time the consumer spends
+    on a chunk is not the provider's.
+    """
+    async with answer_deadline(model):
+        chunks = await opening
+    pending = aiter(chunks)
+    while True:
+        async with answer_deadline(model):
+            try:
+                chunk = await anext(pending)
+            except StopAsyncIteration:
+                return
+        yield chunk
+
 
 # ---------------------------------------------------------------------------
 # Adapter constructor protocol
@@ -56,6 +134,11 @@ class ModelClient(ABC):
     extract`` consume. Adapters keep the neutral contract on both sides:
     neutral ``Message``/``ToolDef`` in, neutral ``Message``/``StreamChunk``/
     ``dict`` out.
+
+    Every wait on the provider runs under :func:`answer_deadline` (streams
+    through :func:`stream_within_deadline`), inside the call's generation span,
+    so a provider that never answers fails the call with ``CapabilityTimeout``
+    and the generation records why.
     """
 
     @abstractmethod

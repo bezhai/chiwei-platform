@@ -24,7 +24,9 @@ trace).
 Retry is the Agent layer's sole responsibility (the adapters disable SDK retry).
 ``run`` / ``extract`` wrap the whole call in ``@retry``; ``stream`` retries only
 *before* the first token is yielded (replaying a streamed prefix would duplicate
-it downstream).
+it downstream). A model call whose provider never answers fails at
+``MODEL_ANSWER_SECONDS`` (``app.agent.client``) with ``CapabilityTimeout``, which
+is retried like the provider's own timeouts.
 
 Usage::
 
@@ -88,6 +90,7 @@ from app.agent.trace import (
     under_last_generation,
 )
 from app.api.middleware import get_lane
+from app.capabilities._errors import CapabilityTimeout
 from app.capabilities.retry import retry as _retry_decorator
 from app.infra import cst_time
 from app.infra.config import settings
@@ -107,11 +110,18 @@ logger = logging.getLogger(__name__)
 # TODO(C3): once LLM/HTTP capability layer translates upstream openai errors
 # into typed CapabilityError subclasses, switch this tuple to the typed
 # defaults exported by ``app.capabilities.retry``.
+#
+# ``CapabilityTimeout`` is what a model call raises when its provider never
+# answers within ``MODEL_ANSWER_SECONDS`` (``app.agent.client``). It is a
+# timeout like ``APITimeoutError`` and gets the same treatment: retried up to the
+# caller's ``max_retries``. Callers that must not replay a whole run pass
+# ``max_retries=1`` and get the failure straight away.
 RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
     APITimeoutError,
     APIConnectionError,
     InternalServerError,
     RateLimitError,
+    CapabilityTimeout,
 )
 
 _DEFAULT_MAX_RETRIES = 2
