@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated
 
@@ -134,18 +135,21 @@ _BEGUN_TABLE = _table_name(NudgeBegun)
 
 
 async def nudge_once(
-    *, lane: str, persona_id: str, now: datetime
+    *, lane: str, persona_id: str, clock: Callable[[], datetime]
 ) -> LifeMoment | None:
     """有人在叫她、或者有传到她这里的消息她还没看过，就把她带到这一刻；都没有、或者都已经
     叫过了，返回 ``None``。
 
     整段在她的 moment 占用里：先看有没有开始了而没落地的那一轮，有就原样重跑它；没有再看
-    现在有什么在叫她（:func:`_calling_her`），记下这一轮开始了，再跑。
+    现在有什么在叫她（:func:`_calling_her`），记下这一轮开始了，再跑。"现在"是拿到占用那一刻
+    的钟（``clock()``），判"什么在叫她"和跑那一轮用的是同一个（理由见
+    :func:`app.living.moment.run_moment`）。
 
     返回值只回答"这一轮跑了没有"。**她回不回是她的输出**，不在这里判、也不该有人在
     这里判。
     """
     async with hold(life_moment_lock_key(lane, persona_id)):
+        now = clock()
         nudged_by = await _begun_not_landed(lane=lane, persona_id=persona_id)
         if nudged_by is None:
             nudged_by = await _calling_her(lane=lane, persona_id=persona_id, now=now)
@@ -226,10 +230,10 @@ async def phone_nudge_tick(tick: PhoneNudgeTick) -> None:
     跟固定那条钟并发打到同一个人时，两边在 :func:`app.living.serial.hold` 上排队——
     后到的等前一个做完，不是被丢掉。
     """
-    lane, now = living_lane(), now_cst()
+    lane = living_lane()
     outcomes = await asyncio.gather(
         *(
-            nudge_once(lane=lane, persona_id=persona_id, now=now)
+            nudge_once(lane=lane, persona_id=persona_id, clock=now_cst)
             for persona_id in LIVING_PERSONAS
         ),
         return_exceptions=True,

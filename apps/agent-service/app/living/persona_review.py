@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from typing import Annotated
 
@@ -196,7 +197,7 @@ def _persona_review_prompt(
 
 
 async def review_persona(
-    *, lane: str, persona_id: str, now: datetime
+    *, lane: str, persona_id: str, clock: Callable[[], datetime]
 ) -> PersonaVersion | None:
     """让她读上一周自己写的那几页，重写一版「我是谁」；这一拍不该跑 / 没写成返回
     ``None``。
@@ -204,8 +205,13 @@ async def review_persona(
     **"本周写过没有"到落库为止在排他占用里**（每人一条轴），理由同
     day_page：两条拍打到同一个人时，各自读到"本周还没写"就会双双烧一次模型，最后链
     上多出一版语义重复的正文（版本链是 append-only，没有任何东西会拦第二次）。窗口
-    那一道判在占用**外面**：它只看传进来的 ``now``，不读任何共享状态，等锁没有意义
+    那一道判在占用**外面**：它只看这一拍的钟，不读任何共享状态，等锁没有意义
     ——一周 2016 拍里的绝大多数在这里就返回了。
+
+    **占用里的一切用拿到占用那一刻的钟**：回看哪一周、本周写过没有、这一版什么时候写下的。
+    前一次回看挂住时（最长占着 15 分钟），排在后面的那一拍要过一阵才轮到，这一版是那时写下
+    的，不是那一拍敲响时。窗口只管这一拍要不要去试：排在后面、轮到时已经过了窗口的那一拍照样
+    写，理由同 :func:`app.living.day_page.write_day_page`。
 
     顺序是"能不调模型就不调"，四道判断全在模型前面：
 
@@ -224,20 +230,24 @@ async def review_persona(
     模型跑完之后还有一道：**正文 strip 为空 = 这一轮没成**。不落版本——下一拍还在窗
     口里的话她会再写一次。落一版空白的后果是这一周被记成"写过了"，而她那一版是空的。
 
-    ``written_at`` 用传进来的 ``now``（归一到 CST）而不是现取钟：判据 2 读的
-    ``written_at`` 和这里写的 ``written_at`` 必须是同一个时钟，两个时钟之间那点差可
-    以正好跨过周界，于是同一周写两版、或者下一周的班被当成已经跑过。生产上钟传的就
-    是 ``now_cst()``，值一样。
+    ``written_at`` 用拿到占用时读的那一个 ``now``（归一到 CST），不在写的时候再读一次钟：
+    判据 2 读的 ``written_at`` 和这里写的 ``written_at`` 必须是同一个时刻，两次读钟之间
+    那点差可以正好跨过周界，于是同一周写两版、或者下一周的班被当成已经跑过。
 
     ``max_retries=1``：core 的 ``run`` 把整轮包在 ``@retry`` 里，一次模型瞬时失败会
     整轮重放、白花一次钱；这一轮本来就一周一次，五分钟后那一拍再来就行。
     """
-    local = now.astimezone(CST)
-    if not (PERSONA_REVIEW_FROM <= local.time() < PERSONA_REVIEW_UNTIL):
+    if not (
+        PERSONA_REVIEW_FROM
+        <= clock().astimezone(CST).time()
+        < PERSONA_REVIEW_UNTIL
+    ):
         return None
 
-    since, until = last_full_week(now)
     async with hold(persona_review_lock_key(lane, persona_id)):
+        now = clock()
+        local = now.astimezone(CST)
+        since, until = last_full_week(now)
         if await has_review_version_this_week(
             lane=lane, persona_id=persona_id, now=now
         ):
@@ -343,10 +353,10 @@ async def persona_review_tick(tick: PersonaReviewTick) -> None:
     三条轴各有自己的占用，并发没有竞争。异常不往上抛——源循环那一拍失败会连累另外两
     个人，而下一拍五分钟后就来了，窗口里还有的是机会。
     """
-    lane, now = living_lane(), now_cst()
+    lane = living_lane()
     outcomes = await asyncio.gather(
         *(
-            review_persona(lane=lane, persona_id=persona_id, now=now)
+            review_persona(lane=lane, persona_id=persona_id, clock=now_cst)
             for persona_id in LIVING_PERSONAS
         ),
         return_exceptions=True,

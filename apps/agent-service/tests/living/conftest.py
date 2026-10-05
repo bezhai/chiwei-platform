@@ -14,6 +14,7 @@ fixtures along the rootdir→test-file path.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -89,6 +90,25 @@ def post(monkeypatch) -> Post:
     stand_in = Post()
     monkeypatch.setattr(outgoing_mod, "send", stand_in.send)
     return stand_in
+
+
+def clock_at(moment: datetime) -> Callable[[], datetime]:
+    """一只停在 ``moment`` 的钟：一轮拿到占用时读它，读几次都是这一刻。"""
+    return lambda: moment
+
+
+async def queued_behind(key: str) -> None:
+    """等到有人排在这把占用后面（``asyncio.Lock`` 的等待队列不空）。"""
+    import asyncio
+
+    from app.living.serial import _lock_for
+
+    lock = _lock_for(key)
+    for _ in range(500):
+        if lock._waiters:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"没有人排在 {key} 后面")
 
 
 def glance_text(shown) -> str:

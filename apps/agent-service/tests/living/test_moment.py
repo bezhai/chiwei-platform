@@ -49,6 +49,7 @@ from app.living.persona import LIVING_PERSONAS
 from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from app.runtime.schema_types import pg_type
+from tests.living.conftest import clock_at
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -203,7 +204,7 @@ async def test_a_moment_that_carries_on_costs_one_word_and_writes_nothing(
 ):
     stub_moment(said="继续")
 
-    moment = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    moment = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert moment is not None
     assert moment.switched is False
@@ -228,7 +229,7 @@ async def test_every_moment_is_countable_afterwards(moment_db, stub_moment):
         said="去洗了",
     )
 
-    moment = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
+    moment = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 40)))
 
     assert (moment.switched, moment.pulled_by, moment.doing) == (
         True,
@@ -297,7 +298,7 @@ async def test_switching_puts_her_somewhere_doing_something(moment_db, stub_mome
         )
     )
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     where = await current_whereabouts(lane=LANE, persona_id="akao")
     assert (where.place, where.doing) == ("家/厨房", "煮抹茶")
@@ -312,7 +313,7 @@ async def test_switching_nowhere_is_refused_instead_of_silently_losing_her(
         ("switch_to", {"doing": "发呆", "place": "  ", "because": "没事干"})
     )
 
-    moment = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    moment = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert isinstance(runner.results[0], dict), "空位置被接受了"
     assert await current_whereabouts(lane=LANE, persona_id="akao") is None
@@ -333,7 +334,7 @@ async def test_what_she_says_reaches_her_sister_word_for_word(
     await _stand("ayana", "家/楼上/绫奈房间", "画画", _at(13))
     stub_moment(("say", {"what": "周末祭典我陪你去。", "to": ["绫奈"]}))
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert [(s.sender, s.recipient, s.body) for s in post.sent] == [
         ("赤尾", "绫奈", "当面对你说：「周末祭典我陪你去。」")
@@ -347,7 +348,7 @@ async def test_speaking_face_to_face_is_what_the_house_can_overhear(
     await _stand("akao", "家/客厅", "待着", _at(13))
     stub_moment(("say", {"what": "抹茶好了。", "to": ["绫奈"]}))
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     from app.living.snapshot import recent_own_happenings
 
@@ -367,7 +368,7 @@ async def test_speaking_to_two_sisters_at_once_is_one_thing_not_two(
     await _stand("akao", "家/客厅", "待着", _at(13))
     stub_moment(("say", {"what": "抹茶煮多了，谁要。", "to": ["绫奈", "千凪"]}))
 
-    moment = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    moment = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert moment.recorded == 1
     assert sorted(s.recipient for s in post.sent) == ["千凪", "绫奈"]
@@ -387,7 +388,7 @@ async def test_she_can_speak_to_someone_the_code_never_heard_of(
     await _stand("akao", "家/玄关", "应门", _at(13))
     runner = stub_moment(("say", {"what": "许阿姨，进来坐。", "to": ["xu_yi"]}))
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert not isinstance(runner.results[0], dict), (
         f"她对世界里的第四个人开不了口：{runner.results[0]!r}"
@@ -405,7 +406,7 @@ async def test_saying_nothing_is_not_saying(moment_db, stub_moment):
     await _stand("akao", "家/客厅", "待着", _at(13))
     runner = stub_moment(("say", {"what": "   ", "to": ["绫奈"]}))
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert isinstance(runner.results[0], dict)
 
@@ -415,7 +416,7 @@ async def test_she_cannot_act_before_she_is_anywhere(moment_db, stub_moment):
     """还没定下位置就动作 —— world 不知道这件事发生在哪，谁也察觉不到。"""
     runner = stub_moment(("act", {"what": "发了会儿呆"}))
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert isinstance(runner.results[0], dict)
 
@@ -503,14 +504,14 @@ async def test_what_a_sister_said_can_be_kept_in_a_moment_that_carries_on(
         ("keep_in_mind", {"still_on_my_mind": ["绫奈问我周末陪不陪她去祭典"]}),
         said="继续",
     )
-    first = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    first = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert first.switched is False, "她手上的事没变 —— 这个 moment 就是「继续」"
     assert first.open_ends == 1
 
     quiet = stub_moment(said="继续")
     for step in range(1, 7):  # 14:10 一路到 15:10，跨过 15:00 那个清理点
-        await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP * step)
+        await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP * step))
 
     read = _all_she_read(quiet.runs[-1])
     assert "绫奈问我周末陪不陪她去祭典" in read, (
@@ -530,12 +531,12 @@ async def test_switching_does_not_by_itself_wipe_what_she_is_keeping_in_mind(
     """换事情跟记不记得住是两件事：换个事做不该把心里挂着的东西清空。"""
     await _stand("akao", "家/客厅", "看书", _at(13))
     stub_moment(("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台"]}))
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     stub_moment(
         ("switch_to", {"doing": "去厨房", "place": "家/厨房", "because": "饿了"})
     )
-    second = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+    second = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP))
 
     assert second.switched is True
     assert [e.what for e in await list_open_loose_ends(lane=LANE, persona_id="akao")] == [
@@ -551,10 +552,10 @@ async def test_the_list_she_reports_replaces_the_whole_list(moment_db, stub_mome
     stub_moment(
         ("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台", "回绫奈的祭典"]})
     )
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     stub_moment(("keep_in_mind", {"still_on_my_mind": ["回绫奈的祭典"]}))
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP))
 
     assert [e.what for e in await list_open_loose_ends(lane=LANE, persona_id="akao")] == [
         "回绫奈的祭典"
@@ -565,10 +566,10 @@ async def test_the_list_she_reports_replaces_the_whole_list(moment_db, stub_mome
 async def test_keeping_nothing_in_mind_is_a_thing_she_can_say(moment_db, stub_moment):
     await _stand("akao", "家/客厅", "看书", _at(13))
     stub_moment(("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台"]}))
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     stub_moment(("keep_in_mind", {"still_on_my_mind": []}))
-    third = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+    third = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP))
 
     assert await list_open_loose_ends(lane=LANE, persona_id="akao") == []
     assert third.open_ends == 0
@@ -611,11 +612,11 @@ async def test_a_moment_only_puts_what_is_new_in_front_of_her(
     """
     await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(13))
     stub_moment(("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台"]}))
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     await _reaches_her("akao", "绫奈", "当面对你说：「姐，抹茶还有吗」", _at(14, 5))
     quiet = stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP))
 
     fresh = _what_she_read(quiet.runs[-1])
     assert "姐，抹茶还有吗" in fresh, "这期间别人说的话没送到"
@@ -640,12 +641,12 @@ async def test_a_cold_start_still_tells_her_where_she_stands(
     """
     await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(13))
     stub_moment(("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台"]}))
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     quiet = stub_moment(said="继续")
     # 上下文不再按天切，所以"历史是空的"要另外造：清一遍那张表，模拟刚重启 / 刚清库。
     await _wipe_transcripts()
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14) + dt.timedelta(days=1))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + dt.timedelta(days=1)))
 
     read = _all_she_read(quiet.runs[-1])
     assert "看昨天拍的胶片" in read, "冷启动那一轮她不知道自己在哪、在做什么"
@@ -673,18 +674,18 @@ async def test_a_thing_she_hung_an_hour_on_comes_due_in_front_of_her(
     stub_moment(
         ("keep_in_mind", {"still_on_my_mind": ["[2026-07-25 15:00] 家属谈话会"]})
     )
-    first = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    first = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
     assert first.open_ends == 1
 
     quiet = stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP))
     before = _all_she_read(quiet.runs[-1])
     assert "[2026-07-25 15:00] 家属谈话会" in before, (
         f"她眼前那条没带上该在几点。拿到：\n{before}"
     )
     assert "到点了" not in before, f"还没到就说到了。拿到：\n{before}"
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(15, 0))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(15, 0)))
     due = _what_she_read(quiet.runs[-1])
     assert "到点了" in due or "刚到点的" in due, (
         f"到点那一下她眼前新来的东西里没有任何变化。拿到：\n{due}"
@@ -699,7 +700,7 @@ async def test_rescheduling_is_just_listing_a_different_hour(moment_db, stub_mom
     runner = stub_moment(
         ("keep_in_mind", {"still_on_my_mind": ["[2026-07-25 15:00] 家属谈话会"]})
     )
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
     assert "[2026-07-25 15:00] 家属谈话会" in runner.results[0], (
         "当场那句确认没把时刻回给她 —— 她无从知道自己写的时刻收下了没有"
     )
@@ -707,7 +708,7 @@ async def test_rescheduling_is_just_listing_a_different_hour(moment_db, stub_mom
     stub_moment(
         ("keep_in_mind", {"still_on_my_mind": ["[2026-07-25 17:30] 家属谈话会"]})
     )
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP))
 
     ends = await list_open_loose_ends(lane=LANE, persona_id="akao")
     assert len(ends) == 1, "改期开出了第二条线头"
@@ -724,7 +725,7 @@ async def test_an_hour_she_wrote_wrong_is_handed_back_instead_of_swallowed(
         ("keep_in_mind", {"still_on_my_mind": ["[明天下午三点] 家属谈话会"]})
     )
 
-    moment = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    moment = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert isinstance(runner.results[0], dict), "写不成的时刻被静默吞掉了"
     assert await list_open_loose_ends(lane=LANE, persona_id="akao") == []
@@ -742,10 +743,10 @@ async def test_writing_only_a_time_does_not_empty_what_she_keeps_in_mind(
     """
     await _stand("akao", "家/客厅", "看书", _at(13))
     stub_moment(("keep_in_mind", {"still_on_my_mind": ["洗的衣服还在阳台"]}))
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     runner = stub_moment(("keep_in_mind", {"still_on_my_mind": ["[2026-07-25 15:00]"]}))
-    second = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+    second = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP))
 
     assert isinstance(runner.results[0], dict), "写了一半的条目被当成成功收下了"
     assert [
@@ -776,10 +777,10 @@ async def test_what_a_sister_does_beside_her_reaches_her_only_through_her_inbox(
         ("say", {"what": "这本书好难懂", "to": []}),
         ("act", {"what": "把书合上了"}),
     )
-    await run_moment(lane=LANE, persona_id="ayana", now=_at(14))
+    await run_moment(lane=LANE, persona_id="ayana", clock=clock_at(_at(14)))
 
     runner = stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     everything = _all_she_read(runner.runs[0])
     assert "这本书好难懂" not in everything and "把书合上了" not in everything, (
@@ -801,7 +802,7 @@ async def test_her_hobbies_are_in_front_of_her_every_moment(moment_db, stub_mome
     的第二个独立病因就是这个。"""
     runner = stub_moment(said="继续")
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     prompt_vars = runner.runs[0][1]["prompt_vars"]
     assert prompt_vars["persona_core"] == stub_moment.persona.persona_core
@@ -820,7 +821,7 @@ async def test_a_blank_core_says_so_instead_of_rendering_a_hole(
     runner = stub_moment(said="继续")
     monkeypatch.setattr(persona_mod, "find_persona", blank)
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     core = runner.runs[0][1]["prompt_vars"]["persona_core"]
     assert core.strip() != ""
@@ -835,7 +836,7 @@ async def test_the_prompt_variables_are_exactly_three(moment_db, stub_moment):
     """
     runner = stub_moment(said="继续")
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert set(runner.runs[0][1]["prompt_vars"]) == {
         "persona_name",
@@ -865,7 +866,7 @@ async def test_the_guides_she_can_read_are_listed_in_front_of_her(
     SkillRegistry.load_all(tmp_path)
     try:
         runner = stub_moment(said="继续")
-        await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+        await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
     finally:
         # 注册表是 class-level 全局状态，留着会漏进别的用例。
         SkillRegistry.load_all(tmp_path / "这个目录不存在")
@@ -883,9 +884,9 @@ async def test_the_guides_she_can_read_are_listed_in_front_of_her(
 async def test_a_second_moment_too_soon_does_not_run(moment_db, stub_moment):
     runner = stub_moment(said="继续")
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
     skipped = await run_moment(
-        lane=LANE, persona_id="akao", now=_at(14) + _STEP - dt.timedelta(minutes=1)
+        lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP - dt.timedelta(minutes=1))
     )
 
     assert skipped is None
@@ -896,8 +897,8 @@ async def test_a_second_moment_too_soon_does_not_run(moment_db, stub_moment):
 async def test_a_moment_runs_again_once_the_gap_has_passed(moment_db, stub_moment):
     runner = stub_moment(said="继续")
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-    later = await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
+    later = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP))
 
     assert later is not None
     assert len(runner.runs) == 2
@@ -907,8 +908,8 @@ async def test_a_moment_runs_again_once_the_gap_has_passed(moment_db, stub_momen
 async def test_one_sisters_moment_does_not_gate_another(moment_db, stub_moment):
     runner = stub_moment(said="继续")
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-    hers = await run_moment(lane=LANE, persona_id="ayana", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
+    hers = await run_moment(lane=LANE, persona_id="ayana", clock=clock_at(_at(14)))
 
     assert hers is not None
     assert len(runner.runs) == 2
@@ -946,7 +947,7 @@ async def test_replaying_the_same_moment_lands_one_row(moment_db, stub_moment):
     重放大概率**不会**产出一模一样的内容，所以幂等必须落在自然键上、跟内容无关。
     """
     stub_moment(said="继续")
-    first = await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    first = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     from app.runtime.persist import insert_idempotent, select_all_versions
 
@@ -969,7 +970,7 @@ async def test_the_tick_walks_all_three_sisters(moment_db, monkeypatch):
 
     walked: list[tuple[str, str]] = []
 
-    async def spy(*, lane: str, persona_id: str, now):
+    async def spy(*, lane: str, persona_id: str, clock):
         walked.append((lane, persona_id))
         return None
 
@@ -988,7 +989,7 @@ async def test_one_sister_blowing_up_does_not_stop_the_others(moment_db, monkeyp
 
     walked: list[str] = []
 
-    async def flaky(*, lane: str, persona_id: str, now):
+    async def flaky(*, lane: str, persona_id: str, clock):
         walked.append(persona_id)
         if persona_id == LIVING_PERSONAS[0]:
             raise RuntimeError("她那边炸了")
@@ -1006,8 +1007,8 @@ async def test_one_sister_blowing_up_does_not_stop_the_others(moment_db, monkeyp
 async def test_moments_of_another_lane_do_not_gate_this_one(moment_db, stub_moment):
     runner = stub_moment(said="继续")
 
-    await run_moment(lane="prod", persona_id="akao", now=_at(14))
-    mine = await run_moment(lane=LANE, persona_id="akao", now=_at(14, 1))
+    await run_moment(lane="prod", persona_id="akao", clock=clock_at(_at(14)))
+    mine = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 1)))
 
     assert mine is not None
     assert len(runner.runs) == 2
@@ -1017,8 +1018,8 @@ async def test_moments_of_another_lane_do_not_gate_this_one(moment_db, stub_mome
 async def test_the_latest_moment_is_the_one_that_ran_last(moment_db, stub_moment):
     stub_moment(said="继续")
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14) + _STEP)
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14) + _STEP))
 
     latest = await latest_moment(lane=LANE, persona_id="akao")
     assert latest.began_at == _at(14) + _STEP
@@ -1029,7 +1030,7 @@ async def test_a_moment_is_not_replayed_by_the_agent_retry(moment_db, stub_momen
     """durable mutation：整轮 ReAct 被 @retry 包着，重放会把已经写过的库再写一遍。"""
     runner = stub_moment(said="继续")
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     assert runner.runs[0][1]["max_retries"] == 1
 
@@ -1067,10 +1068,10 @@ async def test_a_crash_before_the_record_lands_does_not_redo_her_actions(
 
     monkeypatch.setattr(moment_mod, "insert_idempotent", crash)
     with pytest.raises(RuntimeError):
-        await run_moment(lane=LANE, persona_id="akao", now=_at(14, 0))
+        await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 0)))
 
     monkeypatch.setattr(moment_mod, "insert_idempotent", real_insert)
-    again = await run_moment(lane=LANE, persona_id="akao", now=_at(14, 1))
+    again = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 1)))
 
     assert again is not None, "上一个 moment 没留下记录，这一拍该重跑"
     assert again.moment_id == _at(14, 0).isoformat(timespec="minutes")
@@ -1086,14 +1087,34 @@ async def test_a_crash_before_the_record_lands_does_not_redo_her_actions(
 
 
 @pytest.mark.integration
-async def test_a_moment_is_stamped_on_its_grid_cell(moment_db, stub_moment):
-    """moment 的身份是格子，不是钟表上那一瞬 —— 落在格上才可能跨重试对得上。"""
+async def test_a_moment_is_named_by_its_grid_cell_and_lives_at_the_time_it_ran(
+    moment_db, stub_moment
+):
+    """moment 的身份是格子，不是钟表上那一瞬 —— 落在格上才可能跨重试对得上。她这一轮的
+    『现在』却是它真正跑起来的那一刻：一格里晚了几分钟才轮到她，她看到的、做的都在那几分钟之后。"""
     stub_moment(said="继续")
 
-    moment = await run_moment(lane=LANE, persona_id="akao", now=_at(14, 7))
+    moment = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 7)))
 
-    assert moment.began_at == _at(14, 0)
     assert moment.moment_id == _at(14, 0).isoformat(timespec="minutes")
+    assert moment.began_at == _at(14, 7)
+
+
+@pytest.mark.integration
+async def test_a_cell_that_already_ran_late_does_not_run_again(moment_db, stub_moment):
+    """一格只跑一次：14:07 才跑的 14:00 那一格，14:09 那一拍不再跑它，14:10 跑下一格。"""
+    runner = stub_moment(said="继续")
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 7)))
+    again = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 9)))
+    next_cell = await run_moment(
+        lane=LANE, persona_id="akao", clock=clock_at(_at(14, 10))
+    )
+
+    assert again is None
+    assert next_cell is not None
+    assert next_cell.moment_id == _at(14, 10).isoformat(timespec="minutes")
+    assert len(runner.runs) == 2
 
 
 def test_one_wake_has_room_for_more_than_one_whole_thing():
@@ -1116,7 +1137,7 @@ def test_the_moment_runs_on_the_life_model():
 
 
 # --------------------------------------------------------------------------
-# 七 ter · 谁是"最近一个 moment"由**落地顺序**说了算，不由钟点
+# 七 ter · 谁是"最近一个 moment"由**落地顺序**说了算，常规节奏只数常规的格子
 # --------------------------------------------------------------------------
 
 
@@ -1124,64 +1145,63 @@ def test_the_moment_runs_on_the_life_model():
 async def test_an_early_moment_that_lands_first_is_not_taken_as_the_last_one(
     moment_db, stub_moment
 ):
-    """提前来的 moment 先落地、常规 moment 后落地 —— "上一个"是后落地的那个。
+    """提前来的 moment 先落地、排在它后面的常规 moment 后落地 —— "上一个"是后落地的那个。
 
     两条钟并发打到同一个人时 :func:`app.living.serial.hold` 让后到的**排队**而不是
-    丢掉，所以这个次序完全正常：21:34 被叫来的那个 moment 先拿到占用、先跑完
-    （``began_at`` 是真实时刻 21:34），21:35 那一拍的常规 moment 随后才轮到、跑完
-    （``began_at`` 是它的格子 21:30）。**落地顺序和 ``began_at`` 顺序是反的。**
+    丢掉：21:34 被叫来的那个 moment 先拿到占用、先跑完，21:35 那一拍的常规 moment（21:30
+    那一格）随后才轮到。它的『现在』是它真正跑起来的 21:35，不是它那一格的 21:30。
 
     下一轮问"离上一次过了多久"、"上一轮的上下文落地了没有"，问的都是**最后落地**的那个。
-    按 ``began_at`` 排会取回 21:34 那一行：隔了多久报错，后落地那一轮的上下文丢了也判不出来。
     """
     await _stand("akao", "家/客厅", "看书", _at(21, 20))
     runner = stub_moment(said="继续")
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 20))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 20)))
     early = await run_moment(
-        lane=LANE, persona_id="akao", now=_at(21, 34), nudged_by="msg-1"
+        lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)), nudged_by="msg-1"
     )
     assert early is not None and early.began_at == _at(21, 34)
-    regular = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 35))
-    # 前提：常规 moment 的格子比提前来的 moment 的真实时刻早，而它后落地。
-    assert regular is not None and regular.began_at == _at(21, 30)
+    regular = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35)))
+    assert regular is not None
+    assert regular.moment_id == _at(21, 30).isoformat(timespec="minutes")
+    assert regular.began_at == _at(21, 35)
     assert regular.seq > early.seq
 
     latest = await latest_moment(lane=LANE, persona_id="akao")
     assert latest.moment_id == regular.moment_id, (
-        "「最近一个 moment」取成了钟点最靠后的那个 moment，不是最后落地的那个 moment"
+        "「最近一个 moment」取成了先落地的那个 moment，不是最后落地的那个 moment"
     )
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 45))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 45)))
     assert "离上一次过了 10 分钟" in _what_she_read(runner.runs[-1]), (
-        "「离上一次」从提前来的那个 moment 算了 —— 那一轮之后还有一轮"
+        "「离上一次」没从最后落地的那个 moment 算"
     )
 
 
 @pytest.mark.integration
-async def test_the_regular_rhythm_measures_from_the_latest_cell_not_the_last_write(
-    moment_db, stub_moment
-):
-    """乱序落地之后，常规节奏认的仍然是「最近那一格」。
+async def test_the_regular_rhythm_counts_only_the_regular_cells(moment_db, stub_moment):
+    """常规节奏认的是「最近跑过的那一格」，提前来的 moment 不算一格。
 
-    这条和上一条是**两个问题、两种排序**：游标问"最后落地的那个 moment"，节奏问"最近跑
-    过的那一格"。合成一个的话，21:30 那一格（最后落地）会被当成最近一格，21:40 明明
-    该来的那个 moment 就得再等十分钟。
+    这条和上一条是**两个问题**：游标问"最后落地的那个 moment"，节奏问"最近跑过的那一格"。
+    21:35 才跑的 21:30 那一格跑过了，21:39 那一拍不再跑它；21:40 是新的一格，照常来。
     """
     from app.living.moment import latest_regular_moment
 
     stub_moment(said="继续")
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 20))
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 34), nudged_by="m-1")
-    regular = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 35))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 20)))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)), nudged_by="m-1")
+    regular = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35)))
 
     last_regular = await latest_regular_moment(lane=LANE, persona_id="akao")
     assert last_regular.moment_id == regular.moment_id
     assert last_regular.nudged is False, "节奏判断认了提前来的 moment"
-    assert last_regular.began_at == _at(21, 30)
 
-    on_time = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
+    assert (
+        await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 39)))
+        is None
+    ), "21:30 那一格跑了两遍"
+    on_time = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 40)))
     assert on_time is not None, "21:40 那一格被吞了"
     assert on_time.began_at == _at(21, 40)
 
@@ -1191,22 +1211,21 @@ async def test_each_moment_carries_the_order_it_landed_in(moment_db, stub_moment
     """落地顺序是一列**单调递增**的数，跟她的钟没有关系。
 
     这条是上面两条的地基：``began_at`` 只说她这个 moment 的『现在』是几点，谁先谁后落库
-    是另一个问题，得有自己的一列去答。
+    是另一个问题，得有自己的一列去答。现在每一轮都在拿到占用时读钟，新写下的几轮钟点先后
+    跟落地先后一致；加这一列之前、常规 moment 还记着格子的那些旧行没有这个保证
+    （``tests/living/test_registered.py`` 里钟点故意造反的那一条）。
     """
     stub_moment(said="继续")
 
-    first = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 20))
+    first = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 20)))
     early = await run_moment(
-        lane=LANE, persona_id="akao", now=_at(21, 34), nudged_by="m-1"
+        lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)), nudged_by="m-1"
     )
-    regular = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 35))
+    regular = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35)))
 
     assert [m.seq for m in (first, early, regular)] == [1, 2, 3]
-    assert regular.began_at < early.began_at, (
-        "前提没造出来：这条要的就是「后落地的那个 moment 钟点更早」"
-    )
     # 每个人一条轴，互不牵连。
-    hers = await run_moment(lane=LANE, persona_id="ayana", now=_at(21, 35))
+    hers = await run_moment(lane=LANE, persona_id="ayana", clock=clock_at(_at(21, 35)))
     assert hers.seq == 1
 
 
@@ -1352,7 +1371,7 @@ async def test_moving_without_changing_what_she_is_doing_updates_where_she_is(
     await _stand("ayana", "学校/教学楼走廊", "等第一节课", _at(9))
     stub_moment(("move_to", {"place": "学校/二年三班教室"}))
 
-    await run_moment(lane=LANE, persona_id="ayana", now=_at(9, 20))
+    await run_moment(lane=LANE, persona_id="ayana", clock=clock_at(_at(9, 20)))
 
     where = await current_whereabouts(lane=LANE, persona_id="ayana")
     assert where.place == "学校/二年三班教室", "人挪了位置没跟着"
@@ -1369,7 +1388,7 @@ async def test_moving_is_not_switching_to_something_else(moment_db, stub_moment)
     await _stand("ayana", "学校/教学楼走廊", "等第一节课", _at(9))
     stub_moment(("move_to", {"place": "学校/二年三班教室"}))
 
-    moment = await run_moment(lane=LANE, persona_id="ayana", now=_at(9, 20))
+    moment = await run_moment(lane=LANE, persona_id="ayana", clock=clock_at(_at(9, 20)))
 
     assert moment.switched is False, "走一步被算成了换事情"
     assert moment.doing == "等第一节课"
@@ -1383,7 +1402,7 @@ async def test_moving_nowhere_is_refused_like_switching_nowhere(
     await _stand("ayana", "学校/教学楼走廊", "等第一节课", _at(9))
     runner = stub_moment(("move_to", {"place": "   "}))
 
-    await run_moment(lane=LANE, persona_id="ayana", now=_at(9, 20))
+    await run_moment(lane=LANE, persona_id="ayana", clock=clock_at(_at(9, 20)))
 
     assert isinstance(runner.results[0], dict), "空位置被接受了"
     where = await current_whereabouts(lane=LANE, persona_id="ayana")
@@ -1397,7 +1416,7 @@ async def test_moving_before_she_ever_stood_anywhere_says_so(
     """从没落过位置时挪不动 —— 没有"手上那件事"可以原样带走。"""
     runner = stub_moment(("move_to", {"place": "学校/二年三班教室"}))
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(9, 20))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(9, 20)))
 
     assert isinstance(runner.results[0], dict), "凭空挪了一个没有位置的人"
     assert await current_whereabouts(lane=LANE, persona_id="akao") is None
@@ -1435,7 +1454,7 @@ async def test_a_seam_records_what_it_spent_where_it_can_be_counted(
     await _stand("akao", "家/客厅", "看书", _at(13))
     stub_moment(("act", {"what": "把胶片摊了一茶几"}))
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
     spent = await select_all_versions(
         ThinkingTokensSpent,
@@ -1478,7 +1497,7 @@ async def test_the_conversations_she_can_see_are_settled_once_for_the_whole_mome
         ("look_at_phone", {"channel_id": str(_DM)}),
         ("look_up_contact", {"name": "bezhai"}),
     )
-    moment = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    moment = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
 
     assert moment is not None
     assert len(counted) == 1, (
@@ -1501,13 +1520,13 @@ async def test_a_notification_she_ignores_is_not_put_in_front_of_her_again(
     await _incoming(_DM, text_body="在吗", at=_at(21, 0))
 
     first = stub_moment(said="嗯")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     assert "bezhai" in _what_she_read(first.runs[-1]), (
         "消息到了的那一轮，通知都没摆到她眼前"
     )
 
     second = stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30) + _STEP)
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30) + _STEP))
 
     fresh = _what_she_read(second.runs[-1])
     assert "bezhai" not in fresh, (
@@ -1536,11 +1555,11 @@ async def test_what_she_still_has_not_read_comes_back_on_the_checkpoint(
     await _incoming(_DM, text_body="在吗", at=_at(21, 50))
 
     stub_moment(said="嗯")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 55))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 55)))
 
     # 跨过下一个清理点（默认一小时一次，落在整点上）：这一轮会立一根新界桩。
     later = stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(22, 5))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(22, 5)))
 
     posts = [
         m.text()

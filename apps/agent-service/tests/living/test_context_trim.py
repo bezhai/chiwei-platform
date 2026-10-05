@@ -42,6 +42,7 @@ from app.living.moment import (
     run_moment,
     transcript_key,
 )
+from tests.living.conftest import clock_at
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
 
 LANE = "coe-living"
@@ -920,7 +921,7 @@ async def test_her_round_trims_by_her_own_policy(
     used = _spy_on_the_policy(monkeypatch, moment_mod)
 
     stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(13, 50))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(13, 50)))
 
     _assert_read_it_at_both_call_sites(used, hers, whose="她")
 
@@ -979,13 +980,13 @@ async def test_a_cleanup_lands_in_the_stored_transcript(moment_db, stub_moment):
     第二个 moment 立起第一根界桩，第三个才有得算年龄 —— 这就是一天头几轮的样子。
     """
     stub_moment(("look_around", {}), said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(13, 50))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(13, 50)))
 
     stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 0))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 0)))
 
     stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(15, 10))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(15, 10)))
 
     tid = transcript_key(lane=LANE, persona_id="akao")
     stored, _ver = await load_session(tid)
@@ -1031,7 +1032,7 @@ async def test_a_picture_is_gone_before_she_is_fed_again(moment_db, stub_moment)
         )
 
     runner = stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(15, 10))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(15, 10)))
 
     fed = runner.runs[0][0]
     assert _images(fed) == [], "过期地址在模型看到它之前就该没了"

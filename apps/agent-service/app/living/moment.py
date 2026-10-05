@@ -46,11 +46,12 @@
 **提前来的那个 moment 不落在格子上**，它的身份是**把她叫来的那条消息**（``nudged_by``）。
 理由见 :func:`run_moment`：撞不上常规 moment 的 id，而且同一条消息只能把她叫来一次。
 
-**"她这个 moment 的钟点"和"这个 moment 第几个落地"是两个问题，各有各的列。** 排队是正常的
-（``hold`` 让后到的等，不丢），所以提前来的 moment 先跑完、常规 moment 后跑完时，落地顺序跟
-``began_at`` 顺序**是反的**——常规 moment 的 ``began_at`` 是它的格子，可能比先落地那个提前
-来的 moment 的真实时刻还早。"最后落地的是哪个 moment"拿钟点去答就会答错（见 :class:`LifeMoment`
-的 ``seq``）。
+**身份是格子，她这个 moment 的『现在』却是拿到占用那一刻的钟**（:func:`run_moment`）。排队是
+正常的（``hold`` 让后到的等，不丢），前一轮挂住时后面那一拍要过一阵才轮到她；她这一轮看到的、
+做的、发出去的都在轮到她之后，钟点也就是那一刻。
+
+**"她这个 moment 的钟点"和"这个 moment 第几个落地"是两个问题，各有各的列**（见
+:class:`LifeMoment` 的 ``seq``）。
 
 工具：
 
@@ -95,7 +96,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta
+from collections.abc import Callable
+from datetime import datetime
 from typing import Annotated
 
 from inner_shared.dynamic_config import dynamic_config
@@ -235,21 +237,19 @@ class LifeMoment(Data):
     **``began_at`` 和 ``seq`` 回答的是两个问题，别互相顶替。**
 
       * ``began_at`` = **她这个 moment 的『现在』**：喂给快照、手机信封和 ``FEATURE_NOW``
-        的那个时刻。常规 moment 取格子（moment 的身份就是格子，见 :mod:`app.living.anchor`），
-        提前来的 moment 没有格子可落，取真实时刻。
+        的那个时刻，也是她这一轮记下的事、发出去的消息上的时刻。两种 moment 都取拿到占用
+        那一刻的钟（:func:`run_moment`）；常规 moment 的身份是它落在的那一格，不是这个时刻。
       * ``seq`` = **这个 moment 在这条轴上第几个落地**，(lane, persona) 各一条轴，在 moment 的
         排他占用里取号、取完到落库中间不放开占用，所以它的先后就是提交的先后。
 
-    两者顺序**会反**，而且这是正常运转的样子：两条钟并发打到同一个人时后到的排队
-    （:func:`app.living.serial.hold` 不丢），21:34 被叫来那个 moment 先跑完、21:35 那一拍
-    的常规 moment（格子 21:30）后跑完——先落地的钟点反而更晚。所以：
+    每一轮都在拿到占用时读钟，所以新写下的几轮两者先后一致；常规 moment 的 ``began_at`` 还记着
+    格子的那些旧行没有这个保证（排在提前来的 moment 后面落地的常规 moment，钟点反而更早）。
+    所以：
 
-      * "上一个落地的是谁"必须问 ``seq``（:func:`latest_moment`）：她的上下文是一版接一版
-        写下去的，``context_ver`` 要跟最后落地的那一轮比。问 ``began_at`` 会取回 21:34
-        那一行，它的版本号比后落地那一轮小一版，后落地那一轮的上下文没写成也判不出来；
+      * "上一个落地的是谁"问 ``seq``（:func:`latest_moment`）：她的上下文是一版接一版
+        写下去的，``context_ver`` 要跟最后落地的那一轮比；
       * 常规节奏问的是"最近跑过的**哪一格**"，那是 ``began_at``
-        （:func:`latest_regular_moment`）。换成 ``seq`` 就会在乱序落地后把更早的格子
-        当成最近一格，已经跑过的晚格子被判成还没跑。
+        （:func:`latest_regular_moment`）：它落在哪一格，那一格就跑过了。
 
     ``switched`` / ``pulled_by`` / ``said`` 三列是验收口径，不是日志："逐个 moment 看得出
     哪些是继续、哪些换了事情、换的理由是什么"只能从这张表查。光看 langfuse trace
@@ -273,7 +273,7 @@ class LifeMoment(Data):
     persona_id: Annotated[str, Key]
     moment_id: Annotated[str, Key]
     seq: int             # 这个 moment 第几个落地（本 lane + 本人一条轴）
-    began_at: datetime   # 她这个 moment 的『现在』：常规 = 格子，提前 = 真实时刻
+    began_at: datetime   # 她这个 moment 的『现在』：拿到占用那一刻的钟
     switched: bool       # 换事情了吗（False = 「继续」）
     pulled_by: str       # 什么把她带走的（她自己那句）；没换 = ""
     recorded: int        # 这个 moment 她说 / 做了几件事（当面的、手机上的都算）
@@ -958,10 +958,10 @@ async def latest_moment(*, lane: str, persona_id: str) -> LifeMoment | None:
     ``context_ver``，见 :func:`lost_last_round`）。她的上下文只有一条，两种 moment 都接在它
     后面写，所以不筛 ``nudged``。
 
-    **按 ``seq`` 排，不按 ``began_at``。** 后者是她那个 moment 的钟点，跟落库先后无关：
-    提前来的 moment（真实时刻）先跑完、常规 moment（格子，钟点更早）后跑完是排队的正常结果，按钟点
-    取就会取回提前来的 moment 那一行——它的 ``context_ver`` 比后落地那一轮小一版，后落地那一轮
-    的上下文没写成也判不出来。
+    **按 ``seq`` 排，不按 ``began_at``。** 后者是她那个 moment 的钟点，问的不是落库先后：
+    常规 moment 的 ``began_at`` 还记着格子的那些旧行里，排在提前来的 moment 后面落地的常规
+    moment 钟点反而更早，按钟点取就会取回提前来的 moment 那一行——它的 ``context_ver`` 比后
+    落地那一轮小一版，后落地那一轮的上下文没写成也判不出来。
 
     ``COALESCE(seq, 0)`` 是加列的另一半防线：DESC 排序下 pg 把 NULL 放**最前**，
     不接住的话已有数据的泳道会一直取回某一条旧行。旧行统一是 0 号，它们之间的先后退回
@@ -984,9 +984,8 @@ async def latest_regular_moment(
     ——她一天被搭话十次，那十分钟的节拍就成了不定期的。
 
     **这里按 ``began_at`` 排，跟 :func:`latest_moment` 不是同一个问题**：那边问"最后
-    落地的是谁"，这边问"跑过的格子里最晚的是哪一格"。常规 moment 的 ``began_at`` 就是它的
-    格子，所以这条排序问的正是后者。换成 ``seq`` 的话，乱序落地之后更早的格子会被当
-    成最近一格，已经跑过的晚格子被判成还没跑，白烧一次模型而且落不了库（自然键撞上）。
+    落地的是谁"，这边问"跑过的格子里最晚的是哪一格"。常规 moment 的 ``began_at`` 落在它
+    那一格里（旧行就是格子本身），所以钟点最晚的那一个就落在最晚的那一格。
     """
     sql = (
         f"SELECT * FROM {_MOMENT_TABLE} "
@@ -1124,37 +1123,46 @@ def nudged_moment_id(nudged_by: str) -> str:
 
 
 async def run_moment(
-    *, lane: str, persona_id: str, now: datetime, nudged_by: str | None = None
+    *,
+    lane: str,
+    persona_id: str,
+    clock: Callable[[], datetime],
+    nudged_by: str | None = None,
 ) -> LifeMoment | None:
     """推进这个人的一个 moment；这个 moment 不该跑就一句模型都不调，返回 ``None``。
 
     整段在排他占用里：一个人不能同时想两件事。该不该跑也判在里面——不然两条路会各自
     读到"还没跑过"、双双跑一个 moment。
 
+    **这个 moment 的『现在』是拿到占用那一刻的钟**（``clock()``），不是钟敲响那一拍。前一轮
+    挂住时（模型调用卡住，最长占锁 15 分钟，见 :data:`app.living.serial.HELD_SECONDS`），排在
+    后面的那一拍要过一阵才轮到她；它看到的是轮到她时的样子（收件箱、手机、她自己的经历都是那
+    时读的），她做的事、发出去的消息带的也就必须是那一刻。拿那一拍的时刻，world 收到的汇总就
+    比汇总里回应的那件事还早。
+
     **两种 moment，身份和"该不该跑"的判据都不一样。**
 
-    *钟点上该来的那种*（``nudged_by is None``）：``now`` 先落到间隔网格上
+    *钟点上该来的那种*（``nudged_by is None``）：『现在』先落到间隔网格上
     （:func:`app.living.anchor.anchor_on_grid`），锚就是这个 moment 的身份。副作用先落库、
     这条记录后落库，中间崩掉下一拍会重跑——锚落在格上，那一拍算出的还是同一个 moment，所有
-    派生 id 原样对上，同样的动作重放一遍写不出新行。该不该跑，只跟**上一个常规 moment**
-    比间隔（:func:`latest_regular_moment`）。
+    派生 id 原样对上，同样的动作重放一遍写不出新行。该不该跑，只看**这一格有没有常规 moment
+    跑过**（:func:`latest_regular_moment`）。
 
     *被人叫来提前的那种*（``nudged_by`` 是把她叫来那条消息的 id）：身份是
-    ``nudge:<那条消息>``，**不落格子**。这一个决定同时解掉三件事：
+    ``nudge:<那条消息>``，**不落格子**。这一个决定同时解掉两件事：
 
       1. 跟同一分钟的常规 moment**撞不上 id**（一个是钟点串，一个是 ``nudge:`` 开头）；
       2. **同一条消息只能把她叫来一次**——身份就是那条消息，跑过就不再跑。这不是冷却
          也不是计数器：真人手机是新消息才震，躺着的未读不会一直震。她没看手机的话
-         那条一直未读，按"还有没有未读"判就是每分钟震一次；
-      3. ``began_at`` 用真实时刻——她这个 moment 的『现在』就是被叫来的那一刻，没有格子可
-         落。它**不负责**让这个 moment 排在上一个 moment 后面：谁是"最后落地的那个 moment"由 ``seq``
-         答（:func:`latest_moment`），常规 moment 的格子比这个真实时刻早是正常的。
+         那条一直未读，按"还有没有未读"判就是每分钟震一次。
 
-      顺带说清为什么不落格子也不丢幂等：一个 moment 里所有派生 id（happening_id、whereabouts
-      的自然键）都从 ``moment_id`` 来，**不从 ``now`` 来**；``moment_id`` 已经稳了，
-      重跑照样是 no-op。前提是重跑时身份不变：被叫来的那一轮没落地，重跑它的是
-      :mod:`app.living.nudge` 那条钟，它记着开始了而没落地的那一轮
-      （:class:`app.living.nudge.NudgeBegun`），不会因为这期间又来了别的消息就换一个身份。
+    两种 moment 的 ``began_at`` 都是这个『现在』本身，身份落不落格子跟它无关。
+
+    『现在』每次重跑都不一样，幂等却不丢：一个 moment 里所有派生 id（happening_id、whereabouts
+    的自然键）都从 ``moment_id`` 来，**不从『现在』来**；``moment_id`` 稳了，重跑照样是 no-op，
+    第一遍已经落下的那几件留着第一遍的钟点。前提是重跑时身份不变：常规的那种靠格子；被叫来的
+    那一轮没落地，重跑它的是 :mod:`app.living.nudge` 那条钟，它记着开始了而没落地的那一轮
+    （:class:`app.living.nudge.NudgeBegun`），不会因为这期间又来了别的消息就换一个身份。
 
     **她被带到那一刻，回不回是她的输出。** 这里只负责把她带到，不看她说了什么、也没有
     任何"她该不该回"的判断——那是替她做决定。
@@ -1181,7 +1189,7 @@ async def run_moment(
     """
     async with hold(life_moment_lock_key(lane, persona_id)):
         return await run_moment_held(
-            lane=lane, persona_id=persona_id, now=now, nudged_by=nudged_by
+            lane=lane, persona_id=persona_id, now=clock(), nudged_by=nudged_by
         )
 
 
@@ -1195,7 +1203,8 @@ async def run_moment_held(
 ) -> LifeMoment | None:
     """:func:`run_moment` 占住之后的那一段。**调用方必须已经占着**
     :func:`life_moment_lock_key` 那条 key——这里不再占一次，``hold`` 不可重入，嵌套就是
-    永久自锁死。
+    永久自锁死。``now`` 是拿到占用之后读的钟（理由见 :func:`run_moment`），这一轮的『现在』
+    就是它。
 
     单独拿出来，是因为被叫来提前的那条钟要在**同一次占用里**先判"是什么叫醒了她"，再跑
     这一轮（:func:`app.living.nudge.nudge_once`）。判在占用外面的话，判完到轮到她之间
@@ -1207,10 +1216,8 @@ async def run_moment_held(
     叫醒她都撞上"这一轮跑过了"。
     """
     minutes = await life_moment_minutes()
-    interval = timedelta(minutes=minutes)
     anchor = anchor_on_grid(now, minutes=minutes)
     nudged = nudged_by is not None
-    began_at = now if nudged else anchor
     moment_id = (
         nudged_moment_id(nudged_by)
         if nudged_by is not None
@@ -1223,13 +1230,11 @@ async def run_moment_held(
         ):
             return None
     else:
+        # 这一格有常规 moment 跑过了：上一个常规 moment 的『现在』落在这一格里（或者更晚）。
         last_regular = await latest_regular_moment(
             lane=lane, persona_id=persona_id
         )
-        if (
-            last_regular is not None
-            and anchor - last_regular.began_at < interval
-        ):
+        if last_regular is not None and last_regular.began_at >= anchor:
             return None
 
     # 她之前做了、还没确认发出去的，这一轮开始前先发：上一轮失败、超时、赶上部署时，那一轮
@@ -1257,7 +1262,7 @@ async def run_moment_held(
             last.moment_id if last is not None else "",
             last.context_ver if last is not None else 0,
         )
-    snapshot = await read_snapshot(lane=lane, persona_id=persona_id, now=began_at)
+    snapshot = await read_snapshot(lane=lane, persona_id=persona_id, now=now)
     # 传到她这里、她还没看过的消息（:mod:`app.living.received`）。读在模型调用之前：
     # 只有这几条会跟这一轮一起记成看过，这一轮跑着的时候新到的留给下一轮。
     received = await unread_received(
@@ -1277,7 +1282,7 @@ async def run_moment_held(
         session_id=f"living-life:{lane}:{persona_id}",
         features={
             FEATURE_LANE: lane,
-            FEATURE_NOW: began_at.isoformat(),
+            FEATURE_NOW: now.isoformat(),
             FEATURE_PERSONA: persona_id,
             FEATURE_MOMENT: moment_id,
             FEATURE_SWITCHES: [],
@@ -1300,7 +1305,7 @@ async def run_moment_held(
     # 一条会话一次往返，不能为了两段文本走两遍。
     with agent_context(context):
         unread = await envelopes_for(
-            lane=lane, persona_id=persona_id, now=began_at
+            lane=lane, persona_id=persona_id, now=now
         )
     # 这一轮新摆到她眼前的那条，接在连续上下文后面 —— 所以它永远是最后一条。
     #
@@ -1314,13 +1319,13 @@ async def run_moment_held(
     # **未读必须在界桩上**：眼前那份只给新到的，一条她一直不看的通知会随着摆出它的
     # 那一轮刺激一起在 own_minutes 之后被裁掉，界桩不重铺的话之后再没有第二处说得出
     # 有人找过她。
-    state = f"{snapshot.render_state()}\n\n{render_unread(unread, now=began_at)}"
-    arrived = render_arrived(unread, since=previous_at, now=began_at)
+    state = f"{snapshot.render_state()}\n\n{render_unread(unread, now=now)}"
+    arrived = render_arrived(unread, since=previous_at, now=now)
     stimulus = Message(
         role=Role.USER,
         content=(
             f"{snapshot.render_new(previous_at=previous_at)}\n\n"
-            f"{render_received(received, now=began_at)}\n\n{arrived}"
+            f"{render_received(received, now=now)}\n\n{arrived}"
         ),
     )
     # 裁在这里，不在收尾：喂进去的和存下去的是同一份前缀，而且一段带着过期图片
@@ -1328,7 +1333,7 @@ async def run_moment_held(
     history = trim_for_round(
         history,
         material_tools=MATERIAL_TOOLS,
-        now=began_at,
+        now=now,
         state=state,
         policy=MOMENT_TRIM_POLICY,
         lost_last_round=gap,
@@ -1356,7 +1361,7 @@ async def run_moment_held(
         actor=persona_id,
         round_id=moment_id,
         usage=usage,
-        observed_at=began_at.isoformat(),
+        observed_at=now.isoformat(),
     )
 
     switches = context.features[FEATURE_SWITCHES]
@@ -1370,7 +1375,7 @@ async def run_moment_held(
         persona_id=persona_id,
         moment_id=moment_id,
         seq=seq,
-        began_at=began_at,
+        began_at=now,
         switched=bool(switches),
         pulled_by=switches[-1]["because"] if switches else "",
         recorded=len(set(context.features[FEATURE_RECORDED])),
@@ -1422,11 +1427,13 @@ async def life_moment_tick(tick: LifeMomentTick) -> None:
     **并发跑，一个人炸不拖累另两个。** 三个人各有自己的占用（每人一条轴），所以
     并发没有竞争；串行的话一个 moment 几十秒的模型调用会让第三个人永远排在拍与拍的边界上。
     异常不往上抛——源循环那一拍失败会连累另外两个人，而下一拍一分钟后就来了。
+
+    这里不读钟：每个人的『现在』是轮到她那一刻的钟（:func:`run_moment`）。
     """
-    lane, now = living_lane(), now_cst()
+    lane = living_lane()
     outcomes = await asyncio.gather(
         *(
-            run_moment(lane=lane, persona_id=persona_id, now=now)
+            run_moment(lane=lane, persona_id=persona_id, clock=now_cst)
             for persona_id in LIVING_PERSONAS
         ),
         return_exceptions=True,

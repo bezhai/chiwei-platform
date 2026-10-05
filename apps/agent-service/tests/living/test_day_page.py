@@ -45,6 +45,7 @@ from app.living.received import ReceivedMessage
 from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, MEDIUM_PHONE
 from app.living.snapshot import read_snapshot
 from app.living.whereabouts import note_whereabouts
+from tests.living.conftest import clock_at
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -225,7 +226,7 @@ async def test_she_writes_down_the_day_that_just_ended(page_db, stub_page):
     await _a_day_worth_of_stuff()
     stub_page("胶片摊了一茶几，绫奈说要下雨，结果没下。")
 
-    page = await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    page = await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 30)))
 
     assert page is not None, "到点了、那天也有东西，却什么都没写下"
     assert page.day == _DAY, "写的不是刚过去那一天"
@@ -239,8 +240,8 @@ async def test_a_day_that_already_has_a_page_is_not_written_again(page_db, stub_
     await _a_day_worth_of_stuff()
     runner = stub_page()
 
-    first = await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
-    again = await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 35))
+    first = await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 30)))
+    again = await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 35)))
 
     assert first is not None
     assert again is None, "同一天写了第二页"
@@ -253,8 +254,8 @@ async def test_outside_the_window_she_does_not_look_back(page_db, stub_page):
     await _a_day_worth_of_stuff()
     runner = stub_page()
 
-    assert await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 2)) is None
-    assert await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 12)) is None
+    assert await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 2))) is None
+    assert await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 12))) is None
     assert runner.runs == [], "没到点却叫了模型"
 
 
@@ -263,7 +264,7 @@ async def test_a_day_with_nothing_in_it_gets_no_page(page_db, stub_page):
     """那天服务根本没跑 —— 不该有那一页，更不该为一片空白叫一次模型。"""
     runner = stub_page()
 
-    assert await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30)) is None
+    assert await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 30))) is None
     assert runner.runs == [], "一天什么都没发生，却还是叫了模型"
 
 
@@ -273,11 +274,11 @@ async def test_a_round_that_writes_nothing_leaves_no_page(page_db, stub_page):
     await _a_day_worth_of_stuff()
     stub_page("   ")
 
-    assert await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30)) is None
+    assert await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 30))) is None
     assert await read_day_page(lane=LANE, persona_id="akao", day=_DAY) is None
 
     stub_page("补上了：胶片摊了一茶几。")
-    later = await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 5))
+    later = await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 5)))
     assert later is not None, "上一拍空了就再也不写了 —— 这一天她永远丢了"
 
 
@@ -432,7 +433,7 @@ async def test_a_day_where_only_messages_reached_her_still_gets_a_page(
     await _received("akao", "world", "下了一整天的雨。", _on(25, 13))
     runner = stub_page("下了一整天的雨，我哪儿也没去。")
 
-    page = await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    page = await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 30)))
 
     assert page is not None and page.happenings == 1
     assert "下了一整天的雨。" in runner.material
@@ -477,7 +478,7 @@ async def test_the_snapshot_carries_the_page_she_wrote(page_db, stub_page):
     """写了没人读 = 白写。这一段必须真的进她每一轮的输入。"""
     await _a_day_worth_of_stuff()
     stub_page("胶片摊了一茶几，绫奈说要下雨。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 30)))
 
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_on(26, 14)
@@ -501,12 +502,12 @@ async def test_a_page_of_the_current_living_day_is_never_served_as_yesterday(
     """
     await _a_day_worth_of_stuff()
     stub_page("07-25 这天。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 30)))
 
     # 她 07-26 白天又过了一天，07-27 凌晨写下 07-26 那页。
     await _happened("akao", "去了趟唱片店", _on(26, 15), kind=KIND_ACT)
     stub_page("07-26 这天。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(27, 4, 30))
+    await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(27, 4, 30)))
 
     got = await read_day_page_before(
         lane=LANE, persona_id="akao", day=living_day_of(_on(27, 10))
@@ -533,7 +534,7 @@ async def test_a_page_older_than_yesterday_is_labelled_by_its_date(page_db, stub
     """中间断了几天（服务没跑）时，不许把三天前那页说成"昨天"。"""
     await _a_day_worth_of_stuff()
     stub_page("07-25 这天。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 30)))
 
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_on(29, 14)
@@ -631,11 +632,11 @@ async def test_writing_a_page_she_can_see_the_one_before(page_db, stub_page):
     """不给上一页的话每一页都是孤立的一天，跨天这条链断在第二天。"""
     await _a_day_worth_of_stuff()
     stub_page("07-25：胶片摊了一茶几。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 30)))
 
     await _happened("akao", "去了趟唱片店", _on(26, 15), kind=KIND_ACT)
     runner = stub_page("07-26：去了唱片店。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(27, 4, 30))
+    await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(27, 4, 30)))
 
     assert "07-25：胶片摊了一茶几。" in runner.material, (
         f"写第二页时看不见第一页：{runner.material}"
@@ -648,7 +649,7 @@ async def test_the_material_reaches_her_verbatim(page_db, stub_page):
     await _a_day_worth_of_stuff()
     runner = stub_page()
 
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    await write_day_page(lane=LANE, persona_id="akao", clock=clock_at(_on(26, 4, 30)))
 
     assert "把胶片摊了一茶几" in runner.material
     assert "今天要下雨吧" in runner.material
@@ -679,3 +680,36 @@ async def test_the_tick_writes_a_page_for_each_of_them(page_db, stub_page, monke
         assert await read_day_page(lane=LANE, persona_id=who, day=_DAY) is not None, (
             f"{who} 那一天没有页 —— 那条钟没把三个人都推到"
         )
+
+
+@pytest.mark.integration
+async def test_a_page_that_waited_behind_a_stuck_one_is_written_when_it_gets_her(
+    page_db, stub_page, monkeypatch
+):
+    """前一次写页挂住了（模型调用卡住，最长占着 15 分钟），04:30 那一拍排在后面，04:46 才轮到。
+    这一页是 04:46 写下的，记的就是这一刻，不是那一拍敲响的 04:30。"""
+    import asyncio
+
+    from app.living import day_page as page_mod
+    from app.living.day_page import day_page_lock_key
+    from app.living.serial import hold
+    from tests.living.conftest import queued_behind
+
+    await _a_day_worth_of_stuff()
+    stub_page("这天。")
+    clock = [_on(26, 4, 30)]
+    monkeypatch.setattr(page_mod, "living_lane", lambda: LANE)
+    monkeypatch.setattr(page_mod, "now_cst", lambda: clock[0])
+    monkeypatch.setattr(page_mod, "LIVING_PERSONAS", ("akao",))
+
+    key = day_page_lock_key(LANE, "akao")
+    async with hold(key):  # 挂住的那一次
+        tick = asyncio.create_task(
+            day_page_tick.__wrapped__(page_mod.DayPageTick(ts=clock[0].isoformat()))
+        )
+        await queued_behind(key)
+        clock[0] = _on(26, 4, 46)
+    await tick
+
+    page = await read_day_page(lane=LANE, persona_id="akao", day=_DAY)
+    assert page is not None and page.written_at == _on(26, 4, 46)

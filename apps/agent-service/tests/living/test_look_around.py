@@ -26,6 +26,7 @@ from app.living.whereabouts import note_whereabouts
 from app.messaging.message import Answer, SendFailed
 from tests.living.conftest import (
     RESIDENT_NAMES,
+    clock_at,
     model_facing_text,
     names_of_places_in,
     path_samples,
@@ -184,7 +185,7 @@ async def test_after_switching_in_this_round_she_asks_about_where_she_is_now(
         ("look_around", {}),
     )
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
 
     (asked,) = world.asked
     assert "家/厨房" in asked["body"] and "煮乌冬" in asked["body"], asked["body"]
@@ -199,7 +200,7 @@ async def test_after_moving_in_this_round_she_asks_about_the_new_place_still_doi
     await _stand("akao", "家/客厅", "看书", _at(21))
     stub_moment(("move_to", {"place": "家/阳台"}), ("look_around", {}))
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
 
     (asked,) = world.asked
     assert "家/阳台" in asked["body"] and "看书" in asked["body"], asked["body"]
@@ -340,7 +341,7 @@ async def test_her_round_cut_off_at_its_cap_while_she_waits_is_cut_and_let_go(
 
     async with asyncio.timeout(10):
         with pytest.raises(TimeoutError):
-            await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+            await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
 
     assert world.asked, "前提不成立：掐断时她不是在等 world 的回答"
     assert runner.results == [], f"掐断被吞成了一句话交给她：{runner.results}"

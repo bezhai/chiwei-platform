@@ -28,6 +28,7 @@ from app.living.received import (
 )
 from app.messaging.message import Kind, Message, new_message
 from app.messaging.receiving import INBOX_REGISTRY
+from tests.living.conftest import clock_at
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
 from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture 名
@@ -298,7 +299,7 @@ async def her_round(inboxes, monkeypatch):
 async def _her_round(at: dt.datetime):
     from app.living.moment import run_moment
 
-    return await run_moment(lane=LANE, persona_id="ayana", now=at)
+    return await run_moment(lane=LANE, persona_id="ayana", clock=clock_at(at))
 
 
 @pytest.mark.integration

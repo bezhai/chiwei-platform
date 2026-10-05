@@ -35,6 +35,7 @@ from app.living.moment import (
 )
 from app.living.nudge import nudge_once
 from app.living.whereabouts import note_whereabouts
+from tests.living.conftest import clock_at, queued_behind
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -218,10 +219,10 @@ async def _all_moments(persona_id: str = "akao") -> list[LifeMoment]:
 
 @pytest.mark.integration
 async def test_a_direct_message_brings_her_to_that_moment(nudge_db, stub_life):
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     await _incoming(_DM, body="在吗，抹茶店那事", at=_at(21, 31))
 
-    moment = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+    moment = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
 
     assert moment is not None and moment.nudged is True
     envelope_seen = stub_life.prompts[-1]
@@ -242,14 +243,14 @@ async def test_she_can_be_named_and_still_say_nothing_and_everything_is_fine(
     "被叫到"和"开口"离得太近，一不小心 @ 就又变成了回复开关。这条用例存在的
     唯一目的，就是让"她没回"成为一个**正常轮次**，而不是一个失败。
     """
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     await _incoming(
         _GROUP, body=" 你说呢", at=_at(21, 31), sender=_SOMEONE,
         sender_name="路人", names_bot=_AKAO_BOT_UID,
     )
     stub_life.said = "继续"  # 她看了一眼信封，没说话
 
-    moment = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+    moment = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
 
     assert moment is not None, "她连被带到那一刻的机会都没有"
     assert moment.switched is False and moment.recorded == 0
@@ -266,14 +267,14 @@ async def test_group_chatter_that_does_not_name_her_waits_for_the_next_regular_m
     # 群固定加白，所以这个群**在**她视野里：这条用例要验的是"不点名不提前、但下一个
     # 常规轮次看得见"，不是白名单挡没挡住它（:mod:`app.living.whitelist`）。
     pinned(str(_GROUP))
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     await _incoming(
         _GROUP, body="今天好热", at=_at(21, 31), sender=_SOMEONE, sender_name="路人"
     )
 
-    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32)) is None
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32))) is None
 
-    later = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
+    later = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 40)))
     assert later is not None
     assert "路人" in stub_life.prompts[-1], (
         f"不点名的消息不提前，但下一个常规轮次一定看得到。她看到的是：\n"
@@ -288,14 +289,14 @@ async def test_group_chatter_that_does_not_name_her_waits_for_the_next_regular_m
 
 @pytest.mark.integration
 async def test_an_early_moment_does_not_delay_the_regular_rhythm(nudge_db, stub_life):
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     await _incoming(_DM, body="在吗", at=_at(21, 33))
-    early = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+    early = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)))
     assert early is not None
 
     # 21:40 是原本就该来的那一轮。按"最近一轮"判间隔的话，21:34 到 21:40 只有
     # 六分钟，这一轮会被吞掉 —— 她的节奏就被每一条私聊往后拖。
-    on_time = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
+    on_time = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 40)))
 
     assert on_time is not None, "提前的那一轮把常规节奏往后推了"
     assert on_time.nudged is False
@@ -313,10 +314,10 @@ async def test_an_early_moment_does_not_delay_the_regular_rhythm(nudge_db, stub_
 async def test_an_early_moment_in_the_same_minute_is_still_its_own_moment(
     nudge_db, stub_life
 ):
-    regular = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    regular = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     await _incoming(_DM, body="在吗", at=_at(21, 30, 10))
 
-    early = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 30, 20))
+    early = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30, 20)))
 
     assert early is not None, (
         "提前轮次跟常规轮次撞了 moment_id —— 自然键相同，这一轮被当成重放丢掉了"
@@ -340,15 +341,15 @@ async def test_the_regular_moment_does_not_show_again_what_the_early_one_showed(
         lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
         doing="翻胶片", noted_at=_at(21, 20),
     )
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     await receive(_to_her("当面对你说：「姐我出门了。」", at=_at(21, 32), sender="绫奈"))
     await _incoming(_DM, body="在吗", at=_at(21, 33))
 
-    early = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+    early = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)))
     assert early is not None
     assert "姐我出门了。" in stub_life.prompts[-1], "提前轮次没看到刚传到她这里的话"
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 40))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 40)))
 
     assert "姐我出门了。" not in stub_life.prompts[-1], "同一句话她看了两遍"
 
@@ -360,12 +361,12 @@ async def test_the_regular_moment_does_not_show_again_what_the_early_one_showed(
 
 @pytest.mark.integration
 async def test_the_same_message_only_pulls_her_early_once(nudge_db, stub_life):
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     await _incoming(_DM, body="在吗", at=_at(21, 31))
 
-    first = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
-    second = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33))
-    third = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+    first = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+    second = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33)))
+    third = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)))
 
     assert first is not None
     assert (second, third) == (None, None), (
@@ -377,21 +378,21 @@ async def test_the_same_message_only_pulls_her_early_once(nudge_db, stub_life):
 
 @pytest.mark.integration
 async def test_a_newer_message_pulls_her_early_again(nudge_db, stub_life):
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     await _incoming(_DM, body="在吗", at=_at(21, 31))
-    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32)) is not None
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32))) is not None
 
     await _incoming(_DM, body="睡了？", at=_at(21, 35))
 
-    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 36)) is not None
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 36))) is not None
     assert len(await _all_moments()) == 3
 
 
 @pytest.mark.integration
 async def test_nothing_new_means_no_early_moment_at_all(nudge_db, stub_life):
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
 
-    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 31)) is None
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 31))) is None
     assert len(await _all_moments()) == 1
 
 
@@ -421,7 +422,7 @@ async def test_a_moment_that_blew_up_did_not_read_her_phone(nudge_db, stub_life)
     moment_mod.insert_idempotent = blow_up
     try:
         with pytest.raises(RuntimeError):
-            await run_moment(lane=LANE, persona_id="akao", now=_at(21, 32))
+            await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
     finally:
         moment_mod.insert_idempotent = original
 
@@ -439,7 +440,7 @@ async def test_a_finished_moment_did_read_her_phone(nudge_db, stub_life):
     await _incoming(_DM, body="在吗", at=_at(21, 31))
     stub_life.calls = [("look_at_phone", {"channel_id": str(_DM)})]
 
-    moment = await run_moment(lane=LANE, persona_id="akao", now=_at(21, 32))
+    moment = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
 
     assert moment is not None
     assert (
@@ -461,7 +462,7 @@ async def test_both_people_waiting_on_her_are_in_the_envelope(nudge_db, stub_lif
         sender_name="路人", names_bot=_AKAO_BOT_UID,
     )
 
-    moment = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33))
+    moment = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33)))
 
     assert moment is not None
     seen = stub_life.prompts[-1]
@@ -507,12 +508,12 @@ async def test_a_received_message_brings_her_to_that_moment_once(
 ):
     from app.living.received import receive
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
     await receive(rain)
 
-    first = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
-    second = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33))
+    first = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+    second = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33)))
 
     assert first is not None and first.nudged is True
     assert first.moment_id == f"nudge:inbox:{rain.message_id}", (
@@ -534,7 +535,7 @@ async def test_a_woken_round_that_fails_is_the_same_moment_when_it_runs_again(
     """
     from app.living.received import receive
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
     await receive(rain)
 
@@ -543,9 +544,9 @@ async def test_a_woken_round_that_fails_is_the_same_moment_when_it_runs_again(
 
     stub_life.meanwhile = blow_up
     with pytest.raises(RuntimeError):
-        await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+        await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
     stub_life.meanwhile = None
-    again = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33))
+    again = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33)))
 
     assert again is not None and again.moment_id == f"nudge:inbox:{rain.message_id}"
     assert "窗外下起了雨。" in stub_life.prompts[-1], "失败那一轮看到的，重跑时没再给她看"
@@ -557,14 +558,14 @@ async def test_the_same_message_delivered_again_does_not_wake_her_again(
 ):
     from app.living.received import receive
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
     await receive(rain)
-    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32)) is not None
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32))) is not None
 
     await receive(rain)  # world 带着原来的 id 重发
 
-    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33)) is None
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33))) is None
     assert len(await _all_moments()) == 2
 
 
@@ -575,7 +576,7 @@ async def test_a_message_that_arrived_during_her_round_wakes_her_after_it(
     """一轮跑着的时候到的那条没摆进那一轮，它还没叫醒过她：下一拍叫醒她一次。"""
     from app.living.received import receive
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
     doorbell = _to_her("楼下有人按门铃。", at=_at(21, 32))
     await receive(rain)
@@ -584,15 +585,15 @@ async def test_a_message_that_arrived_during_her_round_wakes_her_after_it(
         await receive(doorbell)
 
     stub_life.meanwhile = it_arrives
-    woke_for_rain = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+    woke_for_rain = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
     stub_life.meanwhile = None
-    woke_for_doorbell = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33))
+    woke_for_doorbell = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33)))
 
     assert woke_for_rain is not None and rain.message_id in woke_for_rain.moment_id
     assert woke_for_doorbell is not None
     assert doorbell.message_id in woke_for_doorbell.moment_id
     assert "楼下有人按门铃。" in stub_life.prompts[-1]
-    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34)) is None
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34))) is None
 
 
 @pytest.mark.integration
@@ -602,12 +603,12 @@ async def test_a_phone_call_she_ignored_does_not_keep_a_received_message_from_wa
     """手机上那条私聊已经叫醒过她、她没看手机所以一直未读；之后收到的消息照样叫醒她。"""
     from app.living.received import receive
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     await _incoming(_DM, body="在吗", at=_at(21, 31))
-    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32)) is not None
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32))) is not None
 
     await receive(_to_her("千凪在厨房喊你吃饭。", at=_at(21, 33)))
-    moment = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+    moment = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)))
 
     assert moment is not None, "一条躺着的未读私聊挡住了收件箱里的新消息"
     assert "千凪在厨房喊你吃饭。" in stub_life.prompts[-1]
@@ -649,18 +650,6 @@ async def _unread_ids(persona_id: str = "akao") -> set[str]:
     }
 
 
-async def _queued_behind(key: str) -> None:
-    """等到有人排在这把占用后面（``asyncio.Lock`` 的等待队列不空）。"""
-    from app.living.serial import _lock_for
-
-    lock = _lock_for(key)
-    for _ in range(500):
-        if lock._waiters:
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"没有人排在 {key} 后面")
-
-
 async def _fails() -> None:
     raise RuntimeError("这一轮在她做完那些事之后失败了")
 
@@ -675,7 +664,7 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_p
     from app.living.received import RECEIVED_LIMIT, receive
     from app.living.serial import hold
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     doorbell = _to_her("楼下有人按门铃。", at=_at(21, 31))
     await receive(doorbell)
     bodies = {doorbell.message_id: doorbell.body}
@@ -683,9 +672,9 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_p
     key = life_moment_lock_key(LANE, "akao")
     async with hold(key):  # 她正在跑的那一轮
         waiting = asyncio.create_task(
-            nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+            nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
         )
-        await _queued_behind(key)
+        await queued_behind(key)
         for i in range(RECEIVED_LIMIT):
             earlier = _to_her(f"第 {i} 件事。", at=_at(21, 0, i))
             await receive(earlier)
@@ -704,11 +693,61 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_p
         if not await _unread_ids():
             break
         assert await nudge_once(
-            lane=LANE, persona_id="akao", now=_at(21, minute)
+            lane=LANE, persona_id="akao", clock=clock_at(_at(21, minute))
         ) is not None, "收件箱的提前叫醒卡住了：还有没看过的，却叫不醒她"
     assert await _unread_ids() == set()
     assert any("楼下有人按门铃。" in seen for seen in stub_life.prompts)
-    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 40)) is None
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 40))) is None
+
+
+@pytest.mark.integration
+async def test_a_nudge_that_waited_behind_a_stuck_round_happens_when_it_gets_her(
+    nudge_db, stub_life, named, post, monkeypatch
+):
+    """前一轮挂住了，21:32 那一拍的提前叫醒排在后面，21:47 才轮到。被叫醒的那一轮的『现在』是
+    21:47：她做的事记在这一刻，发给 world 的汇总也带着这一刻，不是那一拍敲响的 21:32。"""
+    from app.living import nudge as nudge_mod
+    from app.living.moment import life_moment_lock_key
+    from app.living.nudge import PhoneNudgeTick, phone_nudge_tick
+    from app.living.received import receive
+    from app.living.serial import hold
+
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
+        doing="翻胶片", noted_at=_at(21, 20),
+    )
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    await receive(_to_her("窗外下起了雨。", at=_at(21, 31)))
+    stub_life.calls = [("act", {"what": "起身把窗关上了"})]
+
+    clock = [_at(21, 32)]
+    monkeypatch.setattr(nudge_mod, "now_cst", lambda: clock[0])
+    monkeypatch.setattr(nudge_mod, "living_lane", lambda: LANE)
+    monkeypatch.setattr(nudge_mod, "LIVING_PERSONAS", ("akao",))
+
+    key = life_moment_lock_key(LANE, "akao")
+    async with hold(key):  # 挂住的那一轮
+        tick = asyncio.create_task(
+            phone_nudge_tick(PhoneNudgeTick(ts=clock[0].isoformat()))
+        )
+        await queued_behind(key)
+        clock[0] = _at(21, 47)
+    await tick
+
+    (woken,) = [m for m in await _all_moments() if m.nudged]
+    assert woken.began_at == _at(21, 47)
+    async with session_mod.get_session() as s:
+        acted_at = (
+            await s.execute(
+                text(
+                    "SELECT occurred_at FROM data_happening "
+                    "WHERE lane = :l AND actor = 'akao' AND kind = 'act'"
+                ),
+                {"l": LANE},
+            )
+        ).scalar_one()
+    assert acted_at == _at(21, 47)
+    assert [(s.recipient, s.time) for s in post.sent] == [("world", _at(21, 47))]
 
 
 @pytest.mark.integration
@@ -720,14 +759,14 @@ async def test_two_ticks_queued_behind_her_round_wake_her_once(nudge_db, stub_li
     from app.living.received import receive
     from app.living.serial import hold
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     doorbell = _to_her("楼下有人按门铃。", at=_at(21, 31))
     await receive(doorbell)
 
     async with hold(life_moment_lock_key(LANE, "akao")):  # 她正在跑的那一轮
         ticks = asyncio.gather(
-            nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32)),
-            nudge_once(lane=LANE, persona_id="akao", now=_at(21, 33)),
+            nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32))),
+            nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 33))),
             return_exceptions=True,
         )
         await asyncio.sleep(0.5)  # 两拍都走到占用门口
@@ -748,7 +787,7 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_a
     from app.living import moment as moment_mod
     from app.living.received import RECEIVED_LIMIT, receive
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     doorbell = _to_her("楼下有人按门铃。", at=_at(21, 31))
     await receive(doorbell)
 
@@ -760,7 +799,7 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_a
         return await real(**kwargs)
 
     monkeypatch.setattr(moment_mod, "read_snapshot", a_pile_arrives_first)
-    woken = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+    woken = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
 
     assert woken is not None
     assert woken.moment_id == f"nudge:inbox:{doorbell.message_id}"
@@ -780,14 +819,14 @@ async def test_a_round_a_message_woke_that_failed_is_retried_as_itself_whatever_
         lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
         doing="翻胶片", noted_at=_at(21, 20),
     )
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
     await receive(rain)
 
     stub_life.calls = [("act", {"what": "起身把窗关上了"})]
     stub_life.after = _fails
     with pytest.raises(RuntimeError, match="做完那些事之后失败"):
-        await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+        await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
     stub_life.after = None
     assert await _acts() == 1, "前提没造出来：失败之前那个动作要已经落下"
 
@@ -795,7 +834,7 @@ async def test_a_round_a_message_woke_that_failed_is_retried_as_itself_whatever_
         await receive(_to_her(f"第 {i} 件事。", at=_at(21, 0, i)))
     summons = await _incoming(_DM, body="在吗", at=_at(21, 33))
 
-    again = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+    again = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)))
 
     assert again is not None
     assert again.moment_id == f"nudge:inbox:{rain.message_id}", (
@@ -805,7 +844,7 @@ async def test_a_round_a_message_woke_that_failed_is_retried_as_itself_whatever_
     assert await _acts() == 1, "失败之前做过的那个动作，重跑时又落了一遍"
     assert rain.message_id not in await _unread_ids()
 
-    then = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 35))
+    then = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35)))
     assert then is not None and then.moment_id == f"nudge:{summons}", (
         "手机上叫她的那条被重跑那一轮挡掉了，没有轮到它"
     )
@@ -823,13 +862,13 @@ async def test_a_round_a_summons_woke_that_failed_is_retried_as_itself_whatever_
         lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
         doing="翻胶片", noted_at=_at(21, 20),
     )
-    await run_moment(lane=LANE, persona_id="akao", now=_at(21, 30))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     first = await _incoming(_DM, body="在吗", at=_at(21, 31))
 
     stub_life.calls = [("act", {"what": "放下胶片去拿手机"})]
     stub_life.after = _fails
     with pytest.raises(RuntimeError, match="做完那些事之后失败"):
-        await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 32))
+        await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
     stub_life.after = None
     assert await _acts() == 1, "前提没造出来：失败之前那个动作要已经落下"
 
@@ -839,11 +878,11 @@ async def test_a_round_a_summons_woke_that_failed_is_retried_as_itself_whatever_
     )
     await receive(_to_her("千凪在厨房喊你吃饭。", at=_at(21, 33)))
 
-    again = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+    again = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)))
 
     assert again is not None
     assert again.moment_id == f"nudge:{first}", "没跑完的那一轮重跑时换了身份"
     assert await _acts() == 1, "失败之前做过的那个动作，重跑时又落了一遍"
 
-    then = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 35))
+    then = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35)))
     assert then is not None and then.moment_id == f"nudge:{newer}"

@@ -33,6 +33,7 @@ from app.living import moment as moment_mod
 from app.living import persona as persona_mod
 from app.living.loose_ends import LooseEnd
 from app.living.moment import _MOMENT_CFG, LifeMoment, run_moment
+from tests.living.conftest import clock_at
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -99,8 +100,8 @@ async def two_moments(living_db, monkeypatch):
     monkeypatch.setattr(moment_mod, "life_moment_minutes", fixed_minutes)
     monkeypatch.setattr(moment_mod, "build_moment_runner", lambda: runner)
 
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 0))
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 10))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 0)))
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 10)))
 
     assert len(runner.runs) == 2, f"两轮没都跑起来：{len(runner.runs)} 轮"
     return [run["prompt_vars"] for run in runner.runs]

@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import logging
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from typing import Annotated
 
@@ -336,14 +337,19 @@ def _day_page_prompt(*, day: date, lines: list[str], previous: LivingDayPage | N
 
 
 async def write_day_page(
-    *, lane: str, persona_id: str, now: datetime
+    *, lane: str, persona_id: str, clock: Callable[[], datetime]
 ) -> LivingDayPage | None:
     """让她把刚过去那个生活日写成一页；这一拍不该写 / 没写成就返回 ``None``。
 
     **"这天写过没有"到落库为止在排他占用里**（每人一条轴）：两
     条拍打到同一个人时，各自读到"这天还没写"就会双双烧一次模型，最后还有一条被
-    ``insert_idempotent`` 丢掉。窗口那一道判在占用**外面**：它只看传进来的 ``now``，
+    ``insert_idempotent`` 丢掉。窗口那一道判在占用**外面**：它只看这一拍的钟，
     不读任何共享状态，等锁没有意义——一天里 288 拍中的绝大多数在这里就返回了。
+
+    **占用里的一切用拿到占用那一刻的钟**：写哪一天、这一页什么时候写下的。前一次写页挂住时
+    （最长占着 15 分钟），排在后面的那一拍要过一阵才轮到，这一页是那时写下的，不是那一拍
+    敲响时。窗口只管这一拍要不要去试：排在后面、轮到时已经过了窗口的那一拍照样写，不然那一天
+    就再也没有页了。
 
     顺序是"能不调模型就不调"——四道判断全在模型前面：
 
@@ -361,12 +367,12 @@ async def write_day_page(
     ``max_retries=1``：core 的 ``run`` 把整轮包在 ``@retry`` 里，一次模型瞬时失败会
     整轮重放、白花一次钱；这一轮本来就低频，五分钟后那一拍再来就行。
     """
-    local = now.astimezone(CST)
-    if not (DAY_PAGE_FROM <= local.time() < DAY_PAGE_UNTIL):
+    if not (DAY_PAGE_FROM <= clock().astimezone(CST).time() < DAY_PAGE_UNTIL):
         return None
 
-    day = living_day_of(now) - timedelta(days=1)
     async with hold(day_page_lock_key(lane, persona_id)):
+        now = clock()
+        day = living_day_of(now) - timedelta(days=1)
         if await read_day_page(lane=lane, persona_id=persona_id, day=day) is not None:
             return None
 
@@ -455,10 +461,10 @@ async def day_page_tick(tick: DayPageTick) -> None:
     三条轴各有自己的占用，并发没有竞争。异常不往上抛——源循环那一拍失败会连累另外两
     个人，而下一拍五分钟后就来了，窗口里还有的是机会。
     """
-    lane, now = living_lane(), now_cst()
+    lane = living_lane()
     outcomes = await asyncio.gather(
         *(
-            write_day_page(lane=lane, persona_id=persona_id, now=now)
+            write_day_page(lane=lane, persona_id=persona_id, clock=now_cst)
             for persona_id in LIVING_PERSONAS
         ),
         return_exceptions=True,

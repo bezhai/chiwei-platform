@@ -25,7 +25,7 @@ from app.living.records import (
     MEDIUM_PHONE,
 )
 from app.living.whereabouts import note_whereabouts
-from tests.living.conftest import RESIDENT_NAMES, model_facing_text
+from tests.living.conftest import RESIDENT_NAMES, clock_at, model_facing_text
 from tests.living.test_moment import (  # noqa: F401 — 形参名就是 fixture 名
     moment_db,
     stub_moment,
@@ -521,7 +521,7 @@ async def test_what_she_did_before_she_started_telling_is_not_sent(
 
 
 async def _round(at: dt.datetime, persona: str = "akao", *, lane: str = LANE):
-    return await run_moment(lane=lane, persona_id=persona, now=at)
+    return await run_moment(lane=lane, persona_id=persona, clock=clock_at(at))
 
 
 @pytest.mark.integration
@@ -557,6 +557,59 @@ async def test_a_round_that_carries_on_tells_nothing(started, stub_moment):  # n
     await _round(_at(21, 30))
 
     assert post.sent == []
+
+
+@pytest.mark.integration
+async def test_a_round_that_waited_behind_a_stuck_one_happens_when_it_gets_her(
+    started, stub_moment, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+):
+    """前一轮挂住了（模型调用卡住，最长占着她 15 分钟），21:10 那一拍排在后面，21:26 才轮到。
+    这一轮的『现在』是 21:26：她这一轮记下的事、发出去的消息带的都是这一刻，不是那一拍敲响的
+    21:10。不然 world 收到一条 21:26 才发出的汇总，上面却盖着 21:10，而她回应的是 21:20 才
+    发生的事。"""
+    from app.living import moment as moment_mod
+    from app.living.moment import (
+        LifeMomentTick,
+        latest_moment,
+        life_moment_lock_key,
+        life_moment_tick,
+    )
+    from app.living.serial import hold
+    from app.living.snapshot import recent_own_happenings
+    from app.living.whereabouts import current_whereabouts
+    from tests.living.conftest import queued_behind
+
+    post = started
+    stub_moment(
+        ("switch_to", {"doing": "端菜", "place": "家/厨房", "because": "饭好了"}),
+        ("say", {"what": "饭好了。", "to": ["绫奈"]}),
+        ("act", {"what": "把锅端上桌"}),
+    )
+    clock = [_at(21, 10)]
+    monkeypatch.setattr(moment_mod, "now_cst", lambda: clock[0])
+    monkeypatch.setattr(moment_mod, "living_lane", lambda: LANE)
+    monkeypatch.setattr(moment_mod, "LIVING_PERSONAS", ("akao",))
+
+    key = life_moment_lock_key(LANE, "akao")
+    async with hold(key):  # 挂住的那一轮
+        tick = asyncio.create_task(
+            life_moment_tick(LifeMomentTick(ts=clock[0].isoformat()))
+        )
+        await queued_behind(key)
+        clock[0] = _at(21, 26)
+    await tick
+
+    moment = await latest_moment(lane=LANE, persona_id="akao")
+    assert moment is not None and moment.began_at == _at(21, 26)
+    did = await recent_own_happenings(lane=LANE, persona_id="akao")
+    assert [h.occurred_at for h in did] == [_at(21, 26), _at(21, 26)]
+    where = await current_whereabouts(lane=LANE, persona_id="akao")
+    assert where.noted_at == _at(21, 26)
+    assert [(s.recipient, s.time) for s in post.sent] == [
+        ("绫奈", _at(21, 26)),
+        ("world", _at(21, 26)),
+    ]
+    assert "- 21:26 CST 把锅端上桌" in post.sent[1].body
 
 
 def _fails_after_its_hands(runner, failure: BaseException | None = None, *, hangs=False):
@@ -797,7 +850,7 @@ async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_othe
     _fails_after_its_hands(runner, RuntimeError("这一轮在她做完事之后失败了"))
     for minute in (32, 33):
         with pytest.raises(RuntimeError, match="做完事之后失败"):
-            await nudge_once(lane=LANE, persona_id="akao", now=_at(21, minute))
+            await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, minute)))
         await chinagi_does(f"搅了搅锅（{minute}）", _at(21, minute))
         if minute == 32:
             await receive(
@@ -808,9 +861,9 @@ async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_othe
             )
 
     stub_moment(said, closed, ("act", {"what": "把晾的衣服收进来了"}))
-    landed = await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 34))
+    landed = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)))
     assert landed is not None and landed.moment_id == f"nudge:inbox:{rain.message_id}"
-    assert await nudge_once(lane=LANE, persona_id="akao", now=_at(21, 35)) is None
+    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35))) is None
 
     hers = await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor")
     others = await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor", "chinagi")

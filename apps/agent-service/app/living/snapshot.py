@@ -141,8 +141,8 @@ class MomentSnapshot:
         if previous_at is None:
             return f"{now}。"
         gap = self.now - previous_at
-        # **不到一分钟（含负数）说"就在刚才"。** 常规 moment 的『现在』是它的格子，可能
-        # 比先落地那个提前来的 moment 的真实时刻还早（见
+        # **不到一分钟（含负数）说"就在刚才"。** 常规 moment 的『现在』还记着格子的那些
+        # 旧行，可能比先落地那个提前来的 moment 的真实时刻还早（见
         # :class:`app.living.moment.LifeMoment`），那时这个差是负的 —— 照直渲染就是往她
         # 眼前塞一句"离上一次过了 -4 分钟"。
         if gap < timedelta(minutes=1):
