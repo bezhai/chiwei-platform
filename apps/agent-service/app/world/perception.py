@@ -144,7 +144,12 @@ def _woken_by(message: Message) -> str:
     if message.kind is Kind.NOT_DELIVERED:
         return "通信机制退回给世界的一条没有送达的消息："
     if message.sender == WORLD:
-        return f"世界自己定的一次醒来（{when(message.time)}），不是谁发来的："
+        # 正文是主 agent 当时写给自己的（:func:`app.world.main_agent.run_round` 排醒来时那段），
+        # 里面的"你"是世界；摆到感知判断眼前，"你"就成了它自己，所以说清楚。
+        return (
+            f"世界自己定的一次醒来（{when(message.time)}），不是谁发来的。"
+            f'下面是世界当时给自己留的话，话里的"你"指世界自己：'
+        )
     return f"{message.sender} 发来（{when(message.time)}）："
 
 

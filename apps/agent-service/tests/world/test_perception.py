@@ -273,19 +273,35 @@ async def test_perception_sees_who_sent_the_message_that_woke_this_round_and_wha
 
 
 async def test_perception_is_told_when_world_woke_on_its_own(world):
+    """world 给自己排的醒来，正文是它当时给自己留的话，用的是"你"。感知判断那边的"你"是它自己，
+    所以要说清楚这段话是谁写给谁的。正文用 world 真的排出去的那一条，不另编。"""
     judge = judges()
     world.agents[perception.PERCEPTION.prompt_id] = judge
-    world.runner.plan = reports("傍晚了，街灯亮了。")
-    own_wake = new_message(
-        sender="world", recipient="world", body="看看傍晚的街上。", kind=Kind.MESSAGE
+    world.runner.plan = sets_wake(reason="看看傍晚的街上。")
+    await main_agent.on_world_message(
+        new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
+    [scheduled] = world.scheduled
+    own_wake = new_message(
+        sender=scheduled["sender"],
+        recipient=scheduled["recipient"],
+        body=scheduled["body"],
+        kind=Kind.MESSAGE,
+        time=scheduled["at"],
+        message_id=scheduled["message_id"],
+    )
+    assert own_wake.body.startswith("你在 ") and own_wake.body.endswith("看看傍晚的街上。"), (
+        "前提没造出来：要用 world 排出去的那段原话"
+    )
+    world.runner.plan = reports("傍晚了，街灯亮了。")
 
-    await main_agent.run_round(own_wake)
+    await main_agent.on_world_message(own_wake)
 
     [seen] = judge.inputs
     assert seen.split("\n")[1:3] == [
-        f"【叫醒世界的消息】世界自己定的一次醒来（{when(own_wake.time)}），不是谁发来的：",
-        "看看傍晚的街上。",
+        f"【叫醒世界的消息】世界自己定的一次醒来（{when(own_wake.time)}），不是谁发来的。"
+        f"下面是世界当时给自己留的话，话里的\"你\"指世界自己：",
+        own_wake.body,
     ]
 
 
