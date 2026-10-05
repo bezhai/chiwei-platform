@@ -643,3 +643,47 @@ async def test_a_review_that_waited_behind_a_stuck_one_is_written_when_it_gets_h
     latest = await read_latest_persona_version(lane=LANE, persona_id="akao")
     assert latest is not None and latest.source == "review"
     assert dt.datetime.fromisoformat(latest.written_at) == _at(6, 46)
+
+
+@pytest.mark.integration
+async def test_a_review_whose_tick_was_in_the_window_runs_even_if_it_gets_her_after(
+    review_db, stub_review, monkeypatch
+):
+    """窗口是 [06:00, 08:00)。07:59 那一拍还在窗口里，排在挂住的那一次后面，08:10 才轮到：
+    已经过了窗口，这一版照样写，记的是轮到时的 08:10。窗口只管这一拍要不要去试；挪进占用里
+    按轮到时的钟再判一次，这一拍就不写了。"""
+    import asyncio
+
+    from app.living import persona_review as review_mod
+    from app.living.persona_review import (
+        PERSONA_REVIEW_FROM,
+        PERSONA_REVIEW_UNTIL,
+        persona_review_lock_key,
+    )
+    from app.living.serial import hold
+    from tests.living.conftest import queued_behind
+
+    assert (PERSONA_REVIEW_FROM, PERSONA_REVIEW_UNTIL) == (dt.time(6, 0), dt.time(8, 0))
+    await _a_week_of_pages("akao")
+    stub_review("这一周。")
+    clock = [_at(7, 59)]
+    monkeypatch.setattr(review_mod, "living_lane", lambda: LANE)
+    monkeypatch.setattr(review_mod, "now_cst", lambda: clock[0])
+    monkeypatch.setattr(review_mod, "LIVING_PERSONAS", ("akao",))
+
+    key = persona_review_lock_key(LANE, "akao")
+    async with hold(key):  # 挂住的那一次
+        tick = asyncio.create_task(
+            persona_review_tick.__wrapped__(
+                review_mod.PersonaReviewTick(ts=clock[0].isoformat())
+            )
+        )
+        await queued_behind(key)
+        clock[0] = _at(8, 10)
+    await tick
+
+    latest = await read_latest_persona_version(lane=LANE, persona_id="akao")
+    assert latest is not None and latest.source == "review", (
+        "排在窗口末尾的那一拍轮到时过了窗口，这一周的回看没写"
+    )
+    assert dt.datetime.fromisoformat(latest.written_at) == _at(8, 10)

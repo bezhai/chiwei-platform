@@ -724,3 +724,39 @@ async def test_a_page_that_waited_behind_a_stuck_one_is_written_when_it_gets_her
 
     page = await read_day_page(lane=LANE, persona_id="akao", day=_DAY)
     assert page is not None and page.written_at == _on(26, 4, 46)
+
+
+@pytest.mark.integration
+async def test_a_page_whose_tick_was_in_the_window_is_written_even_if_it_gets_her_after(
+    page_db, stub_page, monkeypatch
+):
+    """窗口是 [04:00, 06:00)。05:59 那一拍还在窗口里，排在挂住的那一次后面，06:10 才轮到：
+    已经过了窗口，这一页照样写，记的是轮到时的 06:10。窗口只管这一拍要不要去试；挪进占用里
+    按轮到时的钟再判一次，这一拍就不写了，而下一个窗口写的是下一天，这一天从此没有页。"""
+    import asyncio
+
+    from app.living import day_page as page_mod
+    from app.living.day_page import day_page_lock_key
+    from app.living.serial import hold
+    from tests.living.conftest import queued_behind
+
+    assert (DAY_PAGE_FROM, DAY_PAGE_UNTIL) == (dt.time(4, 0), dt.time(6, 0))
+    await _a_day_worth_of_stuff()
+    stub_page("这天。")
+    clock = [_on(26, 5, 59)]
+    monkeypatch.setattr(page_mod, "living_lane", lambda: LANE)
+    monkeypatch.setattr(page_mod, "now_cst", lambda: clock[0])
+    monkeypatch.setattr(page_mod, "LIVING_PERSONAS", ("akao",))
+
+    key = day_page_lock_key(LANE, "akao")
+    async with hold(key):  # 挂住的那一次
+        tick = asyncio.create_task(
+            day_page_tick.__wrapped__(page_mod.DayPageTick(ts=clock[0].isoformat()))
+        )
+        await queued_behind(key)
+        clock[0] = _on(26, 6, 10)
+    await tick
+
+    page = await read_day_page(lane=LANE, persona_id="akao", day=_DAY)
+    assert page is not None, "排在窗口末尾的那一拍轮到时过了窗口，那一天就没有页了"
+    assert page.written_at == _on(26, 6, 10)
