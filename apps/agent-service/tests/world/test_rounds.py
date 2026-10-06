@@ -176,6 +176,41 @@ async def test_the_messages_of_a_round_the_process_died_in_come_back_in_the_next
     assert _shown(_round_input(world), ["我在做饭。", "我在看书。"]) == ["我在做饭。", "我在看书。"]
 
 
+async def test_a_round_dying_after_its_transcript_was_stored_runs_its_messages_again(
+    world, monkeypatch
+):
+    """已知的边界，照现在的样子钉住：一轮的上下文存下了、下次醒来也排好了，记成处理完之前进程
+    死了。这一轮带着的消息一条不丢，在下一个进程里再跑一遍——上下文里会有两轮看过它们。"""
+    gate = asyncio.Event()
+    world.runner.plan = in_turn(world, held(gate), sets_wake(), sets_wake())
+    second, third = _from("千凪", "我在做饭。"), _from("绫奈", "我在看书。")
+    real = pending.handled
+    calls: list[int] = []
+
+    def dies_on_the_second_round(messages):
+        calls.append(1)
+        if len(calls) == 2:
+            raise Crash()
+        real(messages)
+
+    monkeypatch.setattr(pending, "handled", dies_on_the_second_round)
+
+    running = await _a_round_is_running(world, world.deliver(_from("赤尾", "我出门了。")))
+    waiting = await _deliver_one_by_one(world, [second, third])
+    gate.set()
+    outcomes = await asyncio.gather(running, *waiting, return_exceptions=True)
+    assert outcomes[0] is None and isinstance(outcomes[1], Crash)
+    assert len(world.committed) == 2, "那一轮的上下文已经存下了"
+
+    restart(world)
+    await world.deliver(second)  # 没确认的投递被 broker 重投给新进程
+
+    assert len(world.runner.runs) == 3
+    assert _shown(_round_input(world), ["我在做饭。", "我在看书。"]) == ["我在做饭。", "我在看书。"]
+    assert len(world.committed) == 3
+    assert pending.read() == []
+
+
 async def test_a_delivery_left_waiting_when_the_one_ahead_of_it_is_cancelled_fails_not_hangs(
     world,
 ):
