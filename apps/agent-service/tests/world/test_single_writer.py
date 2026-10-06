@@ -100,11 +100,16 @@ async def test_only_the_lock_holder_consumes_and_the_other_takes_over_when_it_ex
     second = (pids - {first}).pop()
     assert waiters() == {second}
 
+    def seen(bodies, lines) -> bool:
+        """每一条都出现在了某一轮眼前（一轮跑着的时候到的几条会合进下一轮，不一定一条一轮）。"""
+        return all(any(body in line for _, line in lines) for body in bodies)
+
     # 拿着锁的那个做启动补醒，然后处理发来的消息；另一个一轮都不跑。
     await eventually(lambda: len(_lines(rounds)) >= 1, timeout=20)
-    for i in range(3):
-        await send(sender="operator", recipient="world", body=f"第 {i} 条。")
-    await eventually(lambda: len(_lines(rounds)) >= 4, timeout=20)
+    first_bodies = [f"第 {i} 条。" for i in range(3)]
+    for body in first_bodies:
+        await send(sender="operator", recipient="world", body=body)
+    await eventually(lambda: seen(first_bodies, _lines(rounds)), timeout=20)
     time.sleep(1.0)
     assert {pid for pid, _ in _lines(rounds)} == {first}
 
@@ -119,15 +124,12 @@ async def test_only_the_lock_holder_consumes_and_the_other_takes_over_when_it_ex
 
     await eventually(lambda: second in holders(), timeout=20)
     before = len(_lines(rounds))
-    for i in range(2):
-        await send(sender="operator", recipient="world", body=f"接上之后第 {i} 条。")
-    await eventually(lambda: len(_lines(rounds)) >= before + 2, timeout=20)
+    later_bodies = [f"接上之后第 {i} 条。" for i in range(2)]
+    for body in later_bodies:
+        await send(sender="operator", recipient="world", body=body)
+    await eventually(lambda: seen(later_bodies, _lines(rounds)[before:]), timeout=20)
 
     after_switch = _lines(rounds)[before:]
     assert {pid for pid, _ in after_switch} == {second}
-    assert ["接上之后第 0 条。" in after_switch[0][1], "接上之后第 1 条。" in after_switch[1][1]] == [
-        True,
-        True,
-    ]
     # 第二个在拿到锁之前一轮都没跑过。
     assert all(pid == first for pid, _ in _lines(rounds)[:before])
