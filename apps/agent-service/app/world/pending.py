@@ -46,6 +46,7 @@ world 要认得它已经处理完了，不然整轮重跑。所以：
   记录才一直留着，一条死信一条。
 
 world 闲着、一直没有新的一轮时，最近那一轮的记录留到下一轮开始。
+
 只有 world 的主 agent 这一侧读写这个文件。写只有拿着卷的写锁的进程能做，每次都是读出整份、改、
 再整份写回去（:func:`app.world.volume.write_atomically`），中间没有 ``await``，同一个进程里的
 几次投递插不进来。**读不出来的文件挪到旁边**（:func:`app.world.volume.set_aside`），记一条点出
