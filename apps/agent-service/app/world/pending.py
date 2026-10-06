@@ -13,7 +13,7 @@ world 一轮处理收件箱里所有还没经过一轮的消息（:mod:`app.worl
 文件里两样：
 
 * ``pending`` —— 还没经过一轮的消息，按到达的先后，每条带着它经过了几次失败的轮；
-* ``handled`` —— 处理完的消息 id，和处理完的时刻。
+* ``handled`` —— 处理完了、但它的投递还没有一次被答复的消息 id，和处理完的时刻。
 
 **放弃。** 一条消息经过的失败轮数到了上限（调用方给，见 :mod:`app.world.rounds`），就从
 ``pending`` 里拿掉，之后的轮不再带它：不然一条每次都让一轮跑不完的消息会留在每一轮里，world
@@ -24,8 +24,23 @@ world 一轮处理收件箱里所有还没经过一轮的消息（:mod:`app.worl
 不放弃：``pending`` 里的自定醒来总是状态里的最新唤醒（旧的在每一轮开头就挪掉了，:func:`drop`），
 拿掉了它就再没有东西会叫醒 world。
 
-**处理完的只留 :data:`KEPT_FOR`。** 它们只用来挡住迟到的投递，迟到能迟多久见那里的说明；
-每次写都把更早的删掉，文件不会越写越长。
+**处理完的记录留到这条消息有一次投递被答复为止，不按时间删。** 通信机制按消息 id 去重：一次投递
+的处理函数正常返回、记成处理成功之后（``runtime_inflight`` 里的 ``succeeded``，不会被删），同一条
+消息之后再来的投递在交给处理函数之前就被挡掉。所以 world 只需要替"已经处理完、却还没有哪次投递
+被答复"的消息记着：
+
+* 不叫醒的消息送到时就答复了（收下就算处理完这次投递），不记；
+* 叫醒 world 的消息在带着它的那一轮跑完时记下（:func:`handled`）；它的投递在这一轮上等着的，
+  紧接着就答复、删掉这条记录（:func:`answered`）——中间进程死了，记录还在，重投来的那次照样
+  跳过；
+* 它的投递不在这一轮上等（之前那一轮失败了，投递在重试；进程死了，投递等着重投；投递进了死信），
+  记录一直留着，直到它的某次投递到来、被答复为"已经处理完"再删。world 停了几天、重试几天后才来，
+  也一样挡得住。
+
+所以文件里的记录，每一条都对着通信机制里一次还会来的投递：在重试的、等着重投给下一个进程的，
+或者在死信里、等人重放的。记录的条数不超过这几样加起来——正常时是零到几条；只有死信里那些一直
+没人重放的，记录才会一直留着，一条死信一条记录。没有按时间删的那一步：按时间删，就挡不住比那段
+时间更晚回来的重试。
 
 只有 world 的主 agent 这一侧读写这个文件。写只有拿着卷的写锁的进程能做，每次都是读出整份、改、
 再整份写回去（:func:`app.world.volume.write_atomically`），中间没有 ``await``，同一个进程里的
@@ -38,7 +53,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from app.infra.cst_time import now_cst
@@ -49,13 +64,6 @@ from app.world.wake import is_own_wake
 logger = logging.getLogger(__name__)
 
 _FILE = "pending.json"
-
-# 处理完的消息 id 留多久。一条消息的投递在它被处理完之后还能再来：通信机制的重试（退避
-# 封顶 10 分钟）、处理它的那次投递的占位租约过期之后被重投（world 的租约一个多小时，见
-# :data:`app.world.rounds.Rounds.delivery_timeout`）、进程死了 broker 在下一个进程起来时重投。
-# 一天比这些都长得多；文件里一天大约几百个 id，每次整份重写也不贵。
-KEPT_FOR = timedelta(days=1)
-
 
 def _path() -> Path:
     return lane_dir() / _FILE
@@ -92,12 +100,6 @@ def _load() -> dict:
 
 
 def _save(state: dict) -> None:
-    cutoff = now_cst() - KEPT_FOR
-    state["handled"] = {
-        message_id: at
-        for message_id, at in state["handled"].items()
-        if datetime.fromisoformat(at) >= cutoff
-    }
     lane_dir().mkdir(parents=True, exist_ok=True)
     write_atomically(_path(), json.dumps(state, ensure_ascii=False))
 
@@ -130,14 +132,23 @@ def drop(message_ids: Iterable[str]) -> None:
     _save(state)
 
 
-def handled(message_ids: Iterable[str]) -> None:
-    """这几条经过的那一轮跑完了：记成处理完。"""
-    ids = set(message_ids)
+def handled(messages: Iterable[Message]) -> None:
+    """这几条经过的那一轮跑完了：从还没经过一轮的里拿掉；叫醒 world 的那几条记成处理完，等它们的
+    投递被答复（:func:`answered`）。不叫醒的送到时投递就答复了，不记。"""
+    taken = list(messages)
+    ids = {m.message_id for m in taken}
     state = _load()
     at = now_cst().isoformat()
     state["pending"] = [e for e in state["pending"] if e["message"]["message_id"] not in ids]
-    state["handled"].update(dict.fromkeys(ids, at))
+    state["handled"].update({m.message_id: at for m in taken if m.wakes_recipient})
     _save(state)
+
+
+def answered(message_id: str) -> None:
+    """这条消息的一次投递被答复为处理完了：之后再来的由通信机制挡住，不用再记。"""
+    state = _load()
+    if state["handled"].pop(message_id, None) is not None:
+        _save(state)
 
 
 def failed(message_ids: Iterable[str], *, give_up_at: int) -> list[Message]:

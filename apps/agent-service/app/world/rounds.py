@@ -34,7 +34,8 @@
 等它们自己的投递，或者下一次真正要一轮的投递。
 
 **一条消息什么时候算处理完。** 带着它的那一轮跑完了（主 agent 定了下次醒来、上下文存下、新的醒来
-排出去之后），才记成处理完（:func:`app.world.pending.handled`），等它的那几次投递这时才处理成功。
+排出去之后），才记成处理完（:func:`app.world.pending.handled`），等它的那几次投递这时才处理成功，
+答复之后删掉这条记录（:func:`app.world.pending.answered`，记录留多久见那里）。
 一轮失败或者被取消，这一轮带着的消息都还在还没经过一轮的那些里，之后的一轮照样带上；等它的投递
 全部算处理失败，各自重试，不会有一次投递把没跑完的消息当成处理完了确认掉。之后某一轮已经处理
 完了它，它的重试再来就在第 2 步跳过。
@@ -113,6 +114,7 @@ class Rounds:
                 "world: message %s was handled by an earlier round; skipped",
                 message.message_id,
             )
+            pending.answered(message.message_id)
             return
         pending.add(message)
         if not message.wakes_recipient:
@@ -122,6 +124,7 @@ class Rounds:
             )
             return
         await self._through_next_round(message.message_id)
+        pending.answered(message.message_id)
 
     async def _through_next_round(self, message_id: str) -> None:
         upcoming = self._next
@@ -172,4 +175,4 @@ class Rounds:
         except Exception:
             pending.failed(ids, give_up_at=receiving.PROCESSING_RETRY.n)
             raise
-        pending.handled(ids)
+        pending.handled(taking)

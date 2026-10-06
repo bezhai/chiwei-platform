@@ -123,17 +123,6 @@ async def test_messages_arriving_while_a_round_runs_are_taken_together_by_the_ne
     assert pending.read() == []
 
 
-async def test_a_message_a_finished_round_took_starts_no_round_when_it_comes_again(world):
-    message = _from("赤尾", "我出门了。")
-    await world.deliver(message)
-
-    await world.deliver(message)  # 进程死在处理完和确认之间，broker 重投
-    restart(world)
-    await world.deliver(message)  # 换了进程也一样
-
-    assert len(world.runner.runs) == 1
-
-
 # ---------------------------------------------------------------------------
 # 一轮失败、进程中途退出：这一轮带着的消息一条不丢，之后的一轮全部带上，也不处理第二遍
 # ---------------------------------------------------------------------------
@@ -185,8 +174,6 @@ async def test_the_messages_of_a_round_the_process_died_in_come_back_in_the_next
 
     assert len(world.runner.runs) == 3
     assert _shown(_round_input(world), ["我在做饭。", "我在看书。"]) == ["我在做饭。", "我在看书。"]
-    await world.deliver(second)
-    assert len(world.runner.runs) == 3
 
 
 async def test_a_delivery_left_waiting_when_the_one_ahead_of_it_is_cancelled_fails_not_hangs(
@@ -228,8 +215,6 @@ async def test_a_message_that_does_not_wake_world_starts_no_round_and_is_seen_in
         "我在客厅看书。",
         "我把窗打开了。",
     ]
-    await world.deliver(quiet)
-    assert len(world.runner.runs) == 1
 
 
 async def test_a_round_woken_by_its_own_time_takes_the_waiting_messages_along(world):
@@ -522,17 +507,66 @@ async def test_an_unreadable_record_of_the_inbox_is_set_aside_and_rounds_go_on(
     assert any(str(aside) in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
 
 
-async def test_a_record_of_a_handled_message_is_kept_a_day_then_dropped(
+# ---------------------------------------------------------------------------
+# 处理完的记录留到这条消息有一次投递被答复为止，不按时间删
+# ---------------------------------------------------------------------------
+
+
+def _handled_records(volume) -> dict:
+    path = volume / LANE / "pending.json"
+    return json.loads(path.read_text(encoding="utf-8"))["handled"] if path.exists() else {}
+
+
+async def test_a_message_handled_while_its_delivery_was_away_runs_once_even_days_later(
     world, volume, monkeypatch
 ):
+    """A 自己那一轮失败了，它的投递在等重试；B 那一轮把 A 一起处理完。world 停了好几天（coe
+    泳道常常一下就是几天），A 的重试这时才回来：不再跑第二遍。"""
+    world.runner.plan = in_turn(world, sets_nothing(), *[sets_wake()] * 3)
+    away = _from("千凪", "我在做饭。")
+    with pytest.raises(main_agent.NoNextWake):
+        await world.deliver(away)
+    await world.deliver(_from("赤尾", "我出门了。"))
+    assert "我在做饭。" in _round_input(world)
+
+    days_later = now_cst() + timedelta(days=3)
+    monkeypatch.setattr(pending, "now_cst", lambda: days_later)
+    restart(world)
+    await world.deliver(_from("绫奈", "我回来了。"))  # 起来之后先有别的一轮，记录照样写过几遍
+    await world.deliver(away)  # A 的重试
+
+    assert len(world.runner.runs) == 3
+    assert sum("我在做饭。" in run[-1].content for run in world.runner.runs) == 2  # 失败那轮和 B 那轮
+    assert _handled_records(volume) == {}, "答复过之后这条记录就不用留了"
+
+
+async def test_no_record_is_left_for_messages_whose_delivery_was_answered(world, volume):
+    """等着这一轮的投递在这一轮跑完时就答复了，不叫醒的那条送到时就答复了：之后再来的同一条
+    由通信机制挡住，文件里不留它们的记录，不会越写越长。"""
+    await world.deliver(_from("绫奈", "我在看书。", wakes=False))
+    await world.deliver(_from("赤尾", "我出门了。"))
+
+    assert len(world.runner.runs) == 1
+    assert _handled_records(volume) == {}
+
+
+async def test_a_message_whose_round_finished_starts_no_round_if_the_process_died_before_answering(
+    world, monkeypatch
+):
+    """这一轮跑完、记成处理完了，进程死在答复它的投递之前：broker 把那次投递重投给下一个进程，
+    不再起一轮。"""
     message = _from("赤尾", "我出门了。")
+    real = pending.answered
+
+    def dies(message_id):
+        monkeypatch.setattr(pending, "answered", real)
+        raise Crash()
+
+    monkeypatch.setattr(pending, "answered", dies)
+    with pytest.raises(Crash):
+        await world.deliver(message)
+
+    restart(world)
     await world.deliver(message)
-    assert pending.is_handled(message.message_id)
 
-    later = now_cst() + pending.KEPT_FOR + timedelta(minutes=1)
-    monkeypatch.setattr(pending, "now_cst", lambda: later)
-    await world.deliver(_from("绫奈", "我在看书。"))
-
-    assert not pending.is_handled(message.message_id)
-    stored = json.loads((volume / LANE / "pending.json").read_text(encoding="utf-8"))
-    assert message.message_id not in stored["handled"]
+    assert len(world.runner.runs) == 1
