@@ -8,7 +8,7 @@
 **一次投递怎么处理**（:meth:`Rounds.receive`，就是 world 收件箱的处理函数）：
 
 1. 交给各知识来源收下（:func:`app.world.sources.take_in`，按消息 id 去重）；
-2. 已经有了结果的（某一轮处理完了，或者放弃了，:func:`app.world.pending.is_done`），跳过；
+2. 某一轮已经处理完了的（:func:`app.world.pending.is_handled`），跳过；
 3. 收进还没经过一轮的消息里（:func:`app.world.pending.add`，记在私有卷上）；
 4. 不叫醒 world 的消息到这里就算处理完了：它不单独起一轮，等下一轮一起看；
 5. 别的等"下一轮"跑完：这一轮成功，这次投递就处理完了；失败，这次投递就算处理失败，原样交给
@@ -40,10 +40,14 @@
 完了它，它的重试再来就在第 2 步跳过。
 
 **一直跑不完的消息放弃。** 一轮因为异常没跑完，这一轮带着的每条记一次失败；一条消息失败的轮数跟
-通信机制给一次投递的处理次数（:data:`app.messaging.receiving.PROCESSING_RETRY`）一样多，就放弃它，
-之后的轮不再带它（:func:`app.world.pending.failed`，world 自己排的醒来除外）。跟一条消息一轮时一样，
-一条每次都让一轮跑不完的消息最多耽误这么多次，然后 world 照常往下跑；不同的是这几轮里同时在等的
-别的消息也各记了失败，失败的原因要是出在这条消息身上，它们会跟着被放弃。一轮超过时限算失败；
+通信机制给一次投递的处理次数（:data:`app.messaging.receiving.PROCESSING_RETRY`）一样多，就从还没
+经过一轮的里拿掉，之后的轮不再带它（:func:`app.world.pending.failed`，world 自己排的醒来除外）。
+这是防一条每次都让一轮跑不完的消息（比如模型拒收它的内容）把之后的每一轮都拖住；一条消息一轮时，
+它的投递处理四次失败就进死信，world 照常往下跑，这里是同一个上限。放弃只是拿掉：它之后再有投递
+（死信重放、它自己还没用完的重试）就重新收下、重新数，下一轮照样带上；不叫醒的消息没有死信，
+放弃时那条 error 里的整条消息是唯一能照着重做的东西。代价是这几轮里同时在等的别的消息也各记了
+失败，失败的原因要是出在别处（模型那边临时出错），它们会跟着被放弃——跟一条消息一轮时那几条
+各自的投递四次失败、进死信是一回事，它们的重试和死信重放照样把它们带回来。一轮超过时限算失败；
 进程在停、一轮被取消，不算失败。
 
 **一次投递最多等多久**（:attr:`Rounds.delivery_timeout`）：前面正在跑的一轮，加上带着它的这一轮。
@@ -104,9 +108,9 @@ class Rounds:
     async def receive(self, message: Message) -> None:
         """world 收件箱的处理函数：收下这条消息，要叫醒 world 的就等一轮把它处理完。"""
         await take_in(message)
-        if pending.is_done(message.message_id):
+        if pending.is_handled(message.message_id):
             logger.info(
-                "world: message %s already has its outcome from an earlier round; skipped",
+                "world: message %s was handled by an earlier round; skipped",
                 message.message_id,
             )
             return

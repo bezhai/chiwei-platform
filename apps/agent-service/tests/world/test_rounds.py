@@ -366,27 +366,79 @@ def _fails_while_it_sees(body: str):
     return plan
 
 
-async def test_a_message_in_as_many_failed_rounds_as_a_delivery_gets_tries_is_given_up(
+# 一段比日志截断长度长得多的正文：放弃的日志里要有整段，才能照着重做。
+LONG = "跑不完的那条。" + "她在厨房把锅放上灶，" * 40
+
+
+def _gave_up(caplog) -> list[dict]:
+    """日志里放弃了的消息：每条 error 末尾是整条消息的 JSON。"""
+    found = []
+    for record in caplog.records:
+        if record.levelno == logging.ERROR and "given up" in record.getMessage():
+            found.append(json.loads(record.getMessage().split("message: ", 1)[1]))
+    return found
+
+
+async def test_a_given_up_message_is_logged_whole_and_runs_again_when_it_is_replayed(
     world, caplog
 ):
     plan = _fails_while_it_sees("跑不完的那条。")
     plan.world = world
     world.runner.plan = plan
-    stuck = _from("赤尾", "跑不完的那条。")
+    stuck = _from("赤尾", LONG)
 
     for _ in range(receiving.PROCESSING_RETRY.n):
         with pytest.raises(RuntimeError):
             await world.deliver(stuck)
 
-    [gave_up] = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert stuck.message_id in gave_up.getMessage()
-    tries = len(world.runner.runs)
-    await world.deliver(stuck)  # 它的投递再来：不再起一轮
-    assert len(world.runner.runs) == tries
-
+    # 放弃了：之后的轮不带它；日志里是整条消息，照着就能重做。
+    assert stuck.message_id not in {m.message_id for m in pending.read()}
+    assert _gave_up(caplog) == [stuck.to_json()]
     await world.deliver(_from("绫奈", "我在看书。"))
-    assert len(world.runner.runs) == tries + 1
     assert "跑不完的那条。" not in _round_input(world)
+
+    # 死信重放（或者它还没用完的一次重试）再投进来：重新收下，下一轮带着它。
+    world.runner.plan = sets_wake()
+    tries = len(world.runner.runs)
+    await world.deliver(stuck)
+    assert len(world.runner.runs) == tries + 1
+    assert LONG in _round_input(world)
+
+
+async def test_a_message_given_up_alongside_another_comes_back_with_its_remaining_retry(
+    world, caplog
+):
+    """一条每次都让一轮跑不完的消息（不叫醒的，没有投递在重试）在等，别的消息跟着它失败、被放弃。
+    被放弃的那条自己的投递还会重试：重试一来就重新收下，跟着下一轮跑完。不叫醒的那条没有死信，
+    日志里的整条消息是它唯一能找回来的地方。"""
+    current = await wake.set_next_wake(now_cst(), "到点了。")
+    plan = _fails_while_it_sees("跑不完的那条。")
+    plan.world = world
+    world.runner.plan = plan
+    poison = _from("绫奈", LONG, wakes=False)
+    caught = _from("千凪", "我在做饭。")
+    its_time = self_message(current.message_id, "到点了。")
+
+    await world.deliver(poison)
+    with pytest.raises(RuntimeError):
+        await world.deliver(caught)
+    for _ in range(receiving.PROCESSING_RETRY.n * 2):
+        if not {m.message_id for m in pending.read()} & {poison.message_id, caught.message_id}:
+            break
+        with pytest.raises(RuntimeError):
+            await world.deliver(its_time)  # 自定醒来不限次数重试，每次都带着它们失败
+    else:
+        pytest.fail("失败了这么多轮，还是没有放弃它们")
+
+    assert sorted(m["message_id"] for m in _gave_up(caplog)) == sorted(
+        [poison.message_id, caught.message_id]
+    )
+    assert poison.to_json() in _gave_up(caplog)
+
+    await world.deliver(its_time)
+    await world.deliver(caught)  # 它还没用完的一次重试
+    assert "我在做饭。" in _round_input(world) and "跑不完的那条。" not in _round_input(world)
+    assert pending.read() == []
 
 
 async def test_its_own_wake_is_never_given_up(world):
@@ -475,12 +527,12 @@ async def test_a_record_of_a_handled_message_is_kept_a_day_then_dropped(
 ):
     message = _from("赤尾", "我出门了。")
     await world.deliver(message)
-    assert pending.is_done(message.message_id)
+    assert pending.is_handled(message.message_id)
 
     later = now_cst() + pending.KEPT_FOR + timedelta(minutes=1)
     monkeypatch.setattr(pending, "now_cst", lambda: later)
     await world.deliver(_from("绫奈", "我在看书。"))
 
-    assert not pending.is_done(message.message_id)
+    assert not pending.is_handled(message.message_id)
     stored = json.loads((volume / LANE / "pending.json").read_text(encoding="utf-8"))
     assert message.message_id not in stored["handled"]
