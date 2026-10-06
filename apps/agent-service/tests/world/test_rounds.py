@@ -392,11 +392,21 @@ LONG = "跑不完的那条。" + "她在厨房把锅放上灶，" * 40
 
 def _gave_up(caplog) -> list[dict]:
     """日志里放弃了的消息：每条 error 末尾是整条消息的 JSON。"""
-    found = []
-    for record in caplog.records:
-        if record.levelno == logging.ERROR and "given up" in record.getMessage():
-            found.append(json.loads(record.getMessage().split("message: ", 1)[1]))
-    return found
+    return [json.loads(text.split("message: ", 1)[1]) for text in _give_up_logs(caplog)]
+
+
+def _give_up_logs(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "given up" in r.getMessage()
+    ]
+
+
+def _how_to_redo(caplog, message) -> str:
+    """放弃这条消息的那条日志里，说怎么照着重做的那一段（整条消息之前的部分）。"""
+    [text] = [t for t in _give_up_logs(caplog) if json.loads(t.split("message: ", 1)[1]) == message.to_json()]
+    return text.split("message: ", 1)[0]
 
 
 async def test_a_given_up_message_is_logged_whole_and_runs_again_when_it_is_replayed(
@@ -414,6 +424,8 @@ async def test_a_given_up_message_is_logged_whole_and_runs_again_when_it_is_repl
     # 放弃了：之后的轮不带它；日志里是整条消息，照着就能重做。
     assert stuck.message_id not in {m.message_id for m in pending.read()}
     assert _gave_up(caplog) == [stuck.to_json()]
+    # 叫醒的消息：它自己的投递还在重试或者进了死信，重放死信就回来。
+    assert "replaying its dead letter" in _how_to_redo(caplog, stuck)
     await world.deliver(_from("绫奈", "我在看书。"))
     assert "跑不完的那条。" not in _round_input(world)
 
@@ -454,6 +466,10 @@ async def test_a_message_given_up_alongside_another_comes_back_with_its_remainin
         [poison.message_id, caught.message_id]
     )
     assert poison.to_json() in _gave_up(caplog)
+    # 不叫醒的消息送到时就记成处理成功了：没有死信，原 id 也用掉了，重做要换一个新的消息 id。
+    assert "new message id" in _how_to_redo(caplog, poison)
+    assert "dead letter" not in _how_to_redo(caplog, poison).replace("no dead letter", "")
+    assert "replaying its dead letter" in _how_to_redo(caplog, caught)
 
     await world.deliver(its_time)
     await world.deliver(caught)  # 它还没用完的一次重试

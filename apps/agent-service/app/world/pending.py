@@ -19,8 +19,10 @@ world 一轮处理收件箱里所有还没经过一轮的消息（:mod:`app.worl
 ``pending`` 里拿掉，之后的轮不再带它：不然一条每次都让一轮跑不完的消息会留在每一轮里，world
 再也跑不完一轮。放弃只是拿掉，不是结果：它之后再有投递（死信重放、通信机制还没用完的重试）
 就照新的一条收下，失败次数从零数起；通信机制给一次投递的处理次数有限，所以这样来回也有尽头。
-放弃时记一条 error，末尾是整条消息（id、类型、发送方、时间、要不要叫醒、全文）的 JSON：
-不叫醒的消息送到时就确认掉了，没有死信，这条日志是照着重做的唯一依据。world 给自己排的醒来
+放弃时记一条 error，末尾是整条消息（id、类型、发送方、时间、要不要叫醒、全文）的 JSON，前面
+写着怎么重做：叫醒 world 的，它自己的投递还在重试或者进了死信，重放死信就回来；不叫醒的送到时
+就处理成功了，没有死信，这条日志是照着重做的唯一依据，而且原来的 id 在通信机制那里已经记成
+处理成功，按原 id 重发会被挡掉，要换一个新的消息 id 把正文再发一遍。world 给自己排的醒来
 不放弃：``pending`` 里的自定醒来总是状态里的最新唤醒（旧的在每一轮开头就挪掉了，:func:`drop`），
 拿掉了它就再没有东西会叫醒 world。
 
@@ -181,10 +183,29 @@ def failed(message_ids: Iterable[str], *, give_up_at: int) -> list[Message]:
     for message in gave_up:
         logger.error(
             "world: message %s was in %d rounds that did not finish; given up, no later round "
-            "takes it unless it is delivered again (a dead-letter replay, a retry). To redo it "
-            "by hand, send it again as it was; message: %s",
+            "takes it unless it is delivered again. %s; message: %s",
             message.message_id,
             give_up_at,
+            _how_to_redo(message),
             json.dumps(message.to_json(), ensure_ascii=False),
         )
     return gave_up
+
+
+def _how_to_redo(message: Message) -> str:
+    """放弃了的这条怎么照着重做。
+
+    叫醒 world 的：它自己的投递还在重试，或者进了死信，重放死信就重新收下。不叫醒的：它那次投递
+    送到时就处理成功了，没有死信；原来的 id 在通信机制那里已经记成处理成功，按原 id 再发会在交到
+    world 之前被挡掉，所以要换一个新的消息 id 把正文再发一遍。
+    """
+    if message.wakes_recipient:
+        return (
+            "Its own delivery is still being retried or is in the dead-letter queue: replaying "
+            "its dead letter takes it in again"
+        )
+    return (
+        "It did not wake world, so its delivery was acknowledged on arrival: there is no dead "
+        "letter, and messaging drops anything sent again under its original id. To redo it by "
+        "hand, send its body again under a new message id"
+    )
