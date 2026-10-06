@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -40,12 +41,17 @@ async def test_only_ids_whose_success_is_recorded_are_finished(broker, monkeypat
         returned.append(message.message_id)
 
     real_mark = receiving.mark_succeeded
-    failed_once: list[str] = []
+    # 给 unrecorded 记成功的每一次：第一次没写成；第二次（租约过期被接管、处理函数又返回之后）
+    # 停在这里，等测试看完"还没记下来"再放行，不跟租约和重投赛跑。
+    writes: list[str] = []
+    second_write_may_go = asyncio.Event()
 
     async def mark_succeeded(**kw):
-        if kw["idempotent_key"] == unrecorded and not failed_once:
-            failed_once.append(unrecorded)
-            raise RuntimeError("记成功的那一笔没写成")
+        if kw["idempotent_key"] == unrecorded:
+            writes.append(unrecorded)
+            if len(writes) == 1:
+                raise RuntimeError("记成功的那一笔没写成")
+            await second_write_may_go.wait()
         return await real_mark(**kw)
 
     monkeypatch.setattr(receiving, "mark_succeeded", mark_succeeded)
@@ -54,17 +60,20 @@ async def test_only_ids_whose_success_is_recorded_are_finished(broker, monkeypat
     for message_id in (done, broken, unrecorded):
         await send(sender="operator", recipient="world", body="x", message_id=message_id)
 
-    await eventually(lambda: done in returned and unrecorded in returned, timeout=10)
+    await eventually(lambda: done in returned, timeout=10)
     await eventually(lambda: attempts.count(broken) == 3, timeout=10)  # 重试用完，进了死信
+    # 第一次没写成；租约过期，同一条又交到处理函数手里、又返回了，第二次记成功停在半路。
+    await eventually(lambda: len(writes) == 2, timeout=10)
+    assert returned.count(unrecorded) == 2
     unknown = uuid.uuid4().hex
 
-    # 处理函数返回了、成功却没记下来的那条不算；处理失败的、没见过的也不算。
+    # 处理函数返回了、成功却还没记下来的那条不算；处理失败的、没见过的也不算。
     assert await succeeded_message_ids("world", [done, broken, unrecorded, unknown]) == {done}
     # 别的收件箱的定论不算这个收件箱的。
     assert await succeeded_message_ids("operator", [done]) == set()
 
-    # 租约过期，同一条又交到处理函数手里，这一次成功记下来了：它也有了定论。
-    await eventually(lambda: returned.count(unrecorded) == 2, timeout=10)
+    # 放行：这一次成功记下来了，它也有了定论。
+    second_write_may_go.set()
 
     async def recorded():
         return unrecorded in await succeeded_message_ids("world", [unrecorded])
