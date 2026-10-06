@@ -461,6 +461,52 @@ async def test_a_message_given_up_alongside_another_comes_back_with_its_remainin
     assert pending.read() == []
 
 
+async def test_a_retry_queued_while_its_message_is_given_up_fails_and_is_not_acknowledged(
+    world, monkeypatch
+):
+    """这条消息的重试排在正在跑的那一轮后面，那一轮失败、把它放弃了：排着的这次投递不能当成处理完
+    确认掉（那样它既没跑过，也不会进死信），要算处理失败，让通信机制再投——再投来就重新收下。"""
+    current = await wake.set_next_wake(now_cst(), "到点了。")
+    gate = asyncio.Event()
+
+    async def plan():
+        seen = world.runner.runs[-1][-1].content
+        if "你给自己排的一次醒来" in seen and "跑不完的那条。" in seen:
+            await gate.wait()
+        if "跑不完的那条。" in seen:
+            raise RuntimeError("这一轮跑不完")
+        return await sets_wake()()
+
+    world.runner.plan = plan
+    stuck = _from("赤尾", "跑不完的那条。")
+    for _ in range(receiving.PROCESSING_RETRY.n - 1):
+        with pytest.raises(RuntimeError):
+            await _soon(world.deliver(stuck))
+
+    its_time = asyncio.create_task(world.deliver(self_message(current.message_id, "到点了。")))
+    await eventually(lambda: len(world.runner.runs) == receiving.PROCESSING_RETRY.n, timeout=5)
+    added: list[str] = []
+    real_add = pending.add
+
+    def add(message):
+        real_add(message)
+        added.append(message.message_id)
+
+    monkeypatch.setattr(pending, "add", add)
+    retry = asyncio.create_task(world.deliver(stuck))
+    await eventually(lambda: added == [stuck.message_id], timeout=5)
+    gate.set()  # 这一轮失败：它的失败数到了，放弃
+    outcomes = await _soon(asyncio.gather(its_time, retry, return_exceptions=True))
+
+    assert isinstance(outcomes[0], RuntimeError)
+    assert isinstance(outcomes[1], RoundFailed), "排着的那次投递被当成处理完确认掉了"
+
+    world.runner.plan = sets_wake()
+    await world.deliver(stuck)  # 通信机制再投的那一次
+    assert "跑不完的那条。" in _round_input(world)
+    assert pending.read() == []
+
+
 async def test_its_own_wake_is_never_given_up(world):
     current = await wake.set_next_wake(now_cst(), "到点了。")
     plan = _fails_while_it_sees("跑不完的那条。")

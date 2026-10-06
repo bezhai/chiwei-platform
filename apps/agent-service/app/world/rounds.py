@@ -13,6 +13,8 @@
 4. 不叫醒 world 的消息到这里就算处理完了：它不单独起一轮，等下一轮一起看；
 5. 别的等"下一轮"跑完：这一轮成功，这次投递就处理完了；失败，这次投递就算处理失败，原样交给
    通信机制重试（最新的自定醒来不限次数，:func:`app.world.wake.retry_latest_wake_without_limit`）。
+   等着的时候前面那一轮失败、把这条消息放弃了（见下面"放弃"），这次投递也算处理失败：它没被
+   处理过，不能确认掉，再投来时重新收下。
 
 **自定醒来是不是旧的，只在一轮开始那一刻（拿着锁）判断，不在投递一到就判断。** 状态里的最新
 唤醒只在两处改：一轮收尾时（:func:`app.world.main_agent.run_round` 调
@@ -70,7 +72,7 @@ from app.messaging import receiving
 from app.messaging.message import Message
 from app.world import pending
 from app.world.sources import take_in
-from app.world.wake import is_stale_wake
+from app.world.wake import is_own_wake, is_stale_wake
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +129,12 @@ class Rounds:
             )
             return
         await self._through_next_round(message.message_id)
+        if not pending.is_handled(message.message_id) and not is_own_wake(message):
+            # 它在等的时候，正在跑的那一轮失败、把它放弃了：这次投递不能当成处理完。算处理失败，
+            # 通信机制再投时重新收下（自定醒来不会被放弃，没处理就是成了旧的、被拿掉了）。
+            raise RoundFailed(
+                f"message {message.message_id} was given up while this delivery waited"
+            )
         pending.answered(message.message_id)
 
     async def _through_next_round(self, message_id: str) -> None:
@@ -158,8 +166,9 @@ class Rounds:
             upcoming.finished.set()
 
     async def _run_waiting(self, delivered: set[str]) -> None:
-        """跑一轮，带上还没经过一轮的全部消息。``delivered`` 是等着这一轮的投递送来的消息：它们
-        都已经不需要一轮了（成了旧的醒来，或者已经被前一轮处理完），这一轮就不跑。"""
+        """跑一轮，带上还没经过一轮的全部消息。``delivered`` 是等着这一轮的投递送来的消息：要是
+        它们都已经不在还没经过一轮的里面了（成了旧的醒来、已经被前一轮处理完，或者被放弃了），
+        这一轮就不跑。"""
         waiting = pending.read()
         stale = [m for m in waiting if is_stale_wake(m)]
         if stale:
