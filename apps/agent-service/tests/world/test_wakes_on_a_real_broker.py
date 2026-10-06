@@ -297,3 +297,80 @@ async def test_messages_arriving_while_a_round_runs_are_taken_together_by_one_ro
     await asyncio.sleep(1.0)
     assert len(runner.round_inputs) == 2
     assert pending.read() == []
+
+
+# ---------------------------------------------------------------------------
+# 处理函数返回了、成功没记下来：租约过期后再来的那一次不再跑一轮
+# ---------------------------------------------------------------------------
+
+
+class WakesTomorrow:
+    """每轮记下眼前那段话，定到一天以后。"""
+
+    def __init__(self):
+        self.round_inputs: list[str] = []
+
+    async def run(self, messages, *, context, transcript_sink, **_):
+        self.round_inputs.append(messages[-1].content)
+        with agent_context(context):
+            at = now_cst() + timedelta(days=1)
+            await wake_me_at.invoke({"at": at.isoformat(), "reason": "明天再看。"})
+        reply = Turn(role=Role.ASSISTANT, content="好。")
+        transcript_sink.append(reply)
+        return reply
+
+
+async def test_a_round_whose_success_was_not_recorded_does_not_run_again_after_the_lease(
+    world_process, broker, test_db, monkeypatch  # noqa: F811
+):
+    """通信机制在处理函数返回之后才记成功。那一笔没写成：这次投递放回去，同一条在占位租约过期
+    之后被接管、又交到 world 的处理函数手里。它那一轮已经跑完了，不能再跑一遍。"""
+    import uuid
+
+    from sqlalchemy import text
+
+    from app.messaging import receiving
+    from app.world import rounds
+
+    # 一轮 3 秒、一次投递的租约 3×2 + 0.5 秒：租约过期在测试的时间里。
+    monkeypatch.setattr(main_agent, "ROUND_TIMEOUT", timedelta(seconds=3))
+    monkeypatch.setattr(rounds, "_SETTLING", timedelta(0))
+    monkeypatch.setattr(receiving, "LEASE_OVER_TIMEOUT_MS", 500)
+    runner = WakesTomorrow()
+    monkeypatch.setattr(agents, "build_runner", lambda config, tools: runner)
+    load_world_wiring()
+
+    knock = uuid.uuid4().hex
+    real_mark = receiving.mark_succeeded
+    failed_once: list[str] = []
+
+    async def mark_succeeded(**kw):
+        if kw["idempotent_key"] == knock and not failed_once:
+            failed_once.append(knock)
+            raise RuntimeError("记成功的那一笔没写成")
+        return await real_mark(**kw)
+
+    monkeypatch.setattr(receiving, "mark_succeeded", mark_succeeded)
+
+    async def state() -> str | None:
+        async with test_db.begin() as conn:
+            return (
+                await conn.execute(
+                    text(
+                        "SELECT state FROM runtime_inflight "
+                        "WHERE edge_id = :edge AND idempotent_key = :key"
+                    ),
+                    {"edge": f"inbox:world@{LANE}", "key": knock},
+                )
+            ).scalar()
+
+    await start_messaging()
+    await eventually(lambda: len(runner.round_inputs) == 1, timeout=10)  # 启动补醒那一轮
+    await send(sender="operator", recipient="world", body="有人敲门。", message_id=knock)
+
+    async def succeeded():
+        return failed_once and await state() == "succeeded"
+
+    await eventually(succeeded, timeout=30)
+    await asyncio.sleep(1.0)
+    assert sum("有人敲门。" in s for s in runner.round_inputs) == 1

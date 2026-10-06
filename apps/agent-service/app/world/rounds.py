@@ -36,8 +36,9 @@
 等它们自己的投递，或者下一次真正要一轮的投递。
 
 **一条消息什么时候算处理完。** 带着它的那一轮跑完了（主 agent 定了下次醒来、上下文存下、新的醒来
-排出去之后），才记成处理完（:func:`app.world.pending.handled`），等它的那几次投递这时才处理成功，
-答复之后删掉这条记录（:func:`app.world.pending.answered`，记录留多久见那里）。
+排出去之后），才记成处理完（:func:`app.world.pending.handled`），等它的那几次投递这时才处理成功。
+这条记录留到通信机制把它的投递成功记下来为止，每一轮开始时问一次、删掉已经记下来的（为什么不能
+在处理函数返回时删、文件有多大，见 :mod:`app.world.pending`）。
 一轮失败或者被取消，这一轮带着的消息都还在还没经过一轮的那些里，之后的一轮照样带上；等它的投递
 全部算处理失败，各自重试，不会有一次投递把没跑完的消息当成处理完了确认掉。之后某一轮已经处理
 完了它，它的重试再来就在第 2 步跳过。
@@ -72,7 +73,7 @@ from app.messaging import receiving
 from app.messaging.message import Message
 from app.world import pending
 from app.world.sources import take_in
-from app.world.wake import is_own_wake, is_stale_wake
+from app.world.wake import WORLD, is_own_wake, is_stale_wake
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,6 @@ class Rounds:
                 "world: message %s was handled by an earlier round; skipped",
                 message.message_id,
             )
-            pending.answered(message.message_id)
             return
         pending.add(message)
         if not message.wakes_recipient:
@@ -135,7 +135,6 @@ class Rounds:
             raise RoundFailed(
                 f"message {message.message_id} was given up while this delivery waited"
             )
-        pending.answered(message.message_id)
 
     async def _through_next_round(self, message_id: str) -> None:
         upcoming = self._next
@@ -155,6 +154,7 @@ class Rounds:
         """等正在跑的那一轮跑完，跑下一轮；结果交给跟着等的那几次投递。"""
         try:
             async with self._lock:
+                await self._forget_settled()
                 self._next = None  # 从这一刻起到的，等再下一轮
                 await self._run_waiting(upcoming.waiting)
         except BaseException as exc:
@@ -164,6 +164,24 @@ class Rounds:
             if self._next is upcoming:  # 还没拿到锁就被取消了
                 self._next = None
             upcoming.finished.set()
+
+    async def _forget_settled(self) -> None:
+        """问通信机制：记着处理完的那些里，哪些的投递成功已经记下来了，删掉它们的记录。问不到就
+        都留着，下一轮再问。"""
+        recorded = pending.recorded()
+        if not recorded:
+            return
+        try:
+            settled = await receiving.succeeded_message_ids(WORLD, recorded)
+        except Exception:
+            logger.warning(
+                "world: could not ask messaging which of %d handled message(s) are settled; "
+                "keeping their records until the next round",
+                len(recorded),
+                exc_info=True,
+            )
+            return
+        pending.forget(settled)
 
     async def _run_waiting(self, delivered: set[str]) -> None:
         """跑一轮，带上还没经过一轮的全部消息。``delivered`` 是等着这一轮的投递送来的消息：要是

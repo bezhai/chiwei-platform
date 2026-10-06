@@ -13,7 +13,7 @@ world 一轮处理收件箱里所有还没经过一轮的消息（:mod:`app.worl
 文件里两样：
 
 * ``pending`` —— 还没经过一轮的消息，按到达的先后，每条带着它经过了几次失败的轮；
-* ``handled`` —— 处理完了、但它的投递还没有一次被答复的消息 id，和处理完的时刻。
+* ``handled`` —— 处理完了、但通信机制还没告诉我们它的投递成功已经记下来的消息 id，和处理完的时刻。
 
 **放弃。** 一条消息经过的失败轮数到了上限（调用方给，见 :mod:`app.world.rounds`），就从
 ``pending`` 里拿掉，之后的轮不再带它：不然一条每次都让一轮跑不完的消息会留在每一轮里，world
@@ -24,24 +24,26 @@ world 一轮处理收件箱里所有还没经过一轮的消息（:mod:`app.worl
 不放弃：``pending`` 里的自定醒来总是状态里的最新唤醒（旧的在每一轮开头就挪掉了，:func:`drop`），
 拿掉了它就再没有东西会叫醒 world。
 
-**处理完的记录留到这条消息有一次投递被答复为止，不按时间删。** 通信机制按消息 id 去重：一次投递
-的处理函数正常返回、记成处理成功之后（``runtime_inflight`` 里的 ``succeeded``，不会被删），同一条
-消息之后再来的投递在交给处理函数之前就被挡掉。所以 world 只需要替"已经处理完、却还没有哪次投递
-被答复"的消息记着：
+**处理完的记录留到通信机制把它的投递成功记下来为止，不按时间删。** 通信机制按消息 id 去重：一次
+投递处理成功、成功记下来之后（``runtime_inflight`` 里的 ``succeeded``，不会被删），同一条消息之后
+再来的投递在交给处理函数之前就被挡掉。可成功是在处理函数**返回之后**才记的：返回和记下之间进程
+死了，或者记的那一笔没写成，这次投递放回去，占位租约过期后同一条还会交到处理函数手里。那时
+world 要认得它已经处理完了，不然整轮重跑。所以：
 
-* 不叫醒的消息送到时就答复了（收下就算处理完这次投递），不记；
-* 叫醒 world 的消息在带着它的那一轮跑完时记下（:func:`handled`）；它的投递在这一轮上等着的，
-  紧接着就答复、删掉这条记录（:func:`answered`）——中间进程死了，记录还在，重投来的那次照样
-  跳过；
-* 它的投递不在这一轮上等（之前那一轮失败了，投递在重试；进程死了，投递等着重投；投递进了死信），
-  记录一直留着，直到它的某次投递到来、被答复为"已经处理完"再删。world 停了几天、重试几天后才来，
-  也一样挡得住。
+* 每条被一轮处理完的消息都记下（:func:`handled`），叫醒的、不叫醒的都记——不叫醒的那次投递在
+  收下时就返回了，它的成功同样可能没记下来；
+* 什么时候删，只看通信机制记下了没有：每一轮开始时，拿着锁，把记着的 id 交给通信机制问一次
+  （:func:`app.messaging.receiving.succeeded_message_ids`），成功已经记下来的那些删掉
+  （:func:`forget`）。问不到（库不通）就都留着，下一轮再问。处理函数返回不算数。
 
-所以文件里的记录，每一条都对着通信机制里一次还会来的投递：在重试的、等着重投给下一个进程的，
-或者在死信里、等人重放的。记录的条数不超过这几样加起来——正常时是零到几条；只有死信里那些一直
-没人重放的，记录才会一直留着，一条死信一条记录。没有按时间删的那一步：按时间删，就挡不住比那段
-时间更晚回来的重试。
+**文件有多大。** 记着的，是"处理完了、但最近一轮开始时通信机制还没记下成功"的消息：
 
+* 最近那一轮自己的消息：等它的投递在这一轮之后才返回、才记成功，下一轮开始时删——最多一轮的量；
+* 投递还在通信机制里没有定论的：处理失败在重试的，进程死了等着重投的，成功没记下来、等租约过期
+  被接管的，进了死信的。前几样过一阵自己就有了定论，之后的第一轮删掉；只有一直没人重放的死信，
+  记录才一直留着，一条死信一条。
+
+world 闲着、一直没有新的一轮时，最近那一轮的记录留到下一轮开始。
 只有 world 的主 agent 这一侧读写这个文件。写只有拿着卷的写锁的进程能做，每次都是读出整份、改、
 再整份写回去（:func:`app.world.volume.write_atomically`），中间没有 ``await``，同一个进程里的
 几次投递插不进来。**读不出来的文件挪到旁边**（:func:`app.world.volume.set_aside`），记一条点出
@@ -133,21 +135,30 @@ def drop(message_ids: Iterable[str]) -> None:
 
 
 def handled(messages: Iterable[Message]) -> None:
-    """这几条经过的那一轮跑完了：从还没经过一轮的里拿掉；叫醒 world 的那几条记成处理完，等它们的
-    投递被答复（:func:`answered`）。不叫醒的送到时投递就答复了，不记。"""
+    """这几条经过的那一轮跑完了：从还没经过一轮的里拿掉，记成处理完。"""
     taken = list(messages)
     ids = {m.message_id for m in taken}
     state = _load()
     at = now_cst().isoformat()
     state["pending"] = [e for e in state["pending"] if e["message"]["message_id"] not in ids]
-    state["handled"].update({m.message_id: at for m in taken if m.wakes_recipient})
+    state["handled"].update(dict.fromkeys(ids, at))
     _save(state)
 
 
-def answered(message_id: str) -> None:
-    """这条消息的一次投递被答复为处理完了：之后再来的由通信机制挡住，不用再记。"""
+def recorded() -> list[str]:
+    """记成处理完、还没删掉的那些消息 id。"""
+    return list(_load()["handled"])
+
+
+def forget(message_ids: Iterable[str]) -> None:
+    """这几条的投递成功通信机制已经记下来了，同一条再也到不了处理函数：删掉它们的记录。"""
+    ids = set(message_ids)
+    if not ids:
+        return
     state = _load()
-    if state["handled"].pop(message_id, None) is not None:
+    kept = {m: at for m, at in state["handled"].items() if m not in ids}
+    if len(kept) != len(state["handled"]):
+        state["handled"] = kept
         _save(state)
 
 

@@ -621,36 +621,64 @@ async def test_a_message_handled_while_its_delivery_was_away_runs_once_even_days
 
     assert len(world.runner.runs) == 3
     assert sum("我在做饭。" in run[-1].content for run in world.runner.runs) == 2  # 失败那轮和 B 那轮
-    assert _handled_records(volume) == {}, "答复过之后这条记录就不用留了"
+
+    # 重试那次的成功记下来之后，下一轮开始时这条记录就删了。
+    await world.deliver(_from("赤尾", "我到车站了。"))
+    assert away.message_id not in _handled_records(volume)
 
 
-async def test_no_record_is_left_for_messages_whose_delivery_was_answered(world, volume):
-    """等着这一轮的投递在这一轮跑完时就答复了，不叫醒的那条送到时就答复了：之后再来的同一条
-    由通信机制挡住，文件里不留它们的记录，不会越写越长。"""
+async def test_a_message_is_not_run_again_when_its_success_was_never_recorded(world):
+    """处理函数返回了，通信机制记成功的那一笔却没写成（或者进程死在返回和记下之间）：租约过期后
+    同一条又交到处理函数手里。它已经处理完了，不再跑一轮——中间别的轮跑过、进程换过也一样。"""
+    out = _from("赤尾", "我出门了。")
+    await world.deliver(out, success_recorded=False)
+    await world.deliver(_from("绫奈", "我在看书。"))
+    restart(world)
+    await world.deliver(_from("千凪", "我在做饭。"))
+
+    await world.deliver(out)  # 租约过期，同一条又交到处理函数手里
+
+    assert len(world.runner.runs) == 3
+    assert sum("我出门了。" in run[-1].content for run in world.runner.runs) == 1
+
+
+async def test_a_quiet_message_is_not_taken_again_when_its_success_was_never_recorded(world):
+    """不叫醒的消息送到时就答复了；那一次的成功没记下来，它又在一轮把它处理完之后回来：不再收进
+    还没经过一轮的里，不再被下一轮带上。"""
+    quiet = _from("绫奈", "我在看书。", wakes=False)
+    await world.deliver(quiet, success_recorded=False)
+    await world.deliver(_from("赤尾", "我出门了。"))
+    await world.deliver(_from("千凪", "我在做饭。"))
+
+    await world.deliver(quiet)  # 租约过期，同一条又交到处理函数手里
+    await world.deliver(_from("赤尾", "我到车站了。"))
+
+    assert sum("我在看书。" in run[-1].content for run in world.runner.runs) == 1
+
+
+async def test_records_are_dropped_once_messaging_has_recorded_success(world, volume):
+    """记录不会越积越多：每一轮开始时问一次通信机制，成功已经记下来的那些就删。刚跑完的那一轮，
+    它的投递在这一轮之后才记成功，所以它的记录留到下一轮开始。"""
     await world.deliver(_from("绫奈", "我在看书。", wakes=False))
     await world.deliver(_from("赤尾", "我出门了。"))
+    latest = _from("千凪", "我在做饭。")
 
-    assert len(world.runner.runs) == 1
-    assert _handled_records(volume) == {}
+    await world.deliver(latest)
+
+    assert set(_handled_records(volume)) == {latest.message_id}
 
 
-async def test_a_message_whose_round_finished_starts_no_round_if_the_process_died_before_answering(
-    world, monkeypatch
+async def test_when_messaging_cannot_be_asked_the_records_stay_and_the_round_runs(
+    world, volume, monkeypatch
 ):
-    """这一轮跑完、记成处理完了，进程死在答复它的投递之前：broker 把那次投递重投给下一个进程，
-    不再起一轮。"""
-    message = _from("赤尾", "我出门了。")
-    real = pending.answered
+    first = _from("赤尾", "我出门了。")
+    await world.deliver(first)
 
-    def dies(message_id):
-        monkeypatch.setattr(pending, "answered", real)
-        raise Crash()
+    async def database_down(inbox_name, message_ids):
+        raise ConnectionError("库连不上")
 
-    monkeypatch.setattr(pending, "answered", dies)
-    with pytest.raises(Crash):
-        await world.deliver(message)
+    monkeypatch.setattr(receiving, "succeeded_message_ids", database_down)
+    await world.deliver(_from("千凪", "我在做饭。"))
 
-    restart(world)
-    await world.deliver(message)
-
-    assert len(world.runner.runs) == 1
+    assert len(world.runner.runs) == 2
+    assert first.message_id in _handled_records(volume)
