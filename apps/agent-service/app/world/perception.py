@@ -11,6 +11,15 @@
 的那条消息：谁发的、什么时候、说了什么（:func:`_perception_input`）。居民发来的是她做了什么，做事的
 人已经知道自己做了什么，该告诉她的只是她不知道的那部分；这一点要有依据，不能从变化描述里去猜是谁。
 
+**模型的临时失败重试，失败那一次的判断作废。** 感知判断那次模型调用遇到 5xx、超时这类临时失败
+（:data:`app.agent.core.RETRYABLE_EXCEPTIONS`），整次判断重来，最多 :data:`PERCEPTION_ATTEMPTS`
+次。:func:`someone_notices` 只把判断记在这一次调用自己的字典里，不发任何东西，所以失败那一次
+判断过谁、写了什么，都随那个字典丢掉；重来的那一次从空的开始，发出去的只有成功那一次的判断。
+不在 Agent 层重试（``max_retries``）：那一层重放整个工具循环时用的是同一个 context，失败那一次
+记下的判断会留到重放的那一次里。试完了还是失败，交回调用方照旧处理（主 agent 看到"没有报告
+出去"），日志里记一条 error 点明试了几次、最后为什么失败；每一次失败的调用在 Langfuse 里各是
+一条标成 ERROR 的 trace。
+
 **告知居民只有这一条路。** 每一条判断变成一条 :class:`Notice`，消息 id 在判断完那一刻就定下；
 :func:`tell` 把它原样按通信机制发给那个参与者（``send``，发送方是 world，用的就是这个 id）。
 主 agent 没有直接给谁发消息的工具，所以"谁知道这件事"只由这一次判断决定，告知的内容也是判断
@@ -41,12 +50,14 @@ from typing import Annotated
 from pydantic import Field
 
 from app.agent.context import AgentContext
+from app.agent.core import RETRYABLE_EXCEPTIONS
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
 from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg
+from app.capabilities.retry import retry
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, Message, message_body, participant
 from app.messaging.sending import send
@@ -64,6 +75,15 @@ PERCEPTION = AgentKind(
 
 # ``AgentContext.features`` 里这一次判断的结果：参与者名字 → (他察觉到的那段话, 要不要现在就让他注意到)。
 _JUDGMENTS = "world_perception_judgments"
+
+# 感知判断那次模型调用遇到临时失败（5xx、超时、连不上、限流，跟 Agent 层自己重试的是同一组：
+# :data:`app.agent.core.RETRYABLE_EXCEPTIONS`）时最多试几次，两次之间等多久（翻倍，有上限）。
+# 2026-10-06 在 coe-world 上，模型两次返回 500，那两个变化没有报告出去。一次调用最长等
+# 180 秒（:data:`app.agent.client.MODEL_ANSWER_SECONDS`），三次加上等待不到十分钟，在一轮的
+# 时限之内。
+PERCEPTION_ATTEMPTS = 3
+RETRY_BASE_SECONDS = 2.0
+RETRY_MAX_SECONDS = 8.0
 
 
 @tool
@@ -168,18 +188,43 @@ def _perception_input(change: str, woken_by: Message) -> str:
 async def judge_who_notices(change: str, *, woken_by: Message) -> list[Notice]:
     """为一个变化跑一次感知判断，交回判断出来的告知，每条带一个新的消息 id。一条都不发。
 
-    ``woken_by`` 是叫醒主 agent 这一轮的那条消息，原样摆进感知判断的输入。感知判断那次模型调用
-    失败原样往外抛。
+    ``woken_by`` 是叫醒主 agent 这一轮的那条消息，原样摆进感知判断的输入。模型调用的临时失败
+    重试，最多 :data:`PERCEPTION_ATTEMPTS` 次；每一次都从空的判断开始，失败那一次判断过谁不带进
+    下一次（它也一条都没发：告知要等判断交回来之后才由调用方发）。别的失败、或者试完了还是失败，
+    原样往外抛。
     """
-    judgments: dict[str, tuple[str, bool]] = {}
-    call_id = uuid.uuid4().hex
-    await run_agent(
-        PERCEPTION,
-        [Turn(role=Role.USER, content=_perception_input(change, woken_by))],
-        tools=[*await query_tools(), someone_notices],
-        context=AgentContext(session_id=session_key(), features={_JUDGMENTS: judgments}),
-        call_id=call_id,
+    perception_input = _perception_input(change, woken_by)
+    tools = [*await query_tools(), someone_notices]
+
+    @retry(
+        attempts=PERCEPTION_ATTEMPTS,
+        base_delay_s=RETRY_BASE_SECONDS,
+        max_delay_s=RETRY_MAX_SECONDS,
+        retry_on=RETRYABLE_EXCEPTIONS,
     )
+    async def judge() -> tuple[str, dict[str, tuple[str, bool]]]:
+        judgments: dict[str, tuple[str, bool]] = {}
+        call_id = uuid.uuid4().hex
+        await run_agent(
+            PERCEPTION,
+            [Turn(role=Role.USER, content=perception_input)],
+            tools=tools,
+            context=AgentContext(session_id=session_key(), features={_JUDGMENTS: judgments}),
+            call_id=call_id,
+        )
+        return call_id, judgments
+
+    try:
+        call_id, judgments = await judge()
+    except RETRYABLE_EXCEPTIONS as exc:
+        logger.error(
+            "world: perception failed on all %d attempts (last: %s: %s); the change is not told "
+            "to anyone",
+            PERCEPTION_ATTEMPTS,
+            type(exc).__name__,
+            exc,
+        )
+        raise
     logger.info(
         "world: perception %s judged %s",
         call_id,

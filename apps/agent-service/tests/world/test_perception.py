@@ -7,9 +7,15 @@ context 里真调 ``someone_notices``），通信机制的 ``send`` 换成替身
 from __future__ import annotations
 
 import ast
+import logging
 from pathlib import Path
 
+import httpx
+import pytest
+from openai import InternalServerError
+
 import app.world
+from app.capabilities._errors import CapabilityTimeout
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, perception
 from app.world.actions import ACTIONS, report_change
@@ -312,6 +318,109 @@ async def test_perception_is_told_when_world_woke_on_its_own(world):
         f"下面是世界当时给自己留的话，话里的\"你\"指世界自己：",
         own_wake.body,
     ]
+
+
+# ---------------------------------------------------------------------------
+# 模型的临时失败（5xx、超时）重试；失败那一次判断过的不带进重试，也不发
+# ---------------------------------------------------------------------------
+
+
+def _server_error() -> Exception:
+    """模型那边返回 500：2026-10-06 在 coe-world 上两次丢掉变化的就是它。"""
+    request = httpx.Request("POST", "https://model.invalid/v1/chat/completions")
+    return InternalServerError(
+        "Error code: 500 - The server had an error while processing your request.",
+        response=httpx.Response(500, request=request),
+        body=None,
+    )
+
+
+def _no_answer() -> Exception:
+    return CapabilityTimeout("gpt-5.5 gave no answer within 180s")
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    monkeypatch.setattr(perception, "RETRY_BASE_SECONDS", 0.0)
+
+
+@pytest.mark.parametrize("transient", [_server_error, _no_answer])
+async def test_a_transient_model_failure_is_retried_and_only_the_retrys_judgments_are_sent(
+    world, no_backoff, transient
+):
+    """失败的那一次已经判断过 akao 和 ayana；重试只判断了 ayana。发出去的只有重试的那一条，
+    akao 不会因为失败那一次的判断收到告知，ayana 也只收到一条。"""
+    attempts: list[str] = []
+
+    async def plan(perception_input):
+        attempts.append(perception_input)
+        if len(attempts) == 1:
+            await perception.someone_notices.invoke(
+                {"who": "akao", "what": "失败那一次写的。", "right_away": True}
+            )
+            await perception.someone_notices.invoke(
+                {"who": "ayana", "what": "失败那一次写的。", "right_away": True}
+            )
+            raise transient()
+        await perception.someone_notices.invoke(
+            {"who": "ayana", "what": "你听见楼下的门响了一声。", "right_away": False}
+        )
+        return "判断完了。"
+
+    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+    world.open_inboxes = {"ayana"}
+
+    [result] = await _a_round(world, reports("楼下的门被风吹得响了一声。"))
+
+    assert len(attempts) == 2
+    assert attempts[1] == attempts[0], "重试拿到的是同一份输入"
+    assert [(s["recipient"], s["body"]) for s in world.sent] == [
+        ("ayana", "你听见楼下的门响了一声。")
+    ]
+    assert world.sent_wakes == [False]
+    assert "ayana" in result and "送达了" in result and "akao" not in result
+
+
+async def test_when_every_attempt_fails_nothing_is_sent_and_the_failure_shows(
+    world, no_backoff, caplog
+):
+    attempts: list[str] = []
+
+    async def plan(perception_input):
+        attempts.append(perception_input)
+        await perception.someone_notices.invoke(
+            {"who": "ayana", "what": "没做成的那一次写的。", "right_away": True}
+        )
+        raise _server_error()
+
+    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+
+    with caplog.at_level(logging.WARNING):
+        [result] = await _a_round(world, reports("楼下的门被风吹得响了一声。"))
+
+    assert len(attempts) == perception.PERCEPTION_ATTEMPTS > 1
+    assert world.sent == []
+    # 主 agent 照旧拿到"没有报告出去"（用完之后的处理不变），日志里点明试了几次、最后为什么失败。
+    assert "没有报告出去" in result and "InternalServerError" in result
+    [gave_up] = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert f"{perception.PERCEPTION_ATTEMPTS} attempts" in gave_up.getMessage()
+    retried = [r for r in caplog.records if "retrying" in r.getMessage()]
+    assert len(retried) == perception.PERCEPTION_ATTEMPTS - 1
+
+
+async def test_a_failure_that_is_not_transient_is_not_retried(world, no_backoff):
+    attempts: list[str] = []
+
+    async def plan(perception_input):
+        attempts.append(perception_input)
+        raise ValueError("模型交回来的东西解不开")
+
+    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+
+    [result] = await _a_round(world, reports("下雨了。"))
+
+    assert len(attempts) == 1
+    assert "没有报告出去" in result and world.sent == []
 
 
 # ---------------------------------------------------------------------------
