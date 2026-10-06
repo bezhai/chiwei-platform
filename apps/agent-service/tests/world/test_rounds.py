@@ -516,11 +516,14 @@ async def test_its_own_wake_is_never_given_up(world):
         await world.deliver(_from("赤尾", "跑不完的那条。"))
     its_time = self_message(current.message_id, "到点了。")
 
-    for _ in range(receiving.PROCESSING_RETRY.n + 2):
+    for _ in range(receiving.PROCESSING_RETRY.n + 2):  # 自定醒来不限次数重试，直到有一次处理成功
         try:
             await world.deliver(its_time)
+            break
         except RuntimeError:
             pass
+    else:
+        pytest.fail("自定醒来一直没跑完")
 
     # 跑不完的那条在第 n 次失败之后被放弃；自定唤醒一直在，下一轮就跑完了。
     assert "到点了。" in _round_input(world) and "跑不完的那条。" not in _round_input(world)

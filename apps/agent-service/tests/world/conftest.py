@@ -16,6 +16,7 @@ from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
 from app.agent.runtime_context import agent_context
 from app.infra.cst_time import now_cst
+from app.messaging import receiving
 from app.messaging.message import Delivery, Kind, SendFailed, new_message
 from app.world import agents, main_agent, perception, wake
 from app.world.actions import wake_me_at
@@ -137,8 +138,10 @@ def world(volume, monkeypatch):
         costs: list[dict] = []
         history: list[Turn] = []
         ver = 3
-        # world 收件箱的处理函数，就是接线里交给通信机制的那一个：一次投递就是调它一次。
-        deliver = None
+        # world 收件箱的处理函数，就是接线里交给通信机制的那一个（:func:`restart` 换）。
+        handler = None
+        # 通信机制记下了"处理成功"的消息 id：同一条再来，交不到处理函数手里。
+        succeeded: set[str] = set()
 
     h = Handle()
     h.agents, h.built = {}, []
@@ -148,6 +151,22 @@ def world(volume, monkeypatch):
     h.before_send = None
     h.history = [Turn(role=Role.USER, content="上一轮的输入。")]
     h.runner = FakeRunner(sets_wake())
+    h.succeeded = set()
+
+    async def deliver(message, *, success_recorded: bool = True):
+        """通信机制投一次：成功记下来过的不再交给处理函数；处理函数正常返回之后才记成功，
+        ``success_recorded=False`` 是记成功的那一笔没写成（或者进程死在返回和记下之间）。"""
+        if message.message_id in h.succeeded:
+            return
+        await h.handler(message)
+        if success_recorded:
+            h.succeeded.add(message.message_id)
+
+    async def succeeded_message_ids(inbox_name, message_ids):
+        assert inbox_name == "world"
+        return {m for m in message_ids if m in h.succeeded}
+
+    h.deliver = deliver
 
     async def send_at(**kw):
         h.scheduled.append(kw)
@@ -198,6 +217,7 @@ def world(volume, monkeypatch):
     monkeypatch.setattr(main_agent, "commit_transcript", commit_transcript)
     monkeypatch.setattr(agents, "record_round_cost", record_round_cost)
     monkeypatch.setattr(agents, "build_runner", build_runner)
+    monkeypatch.setattr(receiving, "succeeded_message_ids", succeeded_message_ids)
     restart(h)
     return h
 
@@ -208,7 +228,7 @@ def restart(world_handle) -> None:
     from app.messaging.receiving import INBOX_REGISTRY
 
     load_world_wiring()
-    world_handle.deliver = INBOX_REGISTRY["world"].on_message
+    world_handle.handler = INBOX_REGISTRY["world"].on_message
 
 
 def tools_built_for(world_handle, prompt_id: str) -> list[str]:

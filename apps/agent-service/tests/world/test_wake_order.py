@@ -183,7 +183,7 @@ async def test_row_5_dying_between_sending_and_recording(world, monkeypatch):
 
 async def test_row_6_dying_between_recording_and_acknowledging(world):
     a, trigger = await _armed(world)
-    await world.deliver(trigger)
+    await world.deliver(trigger, success_recorded=False)  # 处理完了，还没记成功进程就死了
     b = world.scheduled[-1]["message_id"]
 
     await world.deliver(trigger)  # 没确认的 A 被重投
