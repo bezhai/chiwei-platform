@@ -36,14 +36,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from app.infra.cst_time import now_cst
 from app.world.perception import Notice
-from app.world.volume import lane_dir, require_writer_lock, write_atomically
+from app.world.volume import lane_dir, require_writer_lock, set_aside, write_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +101,7 @@ def _to_json(happening: Happening) -> dict:
 
 def _set_aside(path: Path) -> None:
     """把读不出来的那份原样改名留在旁边，点名记一条 error。"""
-    require_writer_lock()
-    aside = path.with_name(f"{path.name}.unreadable-{now_cst():%Y%m%dT%H%M%S%f}")
-    os.replace(path, aside)
+    aside = set_aside(path)
     logger.error(
         "world: %s is unreadable; moved it to %s and went on as if nothing were left over. "
         "The notices kept in it were not resent: read it and handle them by hand",

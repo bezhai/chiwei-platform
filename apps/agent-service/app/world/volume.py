@@ -33,6 +33,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from app.infra.cst_time import now_cst
 from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
@@ -134,3 +135,15 @@ def write_atomically(target: Path, text: str) -> None:
         os.replace(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def set_aside(path: Path) -> Path:
+    """把读不出来的一份文件原样改名留在同一个目录（``<名字>.unreadable-<时刻>``），交回新的路径。
+
+    读的一方接着按"没有这份文件"往下走：之后写的是一份新文件，挪开的那份不会被覆盖或者删掉，
+    留给人看过之后处理。只有拿着写锁的进程能挪。
+    """
+    require_writer_lock()
+    aside = path.with_name(f"{path.name}.unreadable-{now_cst():%Y%m%dT%H%M%S%f}")
+    os.replace(path, aside)
+    return aside
