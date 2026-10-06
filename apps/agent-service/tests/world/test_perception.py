@@ -55,7 +55,7 @@ def reports(*changes: str):
 
 async def _a_round(world, plan):
     world.runner.plan = plan
-    await main_agent.on_world_message(
+    await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
     return plan.results
@@ -277,7 +277,7 @@ async def test_perception_sees_who_sent_the_message_that_woke_this_round_and_wha
         sender="赤尾", recipient="world", body="我起身把窗关上了。", kind=Kind.MESSAGE
     )
 
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
 
     [seen] = judge.inputs
     assert seen.split("\n")[1:] == [
@@ -295,7 +295,7 @@ async def test_perception_is_told_when_world_woke_on_its_own(world):
     judge = judges()
     world.agents[perception.PERCEPTION.prompt_id] = judge
     world.runner.plan = sets_wake(reason="看看傍晚的街上。")
-    await main_agent.on_world_message(
+    await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
     [scheduled] = world.scheduled
@@ -312,7 +312,7 @@ async def test_perception_is_told_when_world_woke_on_its_own(world):
     )
     world.runner.plan = reports("傍晚了，街灯亮了。")
 
-    await main_agent.on_world_message(own_wake)
+    await world.deliver(own_wake)
 
     [seen] = judge.inputs
     assert seen.split("\n")[1:4] == [

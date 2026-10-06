@@ -228,3 +228,71 @@ async def test_the_latest_wake_failing_again_and_again_is_never_dead_lettered(
     assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0
     rows = await read_record(message_id=started.message_id)
     assert [r["outcome"] for r in rows].count("retrying") == 5
+
+
+# ---------------------------------------------------------------------------
+# 一轮进行中到的几条消息，下一轮一起处理
+# ---------------------------------------------------------------------------
+
+
+class HeldFirstRound:
+    """第一轮卡在模型那一段，直到放行；每轮记下眼前那段话，定到一天以后。"""
+
+    def __init__(self):
+        self.release = asyncio.Event()
+        self.round_inputs: list[str] = []
+
+    async def run(self, messages, *, context, transcript_sink, **_):
+        self.round_inputs.append(messages[-1].content)
+        if len(self.round_inputs) == 1:
+            await self.release.wait()
+        with agent_context(context):
+            at = now_cst() + timedelta(days=1)
+            await wake_me_at.invoke({"at": at.isoformat(), "reason": "明天再看。"})
+        reply = Turn(role=Role.ASSISTANT, content="好。")
+        transcript_sink.append(reply)
+        return reply
+
+
+async def test_messages_arriving_while_a_round_runs_are_taken_together_by_one_round(
+    world_process, broker, test_db, monkeypatch  # noqa: F811
+):
+    from sqlalchemy import text
+
+    from app.world import pending
+
+    runner = HeldFirstRound()
+    monkeypatch.setattr(agents, "build_runner", lambda config, tools: runner)
+
+    await start_messaging()
+    await eventually(lambda: len(runner.round_inputs) == 1, timeout=10)  # 启动补醒那一轮在跑
+
+    bodies = ["千凪在厨房煮乌冬。", "绫奈在客厅看书。", "赤尾出门了。"]
+    sent = [await send(sender="operator", recipient="world", body=b) for b in bodies]
+    # 三次投递都到了处理函数手里、收下了，都在等。
+    await eventually(lambda: len(pending.read()) == 3, timeout=10)
+    runner.release.set()
+
+    await eventually(lambda: len(runner.round_inputs) == 2, timeout=10)
+    second = runner.round_inputs[1]
+    assert sorted(bodies, key=second.index) == bodies
+
+    # 三次投递各自都处理成功了，没有哪一次再起一轮。
+    async def states() -> list[str]:
+        async with test_db.begin() as conn:
+            rows = await conn.execute(
+                text(
+                    "SELECT state FROM runtime_inflight "
+                    "WHERE edge_id = :edge AND idempotent_key = ANY(:keys)"
+                ),
+                {"edge": f"inbox:world@{LANE}", "keys": [d.message_id for d in sent]},
+            )
+            return [r[0] for r in rows]
+
+    async def all_succeeded():
+        return await states() == ["succeeded"] * 3
+
+    await eventually(all_succeeded, timeout=10)
+    await asyncio.sleep(1.0)
+    assert len(runner.round_inputs) == 2
+    assert pending.read() == []

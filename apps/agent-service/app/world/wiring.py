@@ -4,8 +4,10 @@ world 的 agent 能查到的东西由知识来源提供（:mod:`app.world.source
 就是在下面的登记表里加一行。
 
 world 靠收件箱醒：开设名为 ``world`` 的收件箱，只在拿着卷的写锁时消费
-（:func:`app.world.volume.writer_lock`；启动补醒也在拿到锁之后才跑），一次只处理一条、一轮最多
-:data:`app.world.main_agent.ROUND_TIMEOUT`（占位租约随之放长），开设时按私有状态补醒
+（:func:`app.world.volume.writer_lock`；启动补醒也在拿到锁之后才跑）。送来的消息交给
+:data:`ROUNDS`：一轮处理收件箱里所有还没经过一轮的消息，同一时刻只有一轮在跑，一轮最多
+:data:`app.world.main_agent.ROUND_TIMEOUT`；收件箱的处理时限和占位租约放长到一次投递最多要等的
+时间（:attr:`app.world.rounds.Rounds.delivery_timeout`）。开设时按私有状态补醒
 （:func:`app.world.wake.wake_on_start`），状态里的最新唤醒那一轮失败时不限次数重试、永不
 进死信（:func:`app.world.wake.retry_latest_wake_without_limit`）。问它的问题（某处现在什么样、
 谁在哪）由应答 agent 回答（:func:`app.world.answer.answer_question`）：只读，不叫醒主 agent。
@@ -27,7 +29,8 @@ from app.world.admin import (
     record_write_node,
 )
 from app.world.answer import answer_question
-from app.world.main_agent import ROUND_TIMEOUT, on_world_message
+from app.world.main_agent import ROUND_TIMEOUT, run_round
+from app.world.rounds import Rounds
 from app.world.sources import reality, register, told
 from app.world.sources import records as records_source
 from app.world.volume import writer_lock
@@ -36,12 +39,14 @@ from app.world.wake import WORLD, retry_latest_wake_without_limit, wake_on_start
 for source in (records_source.SOURCE, reality.SOURCE, told.SOURCE):
     register(source)
 
+# 这个进程里 world 的一轮接一轮。
+ROUNDS = Rounds(run_round, round_timeout=ROUND_TIMEOUT)
+
 inbox(
     WORLD,
-    on_message=on_world_message,
+    on_message=ROUNDS.receive,
     on_question=answer_question,
-    processing_timeout=ROUND_TIMEOUT,
-    one_at_a_time=True,
+    processing_timeout=ROUNDS.delivery_timeout,
     on_open=wake_on_start,
     retry_without_limit=retry_latest_wake_without_limit,
     consume_while=writer_lock,

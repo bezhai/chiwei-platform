@@ -96,7 +96,7 @@ async def test_the_judged_notices_are_kept_with_their_ids_before_any_is_sent(wor
     world.before_send = lambda _r: kept_at_first_send.append(unfinished.read()) if not kept_at_first_send else None
     world.runner.plan = reports("楼下的门被风吹得响了一声。")
 
-    await main_agent.on_world_message(_message())
+    await world.deliver(_message())
 
     [[happening]] = kept_at_first_send
     assert "楼下的门被风吹得响了一声。" in happening.what
@@ -118,11 +118,11 @@ async def test_dying_while_judging_leaves_nothing_kept_and_nothing_to_resend(wor
     world.runner.plan = reports("下雨了。")
 
     with pytest.raises(Crash):
-        await main_agent.on_world_message(_message())
+        await world.deliver(_message())
 
     assert unfinished.read() == [] and world.sent == []
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(_message())
+    await world.deliver(_message())
     assert world.sent == []
     assert "已经发生" not in _round_input(world)
 
@@ -141,7 +141,7 @@ async def test_a_judgment_that_fails_is_handed_back_and_nothing_is_kept_or_sent(
         return await sets_wake()()
 
     world.runner.plan = plan
-    await main_agent.on_world_message(_message())
+    await world.deliver(_message())
 
     assert "没有报告出去" in results[0] and "RuntimeError" in results[0]
     assert unfinished.read() == [] and world.sent == []
@@ -155,14 +155,14 @@ async def test_dying_after_keeping_but_before_sending_sends_them_before_the_next
     trigger = _message()
 
     with pytest.raises(Crash):
-        await main_agent.on_world_message(trigger)
+        await world.deliver(trigger)
     assert world.sent == []
     kept = _kept_ids()
 
     world.before_send = None
     seen: list = []
     world.runner.plan = watches_sends_then_sets_wake(world, seen)
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
 
     assert seen == [2]
     assert world.sent_ids == kept
@@ -181,13 +181,13 @@ async def test_interrupted_between_two_sends_both_go_out_again_with_their_origin
     trigger = _message()
 
     with pytest.raises(type(interruption)):
-        await main_agent.on_world_message(trigger)
+        await world.deliver(trigger)
     first_id, second_id = _kept_ids()
     assert world.sent_ids == [first_id]
 
     world.before_send = None
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
 
     # ayana 那条按原 id 再发一次，接收方按 id 去重；akao 那条第一次发出。没有新 id。
     assert world.sent_ids == [first_id, first_id, second_id]
@@ -202,12 +202,12 @@ async def test_all_sent_but_the_round_not_stored_resends_them_once_and_then_forg
     trigger = _message()
 
     with pytest.raises(main_agent.NoNextWake):
-        await main_agent.on_world_message(trigger)
+        await world.deliver(trigger)
     kept = _kept_ids()
 
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(trigger)
-    await main_agent.on_world_message(_message("下一条"))
+    await world.deliver(trigger)
+    await world.deliver(_message("下一条"))
 
     assert world.sent_ids == kept + kept
     assert "已经发生" in _round_input(world, -2)
@@ -238,12 +238,12 @@ async def test_stored_but_not_cleared_resends_them_once_more_and_clears_after(
 
     world.runner.plan = reports_and_says_so
     with pytest.raises(Crash):
-        await main_agent.on_world_message(_message())
+        await world.deliver(_message())
     assert len(world.committed) == 1
     kept = _kept_ids()
 
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(_message())
+    await world.deliver(_message())
 
     # 这一轮读回来的上下文里已经有上一轮（它存下了），眼前也摆着补发的结果：两边都看得到。
     *history, round_input = world.runner.runs[-1]
@@ -265,7 +265,7 @@ async def test_cleared_then_scheduling_fails_leaves_nothing_to_resend(world, mon
     world.runner.plan = reports("下雨了。")
 
     with pytest.raises(SendFailed):
-        await main_agent.on_world_message(_message())
+        await world.deliver(_message())
 
     assert len(world.committed) == 1
     assert unfinished.read() == []
@@ -284,14 +284,14 @@ async def test_a_send_error_fails_the_round_and_the_notice_goes_out_on_the_next(
     trigger = _message()
 
     with pytest.raises(SendFailed):
-        await main_agent.on_world_message(trigger)
+        await world.deliver(trigger)
     first_id, second_id = _kept_ids()
     assert world.sent_ids == [first_id]
     assert world.committed == []
 
     world.send_fails = set()
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
 
     assert world.sent_ids == [first_id, first_id, second_id]
 
@@ -300,13 +300,13 @@ async def test_a_send_error_while_resending_fails_the_round_before_the_model_run
     world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
     world.runner.plan = reports("下雨了。", sets=False)
     with pytest.raises(main_agent.NoNextWake):
-        await main_agent.on_world_message(_message())
+        await world.deliver(_message())
     kept = unfinished.read()
     runs = len(world.runner.runs)
 
     world.send_fails = {"akao"}
     with pytest.raises(SendFailed):
-        await main_agent.on_world_message(_message())
+        await world.deliver(_message())
 
     assert len(world.runner.runs) == runs
     assert unfinished.read() == kept
@@ -322,11 +322,11 @@ async def test_a_round_woken_by_something_else_resends_them_too(world):
     world.agents[perception.PERCEPTION.prompt_id] = judges(*TWO)
     world.runner.plan = reports("下雨了。", sets=False)
     with pytest.raises(main_agent.NoNextWake):
-        await main_agent.on_world_message(_message("先来的"))
+        await world.deliver(_message("先来的"))
     kept = _kept_ids()
 
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(_message("后来的"))
+    await world.deliver(_message("后来的"))
 
     assert world.sent_ids == kept + kept
     assert "下雨了。" in _round_input(world)
@@ -346,13 +346,13 @@ async def test_an_npcs_appearance_is_kept_with_its_own_words_and_resent(world):
 
     world.runner.plan = plan
     with pytest.raises(Crash):
-        await main_agent.on_world_message(_message())
+        await world.deliver(_message())
     [happening] = unfinished.read()
     assert "门卫" in happening.what and "今天关门早" in happening.what
 
     world.before_send = None
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(_message())
+    await world.deliver(_message())
 
     assert world.sent_ids == [happening.notices[0].message_id]
     assert "今天关门早" in _round_input(world)
@@ -363,9 +363,9 @@ async def test_a_change_nobody_notices_is_still_kept_so_it_is_not_reported_again
     world.runner.plan = reports("后院落了一片叶子。", sets=False)
 
     with pytest.raises(main_agent.NoNextWake):
-        await main_agent.on_world_message(_message())
+        await world.deliver(_message())
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(_message())
+    await world.deliver(_message())
 
     assert world.sent == []
     assert "后院落了一片叶子。" in _round_input(world)
@@ -381,7 +381,7 @@ async def test_every_change_a_failed_round_reported_is_kept_in_order(world):
 
     world.runner.plan = plan
     with pytest.raises(main_agent.NoNextWake):
-        await main_agent.on_world_message(_message())
+        await world.deliver(_message())
 
     assert ["先起风。" in h.what for h in unfinished.read()] == [True, False]
     assert ["后下雨。" in h.what for h in unfinished.read()] == [False, True]
@@ -400,7 +400,7 @@ async def test_whether_each_notice_wakes_is_kept_and_a_resend_after_a_restart_ke
     world.runner.plan = reports("楼下有人在喊，雨也小了。")
 
     with pytest.raises(Crash):
-        await main_agent.on_world_message(_message())
+        await world.deliver(_message())
     [happening] = unfinished.read()
     assert [(n.who, n.wakes_recipient) for n in happening.notices] == [
         ("ayana", True),
@@ -409,7 +409,7 @@ async def test_whether_each_notice_wakes_is_kept_and_a_resend_after_a_restart_ke
 
     world.before_send = None
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(_message())
+    await world.deliver(_message())
 
     assert [s["recipient"] for s in world.sent] == ["ayana", "akao"]
     assert world.sent_wakes == [True, False]
@@ -434,7 +434,7 @@ async def test_a_file_an_older_version_wrote_is_resent_as_waking(world, volume):
     )
     world.runner.plan = sets_wake()
 
-    await main_agent.on_world_message(_message())
+    await world.deliver(_message())
 
     assert (world.sent_ids, world.sent_wakes) == (["kept-1"], [True])
     assert _set_aside(volume) == []
@@ -504,7 +504,7 @@ async def test_an_unreadable_file_is_set_aside_logged_and_the_round_goes_on(
     world.runner.plan = reports("起风了。")
 
     with caplog.at_level("ERROR", logger="app.world.unfinished"):
-        await main_agent.on_world_message(_message())
+        await world.deliver(_message())
 
     # 这一轮照常跑完：存下了上下文，自己报告的那条照常发，记着的那条没有被当成"没有"补发。
     assert len(world.committed) == 1

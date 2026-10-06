@@ -45,7 +45,7 @@ async def _run_all_four(world) -> dict[str, list[str]]:
         return await sets_wake()()
 
     world.runner.plan = a_round
-    await main_agent.on_world_message(
+    await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
     await answer.answer_question(

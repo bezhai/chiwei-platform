@@ -11,6 +11,8 @@
 * :mod:`app.world.wake` —— 下次醒来的时刻（私有状态）和醒来规则；
 * :mod:`app.world.sources` —— 知识来源：agent 能查到的东西从哪来，每个来源一个模块；
 * :mod:`app.world.agents` —— world 的几类 agent 怎么调模型（模型、trace、成本）；
+* :mod:`app.world.rounds` —— 收件箱的处理：一轮处理所有还没经过一轮的消息，一次只跑一轮；
+* :mod:`app.world.pending` —— 收件箱里的消息走到了哪一步：还没经过一轮、处理完了、放弃了；
 * :mod:`app.world.main_agent` —— 主 agent 的一轮；
 * :mod:`app.world.actions` —— 只有主 agent 才有的动作；
 * :mod:`app.world.perception` —— 感知判断 agent：谁会察觉、察觉到什么，以及告知他们；

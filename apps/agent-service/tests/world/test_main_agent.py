@@ -35,7 +35,7 @@ async def test_a_message_from_someone_wakes_it(world):
         sender="operator", recipient="world", body="有人把窗户打开了。", kind=Kind.MESSAGE
     )
 
-    await main_agent.on_world_message(message)
+    await world.deliver(message)
 
     assert len(world.runner.runs) == 1
     round_input = _round_input(world)
@@ -47,7 +47,7 @@ async def test_its_own_time_wakes_it(world):
     current = await wake.set_next_wake(now_cst(), "该看看外面了。")
     world.scheduled.clear()
 
-    await main_agent.on_world_message(self_message(current.message_id, "该看看外面了。"))
+    await world.deliver(self_message(current.message_id, "该看看外面了。"))
 
     assert len(world.runner.runs) == 1
     round_input = _round_input(world)
@@ -59,7 +59,7 @@ async def test_a_wake_replaced_by_a_later_one_is_skipped_without_a_round(world):
     current = await wake.set_next_wake(now_cst() + timedelta(hours=4), "后来改的。")
     world.scheduled.clear()
 
-    await main_agent.on_world_message(self_message(replaced.message_id))
+    await world.deliver(self_message(replaced.message_id))
 
     assert world.runner.runs == []
     assert world.scheduled == [] and world.committed == []
@@ -69,7 +69,7 @@ async def test_a_wake_replaced_by_a_later_one_is_skipped_without_a_round(world):
 async def test_woken_by_someone_else_it_sees_the_wake_it_had_planned(world):
     planned = await wake.set_next_wake(now_cst() + timedelta(hours=6), "傍晚再看。")
 
-    await main_agent.on_world_message(
+    await world.deliver(
         new_message(sender="operator", recipient="world", body="下雨了。", kind=Kind.MESSAGE)
     )
 
@@ -137,7 +137,7 @@ async def test_a_round_of_others_messages_only_is_told_the_wake_it_had_planned(w
 
 
 async def test_a_round_ends_by_recording_scheduling_and_remembering(world):
-    await main_agent.on_world_message(
+    await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
@@ -162,7 +162,7 @@ async def test_a_round_that_sets_no_next_wake_fails_and_changes_nothing(world):
     world.runner.plan = sets_nothing()
 
     with pytest.raises(main_agent.NoNextWake):
-        await main_agent.on_world_message(
+        await world.deliver(
             new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
         )
 
@@ -178,9 +178,9 @@ async def test_a_failed_round_woken_by_its_own_time_runs_again_on_retry(world):
     trigger = self_message(current.message_id, "到点了。")
 
     with pytest.raises(main_agent.NoNextWake):
-        await main_agent.on_world_message(trigger)
+        await world.deliver(trigger)
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
 
     assert len(world.runner.runs) == 2
     assert wake.read_next_wake().message_id != current.message_id
@@ -197,7 +197,7 @@ async def test_when_the_context_cannot_be_stored_the_round_fails_before_scheduli
     monkeypatch.setattr(main_agent, "commit_transcript", conflict)
 
     with pytest.raises(TranscriptConflict):
-        await main_agent.on_world_message(
+        await world.deliver(
             new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
         )
 
@@ -214,7 +214,7 @@ async def test_the_main_agent_gets_every_enabled_sources_query_tools_and_its_own
     from app.world.actions import ACTIONS
     from app.world.sources import query_tools
 
-    await main_agent.on_world_message(
+    await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
@@ -227,7 +227,7 @@ async def test_the_main_agent_gets_every_enabled_sources_query_tools_and_its_own
 
 
 async def test_the_round_runs_as_its_own_trace_with_its_own_prompt(world):
-    await main_agent.on_world_message(
+    await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
@@ -248,7 +248,7 @@ async def test_what_the_sources_return_is_trimmed_as_material(world, monkeypatch
 
     monkeypatch.setattr(main_agent, "trim_for_round", trim)
 
-    await main_agent.on_world_message(
+    await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
@@ -276,7 +276,7 @@ async def test_a_history_under_30k_tokens_is_carried_into_the_round_whole(world)
     world.history = _turns(29)
     assert 29_000 < estimate_tokens(world.history) < 30_000
 
-    await main_agent.on_world_message(
+    await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
@@ -289,7 +289,7 @@ async def test_a_history_over_30k_tokens_is_cut_back_to_20k_before_the_round(wor
     world.history = _turns(31)
     assert estimate_tokens(world.history) > 30_000
 
-    await main_agent.on_world_message(
+    await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
@@ -335,14 +335,14 @@ async def test_a_checkpoint_cut_away_on_write_back_comes_back_with_the_records_n
     monkeypatch.setattr(main_agent, "now_cst", lambda: at)
     records.write("地方/厨房.md", "灶上炖着汤。", expected=None)
     world.history = []
-    await main_agent.on_world_message(_from_operator())
+    await world.deliver(_from_operator())
     [first] = _checkpoints(world.history)
     assert "地方/厨房.md" in first.content
 
     # 这个整点里后来又跑了很多轮，历史快到 3 万；这一轮自己再说一段，存回去时撞上硬顶。
     world.history = [*world.history, *_turns(28)]
     world.runner.plan = _says("字" * 6000)
-    await main_agent.on_world_message(_from_operator())
+    await world.deliver(_from_operator())
 
     assert first in world.runner.runs[1]
     stored = world.committed[-1]["messages"]
@@ -350,7 +350,7 @@ async def test_a_checkpoint_cut_away_on_write_back_comes_back_with_the_records_n
     assert _checkpoints(stored) == []
 
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(_from_operator())
+    await world.deliver(_from_operator())
 
     *fed, again, _ = world.runner.runs[2]
     assert _checkpoints(fed) == []
@@ -363,7 +363,7 @@ async def test_a_round_that_alone_runs_over_30k_is_stored_whole_and_cut_on_the_n
     world.history = _turns(5)
     long = "字" * 31_000
     world.runner.plan = _says(long)
-    await main_agent.on_world_message(_from_operator())
+    await world.deliver(_from_operator())
 
     # 存回去时这一轮自己的输入和产出一条不丢，哪怕它们自己就超过了 3 万。
     stored = world.committed[-1]["messages"]
@@ -371,7 +371,7 @@ async def test_a_round_that_alone_runs_over_30k_is_stored_whole_and_cut_on_the_n
     assert estimate_tokens(stored) > 30_000
 
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(_from_operator())
+    await world.deliver(_from_operator())
 
     # 下一轮读出来先裁：超过顶的那一轮整组丢掉，只剩这一轮插入的清理标记。
     [marker, _] = world.runner.runs[1]

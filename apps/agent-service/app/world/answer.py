@@ -7,7 +7,7 @@ world 的收件箱声明了 ``on_question``（:mod:`app.world.wiring`），每�
 
 **只读。** 它不写记录、不发消息、不报告变化，也不叫醒主 agent：它手里只有来源的查询工具，
 这一次调用也不放记读过什么的那个字典。提问也不经过各来源的收件处理——那只在普通消息那条路上
-跑（:func:`app.world.main_agent.on_world_message`）。问的人拿到的就是它最后说的话；它什么都没
+跑（:meth:`app.world.rounds.Rounds.receive`）。问的人拿到的就是它最后说的话；它什么都没
 说，就是"没有回答"。
 
 prompt 在 Langfuse（:data:`ANSWER`），正文不引用任何变量；现在几点、谁问的、问的什么写在 USER

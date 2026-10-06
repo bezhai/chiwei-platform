@@ -7,7 +7,7 @@ broker 确认之后才把 B 记成私有状态里的"最新唤醒"。所以状�
 （:func:`app.world.wake.retry_latest_wake_without_limit`）。
 
 A 是叫醒这一轮的自定消息（状态里的最新唤醒），B 是这一轮定的新时刻。"通信机制重投 A"在这里
-就是再调一次 :func:`app.world.main_agent.on_world_message`；"进程死了再起来"就是收件箱开设时
+就是再投一次（``world.deliver``，接线里交给收件箱的处理函数）；"进程死了再起来"就是收件箱开设时
 的 :func:`app.world.wake.wake_on_start`，加上没确认的消息被重投。
 
 每个用例最后都用 :func:`_assert_awake` 核对同一条不变量：之后一定还有一条会被执行的自定唤醒
@@ -107,12 +107,12 @@ async def test_row_1_the_model_part_fails(world):
     world.runner.plan = sets_nothing()
 
     with pytest.raises(main_agent.NoNextWake):
-        await main_agent.on_world_message(trigger)
+        await world.deliver(trigger)
     assert wake.read_next_wake() == a
     await _assert_retried_forever(trigger)
 
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
     assert len(world.runner.runs) == 2
     await _assert_awake(world)
 
@@ -122,11 +122,11 @@ async def test_row_2_sending_the_new_wake_fails(world, monkeypatch):
     _fail_next_send(monkeypatch, world, queued=False)
 
     with pytest.raises(SendFailed):
-        await main_agent.on_world_message(trigger)
+        await world.deliver(trigger)
     assert wake.read_next_wake() == a, "没排出去的唤醒不能记进状态"
     await _assert_retried_forever(trigger)
 
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
     assert len(world.runner.runs) == 2
     await _assert_awake(world)
 
@@ -136,13 +136,13 @@ async def test_row_3_sending_reports_failure_but_the_broker_has_it(world, monkey
     _fail_next_send(monkeypatch, world, queued=True)
 
     with pytest.raises(SendFailed):
-        await main_agent.on_world_message(trigger)
+        await world.deliver(trigger)
     b = world.scheduled[-1]["message_id"]
-    await main_agent.on_world_message(self_message(b))  # B 先到
+    await world.deliver(self_message(b))  # B 先到
     assert len(world.runner.runs) == 1, "没记进状态的 B 应当是旧消息"
     await _assert_retried_forever(trigger)
 
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
     assert len(world.runner.runs) == 2
     assert wake.is_stale_wake(self_message(b))
     await _assert_awake(world)
@@ -153,12 +153,12 @@ async def test_row_4_recording_fails_after_the_new_wake_was_sent(world, monkeypa
     _fail_next_record(monkeypatch, OSError("disk full"))
 
     with pytest.raises(OSError):
-        await main_agent.on_world_message(trigger)
+        await world.deliver(trigger)
     b = world.scheduled[-1]["message_id"]
     assert wake.read_next_wake() == a
     await _assert_retried_forever(trigger)
 
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
     assert len(world.runner.runs) == 2
     assert wake.is_stale_wake(self_message(b))
     await _assert_awake(world)
@@ -169,24 +169,24 @@ async def test_row_5_dying_between_sending_and_recording(world, monkeypatch):
     _fail_next_record(monkeypatch, Crash())
 
     with pytest.raises(Crash):
-        await main_agent.on_world_message(trigger)
+        await world.deliver(trigger)
     b = world.scheduled[-1]["message_id"]
     await wake.wake_on_start()  # 新进程：A 的时刻已经过了
 
     started = wake.read_next_wake()
     assert started.message_id not in {a.message_id, b}
-    await main_agent.on_world_message(trigger)  # 没确认的 A 被重投
-    await main_agent.on_world_message(self_message(b))
+    await world.deliver(trigger)  # 没确认的 A 被重投
+    await world.deliver(self_message(b))
     assert len(world.runner.runs) == 1, "A 和 B 都该是旧消息"
     await _assert_awake(world)
 
 
 async def test_row_6_dying_between_recording_and_acknowledging(world):
     a, trigger = await _armed(world)
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
     b = world.scheduled[-1]["message_id"]
 
-    await main_agent.on_world_message(trigger)  # 没确认的 A 被重投
+    await world.deliver(trigger)  # 没确认的 A 被重投
 
     assert len(world.runner.runs) == 1
     assert wake.read_next_wake().message_id == b
@@ -208,11 +208,11 @@ async def test_row_7_a_timeout_lands_while_sending(world, monkeypatch):
 
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.3):
-            await main_agent.on_world_message(trigger)
+            await world.deliver(trigger)
     assert wake.read_next_wake() == a
     await _assert_retried_forever(trigger)
 
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
     assert len(world.runner.runs) == 2
     await _assert_awake(world)
 
@@ -231,7 +231,7 @@ async def test_row_8_a_round_woken_by_someone_else_fails(world, monkeypatch, whe
         _fail_next_record(monkeypatch, OSError("disk full"))
 
     with pytest.raises((main_agent.NoNextWake, SendFailed, OSError)):
-        await main_agent.on_world_message(message)
+        await world.deliver(message)
 
     assert wake.read_next_wake() == planned
     await _assert_awake(world)
@@ -246,10 +246,10 @@ async def test_row_9_the_latest_wake_failing_again_and_again_is_always_retried(w
 
     for _ in range(10):
         with pytest.raises(main_agent.NoNextWake):
-            await main_agent.on_world_message(trigger)
+            await world.deliver(trigger)
         await _assert_retried_forever(trigger)
 
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(trigger)
+    await world.deliver(trigger)
     assert len(world.runner.runs) == 11
     await _assert_awake(world)

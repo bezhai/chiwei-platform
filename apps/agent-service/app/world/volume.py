@@ -6,7 +6,8 @@
 
 目录里放这几样：``records/``（记录，:mod:`app.world.records`）、``sources/<来源>/``（各知识
 来源自己存的东西，:func:`app.world.sources.private_dir`）、私有状态文件（下次醒来，
-:mod:`app.world.wake`；没跑完的一轮里已经发生的事，:mod:`app.world.unfinished`）和写锁文件。
+:mod:`app.world.wake`；没跑完的一轮里已经发生的事，:mod:`app.world.unfinished`；收件箱里的消息
+走到了哪一步，:mod:`app.world.pending`）和写锁文件。
 人工读写接口只够得到 ``records/``。
 
 **这里的读写全是同步的。** 文件都很小，卷在本机挂载；同步读写意味着"检查指纹"和

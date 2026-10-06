@@ -1,35 +1,35 @@
-"""world 主 agent 的一轮：被一条消息叫醒，看记录、看现实、让世界变化，最后定下次醒来的时刻。
+"""world 主 agent 的一轮：带着收件箱里还没经过一轮的消息，看记录、看现实、让世界变化，最后定
+下次醒来的时刻。
 
-**一条消息一轮。** 收件箱每送来一条消息（别人发来的、自己排的醒来、机制发回的"没有送达"
-告知），:func:`on_world_message` 先把它交给各知识来源的收件处理
-（:func:`app.world.sources.take_in`，各来源按消息 id 去重，重投、重跑都不会多存一份），再跑
-一轮；被后来定的时刻取代了的自定消息不跑（:func:`app.world.wake.is_stale_wake`）。收件箱开设时
-声明了一次只处理一条、一轮最多 :data:`ROUND_TIMEOUT`（:mod:`app.world.wiring`），所以同一时刻
-只有一轮在跑，一轮跑得再久也不会被当成"前一个进程死了"被别人接管。
+**一轮带着哪些消息、什么时候跑**由 :mod:`app.world.rounds` 决定：一轮处理收件箱里所有还没经过
+一轮的消息，同一时刻只有一轮在跑，一轮最多 :data:`ROUND_TIMEOUT`。这里只管一轮怎么跑
+（:func:`run_round`）。
 
 **一轮怎样才算跑完。** 模型那一段结束之后，依次：
 
 1. 这一轮定了下次醒来的时刻吗（:func:`app.world.actions.wake_me_at`）？没定就抛
-   :class:`NoNextWake`：这一轮算处理失败，按通信机制的重试再跑，重试用完进死信。工具预算
-   用完时框架给的那一次不带工具的收尾定不了时刻，同样按没定处理；
+   :class:`NoNextWake`，这一轮算没跑完。工具预算用完时框架给的那一次不带工具的收尾定不了
+   时刻，同样按没定处理；
 2. 把这一轮存进它的连续上下文（:mod:`app.agent.continuity`，按版本做 CAS），然后清空
    :mod:`app.world.unfinished`——这一轮发生过的事已经在上下文里了；
 3. 定下次醒来（:func:`app.world.wake.set_next_wake`：先排出自定消息，broker 确认之后才记成
    私有状态里的最新唤醒）。
 
-任何一步失败都往外抛，这一轮按失败重跑。重跑是安全的：它改过的记录留在盘上，下一次读得到；
-已经发出去的告知收不回来：报告过的变化、出过场的 NPC 和要发的告知（带预先定好的消息 id）在
-发之前就记在 :mod:`app.world.unfinished`，下一轮模型跑之前按原 id 补发一遍（接收方按 id 去重），
-再摆到它眼前，它不会把同一件事再报告一遍；上下文和下次醒来都只在最后才写下。叫醒这一轮的自定消息在第 3 步记下新唤醒之前一直是状态里的
-最新唤醒，所以重投时不会被当成旧消息，失败了也不限次数重试、不进死信；哪一处失败、进程死在
-哪里，各自怎么接上见 :mod:`app.world.wake`。先存上下文、后定时刻，是因为定时刻做完之后这一轮
-就不该再重跑——否则会多出一个被取代的自定消息，而上下文里又少了这一轮。
+任何一步失败都往外抛，这一轮算没跑完，带着的消息都留给之后的一轮，等它们的投递按通信机制重试
+（:mod:`app.world.rounds`）。再跑是安全的：它改过的记录留在盘上，下一次读得到；已经发出去的
+告知收不回来：报告过的变化、出过场的 NPC 和要发的告知（带预先定好的消息 id）在发之前就记在
+:mod:`app.world.unfinished`，下一轮模型跑之前按原 id 补发一遍（接收方按 id 去重），再摆到它
+眼前，它不会把同一件事再报告一遍；上下文和下次醒来都只在最后才写下。这一轮带着的自定消息在
+第 3 步记下新唤醒之前一直是状态里的最新唤醒，所以重投时不会被当成旧消息，失败了也不限次数
+重试、不进死信；哪一处失败、进程死在哪里，各自怎么接上见 :mod:`app.world.wake`。先存上下文、
+后定时刻，是因为定时刻做完之后这一轮就不该再重跑——否则会多出一个被取代的自定消息，而上下文
+里又少了这一轮。
 
 **它眼前摆着什么。** 一条 USER 消息：现在几点、这一轮带着的消息（按到达的先后，每条是谁的、
 什么时候的、原文）；里面没有它给自己排的醒来时，再加上它原来定的下次醒来，提醒它这一轮结束前
 要重新定；之前有一轮没跑完时，再加上那一轮里已经发生的事和补发告知的结果。它的记录目录只在
-上下文清理时写进那条带时刻的标记消息（:mod:`app.agent.continuity`；每轮都一样的东西不每轮重发）。prompt 在 Langfuse
-（:data:`ROUND`），正文不引用任何变量。
+上下文清理时写进那条带时刻的标记消息（:mod:`app.agent.continuity`；每轮都一样的东西不每轮
+重发）。prompt 在 Langfuse（:data:`ROUND`），正文不引用任何变量。
 
 **它手里有什么。** 全部已启用知识来源的查询工具（:func:`app.world.sources.query_tools`，跟
 另外三类 agent 拿的是同一份），加上只有它才有的动作（:data:`app.world.actions.ACTIONS`）。
@@ -61,15 +61,9 @@ from app.world import records, unfinished
 from app.world.actions import ACTIONS, ROUND_SCOPE, RoundScope
 from app.world.agents import WORLD_MODEL_KEY, AgentKind, run_agent, session_key, when
 from app.world.perception import Told, render_told, tell
-from app.world.sources import material_tools, query_tools, take_in
+from app.world.sources import material_tools, query_tools
 from app.world.sources.records import RECORDS_READ
-from app.world.wake import (
-    NextWake,
-    is_own_wake,
-    is_stale_wake,
-    read_next_wake,
-    set_next_wake,
-)
+from app.world.wake import NextWake, is_own_wake, read_next_wake, set_next_wake
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +71,8 @@ logger = logging.getLogger(__name__)
 # :func:`app.agent.prompts.get_prompt`）、trace 名、模型键。
 ROUND = AgentKind(prompt_id="world_round", trace_name="world-round", model_key=WORLD_MODEL_KEY)
 
-# 一轮最多跑多久。收件箱按它放长占位租约（通信机制默认 15 分钟），超过就取消、按失败重试。
-# 正常一轮几分钟；留到半小时是为了扛住一两次卡住的模型调用。
+# 一轮最多跑多久，超过就取消、算这一轮没跑完（:class:`app.world.rounds.Rounds` 管它，收件箱的
+# 处理时限和占位租约按它放长）。正常一轮几分钟；留到半小时是为了扛住一两次卡住的模型调用。
 ROUND_TIMEOUT = timedelta(minutes=30)
 
 # 读到的材料（记录、搜索、天气）过一个清理周期就换成一句"不在眼前了"，要用再读；它自己想过
@@ -161,18 +155,6 @@ def _render_round_input(
             f"- {when(h.at)}\n{h.what}\n{render_told(told)}" for h, told in left_over
         ]
     return "\n".join(lines)
-
-
-async def on_world_message(message: Message) -> None:
-    """world 收件箱的处理函数：先交给各知识来源收下，再看要不要跑一轮——作废的自定消息跳过，
-    其余每一条跑一轮。"""
-    await take_in(message)
-    if is_stale_wake(message):
-        logger.info(
-            "world: wake %s was replaced by a later one; skipped", message.message_id
-        )
-        return
-    await run_round([message])
 
 
 async def _resend_left_over() -> list[tuple[unfinished.Happening, list[Told]]]:

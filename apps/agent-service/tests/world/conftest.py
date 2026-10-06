@@ -137,6 +137,8 @@ def world(volume, monkeypatch):
         costs: list[dict] = []
         history: list[Turn] = []
         ver = 3
+        # world 收件箱的处理函数，就是接线里交给通信机制的那一个：一次投递就是调它一次。
+        deliver = None
 
     h = Handle()
     h.agents, h.built = {}, []
@@ -196,8 +198,17 @@ def world(volume, monkeypatch):
     monkeypatch.setattr(main_agent, "commit_transcript", commit_transcript)
     monkeypatch.setattr(agents, "record_round_cost", record_round_cost)
     monkeypatch.setattr(agents, "build_runner", build_runner)
-    load_world_wiring()
+    restart(h)
     return h
+
+
+def restart(world_handle) -> None:
+    """一个新的 world 进程：重新执行一遍接线，之后的投递交给新的收件箱处理函数。进程里的东西
+    都是新的，私有卷上的还在。"""
+    from app.messaging.receiving import INBOX_REGISTRY
+
+    load_world_wiring()
+    world_handle.deliver = INBOX_REGISTRY["world"].on_message
 
 
 def tools_built_for(world_handle, prompt_id: str) -> list[str]:

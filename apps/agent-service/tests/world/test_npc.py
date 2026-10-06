@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from app.messaging.message import Kind, new_message
-from app.world import main_agent, npc, perception
+from app.world import npc, perception
 from app.world.actions import let_npc_appear
 from app.world.agents import when
 from app.world.sources import query_tools
@@ -56,7 +56,7 @@ TRIGGER = new_message(
 
 async def _a_round(world, plan):
     world.runner.plan = plan
-    await main_agent.on_world_message(TRIGGER)
+    await world.deliver(TRIGGER)
     return plan.results
 
 

@@ -179,7 +179,7 @@ async def test_the_inbox_hands_a_message_to_the_sources_before_the_round(world):
 
     world.runner.plan = plan
 
-    await main_agent.on_world_message(message)
+    await world.deliver(message)
 
     assert "我在厨房。" in seen_by_round[0]
 
@@ -189,8 +189,8 @@ async def test_a_round_that_fails_and_runs_again_keeps_the_message_once(world):
     world.runner.plan = sets_nothing()
 
     with pytest.raises(main_agent.NoNextWake):
-        await main_agent.on_world_message(message)
+        await world.deliver(message)
     world.runner.plan = sets_wake()
-    await main_agent.on_world_message(message)
+    await world.deliver(message)
 
     assert len(_stored()) == 1
