@@ -11,7 +11,8 @@
 上占位（带泳道是因为 ppe 和 prod 共用一个库，同一个 id 在两条泳道各是各的一条）：处理成功过的不再处理；另一个进程正拿着它（租约还没过期）的，不丢，按剩下的
 租约延时重新排回收件箱——那个进程要是半路死了，租约过期后由这里接管。接收方的处理
 函数仍然可能在极端情况下看到同一条消息两次（处理完、还没来得及标记成功就崩了），
-所以它拿到的 ``Message`` 带着 ``message_id``，自己据此去重。
+所以它拿到的 ``Message`` 带着 ``message_id``，自己据此去重。拥有者自己记的"处理过哪些"什么时候
+可以不记，问 :func:`succeeded_message_ids`：成功记下来了，同一条就再也到不了处理函数。
 
 **进死信的原因只有一个：业务处理函数本身失败，有限次重试已经用完，拥有者也没要求不限次数
 重试。** 普通消息的处理函数抛异常 → 按 :data:`PROCESSING_RETRY` 延时重投；次数用完 → 拒收，
@@ -91,7 +92,7 @@ import logging
 import os
 import socket
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -126,7 +127,12 @@ from app.messaging.sending import (
     deliver,
     publish_recorded,
 )
-from app.runtime.inflight import claim_inflight, mark_failed, mark_succeeded
+from app.runtime.inflight import (
+    claim_inflight,
+    mark_failed,
+    mark_succeeded,
+    succeeded_keys,
+)
 from app.runtime.propagation import bind_context, extract_context
 from app.runtime.retry import DELIVERY_COUNT_HEADER, decide_retry, delivery_count
 from app.runtime.wire import RetryPolicy
@@ -712,6 +718,27 @@ def _edge(base: str) -> str:
     return f"{base}@{lane_label()}"
 
 
+def _inbox_edge(name: str) -> str:
+    """一个收件箱（普通消息和问题共用）的去重状态 edge。"""
+    return _edge(f"inbox:{name}")
+
+
+async def succeeded_message_ids(inbox_name: str, message_ids: Iterable[str]) -> set[str]:
+    """``message_ids`` 里，在本泳道名为 ``inbox_name`` 的收件箱已经有一次投递处理成功、而且成功
+    记下来了的那些。
+
+    记下来的成功不会再变：同一条消息之后再来的投递，在交给处理函数之前就被挡掉（见模块说明
+    "至少一次，按消息 id 去重"）。**处理函数返回不等于记下来了**：成功是返回之后才记的
+    （:func:`_handle`），中间进程死了或者那一笔没写成，这次投递放回去，租约过期后同一条还会再交到
+    处理函数手里。拥有者自己记着"处理过哪些"、想知道什么时候可以不记时，以这里为准，不以处理函数
+    返回为准。
+    """
+    ids = list(dict.fromkeys(message_ids))
+    if not ids:
+        return set()
+    return await succeeded_keys(edge_id=_inbox_edge(inbox_name), idempotent_keys=ids)
+
+
 async def _run_owner(spec: InboxSpec, message: Message) -> None:
     if spec.processing_timeout is None:
         await spec.on_message(message)
@@ -776,14 +803,14 @@ async def _answer_question(
 def _message_handler(spec: InboxSpec):
     """收件箱本身那条队列：普通消息和退回的告知，交给 ``on_message``。"""
     route = inbox_route(spec.name)
-    edge_id = _edge(f"inbox:{spec.name}")
+    edge_id = _inbox_edge(spec.name)
     return _consumer(lambda incoming: _deliver_to_owner(spec, route, edge_id, incoming))
 
 
 def _question_handler(spec: InboxSpec):
     """收件箱旁边的问题队列：交给 ``on_question``。去重跟普通消息用同一个 edge，靠消息 id 区分。"""
     route = question_route(spec.name)
-    edge_id = _edge(f"inbox:{spec.name}")
+    edge_id = _inbox_edge(spec.name)
     return _consumer(
         lambda incoming: _answer_question(spec, route, edge_id, incoming), questions=True
     )

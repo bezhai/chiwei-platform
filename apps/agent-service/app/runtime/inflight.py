@@ -38,6 +38,7 @@ Caller protocol:
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -165,6 +166,23 @@ async def claim_inflight(
         ), {"a": new_attempts, "lu": lease_until, "w": worker_id,
             "e": edge_id, "k": idempotent_key})
         return ClaimOutcome(action="run", attempts=new_attempts, fresh=False)
+
+
+async def succeeded_keys(*, edge_id: str, idempotent_keys: Collection[str]) -> set[str]:
+    """``idempotent_keys`` 里在 ``edge_id`` 上已经记成 ``succeeded`` 的那些。
+
+    ``succeeded`` 是最终的：:func:`claim_inflight` 对它一律跳过，:func:`delete_inflight` 也不删它，
+    所以这里交回的 key，之后再来的同一条都不会再交给处理方。``review`` 虽然也让 claim 跳过，但
+    死信处理会删它，不算在内。
+    """
+    if not idempotent_keys:
+        return set()
+    async with get_session() as s:
+        rows = await s.execute(text(
+            "SELECT idempotent_key FROM runtime_inflight "
+            "WHERE edge_id=:e AND idempotent_key = ANY(:ks) AND state='succeeded'"
+        ), {"e": edge_id, "ks": list(idempotent_keys)})
+    return {row[0] for row in rows}
 
 
 async def mark_history_backfill(
