@@ -269,8 +269,9 @@ async def test_messages_arriving_while_a_round_runs_are_taken_together_by_one_ro
 
     bodies = ["千凪在厨房煮乌冬。", "绫奈在客厅看书。", "赤尾出门了。"]
     sent = [await send(sender="operator", recipient="world", body=b) for b in bodies]
-    # 三次投递都到了处理函数手里、收下了，都在等。
-    await eventually(lambda: len(pending.read()) == 3, timeout=10)
+    # 三次投递都到了处理函数手里、收下了，都在等（启动补醒那一条正在跑，也还在里面）。
+    wanted = {d.message_id for d in sent}
+    await eventually(lambda: wanted <= {m.message_id for m in pending.read()}, timeout=10)
     runner.release.set()
 
     await eventually(lambda: len(runner.round_inputs) == 2, timeout=10)
