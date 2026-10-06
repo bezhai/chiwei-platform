@@ -90,8 +90,12 @@ async def _deliver_one_by_one(world, messages) -> list[asyncio.Task]:
 
 
 async def _a_round_is_running(world, deliver_first) -> asyncio.Task:
-    running = asyncio.create_task(deliver_first)
-    await eventually(lambda: len(world.runner.runs) == 1, timeout=5)
+    return await _a_round_is_running_after(world, 0, deliver_first)
+
+
+async def _a_round_is_running_after(world, runs_before: int, deliver) -> asyncio.Task:
+    running = asyncio.create_task(deliver)
+    await eventually(lambda: len(world.runner.runs) == runs_before + 1, timeout=5)
     return running
 
 
@@ -263,6 +267,89 @@ async def test_a_wake_replaced_while_it_waited_is_left_out_and_starts_no_round(w
     assert len(world.runner.runs) == 1
     assert wake.is_stale_wake(its_time)
     assert pending.read() == []
+
+
+async def test_a_new_wake_that_arrives_before_it_is_recorded_is_not_skipped(world, monkeypatch):
+    """一轮收尾时先把新的醒来排出去、broker 确认之后才记成最新唤醒；通信机制发送之后还有记账。
+    新时刻已经到了（这一轮收尾比它定的时刻还晚）时，那条醒来在"记下来"之前就可能送到。它不能
+    在那一刻被判成旧消息、确认掉——那样状态里记着它，却再也没有它这条消息，world 不会再醒。"""
+    early: list[asyncio.Task] = []
+
+    async def send_at(**kw):
+        world.scheduled.append(kw)
+        if not early:
+            due = new_message(
+                sender=kw["sender"],
+                recipient=kw["recipient"],
+                body=kw["body"],
+                kind=Kind.MESSAGE,
+                time=kw["at"],
+                message_id=kw["message_id"],
+            )
+            early.append(asyncio.create_task(world.deliver(due)))
+            # broker 立刻把它交给了收件箱：让这次投递走到它能走到的地方，然后才记下来。
+            await eventually(
+                lambda: early[0].done() or due.message_id in {m.message_id for m in pending.read()},
+                timeout=5,
+            )
+        return kw["message_id"]
+
+    monkeypatch.setattr(wake, "send_at", send_at)
+
+    await world.deliver(_from("赤尾", "我出门了。"))
+    await _soon(early[0])
+
+    assert len(world.runner.runs) == 2, "新的醒来被当成旧消息确认掉了"
+    assert "你给自己排的一次醒来" in _round_input(world)
+
+
+async def test_a_replaced_wake_does_not_run_a_round_for_messages_left_by_a_failed_one(world):
+    """旧的自定醒来不叫醒 world：之前失败的轮里留下的消息等它们自己的重试，不借它跑一轮。"""
+    replaced = await wake.set_next_wake(now_cst() + timedelta(hours=1), "第一次定的。")
+    await wake.set_next_wake(now_cst() + timedelta(hours=4), "后来改的。")
+    world.runner.plan = in_turn(world, sets_nothing(), sets_wake())
+    left = _from("千凪", "我在做饭。")
+    with pytest.raises(main_agent.NoNextWake):
+        await world.deliver(left)
+
+    await world.deliver(self_message(replaced.message_id))
+    assert len(world.runner.runs) == 1
+
+    await world.deliver(left)  # 它自己的重试
+    assert len(world.runner.runs) == 2
+    assert "我在做饭。" in _round_input(world)
+
+
+async def test_a_retry_that_arrives_while_its_message_is_being_handled_runs_no_further_round(
+    world, monkeypatch
+):
+    """一条消息的重试在带着它的那一轮跑着的时候到了：它排到下一轮，下一轮开始时它已经处理完了，
+    这次投递就不再起一轮——哪怕这时还有别的消息在等（不叫醒的那条等下一次真正要一轮的投递）。"""
+    gate = asyncio.Event()
+    world.runner.plan = in_turn(world, sets_nothing(), held(gate), sets_wake())
+    left = _from("千凪", "我在做饭。")
+    with pytest.raises(main_agent.NoNextWake):
+        await world.deliver(left)
+
+    running = await _a_round_is_running_after(world, 1, world.deliver(_from("赤尾", "我出门了。")))
+    assert "我在做饭。" in _round_input(world)
+    added: list[str] = []
+    real_add = pending.add
+
+    def add(message):
+        real_add(message)
+        added.append(message.message_id)  # 收下之后不经 await 就排到了下一轮
+
+    monkeypatch.setattr(pending, "add", add)
+    retry = asyncio.create_task(world.deliver(left))
+    await eventually(lambda: added == [left.message_id], timeout=5)
+    quiet = _from("绫奈", "我在看书。", wakes=False)
+    await _soon(world.deliver(quiet))
+    gate.set()
+    await _soon(asyncio.gather(running, retry))
+
+    assert len(world.runner.runs) == 2
+    assert [m.body for m in pending.read()] == ["我在看书。"]
 
 
 # ---------------------------------------------------------------------------
