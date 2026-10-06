@@ -29,8 +29,6 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
   重试、死信处理）；这条消息的去重占位租约相应放长到它之上
   （:data:`LEASE_OVER_TIMEOUT_MS`），所以处理还没完时到的重复副本不会把它当成"前一个
   进程死了"接管过去。不声明就是默认的 15 分钟租约、不限时。
-* ``one_at_a_time`` —— 一次只处理一条：收件箱的消费通道 prefetch 为 1，broker 在上一
-  条确认之前不送下一条。租约从真正开始处理那一刻起算，排队等的那几条不占租约。
 * ``on_open`` —— 收件箱开设（队列建好）之后、开始消费普通消息之前调一次。拥有者在这里按
   自己的状态做启动时该做的事，可以往自己的收件箱里发消息，它们等这一步结束才被处理。它抛
   异常，启动就失败。
@@ -55,7 +53,7 @@ import 时就要名字，可有的名字存在库里（三姐妹的名字取自�
 在一个进程里就不再调，停了再开始接收时开设的还是那一次取到的那几个名字。
 
 **问题不排在普通消息后面。** 问题走自己的队列、自己的消费通道（prefetch :data:`_PREFETCH`），
-队列一建好就开始消费：不等 ``on_open``，不受 ``one_at_a_time`` 限制，也不等 ``consume_while``。
+队列一建好就开始消费：不等 ``on_open``，也不等 ``consume_while``。
 所以一个收件箱正在处理一条要跑很久的消息、后面还排着几条时，问它的问题照样在提问方的截止
 时刻之前答上。不让 ``consume_while`` 管问题，是因为它护着的是普通消息的处理函数要独占的东西
 （比如 world 的卷只能有一个写的进程），回答用不着：没持有的进程——比如滚动发布时等着旧进程
@@ -183,7 +181,6 @@ class InboxSpec:
     on_message: OnMessage
     on_question: OnQuestion | None
     processing_timeout: timedelta | None = None
-    one_at_a_time: bool = False
     on_open: OnOpen | None = None
     consume_while: ConsumeWhile | None = None
     retry_without_limit: RetryWithoutLimit | None = None
@@ -198,7 +195,6 @@ def inbox(
     on_message: OnMessage,
     on_question: OnQuestion | None = None,
     processing_timeout: timedelta | None = None,
-    one_at_a_time: bool = False,
     on_open: OnOpen | None = None,
     consume_while: ConsumeWhile | None = None,
     retry_without_limit: RetryWithoutLimit | None = None,
@@ -210,8 +206,8 @@ def inbox(
     收件箱不接受提问，问它的一律拿到"没有回答"。问题走自己的队列，``on_question`` 可能
     跟 ``on_message`` 同时跑、也可能跑在没持有 ``consume_while`` 的进程里，所以它只该读。
 
-    ``processing_timeout`` / ``one_at_a_time`` / ``on_open`` / ``consume_while`` /
-    ``retry_without_limit`` 见模块说明。
+    ``processing_timeout`` / ``on_open`` / ``consume_while`` / ``retry_without_limit``
+    见模块说明。
     """
     participant(name)
     if name in INBOX_REGISTRY:
@@ -223,7 +219,6 @@ def inbox(
         on_message,
         on_question,
         processing_timeout=processing_timeout,
-        one_at_a_time=one_at_a_time,
         on_open=on_open,
         consume_while=consume_while,
         retry_without_limit=retry_without_limit,
@@ -279,8 +274,8 @@ def _tracked(handler):
     return run
 
 
-async def _consume(route, handler, *, prefetch_count: int = _PREFETCH) -> None:
-    channel = await mq.open_channel(prefetch_count=prefetch_count)
+async def _consume(route, handler) -> None:
+    channel = await mq.open_channel(prefetch_count=_PREFETCH)
     queue = await channel.get_queue(lane_queue(route.queue, lane()))
     tag = await queue.consume(_tracked(handler))
     _consumers.append((channel, queue, tag))
@@ -304,11 +299,7 @@ async def _open(spec: InboxSpec) -> None:
     """跑 ``on_open``，然后开始消费普通消息。"""
     if spec.on_open is not None:
         await spec.on_open()
-    await _consume(
-        inbox_route(spec.name),
-        _message_handler(spec),
-        prefetch_count=1 if spec.one_at_a_time else _PREFETCH,
-    )
+    await _consume(inbox_route(spec.name), _message_handler(spec))
 
 
 async def _open_while_held(spec: InboxSpec, opener: _HeldOpener, let_go: asyncio.Event) -> None:
@@ -357,7 +348,7 @@ async def start_receiving() -> None:
         await mq.declare_route(inbox_route(spec.name), lane=lane())
         questions = question_route(spec.name)
         await mq.declare_route(questions, lane=lane())
-        # 问题不等 on_open 和 consume_while，也不受 one_at_a_time 限制（见模块说明）。
+        # 问题不等 on_open 和 consume_while（见模块说明）。
         await _consume(questions, _question_handler(spec))
         if spec.consume_while is None:
             await _open(spec)

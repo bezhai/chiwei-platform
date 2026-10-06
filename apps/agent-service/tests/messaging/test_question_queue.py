@@ -55,8 +55,8 @@ async def answer_the_kitchen(question) -> str:
 
 
 async def test_a_question_is_answered_while_a_long_round_holds_the_inbox(broker):
-    """跟 world 一样开设：一次一条、处理时限 30 分钟、只在持有期间消费。一轮卡住、后面还排着
-    一条消息时问它，在提问方的截止时刻之前答上；那一轮和排着的那条都不受影响。"""
+    """跟 world 一样开设：处理时限一个小时、只在持有期间消费。一轮卡住、另一条消息也在等着时
+    问它，在提问方的截止时刻之前答上；那一轮和等着的那条都不受影响。"""
     holder = Hold(available_now=True)
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -71,14 +71,13 @@ async def test_a_question_is_answered_while_a_long_round_holds_the_inbox(broker)
         "world",
         on_message=long_round,
         on_question=answer_the_kitchen,
-        one_at_a_time=True,
-        processing_timeout=timedelta(minutes=30),
+        processing_timeout=timedelta(minutes=61),
         consume_while=holder.hold,
     )
     await start_messaging()
     await send(sender="operator", recipient="world", body="第一轮。")
     await asyncio.wait_for(entered.wait(), timeout=10)
-    await send(sender="operator", recipient="world", body="排在后面的一条。")
+    await send(sender="operator", recipient="world", body="后到的一条。")
 
     started = time.monotonic()
     answer = await ask(
@@ -88,11 +87,10 @@ async def test_a_question_is_answered_while_a_long_round_holds_the_inbox(broker)
     assert answer.answered and answer.text == "厨房里灯亮着，水壶在响。"
     assert time.monotonic() - started < 5
     assert handled == [], "那一轮还没跑完"
-    assert await broker.depth(f"inbox_world_{LANE}") == 1, "排着的那条还在等"
 
     release.set()
     await eventually(lambda: len(handled) == 2, timeout=10)
-    assert handled == ["第一轮。", "排在后面的一条。"]
+    assert sorted(handled) == sorted(["第一轮。", "后到的一条。"])
 
 
 async def test_a_process_not_holding_consume_while_still_answers_questions(broker):
@@ -110,7 +108,6 @@ async def test_a_process_not_holding_consume_while_still_answers_questions(broke
         "world",
         on_message=on_message,
         on_question=answer_the_kitchen,
-        one_at_a_time=True,
         on_open=on_open,
         consume_while=holder.hold,
     )

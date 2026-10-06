@@ -27,8 +27,6 @@ def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_take_th
     spec = INBOX_REGISTRY["world"]
     assert spec.on_message == wiring.ROUNDS.receive
     assert spec.on_question is answer_question
-    # 一次投递在等一轮的时候，后到的投递要能进来，才合得进下一轮。
-    assert not spec.one_at_a_time
     assert spec.on_open is wake_on_start
     # 状态里的最新唤醒失败时不限次数重试，永不进死信；别的消息照常有限次重试。
     assert spec.retry_without_limit is retry_latest_wake_without_limit

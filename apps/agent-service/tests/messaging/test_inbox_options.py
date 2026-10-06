@@ -132,11 +132,11 @@ async def test_the_claim_outlasts_the_processing_limit(broker, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 一次只处理一条
+# 一个收件箱同时处理几条：world 靠它把一轮进行中到的几条合进下一轮
 # ---------------------------------------------------------------------------
 
 
-async def _max_overlap(*, one_at_a_time: bool) -> int:
+async def test_an_inbox_handles_several_messages_together(broker):
     running = 0
     peak = 0
     handled: list[str] = []
@@ -151,21 +151,13 @@ async def _max_overlap(*, one_at_a_time: bool) -> int:
         finally:
             running -= 1
 
-    inbox("world", on_message=handler, one_at_a_time=one_at_a_time)
+    inbox("world", on_message=handler)
     await start_messaging()
     for i in range(3):
         await send(sender="operator", recipient="world", body=f"第 {i} 条。")
     await eventually(lambda: len(handled) == 3, timeout=10)
-    return peak
 
-
-async def test_an_inbox_taking_one_at_a_time_never_handles_two_together(broker):
-    assert await _max_overlap(one_at_a_time=True) == 1
-
-
-async def test_an_ordinary_inbox_handles_several_together(broker):
-    """对照：不声明的收件箱照旧并发处理，上一条用例的 1 不是巧合。"""
-    assert await _max_overlap(one_at_a_time=False) > 1
+    assert peak > 1
 
 
 # ---------------------------------------------------------------------------
