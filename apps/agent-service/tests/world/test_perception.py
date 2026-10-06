@@ -16,8 +16,9 @@ from openai import InternalServerError
 
 import app.world
 from app.capabilities._errors import CapabilityTimeout
+from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, new_message
-from app.world import main_agent, perception
+from app.world import main_agent, perception, wake
 from app.world.actions import ACTIONS, report_change
 from app.world.agents import when
 from app.world.sources import query_tools
@@ -280,7 +281,8 @@ async def test_perception_sees_who_sent_the_message_that_woke_this_round_and_wha
 
     [seen] = judge.inputs
     assert seen.split("\n")[1:] == [
-        f"【叫醒世界的消息】赤尾 发来（{when(trigger.time)}）：",
+        "【叫醒世界的消息】这一轮世界收到 1 条消息，按到达的先后：",
+        f"（1）赤尾 发来（{when(trigger.time)}）：",
         "我起身把窗关上了。",
         "【世界里发生的变化】",
         "窗关上之后，屋里的雨声小了。",
@@ -313,10 +315,49 @@ async def test_perception_is_told_when_world_woke_on_its_own(world):
     await main_agent.on_world_message(own_wake)
 
     [seen] = judge.inputs
-    assert seen.split("\n")[1:3] == [
-        f"【叫醒世界的消息】世界自己定的一次醒来（{when(own_wake.time)}），不是谁发来的。"
+    assert seen.split("\n")[1:4] == [
+        "【叫醒世界的消息】这一轮世界收到 1 条消息，按到达的先后：",
+        f"（1）世界自己定的一次醒来（{when(own_wake.time)}），不是谁发来的。"
         f"下面是世界当时给自己留的话，话里的\"你\"指世界自己：",
         own_wake.body,
+    ]
+
+
+async def test_perception_sees_every_message_of_the_round_with_sender_and_time(world, volume):
+    """一轮带着几条消息时，感知判断看到的是这一轮的全部：每条谁发的、什么时候、原文，按到达的先后。"""
+    judge = judges()
+    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.runner.plan = reports("窗关上之后，屋里的雨声小了。")
+    current = await wake.set_next_wake(now_cst(), "看看雨停了没有。")
+    akao = new_message(sender="赤尾", recipient="world", body="我起身把窗关上了。", kind=Kind.MESSAGE)
+    own = new_message(
+        sender="world",
+        recipient="world",
+        body="看看雨停了没有。",
+        kind=Kind.MESSAGE,
+        message_id=current.message_id,
+    )
+    ayana = new_message(sender="绫奈", recipient="world", body="我在客厅看书。", kind=Kind.MESSAGE)
+    bounced = new_message(
+        sender="world", recipient="world", body="你发给千凪的消息没有送达。", kind=Kind.NOT_DELIVERED
+    )
+
+    await main_agent.run_round([akao, own, ayana, bounced])
+
+    [seen] = judge.inputs
+    assert seen.split("\n")[1:] == [
+        "【叫醒世界的消息】这一轮世界收到 4 条消息，按到达的先后：",
+        f"（1）赤尾 发来（{when(akao.time)}）：",
+        "我起身把窗关上了。",
+        f"（2）世界自己定的一次醒来（{when(own.time)}），不是谁发来的。"
+        f"下面是世界当时给自己留的话，话里的\"你\"指世界自己：",
+        "看看雨停了没有。",
+        f"（3）绫奈 发来（{when(ayana.time)}）：",
+        "我在客厅看书。",
+        f"（4）通信机制退回给世界的一条没有送达的消息（{when(bounced.time)}）：",
+        "你发给千凪的消息没有送达。",
+        "【世界里发生的变化】",
+        "窗关上之后，屋里的雨声小了。",
     ]
 
 

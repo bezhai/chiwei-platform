@@ -128,9 +128,18 @@ async def set_next_wake(at: datetime, reason: str) -> NextWake:
     return wake
 
 
+def is_own_wake(message: Message) -> bool:
+    """这是 world 给自己排的一次醒来吗：自己发给自己的普通消息。
+
+    "没有送达"告知的发送方也是 world（通信机制把退回的告知记成原发送方发给自己），但它的
+    类型不是普通消息。
+    """
+    return message.kind is Kind.MESSAGE and message.sender == WORLD
+
+
 def is_stale_wake(message: Message) -> bool:
     """这是一条被后来定的时刻取代了的自定消息吗。只有自己发给自己的普通消息才可能是。"""
-    if message.kind is not Kind.MESSAGE or message.sender != WORLD:
+    if not is_own_wake(message):
         return False
     latest = read_next_wake()
     return latest is None or latest.message_id != message.message_id
@@ -158,9 +167,7 @@ async def retry_latest_wake_without_limit(message: Message) -> timedelta | None:
 
     别的消息交回 ``None``，照常有限次重试、然后进死信。
     """
-    if message.kind is not Kind.MESSAGE or message.sender != WORLD:
-        return None
-    if is_stale_wake(message):
+    if not is_own_wake(message) or is_stale_wake(message):
         return None
     return timedelta(minutes=await _retry_cap_minutes())
 

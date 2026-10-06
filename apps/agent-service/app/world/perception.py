@@ -7,9 +7,11 @@
 以及要不要现在就让他注意到。谁会察觉、要不要现在就让他注意到，完全是它依据各来源做的判断：代码里
 没有按位置、距离或者任何规则决定感知，也没有规则替它定哪些事急。
 
-**它知道这一轮是被谁的什么消息叫醒的。** 输入里除了现在几点、这一次的变化，还有叫醒主 agent 这一轮
-的那条消息：谁发的、什么时候、说了什么（:func:`_perception_input`）。居民发来的是她做了什么，做事的
-人已经知道自己做了什么，该告诉她的只是她不知道的那部分；这一点要有依据，不能从变化描述里去猜是谁。
+**它知道这一轮是被谁的什么消息叫醒的。** 输入里除了现在几点、这一次的变化，还有主 agent 这一轮
+处理的全部消息，按到达的先后：每条谁发的、什么时候、说了什么（:func:`_perception_input`）。居民
+发来的是她做了什么，做事的人已经知道自己做了什么，该告诉她的只是她不知道的那部分；这一点要有
+依据，不能从变化描述里去猜是谁。一轮里可能有几个人各自发来消息，这一次的变化是谁引起的，由它
+对照每条消息判断。
 
 **模型的临时失败重试，失败那一次的判断作废。** 感知判断那次模型调用遇到 5xx、超时这类临时失败
 （:data:`app.agent.core.RETRYABLE_EXCEPTIONS`），整次判断重来，最多 :data:`PERCEPTION_ATTEMPTS`
@@ -36,14 +38,14 @@ id、要不要叫醒记进 :mod:`app.world.unfinished`，再调 :func:`tell`。�
 :func:`app.messaging.message.message_body`）在判断那一刻退回，记下来、发出去的告知都是发得出去的。
 所以 :func:`tell` 还会遇到的发送出错只剩基础设施的（broker、数据库不可用），按失败重来是对的。
 
-prompt 在 Langfuse（:data:`PERCEPTION`），正文不引用任何变量；现在几点、叫醒这一轮的消息、这一次
+prompt 在 Langfuse（:data:`PERCEPTION`），正文不引用任何变量；现在几点、这一轮处理的消息、这一次
 的变化写在 USER 消息里。
 """
 from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -63,7 +65,7 @@ from app.messaging.message import Kind, Message, message_body, participant
 from app.messaging.sending import send
 from app.world.agents import AgentKind, run_agent, session_key, when
 from app.world.sources import query_tools
-from app.world.wake import WORLD
+from app.world.wake import WORLD, is_own_wake
 
 logger = logging.getLogger(__name__)
 
@@ -159,11 +161,11 @@ class Told:
     reason: str | None = None
 
 
-def _woken_by(message: Message) -> str:
-    """叫醒这一轮的那条消息是谁的：别人发来的、世界自己定的醒来、通信机制退回的。"""
+def _describe(message: Message) -> str:
+    """这一轮的一条消息是谁的、什么时候的：别人发来的、世界自己定的醒来、通信机制退回的。"""
     if message.kind is Kind.NOT_DELIVERED:
-        return "通信机制退回给世界的一条没有送达的消息："
-    if message.sender == WORLD:
+        return f"通信机制退回给世界的一条没有送达的消息（{when(message.time)}）："
+    if is_own_wake(message):
         # 正文是主 agent 当时写给自己的（:func:`app.world.main_agent.run_round` 排醒来时那段），
         # 里面的"你"是世界；摆到感知判断眼前，"你"就成了它自己，所以说清楚。
         return (
@@ -173,27 +175,27 @@ def _woken_by(message: Message) -> str:
     return f"{message.sender} 发来（{when(message.time)}）："
 
 
-def _perception_input(change: str, woken_by: Message) -> str:
-    return "\n".join(
-        [
-            f"【现在】{when(now_cst())}",
-            f"【叫醒世界的消息】{_woken_by(woken_by)}",
-            woken_by.body,
-            "【世界里发生的变化】",
-            change,
-        ]
-    )
+def _perception_input(change: str, round_messages: Sequence[Message]) -> str:
+    lines = [
+        f"【现在】{when(now_cst())}",
+        f"【叫醒世界的消息】这一轮世界收到 {len(round_messages)} 条消息，按到达的先后：",
+    ]
+    for number, message in enumerate(round_messages, 1):
+        lines += [f"（{number}）{_describe(message)}", message.body]
+    return "\n".join([*lines, "【世界里发生的变化】", change])
 
 
-async def judge_who_notices(change: str, *, woken_by: Message) -> list[Notice]:
+async def judge_who_notices(
+    change: str, *, round_messages: Sequence[Message]
+) -> list[Notice]:
     """为一个变化跑一次感知判断，交回判断出来的告知，每条带一个新的消息 id。一条都不发。
 
-    ``woken_by`` 是叫醒主 agent 这一轮的那条消息，原样摆进感知判断的输入。模型调用的临时失败
+    ``round_messages`` 是主 agent 这一轮处理的消息，按到达的先后原样摆进感知判断的输入。模型调用的临时失败
     重试，最多 :data:`PERCEPTION_ATTEMPTS` 次；每一次都从空的判断开始，失败那一次判断过谁不带进
     下一次（它也一条都没发：告知要等判断交回来之后才由调用方发）。别的失败、或者试完了还是失败，
     原样往外抛。
     """
-    perception_input = _perception_input(change, woken_by)
+    perception_input = _perception_input(change, round_messages)
     tools = [*await query_tools(), someone_notices]
 
     @retry(

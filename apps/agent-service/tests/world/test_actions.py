@@ -21,7 +21,9 @@ from app.world.sources.records import RECORDS_READ, read_record
 @pytest.fixture
 def scope(volume) -> RoundScope:
     s = RoundScope(
-        woken_by=new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
+        messages=(
+            new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE),
+        )
     )
     ctx = AgentContext(features={ROUND_SCOPE: s, RECORDS_READ: {}})
     with agent_context(ctx):

@@ -16,6 +16,7 @@ from app.agent.neutral import Role
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, wake
+from app.world.agents import when
 
 from .conftest import LANE, self_message, sets_nothing, sets_wake, tools_built_for
 
@@ -76,6 +77,58 @@ async def test_woken_by_someone_else_it_sees_the_wake_it_had_planned(world):
     assert "傍晚再看。" in round_input
     assert "重新定" in round_input
     assert wake.read_next_wake() != planned
+
+
+# ---------------------------------------------------------------------------
+# 一轮带着几条消息：每条的发件人、时间、原文，按到达的先后
+# ---------------------------------------------------------------------------
+
+
+def _not_delivered(body: str):
+    return new_message(sender="world", recipient="world", body=body, kind=Kind.NOT_DELIVERED)
+
+
+async def test_a_round_shows_each_of_its_messages_with_sender_time_and_text_in_order(world):
+    current = await wake.set_next_wake(now_cst(), "该看看外面了。")
+    resident = new_message(sender="赤尾", recipient="world", body="我把窗关上了。", kind=Kind.MESSAGE)
+    own = self_message(current.message_id, "该看看外面了。")
+    bounced = _not_delivered("你发给千凪的消息没有送达。")
+
+    await main_agent.run_round([resident, own, bounced])
+
+    lines = _round_input(world).split("\n")
+    assert lines[1:8] == [
+        "【叫醒你的】这一轮有 3 条消息，按到达的先后：",
+        f"（1）赤尾 发来一条消息（{when(resident.time)}）：",
+        "我把窗关上了。",
+        f"（2）你给自己排的一次醒来（排在 {when(own.time)}）：",
+        "该看看外面了。",
+        f"（3）通信机制告诉你，你的一条消息没有送达（{when(bounced.time)}）：",
+        "你发给千凪的消息没有送达。",
+    ]
+
+
+async def test_a_round_that_takes_its_own_wake_is_not_told_its_planned_wake_is_replaced(world):
+    current = await wake.set_next_wake(now_cst(), "该看看外面了。")
+    resident = new_message(sender="赤尾", recipient="world", body="我出门了。", kind=Kind.MESSAGE)
+
+    await main_agent.run_round([resident, self_message(current.message_id, "该看看外面了。")])
+
+    assert "【你原来定的下次醒来】" not in _round_input(world)
+
+
+async def test_a_round_of_others_messages_only_is_told_the_wake_it_had_planned(world):
+    await wake.set_next_wake(now_cst() + timedelta(hours=6), "傍晚再看。")
+
+    await main_agent.run_round(
+        [
+            new_message(sender="赤尾", recipient="world", body="我出门了。", kind=Kind.MESSAGE),
+            _not_delivered("你发给千凪的消息没有送达。"),
+        ]
+    )
+
+    round_input = _round_input(world)
+    assert "【你原来定的下次醒来】" in round_input and "傍晚再看。" in round_input
 
 
 # ---------------------------------------------------------------------------

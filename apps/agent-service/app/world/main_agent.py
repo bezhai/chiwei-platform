@@ -25,10 +25,10 @@
 哪里，各自怎么接上见 :mod:`app.world.wake`。先存上下文、后定时刻，是因为定时刻做完之后这一轮
 就不该再重跑——否则会多出一个被取代的自定消息，而上下文里又少了这一轮。
 
-**它眼前摆着什么。** 一条 USER 消息：现在几点、这一次是什么叫醒了它；被别人叫醒时再加上
-它原来定的下次醒来，提醒它这一轮结束前要重新定；之前有一轮没跑完时，再加上那一轮里已经
-发生的事和补发告知的结果。它的记录目录只在上下文清理时写进那条带
-时刻的标记消息（:mod:`app.agent.continuity`；每轮都一样的东西不每轮重发）。prompt 在 Langfuse
+**它眼前摆着什么。** 一条 USER 消息：现在几点、这一轮带着的消息（按到达的先后，每条是谁的、
+什么时候的、原文）；里面没有它给自己排的醒来时，再加上它原来定的下次醒来，提醒它这一轮结束前
+要重新定；之前有一轮没跑完时，再加上那一轮里已经发生的事和补发告知的结果。它的记录目录只在
+上下文清理时写进那条带时刻的标记消息（:mod:`app.agent.continuity`；每轮都一样的东西不每轮重发）。prompt 在 Langfuse
 （:data:`ROUND`），正文不引用任何变量。
 
 **它手里有什么。** 全部已启用知识来源的查询工具（:func:`app.world.sources.query_tools`，跟
@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 from app.agent.context import AgentContext
@@ -62,7 +63,13 @@ from app.world.agents import WORLD_MODEL_KEY, AgentKind, run_agent, session_key,
 from app.world.perception import Told, render_told, tell
 from app.world.sources import material_tools, query_tools, take_in
 from app.world.sources.records import RECORDS_READ
-from app.world.wake import WORLD, NextWake, is_stale_wake, read_next_wake, set_next_wake
+from app.world.wake import (
+    NextWake,
+    is_own_wake,
+    is_stale_wake,
+    read_next_wake,
+    set_next_wake,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +102,11 @@ TRIM_POLICY = TrimPolicy(
 )
 
 
+def _listed(messages: Sequence[Message]) -> str:
+    """日志里的一轮带着哪些消息：每条的 id、类型、发送方。"""
+    return ", ".join(f"{m.message_id} ({m.kind} from {m.sender})" for m in messages)
+
+
 class NoNextWake(RuntimeError):
     """这一轮跑完了模型那一段，却没有定下次醒来的时刻：这一轮不算完成。"""
 
@@ -110,28 +122,34 @@ def _render_state() -> str:
     )
 
 
+def _render_message(message: Message) -> str:
+    """一轮带着的一条消息：谁的、什么时候的，下一行起是原文。"""
+    if message.kind is Kind.NOT_DELIVERED:
+        head = f"通信机制告诉你，你的一条消息没有送达（{when(message.time)}）："
+    elif is_own_wake(message):
+        head = f"你给自己排的一次醒来（排在 {when(message.time)}）："
+    else:
+        head = f"{message.sender} 发来一条消息（{when(message.time)}）："
+    return f"{head}\n{message.body}"
+
+
 def _render_round_input(
-    trigger: Message,
+    messages: Sequence[Message],
     *,
     now: datetime,
     planned: NextWake | None,
     left_over: list[tuple[unfinished.Happening, list[Told]]],
 ) -> str:
-    lines = [f"【现在】{when(now)}"]
-    if trigger.kind is Kind.MESSAGE and trigger.sender == WORLD:
-        lines.append(f"【叫醒你的】你给自己排的一次醒来（排在 {when(trigger.time)}）：")
-        lines.append(trigger.body)
-    else:
-        if trigger.kind is Kind.NOT_DELIVERED:
-            lines.append("【叫醒你的】通信机制告诉你，你的一条消息没有送达：")
-        else:
-            lines.append(f"【叫醒你的】{trigger.sender} 发来一条消息（{when(trigger.time)}）：")
-        lines.append(trigger.body)
-        if planned is not None:
-            lines.append(
-                f"【你原来定的下次醒来】{when(planned.at)}。当时的说明：{planned.reason}\n"
-                f"这一轮结束前要重新定一个时刻；还想按原来的来，就再定一次同一个时刻。"
-            )
+    lines = [
+        f"【现在】{when(now)}",
+        f"【叫醒你的】这一轮有 {len(messages)} 条消息，按到达的先后：",
+    ]
+    lines += [f"（{number}）{_render_message(m)}" for number, m in enumerate(messages, 1)]
+    if planned is not None and not any(is_own_wake(m) for m in messages):
+        lines.append(
+            f"【你原来定的下次醒来】{when(planned.at)}。当时的说明：{planned.reason}\n"
+            f"这一轮结束前要重新定一个时刻；还想按原来的来，就再定一次同一个时刻。"
+        )
     if left_over:
         lines.append(
             "【之前没跑完的一轮里已经发生的事】之前有一轮没有正常收尾。那一轮的经过你可能记得，"
@@ -154,7 +172,7 @@ async def on_world_message(message: Message) -> None:
             "world: wake %s was replaced by a later one; skipped", message.message_id
         )
         return
-    await run_round(message)
+    await run_round([message])
 
 
 async def _resend_left_over() -> list[tuple[unfinished.Happening, list[Told]]]:
@@ -172,8 +190,9 @@ async def _resend_left_over() -> list[tuple[unfinished.Happening, list[Told]]]:
     return left_over
 
 
-async def run_round(trigger: Message) -> None:
-    """跑一轮。没定下次醒来的时刻抛 :class:`NoNextWake`；别的失败原样往外抛。"""
+async def run_round(messages: Sequence[Message]) -> None:
+    """带着 ``messages``（按到达的先后）跑一轮。没定下次醒来的时刻抛 :class:`NoNextWake`；别的
+    失败原样往外抛。"""
     now = now_cst()
     round_id = uuid.uuid4().hex
     key = session_key()
@@ -190,10 +209,10 @@ async def run_round(trigger: Message) -> None:
     round_input = Turn(
         role=Role.USER,
         content=_render_round_input(
-            trigger, now=now, planned=read_next_wake(), left_over=left_over
+            messages, now=now, planned=read_next_wake(), left_over=left_over
         ),
     )
-    scope = RoundScope(woken_by=trigger)
+    scope = RoundScope(messages=tuple(messages))
     context = AgentContext(
         session_id=key, features={ROUND_SCOPE: scope, RECORDS_READ: {}}
     )
@@ -210,8 +229,8 @@ async def run_round(trigger: Message) -> None:
     choice = scope.next_wake
     if choice is None:
         raise NoNextWake(
-            f"world round {round_id} (woken by {trigger.message_id}) ended without "
-            f"setting its next wake"
+            f"world round {round_id} (taking {_listed(messages)}) ended without setting its "
+            f"next wake"
         )
     await commit_transcript(
         key,
@@ -224,11 +243,9 @@ async def run_round(trigger: Message) -> None:
         choice.at, f"你在 {when(now)} 定下这个时刻醒来，当时写下的理由：{choice.reason}"
     )
     logger.info(
-        "world: round %s woken by %s (%s from %s) done; wrote %d record(s); next wake %s at %s; said: %s",
+        "world: round %s taking %s done; wrote %d record(s); next wake %s at %s; said: %s",
         round_id,
-        trigger.message_id,
-        trigger.kind,
-        trigger.sender,
+        _listed(messages),
         len(scope.written),
         chosen.message_id,
         chosen.at.isoformat(),

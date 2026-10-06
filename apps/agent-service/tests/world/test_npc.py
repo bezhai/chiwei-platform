@@ -89,7 +89,8 @@ async def test_perception_of_an_npcs_words_sees_the_message_that_woke_this_round
 
     [seen] = judge.inputs
     assert seen.split("\n")[1:] == [
-        f"【叫醒世界的消息】ayana 发来（{when(TRIGGER.time)}）：",
+        "【叫醒世界的消息】这一轮世界收到 1 条消息，按到达的先后：",
+        f"（1）ayana 发来（{when(TRIGGER.time)}）：",
         "我把画拿给老师看。",
         "【世界里发生的变化】",
         LINES,

@@ -16,8 +16,8 @@
 :mod:`app.world.unfinished`，再按这些 id 发。告知收不回来，这一轮要是没跑完，下一轮开始时按原 id
 补发，并且看得见它们。
 
-一轮里动作之间共享的东西放在 :class:`RoundScope` 里，由这一轮的 ``AgentContext`` 带着：叫醒这一轮
-的那条消息（报告变化、让 NPC 出场都把它交给感知判断）、这一轮写下了哪几份记录、定下的下次醒来。
+一轮里动作之间共享的东西放在 :class:`RoundScope` 里，由这一轮的 ``AgentContext`` 带着：这一轮处理
+的消息（报告变化、让 NPC 出场都把它们交给感知判断）、这一轮写下了哪几份记录、定下的下次醒来。
 
 **改写一份已有的记录，必须在这一轮里读过它现在的样子。** 模型不用自己搬指纹：读记录的工具
 （:func:`app.world.sources.records.read_record`）把读到的指纹记进这一轮的
@@ -60,9 +60,9 @@ class WakeChoice:
 class RoundScope:
     """一轮里工具之间共享的东西。每一轮新建一个，放进 ``AgentContext.features``。"""
 
-    # 叫醒这一轮的那条消息：感知判断要知道是谁的什么消息叫醒了这一轮
+    # 这一轮处理的消息，按到达的先后：感知判断要知道这一轮是谁的什么消息叫醒的
     # （:func:`app.world.perception.judge_who_notices`）。
-    woken_by: Message
+    messages: tuple[Message, ...]
     # 这一轮写下的记录，按写的先后（只用来记日志）。
     written: list[str] = field(default_factory=list)
     # 这一轮定下的下次醒来；调过几次以最后一次为准。
@@ -202,7 +202,7 @@ async def report_change(
     except ValueError as exc:
         return f"没有报告：这段话里有记不下来的东西，改一下再报告（{exc}）。"
     try:
-        notices = await judge_who_notices(change, woken_by=_scope().woken_by)
+        notices = await judge_who_notices(change, round_messages=_scope().messages)
     except Exception as exc:
         return _not_done("没有报告出去，感知判断没有做成", exc)
     return await _tell_and_keep(f"你报告了一个变化：{change}", notices)
@@ -234,7 +234,9 @@ async def let_npc_appear(
         acted = await play_npc(name, situation)
         if not acted:
             return f"{name} 这一次没有说话，也没有做什么。没有告知任何人。"
-        notices = await judge_who_notices(message_body(acted), woken_by=_scope().woken_by)
+        notices = await judge_who_notices(
+            message_body(acted), round_messages=_scope().messages
+        )
     except Exception as exc:
         return _not_done(f"{name} 没有出场，扮演或者感知判断没有做成", exc)
     words = f"【{name} 这一次的言行】\n{acted}"
