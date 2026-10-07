@@ -698,3 +698,28 @@ async def test_when_messaging_cannot_be_asked_the_records_stay_and_the_round_run
 
     assert len(world.runner.runs) == 2
     assert first.message_id in _handled_records(volume)
+
+
+async def test_when_messaging_does_not_answer_in_time_the_records_stay_and_the_round_runs(
+    world, volume, monkeypatch
+):
+    """问通信机制那一步一直没有回音（库那边卡住了）：等到时限按"这次没查到"处理，这一轮照常跑，
+    记录留到下一轮再清。不等到时限就放手的话，它卡在拿着锁的一轮开头，之后的投递全都跟着等。"""
+    monkeypatch.setattr("app.world.rounds.SETTLED_QUERY_TIMEOUT", timedelta(milliseconds=200))
+    first = _from("赤尾", "我出门了。")
+    await world.deliver(first)
+    answers = receiving.succeeded_message_ids
+
+    async def no_answer(inbox_name, message_ids):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(receiving, "succeeded_message_ids", no_answer)
+    await _soon(world.deliver(_from("千凪", "我在做饭。")))
+
+    assert len(world.runner.runs) == 2
+    assert first.message_id in _handled_records(volume)
+
+    monkeypatch.setattr(receiving, "succeeded_message_ids", answers)
+    await world.deliver(_from("绫奈", "我在看书。"))
+
+    assert first.message_id not in _handled_records(volume)

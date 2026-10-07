@@ -85,6 +85,12 @@ RunRound = Callable[[Sequence[Message]], Awaitable[None]]
 # 一次投递等完两轮之后，把结果交回通信机制还要一点时间（记成处理完、排重试）。
 _SETTLING = timedelta(minutes=1)
 
+# 每一轮开始时问通信机制"哪些处理完的消息已经记下了成功"，最多等多久
+# （:meth:`Rounds._forget_settled`）。正常是一条走索引的查询，几毫秒就回来；库那边卡住时，它拿着锁，
+# 这一轮和排在后面的投递全都跟着等。等不到就按"这次没查到"处理：记录留着，这一轮照常跑，下一轮
+# 再问。一次投递最多经过两次这一步，加起来远小于 :data:`_SETTLING`。
+SETTLED_QUERY_TIMEOUT = timedelta(seconds=10)
+
 
 class RoundFailed(RuntimeError):
     """带着这条消息的那一轮没跑完：这次投递算处理失败，按通信机制的重试再来。"""
@@ -169,13 +175,14 @@ class Rounds:
             upcoming.finished.set()
 
     async def _forget_settled(self) -> None:
-        """问通信机制：记着处理完的那些里，哪些的投递成功已经记下来了，删掉它们的记录。问不到就
-        都留着，下一轮再问。"""
+        """问通信机制：记着处理完的那些里，哪些的投递成功已经记下来了，删掉它们的记录。问不到、
+        或者 :data:`SETTLED_QUERY_TIMEOUT` 之内没有回音，就都留着，下一轮再问。"""
         recorded = pending.recorded()
         if not recorded:
             return
         try:
-            settled = await receiving.succeeded_message_ids(WORLD, recorded)
+            async with asyncio.timeout(SETTLED_QUERY_TIMEOUT.total_seconds()):
+                settled = await receiving.succeeded_message_ids(WORLD, recorded)
         except Exception:
             logger.warning(
                 "world: could not ask messaging which of %d handled message(s) are settled; "
