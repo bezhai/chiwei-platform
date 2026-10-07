@@ -1,0 +1,145 @@
+"""一次投递在领取或标记的时候被取消：占位立刻放开，重投的那一份不用等租约过期（2026-10-07）。
+
+10-06 在 coe-world 上，几次投递卡在领取那一步（事务已经提交，会话退出时关连接一直等着），后来
+broker 关掉通道、把它们取消了。可"被取消就放开占位"只包着处理函数那一段，这几条的占位一直是
+``processing``，重投的那一份等了一个小时租约过期才有人接。
+
+取消有两个来源：进程在停（:func:`app.messaging.receiving.stop_receiving`），和投递所在的通道被
+关掉（broker 关的，或者连接断了）。两种都要放开占位，记下来的原因要分得开——10-06 那次 broker
+关通道取消的投递，记的是"进程正在停止时被取消"。
+
+卡住是在真实调用链上注入的：领取照常提交，然后不返回；标记成功在提交之前不返回。通道是让 broker
+自己关的：在消费通道上确认一个不存在的投递编号，broker 按协议关掉这个通道。跑在真 broker + 真
+Postgres 上。
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import timedelta
+
+import pytest
+from sqlalchemy import text
+
+from app.messaging import receiving
+from app.messaging.lifecycle import start_messaging, stop_messaging
+from app.messaging.receiving import inbox
+from app.messaging.sending import send
+
+from .conftest import LANE
+from .helpers import Inbox, eventually
+
+pytestmark = pytest.mark.usefixtures("messaging_db")
+
+# 处理时限 10 分钟 → 占位租约 11 分钟：占位不放开的话，重投的那一份在测试里等不到。
+LONG_LEASE = timedelta(minutes=10)
+
+
+class HangsOnce:
+    """包住领取或标记的一步：第一次在 ``after_commit`` 指定的那一侧停住不返回，之后照常。"""
+
+    def __init__(self, real, *, after_commit: bool) -> None:
+        self._real = real
+        self._after_commit = after_commit
+        self.stuck = asyncio.Event()
+
+    async def __call__(self, **kw):
+        if self.stuck.is_set():
+            return await self._real(**kw)
+        if self._after_commit:
+            result = await self._real(**kw)
+            self.stuck.set()
+            await asyncio.Event().wait()
+            return result
+        self.stuck.set()
+        await asyncio.Event().wait()
+        return await self._real(**kw)
+
+
+async def _close_the_inbox_channel_from_the_broker() -> None:
+    """让 broker 关掉 world 收件箱的消费通道：确认一个这条通道上不存在的投递编号。"""
+    queue = f"inbox_world_{LANE}"
+    (channel,) = [ch for ch, q, _tag in receiving._consumers if q.name == queue]
+    underlay = await channel.get_underlay_channel()
+    await underlay.basic_ack(delivery_tag=999_999)
+
+
+async def _inflight(test_db, message_id: str) -> dict:
+    async with test_db.connect() as conn:
+        row = await conn.execute(
+            text(
+                "SELECT state, attempts, last_error FROM runtime_inflight "
+                "WHERE edge_id = :e AND idempotent_key = :k"
+            ),
+            {"e": f"inbox:world@{LANE}", "k": message_id},
+        )
+        return dict(row.mappings().one())
+
+
+async def test_a_delivery_cancelled_while_claiming_because_its_channel_closed_is_taken_up_at_once(
+    broker, test_db, monkeypatch, caplog
+):
+    caplog.set_level(logging.INFO, logger="app.messaging.receiving")
+    claim = HangsOnce(receiving.claim_inflight, after_commit=True)
+    monkeypatch.setattr(receiving, "claim_inflight", claim)
+    world = Inbox()
+    inbox("world", on_message=world.on_message, processing_timeout=LONG_LEASE)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="领取时卡住。")
+    await asyncio.wait_for(claim.stuck.wait(), timeout=10)
+
+    await _close_the_inbox_channel_from_the_broker()
+
+    # broker 把没确认的这条重投到重新打开的通道上：占位放开了，马上有人接。
+    await eventually(lambda: world.got, timeout=10)
+    assert [m.message_id for m in world.got] == [delivery.message_id]
+    row = await _inflight(test_db, delivery.message_id)
+    assert row["state"] == "succeeded"
+    assert row["attempts"] == 2
+    assert "channel" in row["last_error"], row["last_error"]
+    assert "process was stopping" not in row["last_error"], "通道被关掉的取消记成了进程在停"
+    assert "PRECONDITION_FAILED" in caplog.text, "broker 关通道的原因没有记进日志"
+
+
+async def test_a_delivery_cancelled_while_claiming_because_the_process_stops_is_released(
+    broker, test_db, monkeypatch
+):
+    monkeypatch.setattr(receiving, "STOP_GRACE_SECONDS", 0.3)
+    claim = HangsOnce(receiving.claim_inflight, after_commit=True)
+    monkeypatch.setattr(receiving, "claim_inflight", claim)
+    inbox("world", on_message=Inbox().on_message, processing_timeout=LONG_LEASE)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="领取时卡住。")
+    await asyncio.wait_for(claim.stuck.wait(), timeout=10)
+
+    await asyncio.wait_for(stop_messaging(), timeout=10)
+
+    assert await broker.depth(f"inbox_world_{LANE}") == 1, "被取消的投递没有放回收件箱"
+    row = await _inflight(test_db, delivery.message_id)
+    assert row["state"] != "processing", "占位没放开，重投的那一份要等租约过期"
+    assert "process was stopping" in row["last_error"], row["last_error"]
+
+
+async def test_a_delivery_cancelled_while_marking_its_success_is_taken_up_at_once(
+    broker, test_db, monkeypatch
+):
+    """标记成功那一笔还没落下就被取消：放开占位，重投的那一份再交给处理函数一次（至少一次）。"""
+    mark = HangsOnce(receiving.mark_succeeded, after_commit=False)
+    monkeypatch.setattr(receiving, "mark_succeeded", mark)
+    world = Inbox()
+    inbox("world", on_message=world.on_message, processing_timeout=LONG_LEASE)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="标记时卡住。")
+    await asyncio.wait_for(mark.stuck.wait(), timeout=10)
+
+    await _close_the_inbox_channel_from_the_broker()
+
+    await eventually(lambda: len(world.got) == 2, timeout=10)
+    assert [m.message_id for m in world.got] == [delivery.message_id] * 2
+    await eventually(
+        lambda: _state_is(test_db, delivery.message_id, "succeeded"), timeout=10
+    )
+
+
+async def _state_is(test_db, message_id: str, state: str) -> bool:
+    return (await _inflight(test_db, message_id))["state"] == state

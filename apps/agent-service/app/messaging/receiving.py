@@ -70,6 +70,12 @@ import 时就要名字，可有的名字存在库里（三姐妹的名字取自�
 ``consume_while`` 的收件箱：还在等着进上下文的，停止时直接放弃等待；已经在消费的，等上面这些
 都做完才退出上下文。
 
+**被取消就放开占位。** 正在处理的投递被取消只有两个来源：进程在停（上一段），和它所在的消费
+通道被关掉——broker 关的（比如一条投递超过了 broker 的确认时限），或者连接断了。两种都一样：
+broker 把没确认的消息放回原队列，这里放开它的去重占位，不管取消落在领取、处理、标记哪一步
+（:func:`_handle`）。记下来的原因分得开（:func:`_release`）；通道不是因为进程在停而关掉时，
+另记一条带着关闭原因的 warning（:func:`_closed_while_consuming`）。
+
 **问题不重试，至多答一次。** 问题的处理函数抛异常、返回空、或者收件箱不接受提问（没给
 ``on_question`` 的收件箱也有问题队列），都立刻给提问方回一个"没有回答"。问题这条路径上的任何失败——回复发不出去、去重状态读写失败、消息
 本身解不开——都只记一笔日志、确认掉：不重投，不进死信。领到一个问题先把占位收成"处理过"再
@@ -180,6 +186,10 @@ ConsumeWhile = Callable[[], AbstractAsyncContextManager[None]]
 # 声明了 consume_while 的收件箱：进了上下文之后开设失败，隔多久再来一次（秒）。
 OPEN_RETRY_SECONDS = 30.0
 
+# 进程在停（:func:`stop_receiving` 开始了）。处理被取消、消费通道关掉时据此分清是进程在停，
+# 还是通道被 broker 关掉、连接断了。
+_stopping = False
+
 
 @dataclass(frozen=True)
 class InboxSpec:
@@ -283,9 +293,26 @@ def _tracked(handler):
 async def _consume(route, handler) -> None:
     channel = await mq.open_channel(prefetch_count=_PREFETCH)
     queue = await channel.get_queue(lane_queue(route.queue, lane()))
+    channel.close_callbacks.add(_closed_while_consuming(queue.name))
     tag = await queue.consume(_tracked(handler))
     _consumers.append((channel, queue, tag))
     logger.info("messaging: consuming %s", queue.name)
+
+
+def _closed_while_consuming(queue_name: str):
+    """消费通道关了、又不是因为进程在停时，记下关闭的原因：broker 关通道时，原因只在这里看得到。
+    通道重新打开之后接着消费，这条通道上正在处理的投递被取消、放开占位（:func:`_release`）。"""
+
+    def closed(_channel, exc: BaseException | None) -> None:
+        if not _stopping:
+            logger.warning(
+                "messaging: the channel consuming %s was closed (%r); deliveries being "
+                "handled on it are cancelled and go back to the queue",
+                queue_name,
+                exc,
+            )
+
+    return closed
 
 
 @dataclass
@@ -345,7 +372,8 @@ async def start_receiving() -> None:
     后台等到持有之后才开始消费，这里不等它。名字到启动时才知道的那几组先取名字，再开设
     （:func:`inboxes_at_start`）。
     """
-    global _let_go
+    global _let_go, _stopping
+    _stopping = False
     await _open_inboxes_named_at_start()
     _let_go = asyncio.Event()
     await mq.declare_route(SCHEDULED, lane=lane())
@@ -369,6 +397,8 @@ async def start_receiving() -> None:
 
 async def stop_receiving() -> None:
     """停止消费：取消消费者，等正在处理的消息，等不完的放回去（见模块说明）。"""
+    global _stopping
+    _stopping = True
     openers, _held_openers[:] = list(_held_openers), []
     # 还没开始消费的那几路（在等着进上下文，或者正在开设）：直接放弃，不让它们在下面取快照
     # 之后才开始消费。
@@ -505,8 +535,8 @@ def _consumer(decide: Decide, *, questions: bool = False):
             try:
                 verdict = await decide(incoming)
             except asyncio.CancelledError:
-                # 进程在停（:func:`stop_receiving`）。问题：确认掉，不退回队列。普通消息：通道
-                # 已经关了，broker 把它放回原队列。
+                # 进程在停（:func:`stop_receiving`），或者通道被关掉了。问题：进程在停时通道还
+                # 开着，确认掉，不退回队列。普通消息：通道已经关了，broker 把它放回原队列。
                 if questions and not incoming.channel.is_closed:
                     await incoming.ack()
                 raise
@@ -551,78 +581,109 @@ async def _handle(
     按消息 id 去重：处理成功过的不再处理；另一个进程正拿着（租约没过期）的，按剩下的租约延时
     重新排回去——那个进程要是半路死了，租约过期后由这里接管。每次占位用一个只属于这一次的
     标记：租约过期被别人接管之后，这里的成功或失败都不再改那一行，也不再重投。
+
+    被取消时放开占位（:func:`_release`），不管取消落在哪一步：领取的事务可能已经提交、卡在之后
+    关连接那一步（2026-10-06 在 coe 上就是这样），标记的那一笔可能还没落下。不放开的话，占位一直
+    是"处理中"，重投的那一份要等租约过期才有人接。放开按这次占位的标记做，没占上的、已经记下了
+    结果的都不改；标记成功之前被取消的，重投时处理函数会再看到它一次。
     """
     claim_token = f"{WORKER_ID}#{uuid.uuid4().hex[:12]}"
-    claim = await claim_inflight(
-        edge_id=edge_id,
-        idempotent_key=message.message_id,
-        data_table=route.queue,
-        worker_id=claim_token,
-        lease_ms=lease_ms,
-        trace_id=extract_context(received).trace_id,
-    )
-    if claim.action == "skip":
-        if claim.locked_until is not None:
-            wait_ms = hop_delay_ms(claim.locked_until, datetime.now(UTC))
-            await publish(
-                route, message.to_json(), headers=received, delay_ms=wait_ms + _LEASE_MARGIN_MS
+    try:
+        claim = await claim_inflight(
+            edge_id=edge_id,
+            idempotent_key=message.message_id,
+            data_table=route.queue,
+            worker_id=claim_token,
+            lease_ms=lease_ms,
+            trace_id=extract_context(received).trace_id,
+        )
+        if claim.action == "skip":
+            if claim.locked_until is not None:
+                wait_ms = hop_delay_ms(claim.locked_until, datetime.now(UTC))
+                await publish(
+                    route,
+                    message.to_json(),
+                    headers=received,
+                    delay_ms=wait_ms + _LEASE_MARGIN_MS,
+                )
+                logger.info(
+                    "messaging: %s %s is held by another worker; re-queued",
+                    edge_id,
+                    message.message_id,
+                )
+            return Verdict.ACK
+
+        try:
+            await run()
+        except Exception as exc:
+            still_mine = await mark_failed(
+                edge_id=edge_id,
+                idempotent_key=message.message_id,
+                last_error=f"{type(exc).__name__}: {exc}",
+                worker_id=claim_token,
             )
-            logger.info(
-                "messaging: %s %s is held by another worker; re-queued",
+            if not still_mine:
+                logger.warning(
+                    "messaging: %s %s failed after its claim was taken over; the new holder "
+                    "owns the outcome",
+                    edge_id,
+                    message.message_id,
+                )
+                return Verdict.ACK
+            return await after_failure(message, received, route, edge_id, exc)
+
+        if not await mark_succeeded(
+            edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
+        ):
+            logger.warning(
+                "messaging: %s %s finished after its claim was taken over",
                 edge_id,
                 message.message_id,
             )
         return Verdict.ACK
-
-    try:
-        await run()
     except asyncio.CancelledError:
         await _release(edge_id, message, claim_token)
         raise
-    except Exception as exc:
-        still_mine = await mark_failed(
-            edge_id=edge_id,
-            idempotent_key=message.message_id,
-            last_error=f"{type(exc).__name__}: {exc}",
-            worker_id=claim_token,
-        )
-        if not still_mine:
-            logger.warning(
-                "messaging: %s %s failed after its claim was taken over; the new holder "
-                "owns the outcome",
-                edge_id,
-                message.message_id,
-            )
-            return Verdict.ACK
-        return await after_failure(message, received, route, edge_id, exc)
-
-    if not await mark_succeeded(
-        edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
-    ):
-        logger.warning(
-            "messaging: %s %s finished after its claim was taken over",
-            edge_id,
-            message.message_id,
-        )
-    return Verdict.ACK
 
 
 async def _release(edge_id: str, message: Message, claim_token: str) -> None:
-    """进程在停，这条被取消了：放开占位，重投的那一份马上有人接。放不开只记一笔。"""
+    """这一次处理被取消了：按这次占位的标记放开它，重投的那一份马上有人接。没占上的、已经记下了
+    结果的不改；放不开只记一笔。
+
+    记下的原因分开写：进程在停（:func:`stop_receiving`），还是它所在的通道被关掉了（broker 关的，
+    或者连接断了；关闭原因在 :func:`_closed_while_consuming` 记的那条 warning 里）。
+    """
+    if _stopping:
+        why = "cancelled while the process was stopping"
+    else:
+        why = (
+            "cancelled because the channel it came on was closed "
+            "(by the broker, or its connection dropped)"
+        )
     try:
-        await mark_failed(
+        released = await mark_failed(
             edge_id=edge_id,
             idempotent_key=message.message_id,
-            last_error="cancelled while the process was stopping",
+            last_error=why,
             worker_id=claim_token,
         )
     except Exception:
         logger.warning(
-            "messaging: could not release %s %s after cancelling it",
+            "messaging: %s %s was %s, and its claim could not be released",
             edge_id,
             message.message_id,
+            why,
             exc_info=True,
         )
+        return
+    logger.log(
+        logging.INFO if _stopping else logging.WARNING,
+        "messaging: %s %s was %s; %s",
+        edge_id,
+        message.message_id,
+        why,
+        "its claim is released" if released else "it held no claim to release",
+    )
 
 
 async def _after_owner_failure(
