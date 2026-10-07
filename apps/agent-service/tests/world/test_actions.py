@@ -112,6 +112,16 @@ async def test_a_time_without_an_offset_is_read_as_utc_plus_eight(scope):
     assert scope.next_wake.at == local.replace(tzinfo=CST)
 
 
+def test_the_model_is_told_which_reason_it_sees_when_it_keeps_the_same_time():
+    """时刻跟原来定的下次醒来相同时不另排，到点摆出来的是原来那次写的理由
+    （:func:`app.world.wake.set_next_wake`）。说明里不能许诺"这一次写的会原样摆出来"。"""
+    described = actions.wake_me_at.definition.parameters["properties"]["reason"]
+    assert described["description"] == (
+        "为什么定这个时刻。到时候这句话会原样摆在你眼前；时刻跟你原来定的下次醒来相同时，"
+        "不另排，到时候摆出来的是原来那次写的理由"
+    )
+
+
 @pytest.mark.parametrize(
     "offset_minutes,reason",
     [

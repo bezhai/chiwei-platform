@@ -122,7 +122,13 @@ async def wake_me_at(
         Field(description="下次醒来的时刻，ISO 8601，形如 YYYY-MM-DDTHH:MM；不带时区的按东八区算"),
     ],
     reason: Annotated[
-        str, Field(description="为什么定这个时刻。到时候这句话会原样摆在你眼前")
+        str,
+        Field(
+            description=(
+                "为什么定这个时刻。到时候这句话会原样摆在你眼前；时刻跟你原来定的下次醒来相同时，"
+                "不另排，到时候摆出来的是原来那次写的理由"
+            )
+        ),
     ],
 ) -> str:
     """定下次醒来的时刻。每一轮结束前必须定一次；调了几次以最后一次为准。
