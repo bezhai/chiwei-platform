@@ -171,6 +171,24 @@ async def test_on_start_with_a_wake_already_past_it_wakes_right_away(volume, sch
     assert "错过的那次。" in scheduled[0]["body"]
 
 
+async def test_on_start_with_a_wake_due_this_very_moment_it_still_wakes_right_away(
+    volume, scheduled, monkeypatch
+):
+    """记的时刻正好是现在：它跟"已经过了"一样立刻补醒，不能因为"同一个时刻只排一条"被省掉——
+    那一条可能早就丢了，补醒就是为这种情况排的。"""
+    moment = now_cst()
+    monkeypatch.setattr(wake, "now_cst", lambda: moment)
+    due = await wake.set_next_wake(moment, "就是现在。")
+    scheduled.clear()
+
+    await wake.wake_on_start()
+
+    armed = wake.read_next_wake()
+    assert armed.message_id != due.message_id
+    assert [s["message_id"] for s in scheduled] == [armed.message_id]
+    assert "已经过了" in scheduled[0]["body"]
+
+
 async def test_on_start_with_a_wake_still_ahead_it_does_not_wake_now(volume, scheduled):
     """时刻未到：不立刻醒。同一条消息按原 id、原时刻再排一次——死在"写好状态、还没排
     消息"之间的话，这是那条消息唯一的来源；原来那条要是还在，接收方按 id 去重。"""
