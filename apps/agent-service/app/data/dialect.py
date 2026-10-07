@@ -52,18 +52,24 @@ class AsyncpgDialect(PGDialect_asyncpg):
         if task is None:
             super().do_terminate(dbapi_connection)
             return
-        requested_at: int | None = None
+        # Cancellations already asked for when terminating starts (one may be on its way out right
+        # now). The grace's own cancellation is taken back only if, once it is, the count is back
+        # here: anything above it was asked for by someone else while the grace ran out, possibly
+        # before the grace fired and with the task not yet resumed, so both arrive as the same
+        # CancelledError.
+        baseline = task.cancelling()
+        cut = False
 
         def cut_short() -> None:
-            nonlocal requested_at
-            requested_at = task.cancelling()
+            nonlocal cut
+            cut = True
             task.cancel()
 
         timer = task.get_loop().call_later(TERMINATE_GRACE_SECONDS, cut_short)
         try:
             super().do_terminate(dbapi_connection)
         except asyncio.CancelledError:
-            if requested_at is None or task.uncancel() > requested_at:
+            if not cut or task.uncancel() > baseline:
                 raise
             logger.warning(
                 "database: terminating a connection took over %ss; dropped it without waiting",
