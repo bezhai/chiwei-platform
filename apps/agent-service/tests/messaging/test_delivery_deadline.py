@@ -29,7 +29,8 @@ from tests.data.db_proxy import process_db_behind
 from .conftest import LANE
 from .helpers import HangsOnce, Inbox, eventually
 
-pytestmark = pytest.mark.usefixtures("messaging_db")
+# 只给要真库的那几个用例：最后两个检查只算数，没有 docker 的环境里也要跑。
+needs_the_database = pytest.mark.usefixtures("messaging_db")
 
 DEADLINE = 3.0
 GRACE = 0.5
@@ -57,6 +58,7 @@ async def _inflight(test_db, message_id: str) -> dict:
         return dict(row.mappings().one())
 
 
+@needs_the_database
 async def test_a_delivery_held_up_in_the_database_is_handed_back_at_its_deadline_alone(
     process_db, broker, test_db, monkeypatch, caplog
 ):
@@ -110,6 +112,7 @@ async def test_a_delivery_held_up_in_the_database_is_handed_back_at_its_deadline
     await eventually(lambda: _empty(broker), timeout=5)
 
 
+@needs_the_database
 async def test_a_delivery_whose_deadline_falls_after_its_success_was_recorded_stays_succeeded(
     broker, test_db, monkeypatch
 ):
