@@ -33,11 +33,23 @@ def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_take_th
     # 只在拿着卷的写锁时消费；启动补醒（on_open）也在拿到锁之后才跑。
     assert spec.consume_while is writer_lock
     # 一次投递可能要等前面正在跑的一轮、再等带着它的这一轮：处理时限和租约都要放长到这之上，
-    # 远远超过通信机制默认的 15 分钟租约。
+    # 超过通信机制默认的 15 分钟租约。
     assert spec.processing_timeout == wiring.ROUNDS.delivery_timeout
     assert spec.processing_timeout >= 2 * ROUND_TIMEOUT
-    assert ROUND_TIMEOUT > timedelta(milliseconds=PROCESSING_RETRY.lease_ms)
+    assert spec.processing_timeout > timedelta(milliseconds=PROCESSING_RETRY.lease_ms)
     assert _lease_ms(spec) > spec.processing_timeout.total_seconds() * 1000
+
+
+def test_a_world_delivery_is_settled_before_the_broker_stops_waiting_for_its_ack():
+    """一次投递从领到交回结果，最长不超过它的占位租约：处理时限，加上超时之后记失败、排重试的
+    余量。broker 等确认的时限比这短，就会在 world 正常等轮的时候关掉整个通道，同一通道上正在跑
+    的一轮也跟着被取消（2026-10-06 在 coe-world 上，一轮的时限是 30 分钟时）。"""
+    from app.infra.rabbitmq import BROKER_ACK_TIMEOUT_MS
+    from app.messaging.receiving import INBOX_REGISTRY, _lease_ms
+
+    load_world_wiring()
+
+    assert _lease_ms(INBOX_REGISTRY["world"]) < BROKER_ACK_TIMEOUT_MS
 
 
 def test_the_trim_policy_keeps_the_five_constraints():
