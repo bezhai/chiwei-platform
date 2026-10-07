@@ -37,8 +37,8 @@ X_DELAY_MAX_MS = 2_147_483_647
 # broker 等一条投递被确认最多多久（RabbitMQ 的 ``consumer_timeout``）：超过就关掉这条投递所在的整个
 # 通道，通道上正在处理的别的投递一起被取消、放回队列。我们没有改它：prod 和 chiwei-test 的 broker
 # 都是 rabbitmq 4.0 镜像（``infra/k8s/infra-services/rabbitmq/deployment.yaml``、
-# ``infra/test-env/docker-compose.yaml``），没有配置这一项，用的是默认的 30 分钟。一条投递可能处理
-# 很久的消费方，要把处理时限压在它之下。
+# ``infra/test-env/docker-compose.yaml``），没有配置这一项，用的是默认的 30 分钟。通信机制给一次投递
+# 的期限压在它之下（:data:`app.messaging.receiving.DELIVERY_DEADLINE`）。
 BROKER_ACK_TIMEOUT_MS = 1_800_000
 
 # Non-prod queues auto-expire after 24 h of inactivity

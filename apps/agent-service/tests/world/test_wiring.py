@@ -40,20 +40,26 @@ def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_take_th
     assert _lease_ms(spec) > spec.processing_timeout.total_seconds() * 1000
 
 
-def test_a_world_delivery_is_settled_before_the_broker_stops_waiting_for_its_ack():
-    """world 给一次投递留的时间（它的占位租约：处理时限，加上超时之后记失败、排重试的余量）要短于
-    broker 等确认的时限。不然 broker 会在 world 正常等轮的时候关掉整个通道，同一通道上正在跑的
-    一轮也跟着被取消（2026-10-06 在 coe-world 上，一轮的时限是 30 分钟时）。
+def test_a_world_delivery_fits_inside_the_delivery_deadline():
+    """world 一次投递最多等两轮（它的处理时限），再加上领取和记结果的余量，要放进通信机制给一次投递
+    的期限（:data:`app.messaging.receiving.DELIVERY_DEADLINE`）；放不进去，开设收件箱时就拒绝。
 
-    这里钉的不是一次投递没确认的全部时间：领取和记结果那几次查库在处理时限之外，库正常时是毫秒级，
-    每一步都顶到语句时限只会发生在库或网络出了故障的时候。那时超过 broker 的时限，通道被关、投递
-    被取消，占位随即放开，重投的那一份马上有人接（:func:`app.messaging.receiving._handle`）。"""
+    期限比 broker 等确认的时限短，到了就只把这一条交还重投，期限之后要做的也都落在 broker 的时限
+    之内（``tests/messaging/test_delivery_deadline.py``）。所以一次投递没确认的全部时间，包括领取和
+    记结果那几次查库，都在 broker 的时限之内：broker 不会在 world 正常等轮的时候关掉整个通道，连带
+    取消同一通道上正在跑的一轮（2026-10-06 在 coe-world 上，一轮的时限是 30 分钟时）。"""
     from app.infra.rabbitmq import BROKER_ACK_TIMEOUT_MS
-    from app.messaging.receiving import INBOX_REGISTRY, _lease_ms
+    from app.messaging.receiving import (
+        CLAIM_AND_SETTLE_ROOM,
+        DELIVERY_DEADLINE,
+        INBOX_REGISTRY,
+    )
 
     load_world_wiring()
 
-    assert _lease_ms(INBOX_REGISTRY["world"]) < BROKER_ACK_TIMEOUT_MS
+    spec = INBOX_REGISTRY["world"]
+    assert spec.processing_timeout + CLAIM_AND_SETTLE_ROOM <= DELIVERY_DEADLINE
+    assert DELIVERY_DEADLINE < timedelta(milliseconds=BROKER_ACK_TIMEOUT_MS)
 
 
 def test_the_trim_policy_keeps_the_five_constraints():

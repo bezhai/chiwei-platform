@@ -73,9 +73,10 @@ ROUND = AgentKind(prompt_id="world_round", trace_name="world-round", model_key=W
 
 # 一轮最多跑多久，超过就取消、算这一轮没跑完（:class:`app.world.rounds.Rounds` 管它，收件箱的
 # 处理时限和占位租约按它放长）。正常一轮 30 到 70 秒，10 分钟是将近十倍的余量。不能再长：一次投递
-# 最多要等两轮，加上收尾约 22 分钟，要落在 broker 等确认的 30 分钟之内
-# （:data:`app.infra.rabbitmq.BROKER_ACK_TIMEOUT_MS`），否则 broker 会在 world 正常等轮的时候
-# 关掉整个通道，把同一通道上正在跑的一轮也取消掉（2026-10-06 在 coe-world 上，这里是 30 分钟时）。
+# 最多要等两轮加一分钟（21 分钟），再给领取和记结果留出余量，要放进通信机制给一次投递的期限
+# （:data:`app.messaging.receiving.DELIVERY_DEADLINE`，28 分钟，比 broker 等确认的 30 分钟短）。
+# 放不进去开设收件箱时就拒绝；以前是 broker 在 world 正常等轮的时候关掉整个通道，把同一通道上正在
+# 跑的一轮也取消掉（2026-10-06 在 coe-world 上，这里是 30 分钟时）。
 ROUND_TIMEOUT = timedelta(minutes=10)
 
 # 读到的材料（记录、搜索、天气）过一个清理周期就换成一句"不在眼前了"，要用再读；它自己想过

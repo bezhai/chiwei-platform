@@ -29,7 +29,8 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
 * ``processing_timeout`` —— 一条消息最多处理多久。超过就取消，算一次处理失败（按上面的
   重试、死信处理）；这条消息的去重占位租约相应放长到它之上
   （:data:`LEASE_OVER_TIMEOUT_MS`），所以处理还没完时到的重复副本不会把它当成"前一个
-  进程死了"接管过去。不声明就是默认的 15 分钟租约、不限时。
+  进程死了"接管过去。不声明就是默认的 15 分钟租约，处理本身只受下面一次投递的期限约束。
+  声明了的，要给领取和记结果留出 :data:`CLAIM_AND_SETTLE_ROOM`，放不进期限就拒绝开设。
 * ``on_open`` —— 收件箱开设（队列建好）之后、开始消费普通消息之前调一次。拥有者在这里按
   自己的状态做启动时该做的事，可以往自己的收件箱里发消息，它们等这一步结束才被处理。它抛
   异常，启动就失败。
@@ -70,11 +71,16 @@ import 时就要名字，可有的名字存在库里（三姐妹的名字取自�
 ``consume_while`` 的收件箱：还在等着进上下文的，停止时直接放弃等待；已经在消费的，等上面这些
 都做完才退出上下文。
 
-**被取消就放开占位。** 正在处理的投递被取消只有两个来源：进程在停（上一段），和它所在的消费
-通道被关掉——broker 关的（比如一条投递超过了 broker 的确认时限），或者连接断了。两种都一样：
-broker 把没确认的消息放回原队列，这里放开它的去重占位，不管取消落在领取、处理、标记哪一步
-（:func:`_handle`）。记下来的原因分得开（:func:`_release`）；通道不是因为进程在停而关掉时，
-另记一条带着关闭原因的 warning（:func:`_closed_while_consuming`）。
+**一次投递有期限。** 从领取、处理到记下结果，整体最多 :data:`DELIVERY_DEADLINE`，比 broker 等
+确认的时限短。领取和记结果那十几次查库在处理时限之外，库很慢时按各自的上限加起来能超过 broker 的
+时限，broker 就会关掉整个通道，同一通道上别的投递跟着被取消。到了期限就取消这一次、放开占位，
+只把这一条放回原队列（:data:`Verdict.PUT_BACK`），通道照常开着。
+
+**被取消就放开占位。** 正在处理的投递被取消有三个来源：它到了期限（上一段），进程在停（再上
+一段），和它所在的消费通道被关掉——broker 关的，或者连接断了。都一样：这里放开它的去重占位，
+不管取消落在领取、处理、标记哪一步（:func:`_handle`），消息回到原队列。记下来的原因分得开
+（:func:`_release`）；通道不是因为进程在停而关掉时，另记一条带着关闭原因的 warning
+（:func:`_closed_while_consuming`）。
 
 **问题不重试，至多答一次。** 问题的处理函数抛异常、返回空、或者收件箱不接受提问（没给
 ``on_question`` 的收件箱也有问题队列），都立刻给提问方回一个"没有回答"。问题这条路径上的任何失败——回复发不出去、去重状态读写失败、消息
@@ -108,7 +114,7 @@ from typing import Any
 from aio_pika.abc import AbstractIncomingMessage
 from aio_pika.exceptions import ChannelInvalidStateError
 
-from app.infra.rabbitmq import lane_queue, mq
+from app.infra.rabbitmq import BROKER_ACK_TIMEOUT_MS, lane_queue, mq
 from app.messaging.broker import (
     SCHEDULED,
     headers,
@@ -168,6 +174,20 @@ LEASE_OVER_TIMEOUT_MS = 60_000
 
 # 消费通道一次最多拿几条没确认的消息（:meth:`app.infra.rabbitmq.MQ.open_channel` 的默认）。
 _PREFETCH = 10
+
+# 一次投递从领取、处理到记下结果，整体最多多久（:func:`_handle`）。比 broker 等确认的时限短
+# DELIVERY_MARGIN：期限到了之后还有几件事要在 broker 动手之前做完——被取消的那一步收尾（最多
+# :data:`app.data.dialect.TERMINATE_GRACE_SECONDS`，5 秒）、放开占位（RELEASE_SECONDS，它被截断时
+# 再加一次收尾）、放回之前停的那一会儿（最多 PUT_BACK_CAP_SECONDS），加起来不到一分半。
+DELIVERY_MARGIN = timedelta(minutes=2)
+DELIVERY_DEADLINE = timedelta(milliseconds=BROKER_ACK_TIMEOUT_MS) - DELIVERY_MARGIN
+
+# 声明了处理时限的收件箱，处理时限之外要给领取和记结果留出多久。库正常时这两步是毫秒级；库慢到
+# 用完它，这一次就到了期限、交还重投。开设收件箱时检查处理时限加上它放得进期限。
+CLAIM_AND_SETTLE_ROOM = timedelta(minutes=5)
+
+# 被取消之后放开占位最多等多久（秒）。放开只是一条短的更新；等不到就只记一笔，占位留到租约过期。
+RELEASE_SECONDS = 15.0
 
 # 停下时最多等正在处理的消息多久（秒）。要比部署平台给进程的退出宽限（K8s 默认 30 秒）短，
 # 否则等到一半进程就被杀掉，后面放回和放开占位那两步都来不及做。
@@ -231,6 +251,15 @@ def inbox(
         raise RuntimeError(f"inbox {name!r} is already declared in this process")
     if processing_timeout is not None and processing_timeout <= timedelta(0):
         raise ValueError("processing_timeout must be positive")
+    if (
+        processing_timeout is not None
+        and processing_timeout + CLAIM_AND_SETTLE_ROOM > DELIVERY_DEADLINE
+    ):
+        raise ValueError(
+            f"inbox {name!r}: processing_timeout {processing_timeout} leaves less than "
+            f"{CLAIM_AND_SETTLE_ROOM} for claiming and settling inside the delivery deadline "
+            f"{DELIVERY_DEADLINE}"
+        )
     INBOX_REGISTRY[name] = InboxSpec(
         name,
         on_message,
@@ -580,8 +609,8 @@ async def _handle(
     run: Callable[[], Awaitable[None]],
     after_failure: Callable[[Message, dict[str, Any], Any, str, Exception], Awaitable[Verdict]],
 ) -> Verdict:
-    """领取 → 业务处理 → 标记。只有 ``run`` 的失败算业务失败，交给 ``after_failure``；别的步骤
-    抛出去，由 :func:`_consumer` 按基础设施失败处理。
+    """领取 → 业务处理 → 标记，整体最多 :data:`DELIVERY_DEADLINE`。只有 ``run`` 的失败算业务失败，
+    交给 ``after_failure``；别的步骤抛出去，由 :func:`_consumer` 按基础设施失败处理。
 
     按消息 id 去重：处理成功过的不再处理；另一个进程正拿着（租约没过期）的，按剩下的租约延时
     重新排回去——那个进程要是半路死了，租约过期后由这里接管。每次占位用一个只属于这一次的
@@ -590,88 +619,127 @@ async def _handle(
     被取消时放开占位（:func:`_release`），不管取消落在哪一步：领取的事务可能已经提交、卡在之后
     关连接那一步（2026-10-06 在 coe 上就是这样），标记的那一笔可能还没落下。不放开的话，占位一直
     是"处理中"，重投的那一份要等租约过期才有人接。放开按这次占位的标记做，没占上的、已经记下了
-    结果的都不改；标记成功之前被取消的，重投时处理函数会再看到它一次。
+    结果的都不改；标记成功之前被取消的，重投时处理函数会再看到它一次。到了期限也是这样取消、放开，
+    然后只把这一条放回原队列，通道照常开着。
     """
     claim_token = f"{WORKER_ID}#{uuid.uuid4().hex[:12]}"
     try:
-        claim = await claim_inflight(
-            edge_id=edge_id,
-            idempotent_key=message.message_id,
-            data_table=route.queue,
-            worker_id=claim_token,
-            lease_ms=lease_ms,
-            trace_id=extract_context(received).trace_id,
+        async with asyncio.timeout(DELIVERY_DEADLINE.total_seconds()) as deadline:
+            try:
+                return await _claim_run_settle(
+                    message,
+                    received,
+                    claim_token,
+                    route=route,
+                    edge_id=edge_id,
+                    lease_ms=lease_ms,
+                    run=run,
+                    after_failure=after_failure,
+                )
+            except asyncio.CancelledError:
+                await _release(edge_id, message, claim_token, _cancel_cause(deadline))
+                raise
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        logger.warning(
+            "messaging: %s %s ran past its delivery deadline (%s); put back on its queue",
+            edge_id,
+            message.message_id,
+            DELIVERY_DEADLINE,
         )
-        if claim.action == "skip":
-            if claim.locked_until is not None:
-                wait_ms = hop_delay_ms(claim.locked_until, datetime.now(UTC))
-                await publish(
-                    route,
-                    message.to_json(),
-                    headers=received,
-                    delay_ms=wait_ms + _LEASE_MARGIN_MS,
-                )
-                logger.info(
-                    "messaging: %s %s is held by another worker; re-queued",
-                    edge_id,
-                    message.message_id,
-                )
-            return Verdict.ACK
+        return Verdict.PUT_BACK
 
-        try:
-            await run()
-        except Exception as exc:
-            still_mine = await mark_failed(
-                edge_id=edge_id,
-                idempotent_key=message.message_id,
-                last_error=f"{type(exc).__name__}: {exc}",
-                worker_id=claim_token,
+
+async def _claim_run_settle(
+    message: Message,
+    received: dict[str, Any],
+    claim_token: str,
+    *,
+    route,
+    edge_id: str,
+    lease_ms: int,
+    run: Callable[[], Awaitable[None]],
+    after_failure: Callable[[Message, dict[str, Any], Any, str, Exception], Awaitable[Verdict]],
+) -> Verdict:
+    """:func:`_handle` 的那三步，用 ``claim_token`` 占位。"""
+    claim = await claim_inflight(
+        edge_id=edge_id,
+        idempotent_key=message.message_id,
+        data_table=route.queue,
+        worker_id=claim_token,
+        lease_ms=lease_ms,
+        trace_id=extract_context(received).trace_id,
+    )
+    if claim.action == "skip":
+        if claim.locked_until is not None:
+            wait_ms = hop_delay_ms(claim.locked_until, datetime.now(UTC))
+            await publish(
+                route, message.to_json(), headers=received, delay_ms=wait_ms + _LEASE_MARGIN_MS
             )
-            if not still_mine:
-                logger.warning(
-                    "messaging: %s %s failed after its claim was taken over; the new holder "
-                    "owns the outcome",
-                    edge_id,
-                    message.message_id,
-                )
-                return Verdict.ACK
-            return await after_failure(message, received, route, edge_id, exc)
-
-        if not await mark_succeeded(
-            edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
-        ):
-            logger.warning(
-                "messaging: %s %s finished after its claim was taken over",
+            logger.info(
+                "messaging: %s %s is held by another worker; re-queued",
                 edge_id,
                 message.message_id,
             )
         return Verdict.ACK
-    except asyncio.CancelledError:
-        await _release(edge_id, message, claim_token)
-        raise
 
-
-async def _release(edge_id: str, message: Message, claim_token: str) -> None:
-    """这一次处理被取消了：按这次占位的标记放开它，重投的那一份马上有人接。没占上的、已经记下了
-    结果的不改；放不开只记一笔。
-
-    记下的原因分开写：进程在停（:func:`stop_receiving`），还是它所在的通道被关掉了（broker 关的，
-    或者连接断了；关闭原因在 :func:`_closed_while_consuming` 记的那条 warning 里）。
-    """
-    if _stopping:
-        why = "cancelled while the process was stopping"
-    else:
-        why = (
-            "cancelled because the channel it came on was closed "
-            "(by the broker, or its connection dropped)"
-        )
     try:
-        released = await mark_failed(
+        await run()
+    except Exception as exc:
+        still_mine = await mark_failed(
             edge_id=edge_id,
             idempotent_key=message.message_id,
-            last_error=why,
+            last_error=f"{type(exc).__name__}: {exc}",
             worker_id=claim_token,
         )
+        if not still_mine:
+            logger.warning(
+                "messaging: %s %s failed after its claim was taken over; the new holder "
+                "owns the outcome",
+                edge_id,
+                message.message_id,
+            )
+            return Verdict.ACK
+        return await after_failure(message, received, route, edge_id, exc)
+
+    if not await mark_succeeded(
+        edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
+    ):
+        logger.warning(
+            "messaging: %s %s finished after its claim was taken over",
+            edge_id,
+            message.message_id,
+        )
+    return Verdict.ACK
+
+
+def _cancel_cause(deadline: asyncio.Timeout) -> str:
+    """一次处理为什么被取消，记进占位和日志：到了期限、进程在停，还是所在的通道被关掉了。"""
+    if deadline.expired():
+        return f"cancelled at its delivery deadline ({DELIVERY_DEADLINE}), to be redelivered"
+    if _stopping:
+        return "cancelled while the process was stopping"
+    return (
+        "cancelled because the channel it came on was closed "
+        "(by the broker, or its connection dropped)"
+    )
+
+
+async def _release(edge_id: str, message: Message, claim_token: str, why: str) -> None:
+    """这一次处理被取消了（原因 ``why``，见 :func:`_cancel_cause`）：按这次占位的标记放开它，
+    重投的那一份马上有人接。没占上的、已经记下了结果的不改；放不开、或者
+    :data:`RELEASE_SECONDS` 之内没放开，只记一笔，占位留到租约过期。通道不是因为进程在停而关掉的，
+    关闭原因在 :func:`_closed_while_consuming` 记的那条 warning 里。
+    """
+    try:
+        async with asyncio.timeout(RELEASE_SECONDS):
+            released = await mark_failed(
+                edge_id=edge_id,
+                idempotent_key=message.message_id,
+                last_error=why,
+                worker_id=claim_token,
+            )
     except Exception:
         logger.warning(
             "messaging: %s %s was %s, and its claim could not be released",

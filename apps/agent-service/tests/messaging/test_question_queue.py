@@ -71,7 +71,7 @@ async def test_a_question_is_answered_while_a_long_round_holds_the_inbox(broker)
         "world",
         on_message=long_round,
         on_question=answer_the_kitchen,
-        processing_timeout=timedelta(minutes=61),
+        processing_timeout=timedelta(minutes=21),
         consume_while=holder.hold,
     )
     await start_messaging()
