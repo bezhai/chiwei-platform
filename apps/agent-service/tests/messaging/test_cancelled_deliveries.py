@@ -29,33 +29,12 @@ from app.runtime.inflight import claim_inflight
 from app.runtime.wire import RetryPolicy
 
 from .conftest import LANE
-from .helpers import Inbox, eventually
+from .helpers import HangsOnce, Inbox, eventually
 
 pytestmark = pytest.mark.usefixtures("messaging_db")
 
 # 处理时限 10 分钟 → 占位租约 11 分钟：占位不放开的话，重投的那一份在测试里等不到。
 LONG_LEASE = timedelta(minutes=10)
-
-
-class HangsOnce:
-    """包住领取或标记的一步：第一次在 ``after_commit`` 指定的那一侧停住不返回，之后照常。"""
-
-    def __init__(self, real, *, after_commit: bool) -> None:
-        self._real = real
-        self._after_commit = after_commit
-        self.stuck = asyncio.Event()
-
-    async def __call__(self, **kw):
-        if self.stuck.is_set():
-            return await self._real(**kw)
-        if self._after_commit:
-            result = await self._real(**kw)
-            self.stuck.set()
-            await asyncio.Event().wait()
-            return result
-        self.stuck.set()
-        await asyncio.Event().wait()
-        return await self._real(**kw)
 
 
 async def _close_the_inbox_channel_from_the_broker(queue: str = f"inbox_world_{LANE}") -> None:

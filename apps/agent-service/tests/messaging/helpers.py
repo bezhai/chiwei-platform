@@ -65,3 +65,24 @@ async def outcomes_become(message_id: str, expected: list[str], *, timeout: floa
         if got == expected or time.monotonic() >= deadline:
             return got
         await asyncio.sleep(0.05)
+
+
+class HangsOnce:
+    """包住领取或标记的一步：第一次在 ``after_commit`` 指定的那一侧停住不返回，之后照常。"""
+
+    def __init__(self, real, *, after_commit: bool) -> None:
+        self._real = real
+        self._after_commit = after_commit
+        self.stuck = asyncio.Event()
+
+    async def __call__(self, **kw):
+        if self.stuck.is_set():
+            return await self._real(**kw)
+        if self._after_commit:
+            result = await self._real(**kw)
+            self.stuck.set()
+            await asyncio.Event().wait()
+            return result
+        self.stuck.set()
+        await asyncio.Event().wait()
+        return await self._real(**kw)

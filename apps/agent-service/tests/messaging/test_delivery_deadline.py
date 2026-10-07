@@ -27,7 +27,7 @@ from app.messaging.sending import send
 from tests.data.db_proxy import process_db_behind
 
 from .conftest import LANE
-from .helpers import Inbox, eventually
+from .helpers import HangsOnce, Inbox, eventually
 
 pytestmark = pytest.mark.usefixtures("messaging_db")
 
@@ -108,6 +108,38 @@ async def test_a_delivery_held_up_in_the_database_is_handed_back_at_its_deadline
     assert (second["state"], second["attempts"]) == ("succeeded", 1)
     assert "was closed" not in caplog.text, "通道被关掉了"
     await eventually(lambda: _empty(broker), timeout=5)
+
+
+async def test_a_delivery_whose_deadline_falls_after_its_success_was_recorded_stays_succeeded(
+    broker, test_db, monkeypatch
+):
+    """标记成功那一笔已经落下、还没返回（比如卡在会话退出时关连接）时到了期限：放开占位不能把
+    "成功"改掉，交还重投的那一份在领取时就被挡掉，处理函数只看到它一次。"""
+    monkeypatch.setattr(receiving, "DELIVERY_DEADLINE", timedelta(seconds=1))
+    monkeypatch.setattr(receiving, "PUT_BACK_BASE_SECONDS", 0.1)
+    mark = HangsOnce(receiving.mark_succeeded, after_commit=True)
+    monkeypatch.setattr(receiving, "mark_succeeded", mark)
+    claims: list[str] = []
+    real_claim = receiving.claim_inflight
+
+    async def counted_claim(**kw):
+        claims.append(kw["worker_id"])
+        return await real_claim(**kw)
+
+    monkeypatch.setattr(receiving, "claim_inflight", counted_claim)
+    world = Inbox()
+    inbox("world", on_message=world.on_message)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="成功记下之后卡住。")
+
+    await eventually(lambda: len(claims) == 2, timeout=5)  # 交还重投的那一份来领过了
+    await asyncio.sleep(0.5)
+
+    assert [m.message_id for m in world.got] == [delivery.message_id]
+    row = await _inflight(test_db, delivery.message_id)
+    assert row["state"] == "succeeded"
+    assert row["last_error"] is None, "到期放开占位改了一条已经成功的记录"
+    assert await _empty(broker)
 
 
 async def _empty(broker) -> bool:
