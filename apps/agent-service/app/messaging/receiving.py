@@ -910,28 +910,61 @@ async def _answer_question(
     "回答已经执行、但还没记为已处理"的时间窗口：不管回答时失败、进程停下被取消，还是确认之后
     又来了同 id 的副本，这个问题都不会被再领一次。代价是记不成的时候（抛出去，最外层确认掉）
     这一次就不答——问题本来就不重试，提问方拿到"没有回答"。
+
+    **有时限**（:func:`_answer_until`）：领取、记为已处理、回答，最多到提问方不再等、或者这次投递
+    的期限（:data:`DELIVERY_DEADLINE`），先到的那个。回答函数到了时限还没答上，跟它失败一样告诉
+    提问方没有回答（:func:`_answer`）；领取和记为已处理到了时限还没做完，就不答了。两种都确认掉，
+    不重投——问题本来就不重试，也不等 broker 的确认时限关掉问题队列的通道。
     """
     message = _decode(incoming)
     if message is None:
         return Verdict.ACK
     received = dict(incoming.headers or {})
+    until = _answer_until(received)
     async with bind_context(extract_context(received)):
         claim_token = f"{WORKER_ID}#{uuid.uuid4().hex[:12]}"
-        claim = await claim_inflight(
-            edge_id=edge_id,
-            idempotent_key=message.message_id,
-            data_table=route.queue,
-            worker_id=claim_token,
-            lease_ms=PROCESSING_RETRY.lease_ms,
-            trace_id=extract_context(received).trace_id,
-        )
-        if claim.action == "skip":
+        try:
+            async with asyncio.timeout_at(until) as limit:
+                claim = await claim_inflight(
+                    edge_id=edge_id,
+                    idempotent_key=message.message_id,
+                    data_table=route.queue,
+                    worker_id=claim_token,
+                    lease_ms=PROCESSING_RETRY.lease_ms,
+                    trace_id=extract_context(received).trace_id,
+                )
+                if claim.action == "skip":
+                    return Verdict.ACK
+                marked = await mark_succeeded(
+                    edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
+                )
+        except TimeoutError:
+            if not limit.expired():
+                raise
+            logger.warning(
+                "messaging: question %s was not claimed before its time ran out; "
+                "acknowledged without an answer",
+                message.message_id,
+            )
             return Verdict.ACK
-        if await mark_succeeded(
-            edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
-        ):
-            await _answer(spec, message, received)
+        if marked:
+            await _answer(spec, message, received, until=until)
     return Verdict.ACK
+
+
+def _answer_until(received: dict[str, Any]) -> float:
+    """答一个问题最多答到什么时候（事件循环的时钟）：提问方不再等的时刻（它带来的 answer-by），
+    和这次投递的期限，先到的那个。answer-by 没带、读不出来，只按期限算。"""
+    loop = asyncio.get_running_loop()
+    until = loop.time() + DELIVERY_DEADLINE.total_seconds()
+    answer_by = received.get(ANSWER_BY_HEADER)
+    if isinstance(answer_by, str):
+        try:
+            left = (datetime.fromisoformat(answer_by) - datetime.now(UTC)).total_seconds()
+        except ValueError:
+            return until
+        until = min(until, loop.time() + left)
+    return until
 
 
 def _message_handler(spec: InboxSpec):
@@ -950,9 +983,12 @@ def _question_handler(spec: InboxSpec):
     )
 
 
-async def _answer(spec: InboxSpec, question: Message, received: dict[str, Any]) -> None:
-    """回答一个问题，或者告诉提问方没有回答。回答函数失败、回答记不下来都在这里收住；最后那
-    一次告知发不出去才会抛出去，由 :func:`_consumer` 确认掉——问题不重试。"""
+async def _answer(
+    spec: InboxSpec, question: Message, received: dict[str, Any], *, until: float
+) -> None:
+    """回答一个问题，或者告诉提问方没有回答。回答函数失败、到了 ``until``（事件循环的时钟，见
+    :func:`_answer_until`）还没答上、回答记不下来，都在这里收住；最后那一次告知发不出去才会抛
+    出去，由 :func:`_consumer` 确认掉——问题不重试。"""
     reply_rk = received.get(REPLY_RK_HEADER)
     answer_by = received.get(ANSWER_BY_HEADER)
     if not isinstance(reply_rk, str) or not isinstance(answer_by, str):
@@ -973,11 +1009,20 @@ async def _answer(spec: InboxSpec, question: Message, received: dict[str, Any]) 
     if spec.on_question is None:
         reason = "对方不接受提问"
     else:
+        limit = asyncio.timeout_at(until)
         try:
-            text = await spec.on_question(question)
+            async with limit:
+                text = await spec.on_question(question)
         except Exception as exc:
-            logger.exception("messaging: answering %s failed", question.message_id)
-            reason = f"对方回答时失败：{type(exc).__name__}"
+            if limit.expired():
+                logger.warning(
+                    "messaging: answering %s ran out of time; telling the asker there is no answer",
+                    question.message_id,
+                )
+                reason = "对方没能在时限内回答"
+            else:
+                logger.exception("messaging: answering %s failed", question.message_id)
+                reason = f"对方回答时失败：{type(exc).__name__}"
         else:
             if not isinstance(text, str) or not text.strip():
                 text, reason = None, "对方没有给出回答"
