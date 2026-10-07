@@ -18,6 +18,7 @@ from app.infra.cst_time import now_cst
 from app.messaging import receiving
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, pending, wake
+from app.world.actions import wake_me_at
 from app.world.rounds import RoundFailed, Rounds
 from tests.messaging.helpers import eventually
 
@@ -58,6 +59,16 @@ def held(gate: asyncio.Event):
     async def plan():
         await gate.wait()
         return await sets_wake()()
+
+    return plan
+
+
+def wakes_at(at):
+    """这一轮把下次醒来定在 ``at``。"""
+
+    async def plan():
+        await wake_me_at.invoke({"at": at.isoformat(), "reason": "到时候再看看。"})
+        return "这一轮看完了。"
 
     return plan
 
@@ -287,6 +298,28 @@ async def test_a_wake_replaced_while_it_waited_is_left_out_and_starts_no_round(w
     assert len(world.runner.runs) == 1
     assert wake.is_stale_wake(its_time)
     assert pending.read() == []
+
+
+async def test_rounds_that_keep_the_same_next_wake_schedule_it_once_and_it_still_wakes_world(
+    world,
+):
+    """被别人的消息叫醒的几轮都定同一个下次醒来时刻：只排一条定时消息（2026-10-06 一次有 20 条
+    自定醒来同时到点，就是每一轮按同一个时刻再排一条堆出来的）。这一条到点送来时仍是最新唤醒，
+    照常跑一轮；定成别的时刻时照常再排。"""
+    at = (now_cst() + timedelta(hours=2)).replace(second=0, microsecond=0)
+    later = at + timedelta(hours=3)
+    world.runner.plan = in_turn(world, wakes_at(at), wakes_at(at), wakes_at(at), wakes_at(later))
+    for sender, body in (("赤尾", "我出门了。"), ("千凪", "我在做饭。"), ("绫奈", "我在看书。")):
+        await world.deliver(_from(sender, body))
+
+    assert [s["at"] for s in world.scheduled] == [at]
+
+    [due] = world.scheduled
+    await world.deliver(self_message(due["message_id"], due["body"]))
+
+    assert len(world.runner.runs) == 4, "到点的那一条被当成旧的跳过了"
+    assert "你给自己排的一次醒来" in _round_input(world)
+    assert [s["at"] for s in world.scheduled] == [at, later]
 
 
 async def test_a_new_wake_that_arrives_before_it_is_recorded_is_not_skipped(world, monkeypatch):

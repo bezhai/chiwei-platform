@@ -13,7 +13,7 @@
 2. 把这一轮存进它的连续上下文（:mod:`app.agent.continuity`，按版本做 CAS），然后清空
    :mod:`app.world.unfinished`——这一轮发生过的事已经在上下文里了；
 3. 定下次醒来（:func:`app.world.wake.set_next_wake`：先排出自定消息，broker 确认之后才记成
-   私有状态里的最新唤醒）。
+   私有状态里的最新唤醒；跟已经排着、还没送到的那一条是同一个时刻，就不再排）。
 
 任何一步失败都往外抛，这一轮算没跑完，带着的消息都留给之后的一轮，等它们的投递按通信机制重试
 （:mod:`app.world.rounds`）。再跑是安全的：它改过的记录留在盘上，下一次读得到；已经发出去的
@@ -225,7 +225,9 @@ async def run_round(messages: Sequence[Message]) -> None:
     )
     unfinished.clear()
     chosen = await set_next_wake(
-        choice.at, f"你在 {when(now)} 定下这个时刻醒来，当时写下的理由：{choice.reason}"
+        choice.at,
+        f"你在 {when(now)} 定下这个时刻醒来，当时写下的理由：{choice.reason}",
+        taken=messages,
     )
     logger.info(
         "world: round %s taking %s done; wrote %d record(s); next wake %s at %s; said: %s",

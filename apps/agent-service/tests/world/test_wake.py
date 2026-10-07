@@ -81,6 +81,44 @@ async def test_only_the_wake_named_in_the_state_is_current(volume, scheduled):
     assert not wake.is_stale_wake(self_message(second.message_id))
 
 
+def _wake_message(wake_set: wake.NextWake):
+    """排出去的那条自定醒来到点送来时的样子。"""
+    return new_message(
+        sender="world",
+        recipient="world",
+        body=wake_set.reason,
+        kind=Kind.MESSAGE,
+        message_id=wake_set.message_id,
+    )
+
+
+async def test_setting_the_time_already_scheduled_sends_nothing_and_keeps_that_wake(
+    volume, scheduled
+):
+    """这个时刻已经排着一条了：不再排新的，状态不动。那一条到点送来时仍是最新唤醒，照常醒。"""
+    at = now_cst() + timedelta(hours=2)
+    first = await wake.set_next_wake(at, "两小时后看看雨停了没有。")
+
+    again = await wake.set_next_wake(at, "还是两小时后再看。")
+
+    assert again == first
+    assert wake.read_next_wake() == first
+    assert len(scheduled) == 1
+    assert not wake.is_stale_wake(_wake_message(first))
+
+
+async def test_the_same_time_is_scheduled_again_once_its_wake_has_been_taken(volume, scheduled):
+    """状态里的最新唤醒已经送到、就在这一轮带着的消息里：它不会再来，同一个时刻也要重新排一条。"""
+    at = now_cst() + timedelta(hours=2)
+    first = await wake.set_next_wake(at, "两小时后。")
+
+    again = await wake.set_next_wake(at, "还是这个时刻。", taken=[_wake_message(first)])
+
+    assert again.message_id != first.message_id
+    assert wake.read_next_wake() == again
+    assert [s["message_id"] for s in scheduled] == [first.message_id, again.message_id]
+
+
 async def test_messages_from_others_and_notices_are_never_stale_wakes(volume, scheduled):
     await wake.set_next_wake(now_cst() + timedelta(hours=1), "定了。")
 

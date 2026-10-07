@@ -17,6 +17,14 @@
 * 进程死在"排出去"和"记下来"之间：重启时（:func:`wake_on_start`）状态里还是叫醒那一轮的那条，
   时刻已经过了，立刻排一个新的；先前那两条都成了旧消息。
 
+**同一个时刻只排一条**（:func:`set_next_wake`）：要定的时刻跟状态里的最新唤醒相同，而那一条不是
+这一轮带着的（还没到点，或者到了正等着下一轮），就不再排新的，状态不动，交回原来那一条；它仍是
+最新唤醒，照常叫醒 world 跑一轮。被别人的消息叫醒的一轮也要定下次醒来（:mod:`app.world.main_agent`），
+还想按原来的时刻醒，就会定同一个时刻；以前每一轮都按它再排一条新 id 的，旧的到点时一条条作为旧
+消息跳过，各占一次投递、各查一次库——2026-10-06 在 coe-world 上 20 条同时到点就是这么堆出来的。
+原来那一条的说明不换：它已经是排出去的那条消息的正文，状态跟它保持一致。最新唤醒就在这一轮带着
+的消息里时，它已经用掉了，同一个时刻照样重排。
+
 **旧的自定唤醒跳过**（:func:`is_stale_wake`）：一条自己发给自己的普通消息，id 跟状态里的最新
 唤醒对不上，就是被后来定的时刻取代了，跳过、不跑一轮。不然每来一条别人的消息，就多出一条
 唤醒链。别人发来的消息、机制发回来的"没有送达"告知不受这条影响。这个判断只在一轮开始那一刻
@@ -39,6 +47,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -116,13 +125,26 @@ async def _schedule(wake: NextWake) -> None:
     )
 
 
-async def set_next_wake(at: datetime, reason: str) -> NextWake:
+async def set_next_wake(
+    at: datetime, reason: str, *, taken: Iterable[Message] = ()
+) -> NextWake:
     """定下次醒来：先排出去，broker 确认之后才记成最新唤醒。``at`` 必须带时区。
 
     ``reason`` 是那条消息的正文，醒来时原样摆到主 agent 眼前。排失败（``SendFailed``）或者记
     失败都往外抛；排失败时状态没动。
+
+    状态里的最新唤醒已经排在 ``at``、又不在 ``taken``（这一轮带着的消息）里，它之后还会叫醒
+    world：不再排，交回它（见模块说明"同一个时刻只排一条"）。
     """
     require_writer_lock()  # 记不下来的唤醒不排：没拿着卷的写锁就别往外发
+    latest = read_next_wake()
+    if (
+        latest is not None
+        and latest.at == at
+        and latest.message_id not in {m.message_id for m in taken}
+    ):
+        logger.info("world: next wake %s at %s is already scheduled", latest.message_id, at)
+        return latest
     wake = NextWake(message_id=uuid.uuid4().hex, at=at, reason=reason)
     await _schedule(wake)
     _record_next_wake(wake)
