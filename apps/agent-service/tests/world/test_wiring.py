@@ -41,9 +41,13 @@ def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_take_th
 
 
 def test_a_world_delivery_is_settled_before_the_broker_stops_waiting_for_its_ack():
-    """一次投递从领到交回结果，最长不超过它的占位租约：处理时限，加上超时之后记失败、排重试的
-    余量。broker 等确认的时限比这短，就会在 world 正常等轮的时候关掉整个通道，同一通道上正在跑
-    的一轮也跟着被取消（2026-10-06 在 coe-world 上，一轮的时限是 30 分钟时）。"""
+    """world 给一次投递留的时间（它的占位租约：处理时限，加上超时之后记失败、排重试的余量）要短于
+    broker 等确认的时限。不然 broker 会在 world 正常等轮的时候关掉整个通道，同一通道上正在跑的
+    一轮也跟着被取消（2026-10-06 在 coe-world 上，一轮的时限是 30 分钟时）。
+
+    这里钉的不是一次投递没确认的全部时间：领取和记结果那几次查库在处理时限之外，库正常时是毫秒级，
+    每一步都顶到语句时限只会发生在库或网络出了故障的时候。那时超过 broker 的时限，通道被关、投递
+    被取消，占位随即放开，重投的那一份马上有人接（:func:`app.messaging.receiving._handle`）。"""
     from app.infra.rabbitmq import BROKER_ACK_TIMEOUT_MS
     from app.messaging.receiving import INBOX_REGISTRY, _lease_ms
 
