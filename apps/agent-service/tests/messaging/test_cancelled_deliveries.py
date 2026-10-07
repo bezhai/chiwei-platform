@@ -25,6 +25,8 @@ from app.messaging import receiving
 from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.receiving import inbox
 from app.messaging.sending import send
+from app.runtime.inflight import claim_inflight
+from app.runtime.wire import RetryPolicy
 
 from .conftest import LANE
 from .helpers import Inbox, eventually
@@ -68,7 +70,7 @@ async def _inflight(test_db, message_id: str) -> dict:
     async with test_db.connect() as conn:
         row = await conn.execute(
             text(
-                "SELECT state, attempts, last_error FROM runtime_inflight "
+                "SELECT state, attempts, last_error, worker_id FROM runtime_inflight "
                 "WHERE edge_id = :e AND idempotent_key = :k"
             ),
             {"e": f"inbox:world@{LANE}", "k": message_id},
@@ -143,3 +145,74 @@ async def test_a_delivery_cancelled_while_marking_its_success_is_taken_up_at_onc
 
 async def _state_is(test_db, message_id: str, state: str) -> bool:
     return (await _inflight(test_db, message_id))["state"] == state
+
+
+async def test_a_delivery_cancelled_after_its_success_was_recorded_stays_succeeded(
+    broker, test_db, monkeypatch
+):
+    """标记成功那一笔已经落下、之后才被取消（比如卡在关连接上）：放开占位不能把"成功"改掉。重投的
+    那一份在领取时就被挡掉，处理函数只看到它一次。"""
+    mark = HangsOnce(receiving.mark_succeeded, after_commit=True)
+    monkeypatch.setattr(receiving, "mark_succeeded", mark)
+    claims: list[str] = []
+    real_claim = receiving.claim_inflight
+
+    async def counted_claim(**kw):
+        claims.append(kw["worker_id"])
+        return await real_claim(**kw)
+
+    monkeypatch.setattr(receiving, "claim_inflight", counted_claim)
+    world = Inbox()
+    inbox("world", on_message=world.on_message, processing_timeout=LONG_LEASE)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="成功记下之后卡住。")
+    await asyncio.wait_for(mark.stuck.wait(), timeout=10)
+
+    await _close_the_inbox_channel_from_the_broker()
+
+    await eventually(lambda: len(claims) == 2, timeout=10)  # 重投的那一份来领过了
+    await asyncio.sleep(0.5)
+    assert [m.message_id for m in world.got] == [delivery.message_id]
+    row = await _inflight(test_db, delivery.message_id)
+    assert row["state"] == "succeeded"
+    assert row["last_error"] is None, "放开占位改了一条已经成功的记录"
+
+
+async def test_a_delivery_cancelled_after_another_worker_took_its_claim_over_leaves_that_claim(
+    broker, test_db, monkeypatch
+):
+    """租约过期、另一个进程已经接管了这条，这里的处理才被取消：放开只按这次占位的标记做，不碰
+    接管者的那一行。"""
+    monkeypatch.setattr(receiving, "STOP_GRACE_SECONDS", 0.3)
+    monkeypatch.setattr(
+        receiving,
+        "PROCESSING_RETRY",
+        RetryPolicy(
+            n=4, backoff="exponential", base_delay_ms=30_000, max_delay_ms=600_000, lease_ms=1_000
+        ),
+    )
+    entered = asyncio.Event()
+
+    async def never_finishes(message) -> None:
+        entered.set()
+        await asyncio.sleep(3600)
+
+    inbox("world", on_message=never_finishes)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="被接管。")
+    await asyncio.wait_for(entered.wait(), timeout=10)
+    await asyncio.sleep(1.2)  # 租约过期
+    taken = await claim_inflight(
+        edge_id=f"inbox:world@{LANE}",
+        idempotent_key=delivery.message_id,
+        data_table="inbox_world",
+        worker_id="another-process#1",
+        lease_ms=600_000,
+    )
+    assert taken.action == "run"
+
+    await asyncio.wait_for(stop_messaging(), timeout=10)
+
+    row = await _inflight(test_db, delivery.message_id)
+    assert (row["state"], row["worker_id"]) == ("processing", "another-process#1")
+    assert row["last_error"] is None, "放开占位改了接管者的那一行"
