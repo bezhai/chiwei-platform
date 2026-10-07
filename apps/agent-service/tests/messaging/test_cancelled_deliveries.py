@@ -24,7 +24,7 @@ from sqlalchemy import text
 from app.messaging import receiving
 from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.receiving import inbox
-from app.messaging.sending import send
+from app.messaging.sending import ask, send
 from app.runtime.inflight import claim_inflight
 from app.runtime.wire import RetryPolicy
 
@@ -58,9 +58,8 @@ class HangsOnce:
         return await self._real(**kw)
 
 
-async def _close_the_inbox_channel_from_the_broker() -> None:
-    """让 broker 关掉 world 收件箱的消费通道：确认一个这条通道上不存在的投递编号。"""
-    queue = f"inbox_world_{LANE}"
+async def _close_the_inbox_channel_from_the_broker(queue: str = f"inbox_world_{LANE}") -> None:
+    """让 broker 关掉 world 收件箱（或别的队列）的消费通道：确认一个这条通道上不存在的投递编号。"""
     (channel,) = [ch for ch, q, _tag in receiving._consumers if q.name == queue]
     underlay = await channel.get_underlay_channel()
     await underlay.basic_ack(delivery_tag=999_999)
@@ -216,3 +215,29 @@ async def test_a_delivery_cancelled_after_another_worker_took_its_claim_over_lea
     row = await _inflight(test_db, delivery.message_id)
     assert (row["state"], row["worker_id"]) == ("processing", "another-process#1")
     assert row["last_error"] is None, "放开占位改了接管者的那一行"
+
+
+async def test_a_question_cancelled_because_its_channel_closed_ends_as_cancelled(broker):
+    """回答问题时它所在的通道被 broker 关掉：处理它的任务按取消结束。通道关着时不能再去确认它，
+    读 ``incoming.channel`` 本身就会抛 ``ChannelInvalidStateError``，把取消换成另一个异常。"""
+    answering: list[asyncio.Task] = []
+
+    async def never_answers(question) -> str | None:
+        answering.append(asyncio.current_task())
+        await asyncio.sleep(3600)
+        return None
+
+    inbox("world", on_message=Inbox().on_message, on_question=never_answers)
+    await start_messaging()
+    asked = asyncio.create_task(
+        ask(sender="operator", recipient="world", body="在吗？", timeout_seconds=30)
+    )
+    await eventually(lambda: answering, timeout=10)
+
+    await _close_the_inbox_channel_from_the_broker(f"questions_world_{LANE}")
+
+    (task,) = answering
+    await asyncio.wait({task}, timeout=10)
+    assert task.done()
+    assert task.cancelled(), f"取消被换成了别的异常：{task.exception()!r}"
+    asked.cancel()

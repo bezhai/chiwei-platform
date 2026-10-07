@@ -99,13 +99,14 @@ import os
 import socket
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
 from aio_pika.abc import AbstractIncomingMessage
+from aio_pika.exceptions import ChannelInvalidStateError
 
 from app.infra.rabbitmq import lane_queue, mq
 from app.messaging.broker import (
@@ -535,10 +536,14 @@ def _consumer(decide: Decide, *, questions: bool = False):
             try:
                 verdict = await decide(incoming)
             except asyncio.CancelledError:
-                # 进程在停（:func:`stop_receiving`），或者通道被关掉了。问题：进程在停时通道还
-                # 开着，确认掉，不退回队列。普通消息：通道已经关了，broker 把它放回原队列。
-                if questions and not incoming.channel.is_closed:
-                    await incoming.ack()
+                # 进程在停（:func:`stop_receiving`），或者通道被关掉了。普通消息：通道已经关了，
+                # broker 把它放回原队列。问题：进程在停时通道还开着，确认掉，不退回队列；通道
+                # 已经关了就确认不了（aio-pika 这时一碰 ``incoming.channel`` 就抛
+                # ChannelInvalidStateError），broker 把它放回去，再来时按 id 认出处理过、确认掉。
+                # 不管哪种，取消都原样往外抛。
+                if questions:
+                    with suppress(ChannelInvalidStateError):
+                        await incoming.ack()
                 raise
             except Exception:
                 logger.warning(
