@@ -32,6 +32,16 @@ class TestEngineConfig:
 
         assert engine.echo is False
 
+    def test_engine_uses_the_dialect_that_cuts_terminating_short_and_keeps_the_statement_cache(
+        self,
+    ):
+        """SQLAlchemy only caches compiled statements for a dialect subclass that says so itself."""
+        from app.data.dialect import AsyncpgDialect
+        from app.data.session import engine
+
+        assert type(engine.dialect) is AsyncpgDialect
+        assert AsyncpgDialect.__dict__.get("supports_statement_cache") is True
+
 
 class TestAsyncSessionFactory:
     """async_session factory should produce AsyncSession instances."""
