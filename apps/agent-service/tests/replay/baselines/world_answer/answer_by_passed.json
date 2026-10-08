@@ -1,0 +1,129 @@
+{
+  "baseline": "world_answer/answer_by_passed",
+  "steps": [
+    {
+      "step": "start world",
+      "at": "2026-07-25T13:00:00+08:00",
+      "outcome": {
+        "returned": null
+      },
+      "model_calls": [],
+      "effects": [
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "publish": [
+            "messaging_scheduled_coe-replay"
+          ],
+          "rk": "messaging.scheduled.coe-replay",
+          "delay_ms": 0,
+          "headers": {
+            "trace_id": "",
+            "lane": "coe-replay"
+          },
+          "body": {
+            "message_id": "<uuid:1>",
+            "sender": "world",
+            "recipient": "world",
+            "time": "2026-07-25T13:00:00+08:00",
+            "kind": "message",
+            "wakes_recipient": true,
+            "body": "进程刚启动，没有找到你定下的下次醒来时刻。"
+          },
+          "confirmed": true
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "file": "write",
+          "path": "coe-replay/next_wake.json"
+        }
+      ],
+      "consumers_started": [
+        "inbox_world_coe-replay",
+        "messaging_scheduled_coe-replay",
+        "questions_world_coe-replay"
+      ],
+      "rows": {
+        "message_record": {
+          "added": [
+            {
+              "body": "进程刚启动，没有找到你定下的下次醒来时刻。",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:1>",
+              "message_time": "2026-07-25T13:00:00+08:00",
+              "outcome": "scheduled",
+              "reason": null,
+              "recipient": "world",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            },
+            {
+              "body": "进程刚启动，没有找到你定下的下次醒来时刻。",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:1>",
+              "message_time": "2026-07-25T13:00:00+08:00",
+              "outcome": "sending",
+              "reason": null,
+              "recipient": "world",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            }
+          ]
+        }
+      },
+      "files": {
+        "coe-replay/next_wake.json": {
+          "added": {
+            "latest": {
+              "message_id": "<uuid:1>",
+              "at": "2026-07-25T13:00:00+08:00",
+              "reason": "进程刚启动，没有找到你定下的下次醒来时刻。"
+            },
+            "written_at": "2026-07-25T13:00:00+08:00"
+          }
+        },
+        "coe-replay/writer.lock": {
+          "added": ""
+        }
+      }
+    },
+    {
+      "step": "绫奈's question is delivered after she stopped waiting",
+      "at": "2026-07-25T15:00:00+08:00",
+      "outcome": {
+        "returned": "ack"
+      },
+      "model_calls": [],
+      "effects": [
+        {
+          "deliver": "questions_world_coe-replay",
+          "message_id": "ayana-question-1"
+        },
+        {
+          "settled": "ack",
+          "queue": "questions_world_coe-replay",
+          "message_id": "ayana-question-1"
+        }
+      ],
+      "consumers_started": [],
+      "rows": {},
+      "files": {}
+    }
+  ],
+  "tool_schemas": {}
+}

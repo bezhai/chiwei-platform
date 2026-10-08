@@ -1,0 +1,1247 @@
+{
+  "baseline": "world_perception/right_away_and_later",
+  "steps": [
+    {
+      "step": "start world",
+      "at": "2026-07-25T13:00:00+08:00",
+      "outcome": {
+        "returned": null
+      },
+      "model_calls": [],
+      "effects": [
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "publish": [
+            "messaging_scheduled_coe-replay"
+          ],
+          "rk": "messaging.scheduled.coe-replay",
+          "delay_ms": 0,
+          "headers": {
+            "trace_id": "",
+            "lane": "coe-replay"
+          },
+          "body": {
+            "message_id": "<uuid:1>",
+            "sender": "world",
+            "recipient": "world",
+            "time": "2026-07-25T13:00:00+08:00",
+            "kind": "message",
+            "wakes_recipient": true,
+            "body": "进程刚启动，没有找到你定下的下次醒来时刻。"
+          },
+          "confirmed": true
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "file": "write",
+          "path": "coe-replay/next_wake.json"
+        }
+      ],
+      "consumers_started": [
+        "inbox_world_coe-replay",
+        "messaging_scheduled_coe-replay",
+        "questions_world_coe-replay"
+      ],
+      "rows": {
+        "message_record": {
+          "added": [
+            {
+              "body": "进程刚启动，没有找到你定下的下次醒来时刻。",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:1>",
+              "message_time": "2026-07-25T13:00:00+08:00",
+              "outcome": "scheduled",
+              "reason": null,
+              "recipient": "world",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            },
+            {
+              "body": "进程刚启动，没有找到你定下的下次醒来时刻。",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:1>",
+              "message_time": "2026-07-25T13:00:00+08:00",
+              "outcome": "sending",
+              "reason": null,
+              "recipient": "world",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            }
+          ]
+        }
+      },
+      "files": {
+        "coe-replay/next_wake.json": {
+          "added": {
+            "latest": {
+              "message_id": "<uuid:1>",
+              "at": "2026-07-25T13:00:00+08:00",
+              "reason": "进程刚启动，没有找到你定下的下次醒来时刻。"
+            },
+            "written_at": "2026-07-25T13:00:00+08:00"
+          }
+        },
+        "coe-replay/writer.lock": {
+          "added": ""
+        }
+      }
+    },
+    {
+      "step": "the round reports a change two people notice",
+      "at": "2026-07-25T14:01:00+08:00",
+      "outcome": {
+        "returned": "ack"
+      },
+      "model_calls": [
+        {
+          "agent": "world_round",
+          "number": 1,
+          "call": "complete",
+          "model": "offline-model",
+          "prompt": {
+            "name": "world_round",
+            "version": 1,
+            "variables": {
+              "currDate": "2026-07-25",
+              "currTime": "14:01:00"
+            }
+          },
+          "options": {
+            "session_id": "world:coe-replay"
+          },
+          "tools": [
+            "list_records",
+            "read_record",
+            "check_current_weather",
+            "check_hourly_forecast",
+            "check_daily_forecast",
+            "search_web",
+            "list_senders",
+            "read_messages_from",
+            "write_record",
+            "wake_me_at",
+            "report_change",
+            "let_npc_appear"
+          ],
+          "messages": [
+            {
+              "role": "system",
+              "content": [
+                "[replay fixture for Langfuse prompt world_round; stands in for the real text, which uses no variables]",
+                "你是这个世界。",
+                ""
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                "【上下文清理 2026-07-25T14:00:00+08:00】",
+                "再往前的那一段不在你眼前了，只剩你自己记下来的。你现在：",
+                "",
+                "你还没有任何记录。"
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                "【现在】2026-07-25 周六 14:01 CST",
+                "【叫醒你的】这一轮有 1 条消息，按到达的先后：",
+                "（1）赤尾 发来一条消息（2026-07-25 周六 14:00 CST）：",
+                "我做了这些（按先后）：",
+                "- 14:00 CST 改做 整理胶片，在 家/客厅",
+                "- 14:00 CST 把胶片一卷卷摆到茶几上",
+                "做完这些，我在 家/客厅，正在 整理胶片。",
+                "【你原来定的下次醒来】2026-07-25 周六 13:00 CST。当时的说明：进程刚启动，没有找到你定下的下次醒来时刻。",
+                "这一轮结束前要重新定一个时刻；还想按原来的来，就再定一次同一个时刻。"
+              ]
+            }
+          ],
+          "reply": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "world_round:1:1",
+                "name": "report_change",
+                "arguments": {
+                  "change": "14:01，快递员在家门口按了门铃，送来一个寄给赤尾的包裹。"
+                }
+              }
+            ],
+            "turn_parts": [
+              {
+                "kind": "tool_call",
+                "call_id": "world_round:1:1"
+              }
+            ]
+          }
+        },
+        {
+          "agent": "world_perception",
+          "number": 1,
+          "call": "complete",
+          "model": "offline-model",
+          "prompt": {
+            "name": "world_perception",
+            "version": 1,
+            "variables": {
+              "currDate": "2026-07-25",
+              "currTime": "14:01:00"
+            }
+          },
+          "options": {
+            "session_id": "world:coe-replay"
+          },
+          "tools": [
+            "list_records",
+            "read_record",
+            "check_current_weather",
+            "check_hourly_forecast",
+            "check_daily_forecast",
+            "search_web",
+            "list_senders",
+            "read_messages_from",
+            "someone_notices"
+          ],
+          "messages": [
+            {
+              "role": "system",
+              "content": [
+                "[replay fixture for Langfuse prompt world_perception; stands in for the real text, which uses no variables]",
+                "判断谁会察觉到世界里发生的变化。",
+                ""
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                "【现在】2026-07-25 周六 14:01 CST",
+                "【叫醒世界的消息】这一轮世界收到 1 条消息，按到达的先后：",
+                "（1）赤尾 发来（2026-07-25 周六 14:00 CST）：",
+                "我做了这些（按先后）：",
+                "- 14:00 CST 改做 整理胶片，在 家/客厅",
+                "- 14:00 CST 把胶片一卷卷摆到茶几上",
+                "做完这些，我在 家/客厅，正在 整理胶片。",
+                "【世界里发生的变化】",
+                "14:01，快递员在家门口按了门铃，送来一个寄给赤尾的包裹。"
+              ]
+            }
+          ],
+          "reply": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "world_perception:1:1",
+                "name": "someone_notices",
+                "arguments": {
+                  "who": "赤尾",
+                  "what": "14:01，你在客厅听见门铃响了，门外的快递员说有你的包裹。",
+                  "right_away": true
+                }
+              },
+              {
+                "id": "world_perception:1:2",
+                "name": "someone_notices",
+                "arguments": {
+                  "who": "绫奈",
+                  "what": "14:01 前后，你在自己房间里隐约听见楼下门铃响了一声。",
+                  "right_away": false
+                }
+              }
+            ],
+            "turn_parts": [
+              {
+                "kind": "tool_call",
+                "call_id": "world_perception:1:1"
+              },
+              {
+                "kind": "tool_call",
+                "call_id": "world_perception:1:2"
+              }
+            ]
+          }
+        },
+        {
+          "agent": "world_perception",
+          "number": 2,
+          "call": "complete",
+          "model": "offline-model",
+          "prompt": {
+            "name": "world_perception",
+            "version": 1,
+            "variables": {
+              "currDate": "2026-07-25",
+              "currTime": "14:01:00"
+            }
+          },
+          "options": {
+            "session_id": "world:coe-replay"
+          },
+          "tools": [
+            "list_records",
+            "read_record",
+            "check_current_weather",
+            "check_hourly_forecast",
+            "check_daily_forecast",
+            "search_web",
+            "list_senders",
+            "read_messages_from",
+            "someone_notices"
+          ],
+          "continues": "world_perception #1",
+          "then": [
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "world_perception:1:1",
+                  "name": "someone_notices",
+                  "arguments": {
+                    "who": "赤尾",
+                    "what": "14:01，你在客厅听见门铃响了，门外的快递员说有你的包裹。",
+                    "right_away": true
+                  }
+                },
+                {
+                  "id": "world_perception:1:2",
+                  "name": "someone_notices",
+                  "arguments": {
+                    "who": "绫奈",
+                    "what": "14:01 前后，你在自己房间里隐约听见楼下门铃响了一声。",
+                    "right_away": false
+                  }
+                }
+              ],
+              "turn_parts": [
+                {
+                  "kind": "tool_call",
+                  "call_id": "world_perception:1:1"
+                },
+                {
+                  "kind": "tool_call",
+                  "call_id": "world_perception:1:2"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "记下了：赤尾 会察觉到。",
+              "tool_call_id": "world_perception:1:1"
+            },
+            {
+              "role": "tool",
+              "content": "记下了：绫奈 会察觉到。",
+              "tool_call_id": "world_perception:1:2"
+            }
+          ],
+          "reply": {
+            "role": "assistant",
+            "content": "判断完了。",
+            "turn_parts": [
+              {
+                "kind": "text",
+                "text": "判断完了。"
+              }
+            ]
+          }
+        },
+        {
+          "agent": "world_round",
+          "number": 2,
+          "call": "complete",
+          "model": "offline-model",
+          "prompt": {
+            "name": "world_round",
+            "version": 1,
+            "variables": {
+              "currDate": "2026-07-25",
+              "currTime": "14:01:00"
+            }
+          },
+          "options": {
+            "session_id": "world:coe-replay"
+          },
+          "tools": [
+            "list_records",
+            "read_record",
+            "check_current_weather",
+            "check_hourly_forecast",
+            "check_daily_forecast",
+            "search_web",
+            "list_senders",
+            "read_messages_from",
+            "write_record",
+            "wake_me_at",
+            "report_change",
+            "let_npc_appear"
+          ],
+          "continues": "world_round #1",
+          "then": [
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "world_round:1:1",
+                  "name": "report_change",
+                  "arguments": {
+                    "change": "14:01，快递员在家门口按了门铃，送来一个寄给赤尾的包裹。"
+                  }
+                }
+              ],
+              "turn_parts": [
+                {
+                  "kind": "tool_call",
+                  "call_id": "world_round:1:1"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": [
+                "感知判断之后，告知了这些人：",
+                "- 赤尾：「14:01，你在客厅听见门铃响了，门外的快递员说有你的包裹。」——送达了",
+                "- 绫奈：「14:01 前后，你在自己房间里隐约听见楼下门铃响了一声。」——送达了"
+              ],
+              "tool_call_id": "world_round:1:1"
+            }
+          ],
+          "reply": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "world_round:2:1",
+                "name": "wake_me_at",
+                "arguments": {
+                  "at": "2026-07-25T16:00",
+                  "reason": "看看包裹拆开了没有"
+                }
+              }
+            ],
+            "turn_parts": [
+              {
+                "kind": "tool_call",
+                "call_id": "world_round:2:1"
+              }
+            ]
+          }
+        },
+        {
+          "agent": "world_round",
+          "number": 3,
+          "call": "complete",
+          "model": "offline-model",
+          "prompt": {
+            "name": "world_round",
+            "version": 1,
+            "variables": {
+              "currDate": "2026-07-25",
+              "currTime": "14:01:00"
+            }
+          },
+          "options": {
+            "session_id": "world:coe-replay"
+          },
+          "tools": [
+            "list_records",
+            "read_record",
+            "check_current_weather",
+            "check_hourly_forecast",
+            "check_daily_forecast",
+            "search_web",
+            "list_senders",
+            "read_messages_from",
+            "write_record",
+            "wake_me_at",
+            "report_change",
+            "let_npc_appear"
+          ],
+          "continues": "world_round #2",
+          "then": [
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "world_round:2:1",
+                  "name": "wake_me_at",
+                  "arguments": {
+                    "at": "2026-07-25T16:00",
+                    "reason": "看看包裹拆开了没有"
+                  }
+                }
+              ],
+              "turn_parts": [
+                {
+                  "kind": "tool_call",
+                  "call_id": "world_round:2:1"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "定好了：2026-07-25 周六 16:00 CST（离现在约 119 分钟）。这一轮结束时生效；再调一次就改成新的时刻。",
+              "tool_call_id": "world_round:2:1"
+            }
+          ],
+          "reply": {
+            "role": "assistant",
+            "content": "这一轮看完了。",
+            "turn_parts": [
+              {
+                "kind": "text",
+                "text": "这一轮看完了。"
+              }
+            ]
+          }
+        }
+      ],
+      "effects": [
+        {
+          "deliver": "inbox_world_coe-replay",
+          "message_id": "akao-digest-1"
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT runtime_inflight"
+          ]
+        },
+        {
+          "file": "write",
+          "path": "coe-replay/sources/told/b319cc9b08fee206/akao-digest-1.json"
+        },
+        {
+          "file": "write",
+          "path": "coe-replay/pending.json"
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT data_thinking_tokens_spent"
+          ]
+        },
+        {
+          "file": "write",
+          "path": "coe-replay/unfinished.json"
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "publish": [
+            "inbox_:bgtr75i_coe-replay"
+          ],
+          "rk": "inbox.:bgtr75i.coe-replay",
+          "headers": {
+            "trace_id": "",
+            "lane": "coe-replay"
+          },
+          "body": {
+            "message_id": "<uuid:2>",
+            "sender": "world",
+            "recipient": "赤尾",
+            "time": "2026-07-25T06:01:00+00:00",
+            "kind": "message",
+            "wakes_recipient": true,
+            "body": "14:01，你在客厅听见门铃响了，门外的快递员说有你的包裹。"
+          },
+          "confirmed": true
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "publish": [
+            "inbox_:ntst98f_coe-replay"
+          ],
+          "rk": "inbox.:ntst98f.coe-replay",
+          "headers": {
+            "trace_id": "",
+            "lane": "coe-replay"
+          },
+          "body": {
+            "message_id": "<uuid:3>",
+            "sender": "world",
+            "recipient": "绫奈",
+            "time": "2026-07-25T06:01:00+00:00",
+            "kind": "message",
+            "wakes_recipient": false,
+            "body": "14:01 前后，你在自己房间里隐约听见楼下门铃响了一声。"
+          },
+          "confirmed": true
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT data_thinking_tokens_spent"
+          ]
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT data_session_transcript"
+          ]
+        },
+        {
+          "file": "delete",
+          "path": "coe-replay/unfinished.json"
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "publish": [
+            "messaging_scheduled_coe-replay"
+          ],
+          "rk": "messaging.scheduled.coe-replay",
+          "delay_ms": 7140000,
+          "headers": {
+            "trace_id": "",
+            "lane": "coe-replay"
+          },
+          "body": {
+            "message_id": "<uuid:4>",
+            "sender": "world",
+            "recipient": "world",
+            "time": "2026-07-25T16:00:00+08:00",
+            "kind": "message",
+            "wakes_recipient": true,
+            "body": "你在 2026-07-25 周六 14:01 CST 定下这个时刻醒来，当时写下的理由：看看包裹拆开了没有"
+          },
+          "confirmed": true
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "file": "write",
+          "path": "coe-replay/next_wake.json"
+        },
+        {
+          "file": "write",
+          "path": "coe-replay/pending.json"
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "UPDATE runtime_inflight"
+          ]
+        },
+        {
+          "settled": "ack",
+          "queue": "inbox_world_coe-replay",
+          "message_id": "akao-digest-1"
+        }
+      ],
+      "consumers_started": [],
+      "rows": {
+        "data_session_transcript": {
+          "added": [
+            {
+              "created_at": "<db-clock>",
+              "dedup_hash": "<dedup>",
+              "session_id": "world:coe-replay",
+              "transcript_json": [
+                {
+                  "content": [
+                    "【上下文清理 2026-07-25T14:00:00+08:00】",
+                    "再往前的那一段不在你眼前了，只剩你自己记下来的。你现在：",
+                    "",
+                    "你还没有任何记录。"
+                  ],
+                  "role": "user"
+                },
+                {
+                  "content": [
+                    "【现在】2026-07-25 周六 14:01 CST",
+                    "【叫醒你的】这一轮有 1 条消息，按到达的先后：",
+                    "（1）赤尾 发来一条消息（2026-07-25 周六 14:00 CST）：",
+                    "我做了这些（按先后）：",
+                    "- 14:00 CST 改做 整理胶片，在 家/客厅",
+                    "- 14:00 CST 把胶片一卷卷摆到茶几上",
+                    "做完这些，我在 家/客厅，正在 整理胶片。",
+                    "【你原来定的下次醒来】2026-07-25 周六 13:00 CST。当时的说明：进程刚启动，没有找到你定下的下次醒来时刻。",
+                    "这一轮结束前要重新定一个时刻；还想按原来的来，就再定一次同一个时刻。"
+                  ],
+                  "role": "user"
+                },
+                {
+                  "content": "",
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "arguments": {
+                        "change": "14:01，快递员在家门口按了门铃，送来一个寄给赤尾的包裹。"
+                      },
+                      "id": "world_round:1:1",
+                      "name": "report_change"
+                    }
+                  ],
+                  "turn_parts": [
+                    {
+                      "call_id": "world_round:1:1",
+                      "kind": "tool_call"
+                    }
+                  ]
+                },
+                {
+                  "content": [
+                    "感知判断之后，告知了这些人：",
+                    "- 赤尾：「14:01，你在客厅听见门铃响了，门外的快递员说有你的包裹。」——送达了",
+                    "- 绫奈：「14:01 前后，你在自己房间里隐约听见楼下门铃响了一声。」——送达了"
+                  ],
+                  "role": "tool",
+                  "tool_call_id": "world_round:1:1"
+                },
+                {
+                  "content": "",
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "arguments": {
+                        "at": "2026-07-25T16:00",
+                        "reason": "看看包裹拆开了没有"
+                      },
+                      "id": "world_round:2:1",
+                      "name": "wake_me_at"
+                    }
+                  ],
+                  "turn_parts": [
+                    {
+                      "call_id": "world_round:2:1",
+                      "kind": "tool_call"
+                    }
+                  ]
+                },
+                {
+                  "content": "定好了：2026-07-25 周六 16:00 CST（离现在约 119 分钟）。这一轮结束时生效；再调一次就改成新的时刻。",
+                  "role": "tool",
+                  "tool_call_id": "world_round:2:1"
+                },
+                {
+                  "content": "这一轮看完了。",
+                  "role": "assistant",
+                  "turn_parts": [
+                    {
+                      "kind": "text",
+                      "text": "这一轮看完了。"
+                    }
+                  ]
+                }
+              ],
+              "ver": 1
+            }
+          ]
+        },
+        "data_thinking_tokens_spent": {
+          "added": [
+            {
+              "actor": "world",
+              "cached_tokens": 1200,
+              "created_at": "<db-clock>",
+              "dedup_hash": "<dedup>",
+              "input_tokens": 3000,
+              "lane": "coe-replay",
+              "model_calls": 3,
+              "observed_at": "2026-07-25T14:01:00+08:00",
+              "output_tokens": 300,
+              "round_id": "world-round:<uuid:5>",
+              "total_tokens": 3300
+            },
+            {
+              "actor": "world",
+              "cached_tokens": 800,
+              "created_at": "<db-clock>",
+              "dedup_hash": "<dedup>",
+              "input_tokens": 2000,
+              "lane": "coe-replay",
+              "model_calls": 2,
+              "observed_at": "2026-07-25T14:01:00+08:00",
+              "output_tokens": 200,
+              "round_id": "world-perception:<uuid:6>",
+              "total_tokens": 2200
+            }
+          ]
+        },
+        "message_record": {
+          "added": [
+            {
+              "body": "14:01 前后，你在自己房间里隐约听见楼下门铃响了一声。",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:3>",
+              "message_time": "2026-07-25T14:01:00+08:00",
+              "outcome": "delivered",
+              "reason": null,
+              "recipient": "绫奈",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            },
+            {
+              "body": "14:01 前后，你在自己房间里隐约听见楼下门铃响了一声。",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:3>",
+              "message_time": "2026-07-25T14:01:00+08:00",
+              "outcome": "sending",
+              "reason": null,
+              "recipient": "绫奈",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            },
+            {
+              "body": "14:01，你在客厅听见门铃响了，门外的快递员说有你的包裹。",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:2>",
+              "message_time": "2026-07-25T14:01:00+08:00",
+              "outcome": "delivered",
+              "reason": null,
+              "recipient": "赤尾",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            },
+            {
+              "body": "14:01，你在客厅听见门铃响了，门外的快递员说有你的包裹。",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:2>",
+              "message_time": "2026-07-25T14:01:00+08:00",
+              "outcome": "sending",
+              "reason": null,
+              "recipient": "赤尾",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            },
+            {
+              "body": "你在 2026-07-25 周六 14:01 CST 定下这个时刻醒来，当时写下的理由：看看包裹拆开了没有",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:4>",
+              "message_time": "2026-07-25T16:00:00+08:00",
+              "outcome": "scheduled",
+              "reason": null,
+              "recipient": "world",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            },
+            {
+              "body": "你在 2026-07-25 周六 14:01 CST 定下这个时刻醒来，当时写下的理由：看看包裹拆开了没有",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:4>",
+              "message_time": "2026-07-25T16:00:00+08:00",
+              "outcome": "sending",
+              "reason": null,
+              "recipient": "world",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            }
+          ]
+        },
+        "runtime_inflight": {
+          "added": [
+            {
+              "attempts": 1,
+              "created_at": "<db-clock>",
+              "data_table": "inbox_world",
+              "edge_id": "inbox:world@coe-replay",
+              "idempotent_key": "akao-digest-1",
+              "last_error": null,
+              "locked_until": null,
+              "state": "succeeded",
+              "trace_id": null,
+              "updated_at": "<db-clock>",
+              "worker_id": null
+            }
+          ]
+        }
+      },
+      "files": {
+        "coe-replay/next_wake.json": {
+          "before": {
+            "latest": {
+              "message_id": "<uuid:1>",
+              "at": "2026-07-25T13:00:00+08:00",
+              "reason": "进程刚启动，没有找到你定下的下次醒来时刻。"
+            },
+            "written_at": "2026-07-25T13:00:00+08:00"
+          },
+          "after": {
+            "latest": {
+              "message_id": "<uuid:4>",
+              "at": "2026-07-25T16:00:00+08:00",
+              "reason": "你在 2026-07-25 周六 14:01 CST 定下这个时刻醒来，当时写下的理由：看看包裹拆开了没有"
+            },
+            "written_at": "2026-07-25T14:01:00+08:00"
+          }
+        },
+        "coe-replay/pending.json": {
+          "added": {
+            "pending": [],
+            "handled": {
+              "akao-digest-1": "2026-07-25T14:01:00+08:00"
+            }
+          }
+        },
+        "coe-replay/sources/told/b319cc9b08fee206/akao-digest-1.json": {
+          "added": {
+            "message_id": "akao-digest-1",
+            "sender": "赤尾",
+            "time": "2026-07-25T14:00:00+08:00",
+            "body": [
+              "我做了这些（按先后）：",
+              "- 14:00 CST 改做 整理胶片，在 家/客厅",
+              "- 14:00 CST 把胶片一卷卷摆到茶几上",
+              "做完这些，我在 家/客厅，正在 整理胶片。"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "tool_schemas": {
+    "check_current_weather": {
+      "description": [
+        "查一个真实地方此刻的天气实况：天气现象、气温、体感、湿度、风、近一小时降水、能见度、云量、紫外线。",
+        "",
+        "交回来的是和风天气认下的那个地方和它的读数。名字有歧义时会列出同名的其他地方。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "place": {
+            "description": "要查的那个真实地方的名字",
+            "type": "string"
+          }
+        },
+        "required": [
+          "place"
+        ]
+      }
+    },
+    "check_daily_forecast": {
+      "description": [
+        "查一个真实地方接下来几天的逐日预报：每天的最高最低气温、日出日落、月出月落和月相，白天和夜里分开说天气现象、降水、风、湿度、云量。",
+        "",
+        "交回来的是和风天气认下的那个地方和它的预报。名字有歧义时会列出同名的其他地方。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "place": {
+            "description": "要查的那个真实地方的名字",
+            "type": "string"
+          },
+          "days": {
+            "default": 7,
+            "description": "要看接下来几天",
+            "maximum": 10,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "place"
+        ]
+      }
+    },
+    "check_hourly_forecast": {
+      "description": [
+        "查一个真实地方接下来逐小时的天气预报：每小时的天气现象、气温、降水概率和降水量、风。",
+        "",
+        "交回来的是和风天气认下的那个地方和它的预报。名字有歧义时会列出同名的其他地方。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "place": {
+            "description": "要查的那个真实地方的名字",
+            "type": "string"
+          },
+          "hours": {
+            "default": 24,
+            "description": "要看接下来几个小时",
+            "maximum": 240,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "place"
+        ]
+      }
+    },
+    "let_npc_appear": {
+      "description": [
+        "让一个 NPC 在一次互动里出场。",
+        "",
+        "一个临时 agent 依据各来源扮演他，给出他这一次说的话、做的事；这段言行原样交给感知判断，",
+        "告知会察觉到的人。返回他的言行和告知了谁。这次互动留下了什么，之后由你记进记录。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "npc": {
+            "description": "出场的是谁：他在记录里的名字和身份",
+            "type": "string"
+          },
+          "situation": {
+            "description": "这次出场的情境：什么时候、在哪、刚刚发生了什么、谁在跟他打交道。只写情境，不写他要说什么、做什么",
+            "type": "string"
+          }
+        },
+        "required": [
+          "npc",
+          "situation"
+        ]
+      }
+    },
+    "list_records": {
+      "description": [
+        "列出世界的全部记录：每一份的路径、字数、最后改动的时间。",
+        "",
+        "记录是世界对自己的认识：这个世界坐落在哪个真实的地方，有哪些地方、那里什么样，有哪些人",
+        "和机构，什么东西现在处在什么状态。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    "list_senders": {
+      "description": "列出给世界发过消息的人：名字、发过几条、最近一条是什么时候。",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    "read_messages_from": {
+      "description": [
+        "读一个人最近发给世界的消息原文，从新到旧：他们说自己在哪、在做什么、对世界做了什么。",
+        "",
+        "这是他们自己说的，不是世界确认过的事。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "发消息的人的名字，跟 list_senders 列出来的一字不差",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    "read_record": {
+      "description": "读世界的一份记录的全文。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "description": "记录的路径，相对记录根目录，形如 目录/名字.md",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    "report_change": {
+      "description": [
+        "报告世界里发生的一个变化，让会察觉到它的人知道。",
+        "",
+        "由感知判断决定谁会察觉、各自察觉到的是什么，并告知他们；返回告知了谁、送没送达。",
+        "这是让居民知道世界变化的唯一办法。一个变化报告一次。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "change": {
+            "description": "世界里发生的一个变化：什么时候、在哪、什么变成了什么样。主语是世界：天气、地方、物件、机构、其他人的处境",
+            "type": "string"
+          }
+        },
+        "required": [
+          "change"
+        ]
+      }
+    },
+    "search_web": {
+      "description": [
+        "网页搜索，返回搜索结果及其网页内容。",
+        "",
+        "Args:",
+        "    query: 搜索关键词。",
+        "    gl: 结果地域代码，默认 \"CN\"。",
+        "    hl: 界面语言代码，默认 \"ZH-HANS\"。",
+        "    num: 返回结果条数，默认 5。",
+        "",
+        "Returns:",
+        "    搜索结果的文本摘要。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "gl": {
+            "default": "CN",
+            "type": "string"
+          },
+          "hl": {
+            "default": "ZH-HANS",
+            "type": "string"
+          },
+          "num": {
+            "default": 5,
+            "description": "返回结果条数",
+            "maximum": 10,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    "someone_notices": {
+      "description": [
+        "判断一个参与者会察觉到这个变化，写下他察觉到的是什么，以及要不要现在就叫他来看。",
+        "",
+        "每个会察觉的人调一次；同一个人再调一次，以最后一次为准。没有人会察觉，就一次都不调。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "who": {
+            "description": "会察觉到的那个参与者，用他在这个世界里的名字",
+            "type": "string"
+          },
+          "what": {
+            "description": "他察觉到的是什么：从他的角度写，什么时候、在哪、他看到听到感觉到了什么。这段话会原样发给他",
+            "type": "string"
+          },
+          "right_away": {
+            "description": "要不要为这件事现在就打断他，叫他来看。true：现在就打断他，他马上来看这段话；false：不为这件事打断他，这段话照样会交给他，他下一次看的时候看到。不管哪一种，他读到的都是他在那个时刻察觉到的",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "who",
+          "what",
+          "right_away"
+        ]
+      }
+    },
+    "wake_me_at": {
+      "description": [
+        "定下次醒来的时刻。每一轮结束前必须定一次；调了几次以最后一次为准。",
+        "",
+        "有人找你、或者有消息来，你会被提前叫醒，不用为等消息定时刻。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "description": "下次醒来的时刻，ISO 8601，形如 YYYY-MM-DDTHH:MM；不带时区的按东八区算",
+            "type": "string"
+          },
+          "reason": {
+            "description": "为什么定这个时刻。到时候这句话会原样摆在你眼前；时刻跟你原来定的下次醒来相同时，不另排，到时候摆出来的是原来那次写的理由",
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "reason"
+        ]
+      }
+    },
+    "write_record": {
+      "description": [
+        "整份写下一份记录：没有就新建，有就整份替换。",
+        "",
+        "改写一份已经有的记录之前，要在这一轮里读过它现在的样子。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "description": "记录的路径，相对记录根目录，形如 目录/名字.md",
+            "type": "string"
+          },
+          "text": {
+            "description": "这一份记录的全文，整份替换原来的",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "text"
+        ]
+      }
+    }
+  }
+}
