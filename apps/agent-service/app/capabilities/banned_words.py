@@ -10,9 +10,12 @@ nodes never reach into Redis directly. Single API:
 Behavior preserved 1:1 from the original ``nodes/safety._check_banned_word``:
 strip whitespace + lowercase before substring check.
 
-C5: backed by ``RedisCapability`` so the ``banned_words`` SET key
-auto-prefixes with ``{lane}:`` on non-prod lanes (test lanes don't see
-prod's blocklist, and writes from one lane don't leak into another).
+C5: backed by ``RedisCapability``, which passes keys through verbatim: the
+SET is read under the bare key ``banned_words`` on every lane, with no
+``{lane}:`` prefix (the capability stopped adding one in the 2026-05-13
+hotfix; see ``app.capabilities.redis``). Lanes see different blocklists
+only when they connect to different Redis instances: a ``coe-*`` lane has
+its own, a ``ppe-*`` lane reads prod's.
 """
 from __future__ import annotations
 
