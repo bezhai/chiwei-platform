@@ -251,25 +251,6 @@ async def mark_failed(
     return bool(getattr(result, "rowcount", 0))
 
 
-async def mark_review(
-    *, edge_id: str, idempotent_key: str, last_error: str
-) -> None:
-    """Phase 7b Gap 18: terminal state for messages routed to manual-review.
-
-    Persists last_error so operators inspecting runtime_inflight rows in
-    state='review' can see the reason without joining the queue envelope.
-    Once a row is in 'review', claim_inflight will skip it. Operators
-    must delete_inflight() it before any replay (see runbook).
-    """
-    async with get_session() as s:
-        await s.execute(text(
-            "UPDATE runtime_inflight "
-            "SET state='review', locked_until=NULL, worker_id=NULL, "
-            "    last_error=:err, updated_at=now() "
-            "WHERE edge_id=:e AND idempotent_key=:k"
-        ), {"err": last_error[:8000], "e": edge_id, "k": idempotent_key})
-
-
 async def delete_inflight(
     *,
     by: Literal["edge_idempotent", "trace_id"],

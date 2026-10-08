@@ -35,8 +35,6 @@ async def test_lifespan_migrates_then_starts_sources():
          patch("app.runtime.engine.Runtime.start_source_loops", _start_source_loops), \
          patch("app.runtime.engine.Runtime.stop_source_loops", _stop_source_loops), \
          patch("app.runtime.bootstrap.declare_durable_topology", AsyncMock()), \
-         patch("app.runtime.debounce.start_debounce_consumers", AsyncMock()), \
-         patch("app.runtime.debounce.stop_debounce_consumers", AsyncMock()), \
          patch("app.runtime.durable.stop_consumers", AsyncMock()), \
          patch("app.messaging.lifecycle.start_messaging", AsyncMock()), \
          patch("app.messaging.lifecycle.stop_messaging", AsyncMock()), \
@@ -90,8 +88,6 @@ async def test_lifespan_boots_the_app_named_by_app_name_and_runs_messaging(monke
          patch("app.runtime.durable.start_consumers", AsyncMock(side_effect=_start_consumers)), \
          patch("app.runtime.engine.Runtime.start_source_loops", AsyncMock()), \
          patch("app.runtime.engine.Runtime.stop_source_loops", AsyncMock()), \
-         patch("app.runtime.debounce.start_debounce_consumers", AsyncMock()), \
-         patch("app.runtime.debounce.stop_debounce_consumers", AsyncMock()), \
          patch("app.runtime.durable.stop_consumers", AsyncMock(side_effect=_stop_consumers)), \
          patch("app.messaging.lifecycle.start_messaging", _start_messaging), \
          patch("app.messaging.lifecycle.stop_messaging", _stop_messaging), \

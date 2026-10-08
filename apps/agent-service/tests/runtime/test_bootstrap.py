@@ -77,7 +77,7 @@ async def test_declare_durable_topology_declares_no_route_without_durable_wire()
 
 @pytest.mark.asyncio
 async def test_a_process_with_only_outbound_mq_can_still_publish():
-    """A process whose every ``Source.mq`` is gone still needs its exchange.
+    """A process with no durable wire still needs its exchange.
 
     This is not hypothetical. The living engine registers interval sources
     and zero MQ consumers, so a process can end up holding no durable wire

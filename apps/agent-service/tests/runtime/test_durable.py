@@ -111,7 +111,7 @@ async def test_durable_roundtrip(durable_env):
 
 @pytest.mark.asyncio
 async def test_publish_durable_uses_data_lane_when_context_missing(monkeypatch):
-    """Source.mq payloads carry lane in the body, not necessarily in
+    """Some payloads carry lane in the body, not necessarily in
     contextvars. Durable publish must route by the Data.lane field so
     a <queue>_<lane> source can fan out to durable_<data>_*_<lane>.
     """

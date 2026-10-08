@@ -63,8 +63,8 @@ def inject_context(
     """Return ``headers`` augmented with trace_id / lane.
 
     ``ctx`` defaults to current contextvars. Empty values are written as ``""``
-    (not omitted) to match the existing on-wire format consumed by durable /
-    debounce / source-mq handlers.
+    (not omitted) to match the existing on-wire format consumed by the
+    durable and messaging handlers.
     """
     if ctx is None:
         ctx = Context(trace_id=trace_id_var.get(), lane=lane_var.get())

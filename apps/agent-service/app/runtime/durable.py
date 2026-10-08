@@ -43,13 +43,11 @@ from aio_pika.abc import AbstractIncomingMessage
 from app.api.middleware import lane_var, trace_id_var
 from app.infra.rabbitmq import Route, current_lane, lane_queue, mq
 from app.runtime.data import Data
-from app.runtime.errors import DuplicateData, NeedsReview
 from app.runtime.inflight import (
     claim_inflight,
     edge_id_for,
     mark_failed,
     mark_history_backfill,
-    mark_review,
     mark_succeeded,
 )
 from app.runtime.migrator import _table_name
@@ -62,22 +60,12 @@ from app.runtime.propagation import (
     extract_context,
     inject_context,
 )
-from app.runtime.retry import DELIVERY_COUNT_HEADER, decide_retry
-from app.runtime.review_queue import (
-    publish_to_review_queue,
-    review_queue_name_for,
-    route_for_review,
-)
 from app.runtime.wire import WireSpec
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
-_DEFAULT_LEASE_MS = 300_000  # 5 min — only used when wire has no .retry()
+_LEASE_MS = 300_000  # 5 min
 
 logger = logging.getLogger(__name__)
-
-# Module-level alias so tests can patch "app.runtime.durable.publish_with_confirm"
-# without needing to reach into mq.publish_with_confirm.
-publish_with_confirm = mq.publish_with_confirm
 
 
 def _route_for(w: WireSpec, consumer: Callable) -> Route:
@@ -152,15 +140,14 @@ def _build_handler(w: WireSpec, consumer: Callable):
          - n == 1 → Data row newly written; continue to consumer.
          Adoption-mode Data skips this step (its consumer-side dedup
          carries the original guarantee).
-      5. Invoke consumer; mark succeeded on success, mark failed on
-         exception. Retry transport (republish with x-delay) is
-         introduced in Task 5; this commit retains the legacy
-         fail-to-DLQ via ``message.process(requeue=False)``.
+      5. Invoke consumer; mark succeeded on success. On exception, mark
+         the inflight row failed with the error and re-raise, so
+         ``message.process(requeue=False)`` rejects the message and the
+         broker dead-letters it. There is no retry.
     """
     data_cls = w.data_type
     param_name = next(iter(inputs_of(consumer)))
     edge_id = edge_id_for(data_cls.__qualname__, consumer.__qualname__)
-    lease_ms = w.retry.lease_ms if w.retry is not None else _DEFAULT_LEASE_MS
     data_table = _table_name(data_cls)
     meta = getattr(data_cls, "Meta", None)
     is_adoption = meta is not None and getattr(meta, "existing_table", None) is not None
@@ -181,7 +168,7 @@ def _build_handler(w: WireSpec, consumer: Callable):
                     idempotent_key=idem_key,
                     data_table=data_table,
                     worker_id=WORKER_ID,
-                    lease_ms=lease_ms,
+                    lease_ms=_LEASE_MS,
                     trace_id=ctx.trace_id,
                 )
                 if outcome.action == "skip":
@@ -226,20 +213,15 @@ def _build_handler(w: WireSpec, consumer: Callable):
                 try:
                     await consumer(**{param_name: obj})
                 except Exception as exc:
-                    # Classification: PER-MESSAGE routed (contract §4.2). The
-                    # router dispatches by exception type × wire.on_error policy:
-                    # DuplicateData/NeedsReview → ack with terminal state; retry
-                    # exhausted + dlq (default) → re-raise so process(requeue=
-                    # False) routes to DLX; retry available → mark_failed +
-                    # republish with delay. _route_consumer_exception NEVER
-                    # silently swallows—every path either ack's with a terminal
-                    # state or re-raises.
-                    await _route_consumer_exception(
-                        exc, wire=w, consumer=consumer,
-                        inflight_key=(edge_id, idem_key),
-                        data=obj, attempts=outcome.attempts,
-                        headers=dict(message.headers or {}),
+                    # Classification: PER-MESSAGE routed (contract §4.2): the
+                    # inflight row records why, and the re-raise makes
+                    # process(requeue=False) reject the message to the DLX.
+                    await mark_failed(
+                        edge_id=edge_id,
+                        idempotent_key=idem_key,
+                        last_error=str(exc),
                     )
+                    raise
                 else:
                     await mark_succeeded(
                         edge_id=edge_id,
@@ -247,126 +229,6 @@ def _build_handler(w: WireSpec, consumer: Callable):
                     )
 
     return handler
-
-
-async def _route_consumer_exception(
-    exc: BaseException,
-    *,
-    wire: WireSpec,
-    consumer: Callable,
-    inflight_key: tuple[str, str],
-    data: Data,
-    attempts: int,
-    headers: dict | None = None,
-) -> None:
-    """Phase 7b Gap 18: dispatch a consumer exception per wire.on_error.
-
-    Contract:
-      - return -> 'handled' path: caller's ``async with message.process(...)``
-        will ack on clean exit. inflight terminal state is updated here.
-      - raise  -> 'dlq' path: caller's ``process(requeue=False)`` will nack
-        and the broker will route to DLX. Always re-raises the ORIGINAL
-        exception (so DLQ message body keeps the cause).
-
-    Helper itself NEVER calls message.ack() / message.nack() — see project
-    memory feedback_aio_pika_process_context_double_ack.
-    """
-    edge_id, idem_key = inflight_key
-    last_error = str(exc)
-
-    # 1. typed exception in matching policy
-    if isinstance(exc, DuplicateData) and wire.on_error == "ignore-duplicate":
-        logger.warning(
-            "durable consumer: duplicate ignored (edge=%s key=%s reason=%s)",
-            edge_id, idem_key, last_error,
-        )
-        await mark_succeeded(edge_id=edge_id, idempotent_key=idem_key)
-        return
-
-    if isinstance(exc, NeedsReview) and wire.on_error == "manual-review":
-        confirmed = await publish_to_review_queue(
-            wire=wire, consumer=consumer, data=data, exc=exc,
-            attempts=attempts, last_error=last_error,
-        )
-        if not confirmed:
-            logger.warning(
-                "durable consumer: review queue publish-confirm failed, "
-                "falling through to DLQ (edge=%s key=%s)",
-                edge_id, idem_key,
-            )
-            await mark_failed(edge_id=edge_id, idempotent_key=idem_key,
-                              last_error=last_error)
-            raise exc
-        await mark_review(edge_id=edge_id, idempotent_key=idem_key,
-                          last_error=last_error)
-        return
-
-    # 2. swallow_and_log (contract §4.2 / B4): generic-Exception last-resort
-    #    bucket. Typed DuplicateData / NeedsReview paired with their matching
-    #    policy already returned above; everything else (including typed
-    #    exceptions in mismatched policies — they fell through) is swallowed:
-    #    log + mark_succeeded + return (caller's `async with message.process`
-    #    will ack). NEVER default — only edges that explicitly declared
-    #    .on_error("swallow_and_log") land here.
-    if wire.on_error == "swallow_and_log":
-        logger.warning(
-            "durable consumer: swallow_and_log policy ate exception "
-            "(edge=%s key=%s attempts=%d type=%s reason=%s)",
-            edge_id, idem_key, attempts, type(exc).__name__, last_error,
-        )
-        await mark_succeeded(edge_id=edge_id, idempotent_key=idem_key)
-        return
-
-    # 3. generic Exception path (incl. typed exceptions in mismatched policies)
-    await mark_failed(edge_id=edge_id, idempotent_key=idem_key,
-                      last_error=last_error)
-    decision = decide_retry(
-        headers=headers or {},
-        policy=wire.retry,
-    )
-    if decision.action == "retry":
-        new_headers = dict(headers or {})
-        new_headers[DELIVERY_COUNT_HEADER] = decision.attempt
-        body = data.model_dump(mode="json")
-        retry_lane = new_headers.get("lane") or None
-        if isinstance(retry_lane, str) and not retry_lane:
-            retry_lane = None
-        route = _route_for(wire, consumer)
-        confirmed = await publish_with_confirm(
-            route, body, headers=new_headers,
-            lane=retry_lane, delay_ms=decision.delay_ms,
-        )
-        if not confirmed:
-            logger.warning(
-                "durable consumer: retry publish-confirm failed, falling "
-                "through to DLQ (edge=%s key=%s attempt=%d)",
-                edge_id, idem_key, decision.attempt,
-            )
-            raise exc
-        logger.info(
-            "durable consumer: retry queued attempt=%d delay_ms=%d key=%s",
-            decision.attempt, decision.delay_ms, idem_key,
-        )
-        return
-
-    # 3. dlq fallback (.on_error("manual-review") with retry-exhausted handled here too)
-    if wire.on_error == "manual-review":
-        confirmed = await publish_to_review_queue(
-            wire=wire, consumer=consumer, data=data, exc=exc,
-            attempts=attempts, last_error=last_error,
-        )
-        if not confirmed:
-            logger.warning(
-                "durable consumer: review queue publish-confirm failed, "
-                "falling through to DLQ (edge=%s key=%s)",
-                edge_id, idem_key,
-            )
-            raise exc
-        await mark_review(edge_id=edge_id, idempotent_key=idem_key,
-                          last_error=last_error)
-        return
-
-    raise exc  # default on_error="dlq" -> caller's process(requeue=False)
 
 
 async def start_consumers(app_name: str | None = None) -> None:
@@ -435,17 +297,6 @@ async def start_consumers(app_name: str | None = None) -> None:
                 actual_queue,
                 consumer.__name__,
             )
-
-            # Phase 7b Gap 18: declare review queue for wires that opted
-            # into on_error='manual-review'. No consumer — it's a terminal
-            # inspect-only queue; operators replay via admin endpoints.
-            if w.on_error == "manual-review":
-                review_route = route_for_review(review_queue_name_for(w, consumer))
-                await mq.declare_route(review_route)
-                logger.info(
-                    "review queue declared: %s",
-                    review_route.queue,
-                )
 
 
 async def stop_consumers() -> None:

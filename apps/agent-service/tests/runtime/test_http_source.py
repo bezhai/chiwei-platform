@@ -116,13 +116,13 @@ def test_http_source_post_default_unchanged():
 
 
 def test_http_source_skips_non_http_sources():
-    """A cron-source wire should NOT produce an HTTP endpoint."""
+    """An interval-source wire should NOT produce an HTTP endpoint."""
 
     @node
     async def handler(p: _Ping) -> None:
         pass
 
-    wire(_Ping).from_(Source.cron("* * * * *")).to(handler)
+    wire(_Ping).from_(Source.interval(60)).to(handler)
 
     app = FastAPI()
     register_http_sources(app)

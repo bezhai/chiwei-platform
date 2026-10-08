@@ -63,7 +63,7 @@ class Route(NamedTuple):
 
     queue: str
     rk: str
-    lane_fallback: bool = True   # debounce route 用 False；默认 True 不破坏现有 Route("queue", "rk") 调用
+    lane_fallback: bool = True   # False：lane 队列过期不回落 prod（现在没有路由用）；默认 True 不破坏现有 Route("queue", "rk") 调用
     isolated: bool = False
 
 
@@ -161,7 +161,7 @@ def channel_route_for_payload(base_queue: str, payload: Any) -> Route:
 # ALL_ROUTES 身兼两职，删东西之前先看清是哪一职：
 #
 #   声明面   declare_topology 遍历它建队列 + 绑定
-#   注册面   Sink.mq(name) / Source.mq(name) 的合法队列名从它来
+#   注册面   Sink.mq(name) 的合法队列名从它来
 #            （compile_graph 的 known_queues、sink_dispatch._route_by_queue、
 #            dlq_admin 的重放目标查表）
 #
@@ -367,8 +367,6 @@ class _RabbitMQ:
 
         Reads ``route.lane_fallback`` (default True for prod compatibility) to
         decide whether the lane queue gets x-message-ttl-back-to-prod fallback.
-        debounce routes set ``lane_fallback=False`` so 300s delays don't get
-        short-circuited to prod (spec §3.4.4 / codex review round-5 H1).
 
         *lane* defaults to ``current_lane()``; pass it explicitly (``None`` for
         prod) when the queue belongs to the process's deployment lane rather

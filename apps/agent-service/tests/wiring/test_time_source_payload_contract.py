@@ -1,6 +1,6 @@
 """时间源 Data 形态契约测试 —— 抓"编译期溜过、生产源循环才炸"那类 bug.
 
-框架硬约定（runtime/engine.py ``_build_payload``）：cron / interval 源每次 tick
+框架硬约定（runtime/engine.py ``_build_payload``）：interval 源每次 tick
 **只用 ``w.data_type(ts=<iso>)`` 构造** payload —— 时间源的 Data 必须是带
 ``ts: str`` 字段的单字段 tick（正例见 ``app/living/moment.py`` 的
 ``LifeMomentTick(ts: Annotated[str, Key])``）。
@@ -10,7 +10,7 @@
 tick 就 ``_build_payload`` raise → ``_record_source_error`` → watchdog
 ``os._exit(1)`` → Pod 被杀重启 → 该源驱动的整条链路在生产里永远起不来。
 
-这个文件对生产图里**每一条带 cron/interval 源的 wire** 断言其 ``data_type``
+这个文件对生产图里**每一条带 interval 源的 wire** 断言其 ``data_type``
 满足这条契约（直接复用 ``Runtime._build_payload`` 真实构造，不另起炉灶）。它能抓
 住这一整类 bug，不针对某一条具体的钟。
 """
@@ -47,11 +47,11 @@ def _rebuild_production_graph():
 
 
 def _time_source_wires(graph):
-    """生产图里所有带 cron / interval 源的 wire（这些源走 _build_payload）。"""
+    """生产图里所有带 interval 源的 wire（这些源走 _build_payload）。"""
     return [
         w
         for w in graph.wires
-        if any(s.kind in ("cron", "interval") for s in w.sources)
+        if any(s.kind == "interval" for s in w.sources)
     ]
 
 
@@ -64,7 +64,7 @@ _TIME_SOURCE_NAMES = [
 def test_production_graph_has_time_sources():
     """前置健全：生产图确实有时间源 wire，否则下面的契约断言会 vacuously pass。"""
     graph = _rebuild_production_graph()
-    assert _time_source_wires(graph), "生产图没有任何 cron/interval 源 wire"
+    assert _time_source_wires(graph), "生产图没有任何 interval 源 wire"
 
 
 @pytest.mark.parametrize("wire_name", _TIME_SOURCE_NAMES)

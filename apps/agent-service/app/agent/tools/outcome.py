@@ -12,8 +12,7 @@ module defines:
   converting to the outcome dict.
 
 Failures that are *not* business-semantic (timeout / rate-limit /
-upstream 5xx) propagate out of ``@tool_error`` and are handled by wire
-``on_error`` policies (contract §1 forbids node-level on_error).
+upstream 5xx) propagate out of ``@tool_error`` to the caller.
 
 Contract reference: ``docs/guides/dataflow-node-contract.md`` §4.7 + §4.8.
 """

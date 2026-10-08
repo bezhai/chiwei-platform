@@ -1,13 +1,31 @@
-"""Retry decision logic (Gap 7.2/7.3)."""
+"""Retry policy and decision logic (Gap 7.2/7.3)."""
 
 from __future__ import annotations
 
 from app.runtime.retry import (
     DELIVERY_COUNT_HEADER,
+    RetryPolicy,
     decide_retry,
     delivery_count,
 )
-from app.runtime.wire import RetryPolicy
+
+
+class TestRetryPolicy:
+    def test_delay_for_attempt_exponential(self) -> None:
+        p = RetryPolicy(n=5, backoff="exponential",
+                        base_delay_ms=500, max_delay_ms=30_000, lease_ms=300_000)
+        assert p.delay_for_attempt(1) == 500
+        assert p.delay_for_attempt(2) == 1000
+        assert p.delay_for_attempt(3) == 2000
+        assert p.delay_for_attempt(10) == 30_000  # clamped to max
+
+    def test_delay_for_attempt_linear(self) -> None:
+        p = RetryPolicy(n=5, backoff="linear",
+                        base_delay_ms=500, max_delay_ms=30_000, lease_ms=300_000)
+        assert p.delay_for_attempt(1) == 500
+        assert p.delay_for_attempt(2) == 1000
+        assert p.delay_for_attempt(3) == 1500
+        assert p.delay_for_attempt(100) == 30_000  # clamped
 
 
 class TestDeliveryCount:

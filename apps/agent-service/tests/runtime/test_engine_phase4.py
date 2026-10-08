@@ -1,9 +1,8 @@
-"""Phase 4 runtime extensions: Source.cron tz + start_source_loops + watchdog."""
+"""Phase 4 runtime extensions: start_source_loops + watchdog."""
 from __future__ import annotations
 
 import asyncio
 from typing import Annotated
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -12,84 +11,12 @@ from app.runtime.emit import reset_emit_runtime
 from app.runtime.engine import Runtime
 from app.runtime.node import node
 from app.runtime.placement import clear_bindings
-from app.runtime.source import Source, SourceSpec
+from app.runtime.source import Source
 from app.runtime.wire import clear_wiring, wire
-
-
-def test_source_cron_default_tz_is_utc():
-    spec = Source.cron("* * * * *")
-    assert isinstance(spec, SourceSpec)
-    assert spec.kind == "cron"
-    assert spec.params["expr"] == "* * * * *"
-    assert spec.params["tz"] == "UTC"
-
-
-def test_source_cron_accepts_tz():
-    spec = Source.cron("0 5 * * *", tz="Asia/Shanghai")
-    assert spec.params["tz"] == "Asia/Shanghai"
-
-
-class _TzTick(Data):
-    ts: Annotated[str, Key]
-
-
-_tz_emitted: list[_TzTick] = []
-
-
-@node
-async def _record_tz_tick(t: _TzTick) -> None:
-    _tz_emitted.append(t)
-
-
-@pytest.mark.asyncio
-async def test_cron_source_uses_declared_tz(monkeypatch):
-    """croniter base must be in the declared tz so cron expressions are
-    interpreted at the right wall clock."""
-    clear_wiring()
-    clear_bindings()
-    reset_emit_runtime()
-    _tz_emitted.clear()
-
-    captured: dict = {}
-
-    def fake_croniter(expr, base):
-        captured["base"] = base
-        captured["expr"] = expr
-        # Stub croniter that returns a single far-future tick so the loop
-        # awaits and the test cancels it.
-        class _Iter:
-            def get_next(self, _t):
-                return base.replace(year=base.year + 1)
-        return _Iter()
-
-    monkeypatch.setattr("croniter.croniter", fake_croniter)
-
-    wire(_TzTick).from_(Source.cron("0 5 * * *", tz="Asia/Shanghai")).to(_record_tz_tick)
-
-    rt = Runtime(app_name="agent-service")
-    # Use start_source_loops once Task 2 lands; for now invoke private
-    # helper to validate tz wiring. Rewrite this test in Task 2.
-    # NOTE: this assertion requires _source_loop_cron to honor tz.
-    task = asyncio.create_task(rt._source_loop_cron(
-        next(w for w in __import__("app.runtime.graph", fromlist=["compile_graph"]).compile_graph().wires if w.data_type is _TzTick),
-        Source.cron("0 5 * * *", tz="Asia/Shanghai"),
-    ))
-    await asyncio.sleep(0.05)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    assert captured["base"].tzinfo == ZoneInfo("Asia/Shanghai")
 
 
 class _StartTick(Data):
     ts: Annotated[str, Key]
-
-
-class _MqTick(Data):
-    message_id: Annotated[str, Key]
 
 
 _start_seen: list[_StartTick] = []
@@ -98,11 +25,6 @@ _start_seen: list[_StartTick] = []
 @node
 async def _record_start(t: _StartTick) -> None:
     _start_seen.append(t)
-
-
-@node
-async def _record_mq_tick(t: _MqTick) -> None:  # pragma: no cover - never reached
-    raise AssertionError("_record_mq_tick should be stubbed before execution")
 
 
 @pytest.mark.asyncio
@@ -139,7 +61,7 @@ async def test_start_source_loops_skips_time_sources_in_ppe(monkeypatch, caplog)
     try:
         await asyncio.sleep(0.2)
         assert _start_seen == []
-        assert "skipped 1 cron/interval source(s)" in caplog.text
+        assert "skipped 1 interval source(s)" in caplog.text
     finally:
         await rt.stop_source_loops()
 
@@ -160,29 +82,6 @@ async def test_start_source_loops_override_allows_time_sources_in_ppe(monkeypatc
     try:
         await asyncio.sleep(0.2)
         assert len(_start_seen) >= 1
-    finally:
-        await rt.stop_source_loops()
-
-
-@pytest.mark.asyncio
-async def test_start_source_loops_keeps_mq_sources_in_ppe(monkeypatch):
-    clear_wiring()
-    clear_bindings()
-    reset_emit_runtime()
-    monkeypatch.setenv("LANE", "ppe-refactor")
-    monkeypatch.delenv("DATAFLOW_ENABLE_TIME_SOURCES", raising=False)
-
-    async def _fake_source_loop_mq(self, w, src):
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(Runtime, "_source_loop_mq", _fake_source_loop_mq)
-
-    wire(_MqTick).from_(Source.mq("runtime_test_mq")).to(_record_mq_tick)
-
-    rt = Runtime(app_name="agent-service")
-    await rt.start_source_loops()
-    try:
-        assert [t.get_name() for t in rt._source_tasks] == ["mq[_MqTick]"]
     finally:
         await rt.stop_source_loops()
 

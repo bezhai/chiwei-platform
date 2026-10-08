@@ -91,10 +91,10 @@ _ALL_SOURCES = (
     ") for s in WIRING_REGISTRY for x in s.sources))"
 )
 
-# 钟不是入站边：``Engine._build_payload`` 对 cron / interval 固定造
-# ``data_type(ts=<iso>)``，外面塞不进任何内容。除这两种之外的每一种 kind 都算外部
+# 钟不是入站边：``Engine._build_payload`` 对 interval 固定造
+# ``data_type(ts=<iso>)``，外面塞不进任何内容。除它之外的每一种 kind 都算外部
 # 来源——包括今天还不存在的 kind，新增一种就会落进下面的判据里。
-_CLOCK_KINDS = frozenset({"interval", "cron"})
+_CLOCK_KINDS = frozenset({"interval"})
 
 _LIVING_ROOT = "app.living"
 

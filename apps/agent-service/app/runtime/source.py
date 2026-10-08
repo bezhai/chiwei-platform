@@ -5,10 +5,8 @@ graph. Factories on ``Source`` construct specs; the engine interprets
 ``kind`` to wire up the actual adapter at runtime.
 
 Surface kept intentionally minimal — every kind here has a real
-adapter wired up in the engine. Business-specific entry points
-(feishu webhooks, ops-manual triggers, ...) live in their own services
-(channel-server webhook ingress, /ops endpoints) and feed the graph through ``Source.mq``
-or a plain ``Source.http`` route.
+adapter: ``http`` routes are mounted by ``app.runtime.http_source``,
+``interval`` loops run in the engine.
 """
 
 from __future__ import annotations
@@ -85,25 +83,8 @@ class Source:
         )
 
     @staticmethod
-    def cron(expr: str, *, tz: str = "UTC") -> SourceSpec:
-        """5-field cron expression. ``tz``: IANA zone name
-        (e.g. 'Asia/Shanghai'); the loop fires at the right wall-clock
-        time in that zone. ``croniter.get_next`` is absolute-time based.
-        """
-        return SourceSpec("cron", {"expr": expr, "tz": tz})
-
-    @staticmethod
     def interval(seconds: float) -> SourceSpec:
-        """Simple periodic source: emit every ``seconds`` seconds.
-
-        Cron expressions have a 1-minute minimum resolution (standard
-        5-field format); ``interval`` fills the sub-minute niche and also
-        gives tests a fast-firing source without mocking croniter.
-        """
+        """Simple periodic source: emit every ``seconds`` seconds."""
         if seconds <= 0:
             raise ValueError(f"Source.interval(seconds={seconds!r}) must be positive")
         return SourceSpec("interval", {"seconds": float(seconds)})
-
-    @staticmethod
-    def mq(queue: str) -> SourceSpec:
-        return SourceSpec("mq", {"queue": queue})

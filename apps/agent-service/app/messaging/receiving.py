@@ -147,8 +147,12 @@ from app.runtime.inflight import (
     succeeded_keys,
 )
 from app.runtime.propagation import bind_context, extract_context
-from app.runtime.retry import DELIVERY_COUNT_HEADER, decide_retry, delivery_count
-from app.runtime.wire import RetryPolicy
+from app.runtime.retry import (
+    DELIVERY_COUNT_HEADER,
+    RetryPolicy,
+    decide_retry,
+    delivery_count,
+)
 
 logger = logging.getLogger(__name__)
 

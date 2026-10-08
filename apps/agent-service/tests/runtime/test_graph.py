@@ -21,11 +21,6 @@ class Cfg(Data, AdminOnly):
     v: dict
 
 
-class S(Data):
-    sid: Annotated[str, Key]
-    v: int
-
-
 class X(Data):
     xid: Annotated[str, Key]
 
@@ -44,20 +39,6 @@ class TMsg(Data):
 
     class Meta:
         transient = True
-
-
-class JoinKeyOnly(Data):
-    """W2a: with_latest target whose Key (sid) is absent on M.mid — must reject."""
-
-    sid: Annotated[str, Key]
-    v: int = 0
-
-
-class MatchingKey(Data):
-    """W2a: with_latest target whose Key (mid) matches M.mid — must pass."""
-
-    mid: Annotated[str, Key]
-    v: int = 0
 
 
 def setup_function():
@@ -101,17 +82,6 @@ def test_wire_to_unknown_node_rejected():
         compile_graph()
 
 
-def test_with_latest_requires_as_latest_declared():
-    # S is defined at module top so @node's get_type_hints can resolve the annotation.
-    @node
-    async def f(m: M, s: S) -> None: ...
-
-    wire(M).to(f).with_latest(S)
-    # S has no wire(S).as_latest() declaration anywhere
-    with pytest.raises(GraphError, match="with_latest.*requires.*as_latest"):
-        compile_graph()
-
-
 def test_consumer_missing_data_type_param_rejected():
     # Consumer only accepts Cfg, but wire routes M to it -> signature mismatch.
     @node
@@ -122,22 +92,8 @@ def test_consumer_missing_data_type_param_rejected():
         compile_graph()
 
 
-def test_consumer_missing_with_latest_param_rejected():
-    # Consumer accepts M but not S; wire asks for with_latest(S) -> signature mismatch.
-    @node
-    async def takes_only_m(m: M) -> None: ...
-
-    @node
-    async def s_producer(s: S) -> None: ...
-
-    wire(S).to(s_producer).as_latest()
-    wire(M).to(takes_only_m).with_latest(S)
-    with pytest.raises(GraphError, match="does not match the wire inputs"):
-        compile_graph()
-
-
 def test_consumer_extra_data_param_rejected():
-    # Consumer takes M and X; wire only declares M (no with_latest(X)).
+    # Consumer takes M and X; wire only declares M.
     # Subset matching used to pass this — emit() then crashes with a
     # missing-kwarg at first traffic. compile_graph must reject it at boot.
     @node
@@ -177,24 +133,6 @@ def test_default_bound_and_unbound_on_same_wire_ok():
     bind(explicit_default).to_app(DEFAULT_APP)
     wire(M).to(explicit_default, implicit_default)
     compile_graph()  # no raise
-
-
-def test_durable_with_latest_rejected_until_handler_supports_it():
-    # Durable consumer dispatch is single-input: publish_durable only
-    # carries the primary Data on the queue, and _build_handler calls
-    # the consumer with one kwarg. with_latest is resolved only on the
-    # in-process emit path. Combining them used to compile fine and
-    # then explode on first delivery — refuse at boot.
-    @node
-    async def takes_m_with_s(m: M, s: S) -> None: ...
-
-    @node
-    async def s_producer(s: S) -> None: ...
-
-    wire(S).to(s_producer).as_latest()
-    wire(M).to(takes_m_with_s).with_latest(S).durable()
-    with pytest.raises(GraphError, match="durable.*with_latest|with_latest.*durable"):
-        compile_graph()
 
 
 def test_durable_transient_data_rejected():
@@ -364,47 +302,15 @@ def test_http_source_consumer_in_default_app_ok(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# A0 contract —缺失断言 W2a / W4a / W14
+# A0 contract —缺失断言 W4a
 # ---------------------------------------------------------------------------
-
-
-def test_w2a_with_latest_join_key_must_exist_on_primary():
-    # W2a: with_latest(X) 把 X 的第一个 Key 当作 join key 在 emit 时从 primary
-    # data 同名属性上取（emit.py:_resolve_inputs 的 getattr(data, key)）。primary
-    # 类没有同名属性时，当前是 emit 首次触发才 raise RuntimeError——compile_graph
-    # 必须在 boot 时就拒绝。
-    # M 只有 mid，JoinKeyOnly.Key=sid → primary 没有 sid 属性
-    @node
-    async def needs_join(m: M, s: JoinKeyOnly) -> None: ...
-
-    @node
-    async def join_producer(s: JoinKeyOnly) -> None: ...
-
-    wire(JoinKeyOnly).to(join_producer).as_latest()
-    wire(M).to(needs_join).with_latest(JoinKeyOnly)
-
-    with pytest.raises(GraphError, match="with_latest.*JoinKeyOnly.*sid"):
-        compile_graph()
-
-
-def test_w2a_with_latest_join_key_present_ok():
-    # primary 类拥有 join key 同名属性时通过
-    @node
-    async def reader(m: M, mk: MatchingKey) -> None: ...
-
-    @node
-    async def producer(mk: MatchingKey) -> None: ...
-
-    wire(MatchingKey).to(producer).as_latest()
-    wire(M).to(reader).with_latest(MatchingKey)
-    compile_graph()  # no raise
 
 
 def test_w4a_cross_app_compile_does_not_reject():
     # W4a 是 runtime 检查（在 emit() 触发时 raise），不是 compile-time。
     # compile_graph 无法判断 emit 触发方所在 app（无状态），所以这里只确认
     # compile 通过，真正的 raise 测试见 tests/runtime/test_emit_cross_process.py
-    # 的 test_emit_raises_when_no_mq_source_and_consumer_other_app。
+    # 的 test_emit_raises_when_consumer_in_other_app_without_durable。
     @node
     async def vectorize_consumer(x: X) -> None: ...
 
@@ -430,36 +336,4 @@ def test_w4a_same_app_wire_without_transport_ok():
     async def local_consumer(x: X) -> None: ...
 
     wire(X).to(local_consumer)
-    compile_graph()  # no raise
-
-
-def test_w14_on_error_non_default_requires_durable():
-    # W14: on_error != 'dlq' 时 wire 必须 .durable()。in-process 边异常直接
-    # propagate，on_error 在 in-process 路径上没有意义；声明了 != 'dlq' 但忘
-    # .durable() 说明业务认知错了，必须 boot 时拒绝。
-    @node
-    async def reviewer(x: X) -> None: ...
-
-    wire(X).to(reviewer).on_error("manual-review")  # 缺 .durable()
-
-    with pytest.raises(GraphError, match="on_error.*durable|durable.*on_error"):
-        compile_graph()
-
-
-def test_w14_on_error_dlq_default_ok_without_durable():
-    # 默认 on_error='dlq' 的 in-process wire 是合法状态——dlq 是默认值，
-    # 业务没显式声明任何 policy，不算违反 W14
-    @node
-    async def consumer(x: X) -> None: ...
-
-    wire(X).to(consumer)  # 没 .on_error()，没 .durable()
-    compile_graph()  # no raise
-
-
-def test_w14_on_error_with_durable_ok():
-    # on_error != 'dlq' + .durable() 是设计内的正确组合
-    @node
-    async def reviewer(x: X) -> None: ...
-
-    wire(X).to(reviewer).durable().on_error("manual-review")
     compile_graph()  # no raise

@@ -18,10 +18,6 @@ chat-response-worker between two key spaces and silently dropped
 values on lane verification — see trace
 ``3de371aea10290b327f1386ea56f180c`` and hotfix commit on
 2026-05-13.
-
-The runtime's debounce / single-flight modules talk to the raw client
-directly to avoid inverting the dependency stack (capability →
-runtime).
 """
 from __future__ import annotations
 
@@ -81,10 +77,7 @@ class RedisCapability:
     async def incr(self, key: str, amount: int = 1) -> int:
         try:
             return await self._client.incr(key, amount)
-        except (
-            asyncio.TimeoutError,
-            redis.exceptions.RedisError,
-        ) as e:
+        except (TimeoutError, redis.exceptions.RedisError) as e:
             raise _wrap_error(e, op="incr", key=key) from e
 
     # -- Set read accessor ---------------------------------------------------
@@ -93,10 +86,7 @@ class RedisCapability:
         """``SMEMBERS key`` — returns empty set if missing."""
         try:
             return await self._client.smembers(key)
-        except (
-            asyncio.TimeoutError,
-            redis.exceptions.RedisError,
-        ) as e:
+        except (TimeoutError, redis.exceptions.RedisError) as e:
             raise _wrap_error(e, op="smembers", key=key) from e
 
     # -- String value with TTL (agent session续接) ---------------------------
@@ -105,10 +95,7 @@ class RedisCapability:
         """``GET key`` — returns ``None`` if missing."""
         try:
             return await self._client.get(key)
-        except (
-            asyncio.TimeoutError,
-            redis.exceptions.RedisError,
-        ) as e:
+        except (TimeoutError, redis.exceptions.RedisError) as e:
             raise _wrap_error(e, op="get", key=key) from e
 
     async def set_with_ttl(self, key: str, value: str, *, ttl_seconds: int) -> None:
@@ -119,20 +106,14 @@ class RedisCapability:
         """
         try:
             await self._client.set(key, value, ex=ttl_seconds)
-        except (
-            asyncio.TimeoutError,
-            redis.exceptions.RedisError,
-        ) as e:
+        except (TimeoutError, redis.exceptions.RedisError) as e:
             raise _wrap_error(e, op="set_with_ttl", key=key) from e
 
     async def expire(self, key: str, seconds: int) -> None:
         """``EXPIRE key seconds`` — refresh a key's TTL without rewriting it."""
         try:
             await self._client.expire(key, seconds)
-        except (
-            asyncio.TimeoutError,
-            redis.exceptions.RedisError,
-        ) as e:
+        except (TimeoutError, redis.exceptions.RedisError) as e:
             raise _wrap_error(e, op="expire", key=key) from e
 
     # -- Lua scripts ---------------------------------------------------------
@@ -148,10 +129,7 @@ class RedisCapability:
         through untouched."""
         try:
             return await self._client.eval(script, len(keys), *keys, *args)
-        except (
-            asyncio.TimeoutError,
-            redis.exceptions.RedisError,
-        ) as e:
+        except (TimeoutError, redis.exceptions.RedisError) as e:
             key_repr = keys[0] if keys else None
             raise _wrap_error(e, op="eval", key=key_repr) from e
 

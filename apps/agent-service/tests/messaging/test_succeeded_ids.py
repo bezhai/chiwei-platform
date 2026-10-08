@@ -16,7 +16,7 @@ from app.messaging import receiving
 from app.messaging.lifecycle import start_messaging
 from app.messaging.receiving import inbox, succeeded_message_ids
 from app.messaging.sending import send
-from app.runtime.wire import RetryPolicy
+from app.runtime.retry import RetryPolicy
 
 from .helpers import eventually
 

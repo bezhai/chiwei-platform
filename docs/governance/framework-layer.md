@@ -50,24 +50,18 @@ new runtime behavior, extend [A] first instead of bypassing the framework.
 - Any PR touching [A] must cite a markdown spec in the PR body with:
   `Framework-Layer-Spec: docs/.../*.md`.
 - Single-output `@node` functions return `Data` and let the wrapper auto-emit.
-- Per-key fan-out uses `wire(Data).fan_out_per(extractor)`, not hand-written
-  persona loops.
 - Manual `await emit(...)` in business code is allowed only for non-node code,
   genuinely multiple dynamic outputs, streaming segments, or deliberate
   fire-and-forget side effects with local error handling.
 
 ## Time Source Policy
 
-Cron and interval sources are production side effects. In deployment lanes:
+Interval sources are production side effects. In deployment lanes:
 
-- `prod` / `blue`: cron and interval sources run by default.
-- `coe-*` / `ppe-*` / unknown: cron and interval sources are skipped by
-  default.
+- `prod` / `blue`: interval sources run by default.
+- `coe-*` / `ppe-*` / unknown: interval sources are skipped by default.
 - To intentionally test time sources in a lane, set
   `DATAFLOW_ENABLE_TIME_SOURCES=1`.
-
-MQ sources are not disabled by this policy; workers still need lane-scoped
-queue consumption for normal verification.
 
 ## Current Manual Emit Roster
 

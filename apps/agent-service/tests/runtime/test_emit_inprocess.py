@@ -39,19 +39,6 @@ async def test_emit_default_edge_awaits_consumer():
 
 
 @pytest.mark.asyncio
-async def test_emit_when_predicate_filters():
-    @node
-    async def only_x(m: M) -> None:
-        calls.append(m)
-
-    wire(M).to(only_x).when(lambda m: m.mid == "x")
-    compile_graph()
-    await emit(M(mid="y", text="skip"))
-    await emit(M(mid="x", text="keep"))
-    assert [c.text for c in calls] == ["keep"]
-
-
-@pytest.mark.asyncio
 async def test_emit_multiple_consumers_fan_out():
     @node
     async def a(m: M) -> None:

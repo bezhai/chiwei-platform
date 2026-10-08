@@ -2,9 +2,8 @@
 broker with queues, bindings and consumers.
 
 Interception point: the methods of ``app.infra.rabbitmq.mq`` (every module shares that one
-instance) plus ``app.runtime.durable.publish_with_confirm``, an alias bound at import time.
-Everything above it is real: the messaging layer's records, claims, retries and settle
-decisions; sink dispatch for the two outbound queues; the durable and debounce consumers.
+instance). Everything above it is real: the messaging layer's records, claims, retries and settle
+decisions; sink dispatch for the two outbound queues; the durable consumers.
 
 What the broker does and does not do on its own:
 
@@ -191,11 +190,8 @@ class FakeBroker:
     # ------------------------------------------------------------------ setup
 
     def install(self, monkeypatch) -> None:
-        import app.runtime.durable as durable
-
         for name in _MQ_METHODS:
             monkeypatch.setattr(mq, name, getattr(self, name))
-        monkeypatch.setattr(durable, "publish_with_confirm", self.publish_with_confirm)
 
     def declare_inbox(
         self, participant: str, *, answers: Answerer | None = None

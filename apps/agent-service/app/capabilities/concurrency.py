@@ -22,8 +22,7 @@ Why this exists:
   ``CapabilityRateLimited``, ...) flow through unwrapped so the caller can
   branch on the typed class.
 
-This is *not* a dataflow primitive. For cross-process per-key fan-out the
-right tool is the wire-level ``.fan_out_per(...)`` DSL (B7).
+This is *not* a dataflow primitive.
 """
 from __future__ import annotations
 
@@ -113,7 +112,7 @@ async def fan_out_wait(
             timeout=timeout_s,
         )
         timed_out = False
-    except (asyncio.TimeoutError, TimeoutError):
+    except TimeoutError:
         # asyncio.wait_for already cancelled pending tasks. Give them a
         # loop turn to observe the cancellation, then collect results.
         timed_out = True

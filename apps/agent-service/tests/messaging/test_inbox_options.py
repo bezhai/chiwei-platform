@@ -20,7 +20,7 @@ from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.message import Kind, Message
 from app.messaging.receiving import inbox, inboxes_at_start
 from app.messaging.sending import send
-from app.runtime.wire import RetryPolicy
+from app.runtime.retry import RetryPolicy
 
 from .conftest import LANE
 from .helpers import eventually

@@ -25,10 +25,10 @@ from typing import Annotated
 import pytest
 
 from app.infra.rabbitmq import Route
-from app.runtime import Data, Key, Sink, Source, bind, emit, node, wire
+from app.runtime import Data, Key, Sink, emit, wire
 from app.runtime.placement import clear_bindings
 from app.runtime.propagation import Context, bind_context
-from app.runtime.wire import WireSpec, clear_wiring
+from app.runtime.wire import clear_wiring
 
 LANE = "ppe-lanecheck"
 
@@ -38,15 +38,6 @@ LANE = "ppe-lanecheck"
 # ---------------------------------------------------------------------------
 
 
-class _SourceMqProbe(Data):
-    """Rides ``chat_response_lark``, a queue that really exists in ALL_ROUTES."""
-
-    chat_id: Annotated[str, Key]
-
-    class Meta:
-        transient = True
-
-
 class _SinkProbe(Data):
     session_id: Annotated[str, Key]
     # recall 按 channel 分区，dispatch 据它选 rk。
@@ -54,28 +45,6 @@ class _SinkProbe(Data):
 
     class Meta:
         transient = True
-
-
-class _DebounceProbe(Data):
-    chat_id: Annotated[str, Key]
-
-    class Meta:
-        transient = True
-
-
-class _ReviewProbe(Data):
-    id: Annotated[str, Key]
-
-    class Meta:
-        transient = True
-
-
-async def _debounce_consumer(t: _DebounceProbe) -> None:
-    return None
-
-
-def _review_consumer() -> None:
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -163,34 +132,7 @@ def assert_header_lane_drives_the_queue(broker, route: Route) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# 1. emit() -> Source.mq cross-process publish
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_emit_source_mq_header_lane_matches_queue_lane(broker, lane_env):
-    from app.infra.rabbitmq import CHAT_RESPONSE, channel_route
-
-    @node
-    async def _remote_handler(r: _SourceMqProbe) -> None:
-        pass
-
-    wire(_SourceMqProbe).to(_remote_handler).from_(Source.mq("chat_response_lark"))
-    bind(_remote_handler).to_app("some-other-app")
-
-    async with bind_context(Context(trace_id=None, lane=None)):
-        await emit(_SourceMqProbe(chat_id="c1"))
-
-    assert (
-        assert_header_lane_drives_the_queue(
-            broker, channel_route(CHAT_RESPONSE, "lark")
-        )
-        == LANE
-    )
-
-
-# ---------------------------------------------------------------------------
-# 2. emit() -> Sink.mq dispatch
+# emit() -> Sink.mq dispatch
 # ---------------------------------------------------------------------------
 
 
@@ -206,93 +148,3 @@ async def test_sink_dispatch_header_lane_matches_queue_lane(broker, lane_env):
     # 加了 channel 维度之后泳道后缀仍然加在最后：recall_lark_{lane} / action.recall.lark.{lane}
     expected = channel_route(RECALL, "lark")
     assert assert_header_lane_drives_the_queue(broker, expected) == LANE
-
-
-# ---------------------------------------------------------------------------
-# 3 + 4. debounce publish + reschedule
-# ---------------------------------------------------------------------------
-
-
-def _debounce_wire() -> WireSpec:
-    return WireSpec(
-        data_type=_DebounceProbe,
-        consumers=[_debounce_consumer],
-        debounce={"seconds": 60, "max_buffer": 3},
-        debounce_key_by=lambda e: f"probe:{e.chat_id}",
-    )
-
-
-@pytest.fixture
-def fake_redis(monkeypatch):
-    from unittest.mock import AsyncMock
-
-    redis = AsyncMock()
-    # publish path returns [count, fire_now]; CAS swap path returns 1
-    redis.eval = AsyncMock(return_value=[1, 0])
-    monkeypatch.setattr(
-        "app.runtime.debounce.get_redis", AsyncMock(return_value=redis)
-    )
-    return redis
-
-
-@pytest.mark.asyncio
-async def test_debounce_publish_header_lane_matches_queue_lane(
-    broker, lane_env, fake_redis
-):
-    from app.runtime.debounce import _route_for, publish_debounce
-
-    w = _debounce_wire()
-    await publish_debounce(w, _debounce_consumer, _DebounceProbe(chat_id="c1"))
-
-    route = _route_for(w, _debounce_consumer)
-    assert assert_header_lane_drives_the_queue(broker, route) == LANE
-
-
-@pytest.mark.asyncio
-async def test_debounce_reschedule_header_lane_matches_queue_lane(
-    broker, lane_env, fake_redis
-):
-    from app.runtime.debounce import _do_reschedule, _route_for
-
-    fake_redis.eval = type(fake_redis.eval)(return_value=1)  # CAS swap ok
-
-    w = _debounce_wire()
-    await _do_reschedule(
-        w, _debounce_consumer, _DebounceProbe(chat_id="c1"), "orig-trigger"
-    )
-
-    route = _route_for(w, _debounce_consumer)
-    assert assert_header_lane_drives_the_queue(broker, route) == LANE
-
-
-# ---------------------------------------------------------------------------
-# 5. manual-review queue
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_review_queue_header_lane_matches_queue_lane(broker, lane_env):
-    from app.runtime.review_queue import (
-        publish_to_review_queue,
-        review_queue_name_for,
-        route_for_review,
-    )
-
-    spec = WireSpec(
-        data_type=_ReviewProbe,
-        consumers=[_review_consumer],
-        durable=True,
-        on_error="manual-review",
-    )
-    confirmed = await publish_to_review_queue(
-        wire=spec,
-        consumer=_review_consumer,
-        data=_ReviewProbe(id="x"),
-        exc=RuntimeError("boom"),
-        attempts=2,
-        last_error="boom",
-    )
-    assert confirmed is True
-
-    route = route_for_review(review_queue_name_for(spec, _review_consumer))
-    assert assert_header_lane_drives_the_queue(broker, route) == LANE

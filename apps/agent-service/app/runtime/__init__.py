@@ -2,7 +2,7 @@
 
 Business code that writes Data classes, @node functions, wire() declarations,
 or deployment bind() rules should import from `app.runtime` only. The
-submodules (data, node, wire, source, sink, emit, placement, query, stream, …)
+submodules (data, node, wire, source, sink, emit, placement, …)
 are internal implementation; the names re-exported here are the stable
 surface promised by `docs/guides/dataflow-framework.md`.
 
@@ -14,10 +14,8 @@ needed to write a node and may change without notice.
 from app.runtime.data import AdminOnly, Data, DedupKey, Key, Version
 from app.runtime.db import tx
 from app.runtime.emit import emit
-from app.runtime.errors import DuplicateData, NeedsReview
 from app.runtime.node import node
 from app.runtime.placement import bind
-from app.runtime.query import query
 from app.runtime.sink import Sink
 from app.runtime.source import Source
 from app.runtime.wire import wire
@@ -26,16 +24,13 @@ __all__ = [
     "AdminOnly",
     "Data",
     "DedupKey",
-    "DuplicateData",
     "Key",
-    "NeedsReview",
     "Version",
     "Sink",
     "Source",
     "bind",
     "emit",
     "node",
-    "query",
     "tx",
     "wire",
 ]

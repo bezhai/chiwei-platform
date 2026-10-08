@@ -89,8 +89,8 @@ async def declare_durable_topology() -> None:
     ``prepare_for_run(declare_topology=True)``, and that flag already says
     "this process is going to publish". Whether some durable *consumer*
     happens to be registered says nothing about that. Fusing them meant a
-    process with outbound-only MQ — every ``Source.mq`` gated off, nothing
-    durable left in the registry — got no exchange, and every publish died
+    process with outbound-only MQ — nothing durable in the registry — got
+    no exchange, and every publish died
     on ``RuntimeError: must call declare_topology() first``.
 
     That is exactly what the living-engine experiment lane looks like: four

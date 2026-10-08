@@ -168,7 +168,7 @@ async def test_a_question_cancelled_while_being_marked_handled_is_never_answered
     from app.messaging.message import Kind, Message
     from app.messaging.receiving import clear_inboxes
     from app.messaging.sending import ANSWER_BY_HEADER, REPLY_RK_HEADER, ask
-    from app.runtime.wire import RetryPolicy
+    from app.runtime.retry import RetryPolicy
 
     monkeypatch.setattr(receiving, "STOP_GRACE_SECONDS", 0.3)
     monkeypatch.setattr(

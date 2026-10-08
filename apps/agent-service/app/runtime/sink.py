@@ -30,7 +30,7 @@ class Sink:
         """Publish each Data to ``queue`` on the shared RabbitMQ exchange.
 
         Body is the Data's JSON serialization. Lane suffixing follows
-        the same convention as ``Source.mq`` (``"chat_response"`` becomes
+        the convention of every other route (``"chat_response"`` becomes
         ``"chat_response_{lane}"`` outside prod).
         """
         return SinkSpec("mq", {"queue": queue})

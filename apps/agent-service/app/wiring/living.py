@@ -22,8 +22,8 @@ Pod**，所以这五个 Data 的形状由 ``tests/wiring/test_time_source_payloa
 import 时就固定了——想让间隔成为可调的业务参数（Dynamic Config），只能让钟拍得比最密的
 间隔更密、然后在节点里判"够不够久"。
 
-**这里没有、也不会有任何 dataflow 入站边。** 五条钟全是 interval，一条 ``Source.mq`` /
-``Source.http`` 都没有。手机上的消息她每一轮直接查 ``common_message``
+**这里没有、也不会有任何 dataflow 入站边。** 五条钟全是 interval，一条 ``Source.http``
+都没有。手机上的消息她每一轮直接查 ``common_message``
 （``app.living.phone``），不碰队列。
 
 **她唯一的入口是三姐妹的收件箱**（通信机制，:mod:`app.living.received`）：world 告诉她

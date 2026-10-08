@@ -53,8 +53,7 @@ async def _get_model_and_provider_info(model_id: str) -> dict[str, Any] | None:
       - Hit and fresh -> return cached value.
       - Miss or stale -> query DB -> cache (including None, to prevent stampede).
       - DB exception -> propagate to caller (no cache write — next call retries).
-        Per dataflow contract §4.6: nodes do not log+raise as a courtesy; the
-        wire-level on_error decides DLQ / review / swallow_and_log. The caller
+        Per dataflow contract §4.6: nodes do not log+raise as a courtesy. The caller
         (resolve_model_info) wraps this in ModelBuildError, preserving the
         original exception via __cause__.
     """

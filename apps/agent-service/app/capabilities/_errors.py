@@ -2,10 +2,9 @@
 
 Five typed exception classes plus a common base. Capability and infra
 modules raise these instead of returning ``False`` / ``None`` /
-stringifying upstream failures; business nodes propagate them so wire
-``on_error`` decides DLQ / review / swallow, and tool wrappers (see
-``agent/tools/_common.py``, C3 territory) map a subset to LLM-visible
-typed outcomes.
+stringifying upstream failures; business nodes propagate them to their
+caller, and tool wrappers (see ``agent/tools/_common.py``, C3 territory)
+map a subset to LLM-visible typed outcomes.
 
 Routing table (contract §4.7 + §4.8):
 

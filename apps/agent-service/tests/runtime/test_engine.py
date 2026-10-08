@@ -1,4 +1,4 @@
-"""Runtime engine tests: cron/interval source loops + app-scoped consumer filter.
+"""Runtime engine tests: interval source loops + app-scoped consumer filter.
 
 Focuses on Runtime-level behavior that can't be exercised by the
 per-module unit tests:

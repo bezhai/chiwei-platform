@@ -15,7 +15,7 @@ pod 重启 key 就没了、黑盒查不了。PG 这边 ops-db 可清、重启不
     ``json.dumps([m.to_replay_dict() for m in messages], ensure_ascii=False)`` 落进一
     个 TEXT 列。一条 transcript 天然是一个不透明的整体，不按元素查、也不按元素改。
 
-  * **as_latest + Version，Key = session_id（不额外加 lane Key）。** 每次写一版，对外
+  * **insert_append + Version，Key = session_id（不额外加 lane Key）。** 每次写一版，对外
     读永远 ``select_latest`` 取最新那版全文（旧版留作历史，可 SQL 查、不删）。
     ``session_id`` 由调用方拼，**泳道放在 key 里**（比如 ``lane:persona_id``）——不同
     泳道天然是不同 session_id、不同行，泳道隔离由 key 本身保证，不需要额外显式的
@@ -37,7 +37,7 @@ from app.runtime.data import Data, Key, Version
 
 
 class SessionTranscript(Data):
-    """一条可回放对话流的最新全文（as_latest，带 Version）。
+    """一条可回放对话流的最新全文（按版本追加，带 Version）。
 
     自然键 ``session_id``（调用方拼，已含 lane → 泳道天然隔离）。
     ``transcript_json`` 是整条 transcript 的 JSON 文本（``to_replay_dict`` + json.dumps），

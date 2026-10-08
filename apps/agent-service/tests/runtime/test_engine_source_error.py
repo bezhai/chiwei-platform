@@ -1,10 +1,10 @@
-"""A2: cron/interval source error classification (contract §4.1).
+"""A2: interval source error classification (contract §4.1).
 
 Behavior contract under the new error分级:
 
 * ``emit()`` 内任何业务/wire 异常（包括 in-process consumer raise） →
   log warning + 跳过本 tick + 继续下一个 tick，**不杀 pod**.
-* 非 emit 路径（payload build / croniter init / 时钟 setup 等）抛
+* 非 emit 路径（payload build / 时钟 setup 等）抛
   ``Exception`` → 仍走 ``_record_source_error`` → watchdog kill pod
   （PaaS 重启）.
 
@@ -34,10 +34,6 @@ class _IntervalTick(Data):
     ts: Annotated[str, Key]
 
 
-class _CronTick(Data):
-    ts: Annotated[str, Key]
-
-
 _raise_call_count = {"n": 0}
 
 
@@ -45,12 +41,6 @@ _raise_call_count = {"n": 0}
 async def _always_raises_interval(t: _IntervalTick) -> None:
     _raise_call_count["n"] += 1
     raise RuntimeError("consumer fails on every tick")
-
-
-@node
-async def _always_raises_cron(t: _CronTick) -> None:
-    _raise_call_count["n"] += 1
-    raise RuntimeError("cron consumer fails on every tick")
 
 
 def setup_function() -> None:
@@ -90,47 +80,6 @@ async def test_interval_emit_exception_does_not_kill_pod(monkeypatch) -> None:
     assert exits == [], f"unexpected os._exit call(s): {exits}"
 
 
-@pytest.mark.asyncio
-async def test_cron_emit_exception_does_not_kill_pod(monkeypatch) -> None:
-    """contract §4.1: cron source 内 emit() 抛 Exception →
-    log + continue ticking, 不触发 _record_source_error / watchdog os._exit.
-
-    croniter is stubbed to fire every ~50 ms so the test runs fast.
-    """
-    exits: list[int] = []
-    monkeypatch.setattr("os._exit", lambda code: exits.append(code))
-
-    from datetime import timedelta
-
-    def fake_croniter(expr, base):
-        class _Iter:
-            def __init__(self):
-                self._cur = base
-
-            def get_next(self, _t):
-                self._cur = self._cur + timedelta(milliseconds=50)
-                return self._cur
-
-        return _Iter()
-
-    monkeypatch.setattr("croniter.croniter", fake_croniter)
-
-    wire(_CronTick).from_(Source.cron("* * * * *")).to(_always_raises_cron)
-
-    rt = Runtime(app_name="agent-service")
-    await rt.start_source_loops()
-    await asyncio.sleep(0.3)
-    assert rt._source_error is None, (
-        f"cron emit exception must not be fatal; got {rt._source_error!r}"
-    )
-    assert _raise_call_count["n"] >= 2, (
-        f"expected cron loop to keep ticking past failure; "
-        f"got {_raise_call_count['n']} consumer invocations"
-    )
-    await rt.stop_source_loops()
-    assert exits == [], f"unexpected os._exit call(s): {exits}"
-
-
 class _NoTsField(Data):
     """Lacks a 'ts' field — _build_payload will raise outside emit()."""
 
@@ -144,8 +93,8 @@ async def _unreachable(_: _NoTsField) -> None:  # pragma: no cover
 
 @pytest.mark.asyncio
 async def test_payload_build_failure_is_still_fatal(monkeypatch) -> None:
-    """contract §4.1: source-loop 非 emit 路径异常（payload build /
-    croniter 初始化等）仍然触发 _record_source_error → watchdog kill pod.
+    """contract §4.1: source-loop 非 emit 路径异常（payload build 等）仍然
+    触发 _record_source_error → watchdog kill pod.
     """
     exits: list[int] = []
     monkeypatch.setattr("os._exit", lambda code: exits.append(code))

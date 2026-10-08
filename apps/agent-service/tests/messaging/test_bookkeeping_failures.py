@@ -24,7 +24,7 @@ from app.messaging.lifecycle import start_messaging
 from app.messaging.message import Kind, SendFailed, new_message
 from app.messaging.receiving import inbox
 from app.messaging.sending import ask, send, send_at
-from app.runtime.wire import RetryPolicy
+from app.runtime.retry import RetryPolicy
 
 from .conftest import LANE
 from .helpers import eventually

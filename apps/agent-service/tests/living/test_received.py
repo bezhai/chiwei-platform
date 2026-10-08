@@ -518,7 +518,7 @@ async def test_a_quiet_message_stays_quiet_through_a_scheduled_hop_and_a_failed_
     from app.messaging.lifecycle import start_messaging
     from app.messaging.receiving import inboxes_at_start
     from app.messaging.sending import send_at
-    from app.runtime.wire import RetryPolicy
+    from app.runtime.retry import RetryPolicy
     from tests.messaging.helpers import eventually
 
     monkeypatch.setattr(messaging_broker, "DELAY_LIMIT_MS", 600)

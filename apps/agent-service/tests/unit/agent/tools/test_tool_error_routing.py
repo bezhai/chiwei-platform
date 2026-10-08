@@ -4,7 +4,7 @@
 
 * ``CapabilityInvalidArg``  → caught, returned as ``ToolOutcomeError(kind="invalid_args")`` dict (LLM-visible)
 * ``CapabilityNotFound``    → caught, returned as ``ToolOutcomeError(kind="not_found")`` dict (LLM-visible)
-* ``CapabilityTimeout``     → propagated (wire ``on_error`` decides)
+* ``CapabilityTimeout``     → propagated
 * ``CapabilityRateLimited`` → propagated
 * ``CapabilityCallFailed``  → propagated
 * anything else             → propagated (no swallow)
@@ -24,7 +24,6 @@ from app.capabilities._errors import (
     CapabilityRateLimited,
     CapabilityTimeout,
 )
-
 
 # ---------------------------------------------------------------------------
 # LLM-visible: invalid_args

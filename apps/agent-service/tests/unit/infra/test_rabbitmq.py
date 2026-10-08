@@ -183,8 +183,8 @@ class TestRouteConstants:
 
         赤尾不从队列拿消息，她每次醒来直接查 ``common_message``、自己决定要不要开口。
         所以 ``chat_request`` 既没有生产者也没有消费者 —— 它不该再出现在声明面
-        （``declare_topology`` 遍历 ALL_ROUTES 建队列）或注册面（``Source.mq`` /
-        ``Sink.mq`` 的合法队列名从 ALL_ROUTES 来）的任何一侧。
+        （``declare_topology`` 遍历 ALL_ROUTES 建队列）或注册面（``Sink.mq`` 的合法
+        队列名从 ALL_ROUTES 来）的任何一侧。
         """
         import app.infra.rabbitmq as rabbitmq
 
@@ -303,7 +303,7 @@ async def test_declare_route_passes_lane_fallback_through(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ensure_lane_queue_passes_lane_fallback_through_and_caches():
-    """_ensure_lane_queue (lazy declare 路径，debounce publish 实际走这里)
+    """_ensure_lane_queue (lazy declare 路径)
     应该把 route.lane_fallback 透传给 _build_queue_args，且二次调用走 cache。"""
     from app.infra.rabbitmq import _RabbitMQ
 

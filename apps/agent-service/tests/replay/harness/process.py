@@ -3,8 +3,8 @@ parts the scenario drives itself.
 
 Start: fresh in-process state (registries, messaging's module state, residents, the volume
 lock), that app's wiring executed again (``app.deployment.APP_WIRING``), the graph compiled
-(``prepare_for_run``), then durable consumers, messaging (inboxes, question queues, scheduled
-delivery) and debounce consumers. Not started: the interval clocks, the HTTP routes, the
+(``prepare_for_run``), then durable consumers and messaging (inboxes, question queues, scheduled
+delivery). Not started: the interval clocks, the HTTP routes, the
 skill reload loop. Rounds run when the scenario calls them, and the skill registry is empty
 (no guides on hand), as it is wherever ``SKILLS_DIR`` has none.
 
@@ -31,7 +31,6 @@ def _fresh_process_state(monkeypatch) -> None:
     import app.living.participants as participants
     import app.messaging.receiving as receiving
     import app.messaging.sending as sending
-    import app.runtime.debounce as debounce
     import app.runtime.durable as durable
     import app.world.volume as volume
     from app.messaging.receiving import clear_inboxes
@@ -60,7 +59,6 @@ def _fresh_process_state(monkeypatch) -> None:
         (sending, "_reply_lock", None),
         (sending, "_waiting", {}),
         (durable, "_consumer_tags", []),
-        (debounce, "_consumer_tags", []),
         (participants, "_known", None),
         (volume, "_held", None),
     ):
@@ -101,7 +99,6 @@ class AppProcess:
         from app.messaging.lifecycle import start_messaging
         from app.messaging.receiving import INBOX_REGISTRY
         from app.runtime.bootstrap import prepare_for_run
-        from app.runtime.debounce import start_debounce_consumers
         from app.runtime.durable import start_consumers
 
         self._monkeypatch.setenv("APP_NAME", self.app_name)
@@ -115,7 +112,6 @@ class AppProcess:
         await start_consumers(app_name=self.app_name)
         held = [s.name for s in INBOX_REGISTRY.values() if s.consume_while is not None]
         await start_messaging()
-        await start_debounce_consumers(app_name=self.app_name)
         self.running = True
         # Inboxes that consume only while holding something (world's volume lock) open in the
         # background; the process is up once they consume.
@@ -132,10 +128,8 @@ class AppProcess:
         if not self.running:
             return
         from app.messaging.lifecycle import stop_messaging
-        from app.runtime.debounce import stop_debounce_consumers
         from app.runtime.durable import stop_consumers
 
         self.running = False
-        await stop_debounce_consumers()
         await stop_messaging()
         await stop_consumers()

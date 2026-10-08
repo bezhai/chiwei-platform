@@ -26,7 +26,7 @@ from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.receiving import inbox
 from app.messaging.sending import ask, send
 from app.runtime.inflight import claim_inflight
-from app.runtime.wire import RetryPolicy
+from app.runtime.retry import RetryPolicy
 
 from .conftest import LANE
 from .helpers import HangsOnce, Inbox, eventually

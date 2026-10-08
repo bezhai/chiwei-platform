@@ -80,22 +80,19 @@ async def lifespan(app: FastAPI):
         # .to(run_post_safety).durable()）；runtime 自动按 placement.bind
         # 过滤启动属于本 app 的 consumer。
         from app.messaging.lifecycle import start_messaging
-        from app.runtime.debounce import start_debounce_consumers
         from app.runtime.durable import start_consumers
 
         await start_consumers(app_name=app_name)
         logger.info("Runtime durable consumers started for %s", app_name)
         await start_messaging()
         logger.info("messaging started for %s (inboxes + scheduled delivery)", app_name)
-        await start_debounce_consumers(app_name=app_name)
-        logger.info("Runtime debounce consumers started for %s", app_name)
 
     from app.runtime.http_source import register_http_sources
 
     register_http_sources(app)
     logger.info("dataflow http sources registered")
 
-    # Phase 4: start cron / interval / mq source loops + watchdog.
+    # Phase 4: start the interval source loops + watchdog.
     # Must run AFTER register_http_sources so HTTP routes are in place.
     await runtime_for_sources.start_source_loops()
     logger.info("dataflow source loops started")
@@ -111,10 +108,8 @@ async def lifespan(app: FastAPI):
     # down RabbitMQ connection (otherwise late deliveries race with close).
     if settings.rabbitmq_url:
         from app.messaging.lifecycle import stop_messaging
-        from app.runtime.debounce import stop_debounce_consumers
         from app.runtime.durable import stop_consumers
 
-        await stop_debounce_consumers()
         await stop_messaging()
         await stop_consumers()
 

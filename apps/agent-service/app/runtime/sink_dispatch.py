@@ -6,7 +6,7 @@ Phase 2 把 ``Sink.mq("queue")`` 真正跑起来：emit 一个 Data 时，对每
 lane 由 ``outbound_context`` 解析一次，同时喂给 header 和
 ``mq.publish(lane=...)``——header 的 lane 跟队列的 lane 必须同源。
 
-Phase 7a (Gap 11): trace_id / lane 写入 header（与 durable / debounce 一致），
+Phase 7a (Gap 11): trace_id / lane 写入 header（与 durable 一致），
 同时保留 body 字段中的 ``lane``（chat-response-worker.ts 仍按 body 读）。
 两者并行直到 ts 侧切到 header 后下个 PR 再删 body 字段。
 

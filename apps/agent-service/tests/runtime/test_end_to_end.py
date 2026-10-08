@@ -1,4 +1,4 @@
-"""End-to-end smoke: emit -> durable RabbitMQ -> consume -> insert_idempotent -> query.
+"""End-to-end smoke: emit -> durable RabbitMQ -> consume -> insert_idempotent -> read back.
 
 Validates that the individually-unit-tested Phase 0 pieces actually integrate.
 Covers in one test:
@@ -7,7 +7,7 @@ Covers in one test:
   - emit() routing to publish_durable (NOT a direct publish_durable call)
   - real RabbitMQ publish + consume (testcontainer)
   - consumer-side insert_idempotent writing to real Postgres (testcontainer)
-  - query(T).where(...).all() reading back what the consumer just persisted
+  - select_all_versions(T, ...) reading back what the consumer just persisted
 
 Each unit test verifies one layer; this test verifies the seams.
 """
@@ -25,7 +25,7 @@ from app.runtime.durable import start_consumers, stop_consumers
 from app.runtime.emit import emit, reset_emit_runtime
 from app.runtime.graph import compile_graph
 from app.runtime.node import node
-from app.runtime.query import query
+from app.runtime.persist import select_all_versions
 from app.runtime.wire import clear_wiring, wire
 from tests.runtime.conftest import migrate
 
@@ -71,8 +71,8 @@ async def _wait_for(predicate, timeout=5.0):
 
 
 @pytest.mark.integration
-async def test_emit_to_durable_consumer_persists_and_query_reads(smoke_env):
-    """Full Phase 0 roundtrip: emit -> RabbitMQ -> consumer -> pg insert -> query reads it."""
+async def test_emit_to_durable_consumer_persists_and_reads_back(smoke_env):
+    """Full Phase 0 roundtrip: emit -> RabbitMQ -> consumer -> pg insert -> read it back."""
     tok = trace_id_var.set("smoke-trace-1")
     try:
         await emit(SmokeMsg(smoke_id="sm-1", text="hello from emit"))
@@ -82,8 +82,8 @@ async def test_emit_to_durable_consumer_persists_and_query_reads(smoke_env):
     ok = await _wait_for(lambda: len(received) == 1, timeout=5.0)
     assert ok, f"consumer never fired within 5s; received={received!r}"
 
-    # Consumer-side insert_idempotent committed the row; query(T) must find it.
-    rows = await query(SmokeMsg).where(smoke_id="sm-1").all()
-    assert len(rows) == 1, f"query returned {len(rows)} rows, expected 1"
+    # Consumer-side insert_idempotent committed the row; reading it back must find it.
+    rows = await select_all_versions(SmokeMsg, {"smoke_id": "sm-1"})
+    assert len(rows) == 1, f"read back {len(rows)} rows, expected 1"
     assert rows[0].smoke_id == "sm-1"
     assert rows[0].text == "hello from emit"

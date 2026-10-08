@@ -114,8 +114,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          # No more "不要 catch" / "don't catch" warnings: the wire DSL
-          # expresses error policy via .on_error("dlq") explicitly.
+          # No more "不要 catch" / "don't catch" warnings in business code.
           c=$(grep -rn "# 不要 catch\|# 不要 try/except\|# don't catch" \
               apps/agent-service/app/agent/ apps/agent-service/app/living/ \
               apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
