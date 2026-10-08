@@ -6,6 +6,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -77,14 +78,19 @@ type Server struct {
 	httpServer *http.Server
 	mux        cmux.CMux
 	listener   net.Listener
+	// originalDst finds where a passthrough connection was headed. It is
+	// GetOriginalDst in production; tests point it at a local upstream,
+	// since SO_ORIGINAL_DST only answers behind an iptables REDIRECT.
+	originalDst func(*net.TCPConn) (net.Addr, error)
 }
 
 // NewServer creates a Server that listens on listenAddr (e.g. ":15001").
 func NewServer(listenAddr string, resolver registry.Resolver) *Server {
 	handler := NewHandler(resolver, nil)
 	s := &Server{
-		handler:    handler,
-		listenAddr: listenAddr,
+		handler:     handler,
+		listenAddr:  listenAddr,
+		originalDst: GetOriginalDst,
 	}
 	s.httpServer = &http.Server{
 		Handler:      handler,
@@ -94,14 +100,20 @@ func NewServer(listenAddr string, resolver registry.Resolver) *Server {
 	return s
 }
 
-// ListenAndServe starts the proxy server with protocol multiplexing.
+// ListenAndServe listens on the server's address and serves it (see Serve).
 func (s *Server) ListenAndServe() error {
 	ln, err := net.Listen("tcp", s.listenAddr)
 	if err != nil {
 		return err
 	}
+	return s.Serve(ln)
+}
+
+// Serve multiplexes ln: HTTP/1.x requests get lane routing, everything else
+// is tunnelled to its original destination.
+func (s *Server) Serve(ln net.Listener) error {
 	s.listener = ln
-	log.Printf("[proxy] listening on %s", s.listenAddr)
+	log.Printf("[proxy] listening on %s", ln.Addr())
 
 	s.mux = cmux.New(ln)
 
@@ -146,7 +158,7 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		return
 	}
 
-	origDst, err := GetOriginalDst(rawConn)
+	origDst, err := s.originalDst(rawConn)
 	if err != nil {
 		log.Printf("[proxy] get original dst: %v", err)
 		return
@@ -157,19 +169,52 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		log.Printf("[proxy] dial original dst %s: %v", origDst, err)
 		return
 	}
-	defer upstream.Close()
+
+	tunnel(conn, upstream)
+}
+
+// tunnel relays bytes between client and upstream until both directions are
+// done, then closes both. A direction that reaches EOF half-closes the end it
+// was writing to, so that peer sees the close while the other direction keeps
+// flowing (clients that close a connection, or cancel a query, wait for the
+// server's close and send nothing more). A direction that fails closes both
+// ends, which also ends the other direction.
+func tunnel(client, upstream net.Conn) {
+	closeBoth := func() {
+		client.Close()
+		upstream.Close()
+	}
+	relay := func(dst, src net.Conn) {
+		_, err := io.Copy(dst, src)
+		if err == nil {
+			err = closeWrite(dst)
+		}
+		if err != nil {
+			closeBoth()
+		}
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		io.Copy(upstream, conn)
+		relay(upstream, client)
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(conn, upstream)
+		relay(client, upstream)
 	}()
 	wg.Wait()
+	closeBoth()
+}
+
+// closeWrite sends FIN on c's socket and leaves its read side open.
+func closeWrite(c net.Conn) error {
+	tc := unwrapTCPConn(c)
+	if tc == nil {
+		return fmt.Errorf("cannot half-close %T", c)
+	}
+	return tc.CloseWrite()
 }
 
 // unwrapTCPConn extracts the underlying *net.TCPConn from a possibly
