@@ -29,7 +29,8 @@ error is raised again.
 **Stop** keeps today's shutdown order: clocks first (their ticks still running are cancelled,
 rounds included), then the messaging drain, the durable consumers, tasks, the broker connection;
 registrations last. A stop phase that fails is logged and the rest still run; the first error is
-raised at the end.
+raised at the end. A stop that is cancelled raises the cancellation and leaves what it had not
+reached to the next stop; the piece it interrupted is not run again.
 
 **What T1 does not do yet.** Inboxes and the durable consumer start and stop as a whole with
 messaging and the durable layer (:mod:`app.messaging`, :mod:`app.runtime.durable`): their
@@ -409,6 +410,8 @@ class Host:
         try:
             await self._start(http=http, schema=schema, use_mq=mq, clocks=clocks, tasks=tasks)
         except BaseException:
+            # A cancellation of this task during the cleanup comes out of stop() and is raised
+            # instead, with the start's error as its __context__; the next stop() finishes.
             try:
                 await self.stop()
             except Exception:
@@ -418,31 +421,35 @@ class Host:
             raise
 
     async def stop(self) -> None:
-        phases, self._phases = self._phases, set()
-        if not phases:
+        """Stop the phases that started, then take back every registration.
+
+        Each piece of cleanup (a phase, a registration) runs at most once. If the task running the
+        stop is cancelled, the cancellation is raised at once and what the stop had not reached is
+        left to the next ``stop()``; the piece it interrupted is not run again, since it may be
+        what hung.
+        """
+        if not self._phases:
             return
-        errors: list[Exception] = []
-
-        async def step(what: str, run: Callable[[], Awaitable[None]]) -> None:
-            try:
-                await run()
-            except Exception as e:
-                logger.exception("host: app %s: stopping %s failed", self._app_name, what)
-                errors.append(e)
-
-        if "clocks" in phases:
-            await step("clocks", self._stop_clocks)
-        if "mq" in phases:
-            await step("messaging", stop_messaging)
-            await step("durable consumers", stop_consumers)
-        if "tasks" in phases:
-            await step("tasks", self._stop_tasks)
-        if "mq" in phases:
-            await step("the broker connection", mq.close)
-        await step("registrations", self._revoke)
+        cleanup = _Cleanup(self._app_name)
+        for phase, run in (
+            ("clocks", self._stop_clocks),
+            ("messaging", stop_messaging),
+            ("durable consumers", stop_consumers),
+            ("tasks", self._stop_tasks),
+            ("the broker connection", mq.close),
+        ):
+            if phase in self._phases:
+                self._phases.discard(phase)
+                await cleanup.run(f"stopping {phase}", run)
+        for entry in reversed(list(self._entries)):
+            await cleanup.run(
+                f"taking back {entry.kind} {entry.name!r} of plugin {entry.plugin}", entry.dispose
+            )
+        reset_emit_runtime()
+        self._phases.clear()
         self._http = None
-        if errors:
-            raise errors[0]
+        if cleanup.errors:
+            raise cleanup.errors[0]
 
     # ------------------------------------------------------------------
 
@@ -459,7 +466,7 @@ class Host:
         if schema:
             await ensure_business_schema()
         if use_mq:
-            self._phases.add("mq")
+            self._phases.update(("messaging", "durable consumers", "the broker connection"))
             await declare_durable_topology()
         if schema:
             await migrate_schema()
@@ -545,23 +552,49 @@ class Host:
         for task in tasks:
             await _cancel(task)
 
-    async def _revoke(self) -> None:
-        errors: list[Exception] = []
-        for entry in reversed(list(self._entries)):
-            try:
-                await entry.dispose()
-            except Exception as e:
-                logger.exception(
-                    "host: app %s: taking back %s %r of plugin %s failed",
-                    self._app_name,
-                    entry.kind,
-                    entry.name,
-                    entry.plugin,
-                )
-                errors.append(e)
-        reset_emit_runtime()
-        if errors:
-            raise errors[0]
+
+class _Cleanup:
+    """Runs the pieces of one stop and keeps their failures.
+
+    A piece that fails is logged and noted, and the rest still run. A CancelledError is the stop
+    being cancelled only when the task running the stop was cancelled since the stop began
+    (``Task.cancelling()`` went up): then it is raised, and raised too when the piece caught it
+    and returned, as waiting for a cancelled task does (:func:`_cancel`, the clock runner). A
+    CancelledError nothing cancelled the stop for, one a callback raised itself, is a failure like
+    any other, noted as a :class:`HostError` so that no caller takes it for its own cancellation.
+    """
+
+    def __init__(self, app_name: str) -> None:
+        self._app_name = app_name
+        self._task = asyncio.current_task()
+        self._cancels = self._task.cancelling()
+        self.errors: list[Exception] = []
+
+    async def run(self, what: str, piece: Callable[[], Awaitable[None]]) -> None:
+        try:
+            await piece()
+        except asyncio.CancelledError as e:
+            if self._cancelled():
+                raise
+            logger.exception(
+                "host: app %s: %s raised CancelledError, but nothing cancelled the stop",
+                self._app_name,
+                what,
+            )
+            error = HostError(
+                f"app {self._app_name!r}: {what} raised CancelledError, "
+                f"but nothing cancelled the stop"
+            )
+            error.__cause__ = e
+            self.errors.append(error)
+        except Exception as e:
+            logger.exception("host: app %s: %s failed", self._app_name, what)
+            self.errors.append(e)
+        if self._cancelled():
+            raise asyncio.CancelledError
+
+    def _cancelled(self) -> bool:
+        return self._task.cancelling() > self._cancels
 
 
 def _resolve(app: str, plugins: list[Plugin]) -> tuple[Plugin, ...]:

@@ -1,5 +1,5 @@
 """Start and stop: the order of the phases, what stop takes back, restarting in the same process,
-and cleaning up after a start that failed half-way.
+cleaning up after a start that failed half-way, and a stop that is cancelled.
 
 The phases that would touch the database, the broker or the clock runner are recorded instead of
 run (``recorded_phases``); plugins, registrations and disposers are the real ones.
@@ -267,6 +267,236 @@ async def test_a_failing_stop_phase_does_not_skip_the_rest(recorded_phases):
         "unbind_route:/a",
     ]
     assert host.registered() == ()
+
+
+# ---------------------------------------------------------------------------
+# a stop that is cancelled, and a CancelledError nothing cancelled the stop for
+# ---------------------------------------------------------------------------
+
+
+def _held(entered: asyncio.Event):
+    """A cleanup callback that says it started, then waits until it is cancelled."""
+
+    async def hold() -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    return hold
+
+
+async def _raise_cancelled() -> None:
+    """A cleanup callback that raises CancelledError although nothing cancelled anything."""
+    raise asyncio.CancelledError
+
+
+async def test_a_stop_cancelled_in_an_on_stop_leaves_the_rest_to_the_next_stop():
+    """The reviewer's first repro: before the fix the second stop returned at once, the route and
+    the inbox stayed, and the restart failed with a duplicate registration."""
+    entered = asyncio.Event()
+    ran: list[str] = []
+    setups: list[int] = []
+    app = FastAPI()
+
+    def setup(ctx) -> None:
+        setups.append(1)
+        ctx.route("POST", "/kept", _Ask, _echo)
+        ctx.inbox("kept", on_message=_ignore)
+        ctx.on_stop(lambda: ran.append("on_stop:before"))
+        if len(setups) == 1:
+            ctx.on_stop(_held(entered))
+
+    host = Host("agent-service", [plugin("p", setup)])
+    await host.start(http=app, schema=False, mq=False, clocks=False, tasks=False)
+    stopping = asyncio.create_task(host.stop())
+    await entered.wait()
+    stopping.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    assert "/kept" in _paths(app)
+    assert set(receiving.INBOX_REGISTRY) == {"kept"}
+
+    async with asyncio.timeout(5):  # the interrupted on_stop is not run again
+        await host.stop()
+
+    assert host.registered() == ()
+    assert "/kept" not in _paths(app)
+    assert receiving.INBOX_REGISTRY == {}
+    assert ran == ["on_stop:before"]
+
+    await host.start(http=app, schema=False, mq=False, clocks=False, tasks=False)
+    try:
+        assert _paths(app).count("/kept") == 1
+        assert set(receiving.INBOX_REGISTRY) == {"kept"}
+    finally:
+        await host.stop()
+
+
+async def test_a_stop_cancelled_in_a_phase_leaves_the_later_phases_to_the_next_stop(
+    recorded_phases, monkeypatch
+):
+    """Each piece of cleanup runs at most once: the drain that was cancelled (perhaps because it
+    hung) is not run again; everything after it is, by the next stop."""
+    import app.host.host as host_module
+
+    host = _two_plugins(recorded_phases)
+    await _start_everything(host)
+    recorded_phases.calls.clear()
+    entered = asyncio.Event()
+
+    async def drain_that_hangs() -> None:
+        recorded_phases.note("stop_messaging")
+        await _held(entered)()
+
+    monkeypatch.setattr(host_module, "stop_messaging", drain_that_hangs)
+    stopping = asyncio.create_task(host.stop())
+    await entered.wait()
+    stopping.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    assert recorded_phases.calls == ["clocks.stop", "stop_messaging"]
+
+    async with asyncio.timeout(5):
+        await host.stop()
+
+    assert recorded_phases.calls == [
+        "clocks.stop",
+        "stop_messaging",
+        "stop_consumers",
+        "task.cancelled:ta",
+        "mq.close",
+        "on_stop:b",
+        "on_stop:a",
+        "unbind_route:/a",
+    ]
+    assert host.registered() == ()
+
+
+async def test_a_cancelled_stop_is_raised_even_when_the_step_it_hit_catches_it():
+    """Waiting for a cancelled task to end catches CancelledError (the host's tasks phase and the
+    clock runner both do). A cancellation of the stop that lands there must still come out."""
+    ending = asyncio.Event()
+
+    async def slow_to_end() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            ending.set()
+            await asyncio.sleep(0.05)
+            raise
+
+    def setup(ctx) -> None:
+        ctx.task("slow", slow_to_end)
+        ctx.inbox("kept", on_message=_ignore)
+
+    host = Host("agent-service", [plugin("p", setup)])
+    await no_clocks_no_io(host, tasks=True)
+    await asyncio.sleep(0)
+    stopping = asyncio.create_task(host.stop())
+    await ending.wait()
+    stopping.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+
+    await host.stop()
+    assert host.registered() == ()
+    assert receiving.INBOX_REGISTRY == {}
+
+
+async def test_a_cancelled_error_a_callback_raises_is_a_failure_not_a_cancellation():
+    ran: list[str] = []
+
+    def setup(ctx) -> None:
+        ctx.inbox("kept", on_message=_ignore)
+        ctx.on_stop(lambda: ran.append("on_stop:before"))
+        ctx.on_stop(_raise_cancelled)
+
+    host = Host("agent-service", [plugin("p", setup)])
+    await no_clocks_no_io(host)
+
+    with pytest.raises(HostError, match="CancelledError") as caught:
+        await host.stop()
+
+    assert isinstance(caught.value.__cause__, asyncio.CancelledError)
+    assert ran == ["on_stop:before"]
+    assert host.registered() == ()
+    assert receiving.INBOX_REGISTRY == {}
+
+
+async def test_a_cancelled_error_from_the_cleanup_does_not_replace_the_start_error():
+    """The reviewer's second repro: a cleanup callback's CancelledError used to come out of start
+    in place of the setup's RuntimeError, and the cleanup stopped there."""
+
+    def setup_a(ctx) -> None:
+        ctx.inbox("operator", on_message=_ignore)
+        ctx.on_stop(_raise_cancelled)
+
+    def setup_b(ctx) -> None:
+        raise RuntimeError("setup b failed")
+
+    host = Host("agent-service", [plugin("a", setup_a), plugin("b", setup_b)])
+
+    with pytest.raises(RuntimeError, match="setup b failed"):
+        await no_clocks_no_io(host)
+
+    assert host.registered() == ()
+    assert receiving.INBOX_REGISTRY == {}
+
+
+async def test_a_start_that_is_cancelled_still_cleans_up_everything(recorded_phases, monkeypatch):
+    """The cancellation that stopped the start was delivered before the cleanup began; only a
+    cancellation that comes during the cleanup interrupts it."""
+    import app.host.host as host_module
+
+    entered = asyncio.Event()
+
+    async def schema_that_hangs() -> None:
+        recorded_phases.note("ensure_business_schema")
+        await _held(entered)()
+
+    monkeypatch.setattr(host_module, "ensure_business_schema", schema_that_hangs)
+    host = _two_plugins(recorded_phases)
+    starting = asyncio.create_task(_start_everything(host))
+    await entered.wait()
+    starting.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    after = recorded_phases.calls[recorded_phases.calls.index("ensure_business_schema") + 1 :]
+    assert after == ["on_stop:b", "on_stop:a"]
+    assert host.registered() == ()
+
+
+async def test_a_start_cancelled_while_it_cleans_up_raises_the_cancellation_with_its_error():
+    """Cancelling the task while a failed start cleans up raises the cancellation, the start's
+    error kept as its context; the next stop finishes the cleanup."""
+    entered = asyncio.Event()
+
+    def setup_a(ctx) -> None:
+        ctx.inbox("operator", on_message=_ignore)
+        ctx.on_stop(_held(entered))
+
+    def setup_b(ctx) -> None:
+        raise RuntimeError("setup b failed")
+
+    host = Host("agent-service", [plugin("a", setup_a), plugin("b", setup_b)])
+    starting = asyncio.create_task(no_clocks_no_io(host))
+    await entered.wait()
+    starting.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await starting
+    assert isinstance(caught.value.__context__, RuntimeError)
+    assert set(receiving.INBOX_REGISTRY) == {"operator"}
+
+    async with asyncio.timeout(5):
+        await host.stop()
+
+    assert host.registered() == ()
+    assert receiving.INBOX_REGISTRY == {}
 
 
 # ---------------------------------------------------------------------------

@@ -39,7 +39,8 @@ class RouteSpec:
 
 
 def bind_route(app: FastAPI, spec: RouteSpec) -> APIRoute:
-    """Add the route to ``app`` and return it, for :func:`unbind_route`."""
+    """Add the route to ``app`` and return it, for :func:`unbind_route`; drop the cached OpenAPI
+    document, which does not list it yet."""
     detail_for = refusal_detail(spec.answers_with_lane)
 
     async def endpoint(req: Request):
@@ -60,6 +61,7 @@ def bind_route(app: FastAPI, spec: RouteSpec) -> APIRoute:
             detail_for=detail_for,
         ),
     )
+    app.openapi_schema = None
     return app.router.routes[-1]
 
 

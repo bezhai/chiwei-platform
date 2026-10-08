@@ -343,6 +343,23 @@ async def test_stop_takes_the_route_off_the_app_and_out_of_the_openapi_document(
         assert (await c.post("/gone", json={"name": "x"})).status_code == 404
 
 
+async def test_a_restarted_host_puts_the_route_back_into_the_openapi_document():
+    """The app caches its OpenAPI document the first time it is asked for; binding a route drops
+    that cache, as taking one back does, or the document would keep saying the route is gone."""
+    s = _Served("POST", "/again")
+    await s.host.start(http=s.app, schema=False, mq=False, clocks=False, tasks=False)
+    await s.host.stop()
+    assert "/again" not in s.app.openapi()["paths"]
+
+    await s.host.start(http=s.app, schema=False, mq=False, clocks=False, tasks=False)
+    try:
+        assert "/again" in s.app.openapi()["paths"]
+        async with s.client() as c:
+            assert (await c.post("/again", json={"name": "x"})).status_code == 200
+    finally:
+        await s.host.stop()
+
+
 async def test_an_unsupported_method_is_refused_at_registration():
     async def handler(p: _Ping) -> None:  # pragma: no cover
         return None
