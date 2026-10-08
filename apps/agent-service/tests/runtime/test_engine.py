@@ -1,17 +1,18 @@
-"""Runtime engine tests: interval source loops + app-scoped consumer filter.
+"""Runtime engine tests: how the engine turns interval wires into clocks.
 
-Focuses on Runtime-level behavior that can't be exercised by the
-per-module unit tests:
+Covers what only the engine does:
 
-  - a configured ``Source.interval`` actually fires the wired consumer;
-  - the runtime routes emits through ``emit()`` (so in-process
-    consumers see them without a RabbitMQ roundtrip);
+  - a configured ``Source.interval`` fires the wired consumer through ``emit()``
+    (so in-process consumers see it without a RabbitMQ roundtrip);
   - ``nodes_for_app`` filtering keeps this-app runtimes from starting
     source loops for other-app wires;
-  - an app nobody bound a node to fails to start its loops.
+  - an app nobody bound a node to fails to start its loops;
+  - the engine's own lane flag, and its payload construction: a Data without a
+    ``ts`` field fails inside the clock loop, which is fatal.
 
-The payload contract (a missing ``ts`` field is fatal) is covered in
-``test_engine_source_error.py``.
+How a clock ticks (fire-and-forget, errors, the watchdog, trace ids, lane gating) is
+:mod:`app.runtime.clock`, shared with the plugin host and tested through it in
+``tests/host/test_clocks.py``.
 """
 
 from __future__ import annotations
@@ -122,3 +123,37 @@ async def test_runtime_rejects_unknown_app_name() -> None:
 
     with pytest.raises(RuntimeError, match="totally-not-a-real-app.*known"):
         await rt.start_source_loops()
+
+
+async def test_runtime_skips_its_interval_sources_in_a_test_lane(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("LANE", "ppe-refactor")
+    monkeypatch.delenv("DATAFLOW_ENABLE_TIME_SOURCES", raising=False)
+    wire(Tick).to(count_ticks).from_(Source.interval(seconds=0.05))
+
+    rt = Runtime(app_name="agent-service")
+    await _run_for(rt, seconds=0.2)
+
+    assert agent_counter == []
+    assert "skipped 1 interval source(s)" in caplog.text
+
+
+class _NoTs(Data):
+    """Lacks the ``ts`` field the engine builds every interval payload with."""
+
+    tid: Annotated[str, Key]
+
+
+@node
+async def _never_runs(t: _NoTs) -> None:  # pragma: no cover - the payload fails first
+    raise AssertionError("_never_runs should not run; the payload cannot be built")
+
+
+async def test_a_payload_the_engine_cannot_build_stops_the_process(monkeypatch) -> None:
+    exits: list[int] = []
+    monkeypatch.setattr("os._exit", lambda code: exits.append(code))
+    wire(_NoTs).to(_never_runs).from_(Source.interval(seconds=0.05))
+
+    rt = Runtime(app_name="agent-service")
+    await _run_for(rt, seconds=0.2)
+
+    assert exits == [1]

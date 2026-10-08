@@ -1,4 +1,10 @@
-"""内网 Bearer 校验 —— 声明了 ``requires_inner_secret=True`` 的那几条路由挂它。
+"""管理路由在 handler 之外的那几步：内网凭据、泳道核对、把请求读成路由的 Data，以及这几步拒绝
+时回答的外壳（:func:`refusal_detail`）。dataflow 的 HTTP source（:mod:`app.runtime.http_source`）
+和插件宿主的 ``ctx.route``（:mod:`app.host.http`）共用这一份，各自只管把 handler 接上；dataflow 的
+启动删掉之后（T1 计划的 C7b），这个模块整个搬进 ``app/host``。
+
+**内网 Bearer 校验** —— 声明了要凭据的那几条路由挂它（``Source.http(requires_inner_secret=True)``
+/ ``ctx.route(..., inner_secret=True)``）。
 
 凭据是 ``INNER_HTTP_SECRET`` + ``Authorization: Bearer <token>``：这个进程已经通过
 ``inter-service-auth`` 这个 ConfigBundle 拿得到它（:mod:`app.infra.config` 里的
@@ -22,8 +28,10 @@
 
 **三 · 拒绝发生在参数被反序列化之前。** 这是靠挂法保证的：它是路由级的
 ``Depends``，FastAPI 在调 handler 之前就把它解完了，而参数反序列化在 handler 体内
-（:mod:`app.runtime.http_source`）。顺序反过来的话，一个没有凭据的人能拿 422 的内容
+（:func:`request_data`）。顺序反过来的话，一个没有凭据的人能拿 422 的内容
 把参数结构一个字段一个字段探出来。
+
+**泳道核对** 排在凭据之后（:func:`route_guards`）：没凭据的人连"你落到了哪条泳道"都不该问得出来。
 """
 
 from __future__ import annotations
@@ -31,13 +39,15 @@ from __future__ import annotations
 import hmac
 import logging
 from collections.abc import Callable
+from typing import Any
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from app.infra import config
+from app.runtime.data import Data
+from app.runtime.lane_policy import current_deployment_lane, normalize_deployment_lane
 
-# 一句话 → 这条路由拒绝时 detail 长什么样。由 :mod:`app.runtime.http_source` 按路由
-# 的声明造好传进来：这一层管凭据，回答的外壳（比如带不带执行泳道）是那一层的事。
+# 一句话 → 这条路由拒绝时 detail 长什么样（:func:`refusal_detail` 按路由的声明造）。
 RefusalDetail = Callable[[str], str | dict]
 
 logger = logging.getLogger(__name__)
@@ -78,7 +88,7 @@ def _configured_credential() -> bytes | None:
 def inner_secret_guard(detail_for: RefusalDetail) -> Callable[[Request], None]:
     """造一个"没带对凭据就别往下走"的路由级依赖。
 
-    挂在哪几条路由上由 ``Source.http(requires_inner_secret=True)`` 决定 —— 这一层
+    挂在哪几条路由上由路由自己的声明决定（:func:`route_guards`）—— 这一层
     **不认路径**：认路径的话，"哪些该挡"就变成两处各写一遍的东西，而新增一条路由时
     没有任何东西会提醒你去改第二处。
 
@@ -113,3 +123,88 @@ def inner_secret_guard(detail_for: RefusalDetail) -> Callable[[Request], None]:
             )
 
     return require_inner_secret
+
+
+def refusal_detail(answers_with_lane: bool) -> RefusalDetail:
+    """框架在 handler 之外挡回去的那几种回答（401 / 503 / 409 / 422）的 detail 长什么样。
+
+    没声明 ``answers_with_lane`` 的路由拿到的还是原来那句话本身，**一个字节都没变** —— 那几条
+    运维口今天就是这样答的。
+
+    声明了的路由多一个执行泳道。它读的是本进程的部署环境，回显不了请求里的任何东西：泳道不在
+    注册表里时请求会静默落到 prod 的 pod 上并返回一个正常的回答，自报的落点是"这次调用打的是我
+    以为的那棵树"唯一的证据，而被拒的时候调用方同样需要这个答案。形状跟 handler 自己那几种拒绝
+    一致（``lane`` + ``message``），免得同一条路由的两类拒绝长成两种东西。
+    """
+
+    def detail(message: str) -> str | dict:
+        if not answers_with_lane:
+            return message
+        return {"lane": current_deployment_lane() or "prod", "message": message}
+
+    return detail
+
+
+def lane_match_guard(detail_for: RefusalDetail) -> Callable[[Request], Any]:
+    """请求要去的泳道和进程的部署泳道不一致就 409 的那个路由级依赖。
+
+    请求要去的泳道读 ``x-ctx-lane``（sidecar 选路用的就是它），没有就是 prod。读请求头
+    而不是 :func:`app.api.middleware.get_lane`：这一步不该依赖某个中间件先跑过。
+    """
+
+    async def check(request: Request) -> None:
+        requested = normalize_deployment_lane(request.headers.get("x-ctx-lane"))
+        executed = current_deployment_lane()
+        if requested != executed:
+            raise HTTPException(
+                status_code=409,
+                detail=detail_for(
+                    f"request was meant for lane {requested or 'prod'} but reached "
+                    f"lane {executed or 'prod'}; nothing was done"
+                ),
+            )
+
+    return check
+
+
+def route_guards(*, inner_secret: bool, lane_match: bool, detail_for: RefusalDetail) -> list:
+    """一条路由的路由级依赖：要凭据的先验凭据，要核对泳道的再核对泳道。FastAPI 按列表顺序解。
+
+    凭据只挂在声明了的路由上：覆盖范围在结构上限死 —— 没声明的路由（``/health``、那几条运维口）
+    连这段代码都走不到，不需要任何路径白名单来"记得别挡它们"。
+    """
+    guards = [Depends(inner_secret_guard(detail_for))] if inner_secret else []
+    if lane_match:
+        guards.append(Depends(lane_match_guard(detail_for)))
+    return guards
+
+
+async def request_fields(request: Request, method: str) -> dict[str, Any]:
+    """请求里给路由的 Data 的那些字段：query string 一律读；POST / PUT 再把 JSON body 盖上去。
+
+    同名字段 body 赢：显式的 body 比顺带的 query 更像调用方的本意。body 是空的、不是 JSON、或者
+    不是一个对象，都当作没有 body：只靠 query 也可能凑齐 Data，凑不齐就在 :func:`request_data`
+    那里 422。
+    """
+    fields: dict[str, Any] = dict(request.query_params)
+    if method in {"POST", "PUT"}:
+        try:
+            body = await request.json()
+        except Exception:
+            # Classification: HARMLESS per-request fallback: a missing or non-JSON body is "no
+            # body fields"; validation below answers 422 if the query alone does not do.
+            body = {}
+        if isinstance(body, dict):
+            fields.update(body)
+    return fields
+
+
+def request_data(data_cls: type[Data], fields: dict[str, Any], detail_for: RefusalDetail) -> Data:
+    """把字段造成路由的 Data；造不出来是调用方的问题，回 422，detail 按路由的外壳包。"""
+    try:
+        return data_cls(**fields)
+    except Exception as exc:
+        # Classification: PER-REQUEST validation failure, the caller's to fix: 422 to the HTTP
+        # caller. A route is request/response, not a polling loop, so contract §4.1 does not
+        # apply.
+        raise HTTPException(status_code=422, detail=detail_for(str(exc))) from exc

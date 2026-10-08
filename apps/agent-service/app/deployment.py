@@ -24,3 +24,13 @@ APP_WIRING: dict[str, tuple[str, ...]] = {
     "agent-service": ("app.wiring",),
     "world": ("app.world.wiring",),
 }
+
+APPS: dict[str, tuple[str, ...]] = {
+    "agent-service": (),
+    "world": (),
+}
+"""每个 App 的插件清单：插件模块名（各自暴露一个 ``PLUGIN``），:meth:`app.host.Host.for_app` 按它
+建宿主。写成字符串、到 ``for_app`` 才 import，所以一个 App 的进程只加载它清单里的插件——world
+的进程不加载 living 的代码。两项由下两个提交填上（agent-service 拆成四个插件，world 一个）；
+填上之前进程仍然按上面的 :data:`APP_WIRING` 启动，这里还没有调用方。
+"""

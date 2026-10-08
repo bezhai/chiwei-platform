@@ -758,13 +758,12 @@ async def test_starting_an_app_does_not_create_the_record_table(test_db, monkeyp
     Data 注册表清空：这里只看运行时自己的那几张表，别的测试顺带注册进来的 Data 类
     跟这件事无关。
     """
-    import app.runtime.engine as engine_mod
-    from app.runtime.engine import Runtime
+    import app.runtime.migrator as migrator
 
-    monkeypatch.setattr(engine_mod, "DATA_REGISTRY", set())
+    monkeypatch.setattr(migrator, "DATA_REGISTRY", set())
     async with test_db.begin() as conn:
         await conn.execute(text("DROP TABLE IF EXISTS message_record"))
-    await Runtime(app_name="world").migrate_schema()
+    await migrator.migrate_schema()
 
     async with test_db.begin() as conn:
         exists = (

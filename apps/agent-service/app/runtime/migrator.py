@@ -31,11 +31,13 @@ declaration).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from pydantic.fields import FieldInfo
 
 from app.runtime.data import (
+    DATA_REGISTRY,
     Data,
     is_admin_only,
     key_fields,
@@ -43,6 +45,8 @@ from app.runtime.data import (
 )
 from app.runtime.naming import to_snake
 from app.runtime.schema_types import UnmappablePgType, pg_type_for_annotation
+
+logger = logging.getLogger(__name__)
 
 
 class MigrationError(Exception):
@@ -290,3 +294,58 @@ async def apply_migration(plan: Plan, conn) -> None:
     """
     for s in plan.stmts:
         await conn.execute(s.sql, *s.params)
+
+
+async def migrate_schema() -> None:
+    """Read the live schema, diff it against every registered ``Data``, apply the additive DDL.
+
+    Also applies the runtime's own tables (``runtime_inflight``, ``runtime_dlq_audit``): they
+    are framework state, not Data, so :func:`plan_migration` does not track them; their DDL is
+    idempotent (``IF NOT EXISTS``) and always runs.
+
+    The whole plan is applied in one transaction (``get_session()`` commits on a clean exit,
+    rolls back on an exception): if any statement fails, the database stays as it was and the
+    process must be retried. :func:`plan_migration` already refuses destructive statements, so
+    only additive, ordered DDL reaches here.
+
+    Known limitation: only the ``public`` PostgreSQL schema is read and written.
+    """
+    from sqlalchemy import text
+
+    from app.data.session import get_session
+    from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
+    from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
+
+    existing: dict[str, dict[str, str]] = {}
+    async with get_session() as s:
+        result = await s.execute(
+            text(
+                "SELECT table_name, column_name, data_type "
+                "FROM information_schema.columns "
+                "WHERE table_schema = 'public'"
+            )
+        )
+        for table_name, column_name, data_type in result.all():
+            existing.setdefault(table_name, {})[column_name] = data_type
+
+    plan = plan_migration(list(DATA_REGISTRY), existing)
+    runtime_internal_stmts = list(RUNTIME_INFLIGHT_DDL) + list(RUNTIME_DLQ_AUDIT_DDL)
+
+    # plan_migration only emits parameterless DDL (CREATE TABLE / ALTER TABLE ADD COLUMN /
+    # CREATE INDEX), so each statement is text()-executed as is. If it ever emits
+    # parameterised statements, this loop has to map Stmt.params into a named bind dict.
+    async with get_session() as s:
+        for stmt in plan.stmts:
+            if stmt.params:
+                raise RuntimeError(
+                    "migrate_schema does not support parameterised DDL statements yet; got: "
+                    f"sql={stmt.sql!r} params={stmt.params!r}"
+                )
+            await s.execute(text(stmt.sql))
+        for sql in runtime_internal_stmts:
+            await s.execute(text(sql))
+    logger.info(
+        "runtime: applied %d Data + %d runtime-internal migration statement(s)",
+        len(plan.stmts),
+        len(runtime_internal_stmts),
+    )

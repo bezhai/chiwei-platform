@@ -17,13 +17,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 
 from app.runtime.emit import emit
-from app.runtime.http_auth import inner_secret_guard
-from app.runtime.lane_policy import (
-    current_deployment_lane,
-    normalize_deployment_lane,
+from app.runtime.http_auth import (
+    refusal_detail,
+    request_data,
+    request_fields,
+    route_guards,
 )
 from app.runtime.wire import WIRING_REGISTRY
 
@@ -49,52 +50,12 @@ def _bind_one(app: FastAPI, w, src) -> None:
     sync_response = src.params.get("response", False)
     data_cls = w.data_type
     path_params = _path_params(path)
-    answers_with_lane = src.params.get("answers_with_lane", False)
-
-    def refusal_detail(message: str) -> Any:
-        """框架在 handler 之外挡回去的那几种回答（401 / 503 / 422）长什么样。
-
-        没声明 ``answers_with_lane`` 的路由拿到的还是原来那句话本身，**一个字节都没
-        变** —— 那几条运维口今天就是这样答的。
-
-        声明了的路由多一个执行泳道。它读的是本进程的部署环境，回显不了请求里的任何
-        东西：泳道不在注册表里时请求会静默落到 prod 的 pod 上并返回一个正常的回答，
-        自报的落点是"这次调用打的是我以为的那棵树"唯一的证据，而被拒的时候调用方同样
-        需要这个答案。形状跟 handler 自己那几种拒绝一致（``lane`` + ``message``），
-        免得同一条路由的两类拒绝长成两种东西。
-        """
-        if not answers_with_lane:
-            return message
-        return {"lane": current_deployment_lane() or "prod", "message": message}
+    detail_for = refusal_detail(src.params.get("answers_with_lane", False))
 
     async def endpoint(req: Request, **path_kwargs: Any) -> Any:
-        kwargs: dict[str, Any] = dict(path_kwargs)
-        # Always merge query string — works for POST/PUT/GET/DELETE.
-        kwargs.update(dict(req.query_params))
-        if method in {"POST", "PUT"}:
-            try:
-                body = await req.json()
-            except Exception:
-                # Classification: HARMLESS per-request fallback. Empty / missing
-                # / non-JSON body is treated as "no body fields"; query string
-                # alone may still satisfy the Data class. Validation fails below
-                # (data_cls(**kwargs)) → returns HTTP 422 to the caller.
-                body = {}
-            if isinstance(body, dict):
-                # Body wins on conflict: explicit body fields take precedence
-                # over implicit query string for endpoints that take both.
-                kwargs.update(body)
-
-        try:
-            data_obj = data_cls(**kwargs)
-        except Exception as exc:
-            # Classification: PER-REQUEST validation failure → caller's
-            # responsibility. Returns 422 to the HTTP caller; loop semantics
-            # (contract §4.1) don't apply—HTTP source is a request/response
-            # endpoint, not a polling loop.
-            raise HTTPException(
-                status_code=422, detail=refusal_detail(str(exc))
-            ) from exc
+        # Path params first, then the query string, then (POST / PUT) the JSON body.
+        fields = {**path_kwargs, **await request_fields(req, method)}
+        data_obj = request_data(data_cls, fields, detail_for)
 
         if not sync_response:
             await emit(data_obj)
@@ -120,23 +81,13 @@ def _bind_one(app: FastAPI, w, src) -> None:
     ]
     endpoint.__signature__ = Signature(params)  # type: ignore[attr-defined]
 
-    # 凭据校验挂成**路由级依赖**，只挂在声明了 requires_inner_secret 的那几条上。
-    #
-    # 两件事靠这个挂法成立：
-    #   * 覆盖范围在结构上限死 —— 没声明的路由（/health、那几条运维口）连这段代码都
-    #     走不到，不需要任何路径白名单来"记得别挡它们"；
-    #   * 校验跑在参数反序列化**之前** —— FastAPI 先解依赖再调 handler，而参数是在
-    #     handler 体内 data_cls(**kwargs) 才解的。反过来的话，没凭据的人能拿 422 的
-    #     内容把参数结构探出来。
-    guard = (
-        [Depends(inner_secret_guard(refusal_detail))]
-        if src.params.get("requires_inner_secret")
-        else []
+    # 凭据、泳道校验挂成**路由级依赖**，只挂在声明了的那几条上，跑在参数反序列化之前
+    # （见 :mod:`app.runtime.http_auth`）。
+    guard = route_guards(
+        inner_secret=src.params.get("requires_inner_secret", False),
+        lane_match=src.params.get("requires_lane_match", False),
+        detail_for=detail_for,
     )
-    # 泳道核对排在凭据之后：没凭据的人连"你落到了哪条泳道"都不该问得出来。FastAPI
-    # 按列表顺序解依赖。
-    if src.params.get("requires_lane_match"):
-        guard.append(Depends(_lane_match_guard(refusal_detail)))
 
     status_code = 200 if sync_response else 202
     bind = {
@@ -148,28 +99,6 @@ def _bind_one(app: FastAPI, w, src) -> None:
     if bind is None:
         raise ValueError(f"unsupported HTTP method {method!r}")
     bind(path, status_code=status_code, dependencies=guard)(endpoint)
-
-
-def _lane_match_guard(refusal_detail):
-    """请求要去的泳道和进程的部署泳道不一致就 409 的那个路由级依赖。
-
-    请求要去的泳道读 ``x-ctx-lane``（sidecar 选路用的就是它），没有就是 prod。读请求头
-    而不是 :func:`app.api.middleware.get_lane`：这一步不该依赖某个中间件先跑过。
-    """
-
-    async def check(request: Request) -> None:
-        requested = normalize_deployment_lane(request.headers.get("x-ctx-lane"))
-        executed = current_deployment_lane()
-        if requested != executed:
-            raise HTTPException(
-                status_code=409,
-                detail=refusal_detail(
-                    f"request was meant for lane {requested or 'prod'} but reached "
-                    f"lane {executed or 'prod'}; nothing was done"
-                ),
-            )
-
-    return check
 
 
 async def _emit_rpc(w, data_obj):

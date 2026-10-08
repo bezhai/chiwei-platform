@@ -25,7 +25,7 @@
 表的声明在 :class:`app.data.models.MessageRecord`，跟公共层的业务表一样建：coe-* 泳道启动
 时由 :func:`app.data.bootstrap.ensure_business_schema` 建，prod 在发版之前走 DDL 申请
 （``docs/runbooks/prod-ddl-backlog.md``）。App 启动时的运行时迁移
-（:meth:`app.runtime.engine.Runtime.migrate_schema`）不建它。
+（:func:`app.runtime.migrator.migrate_schema`）不建它。
 """
 from __future__ import annotations
 

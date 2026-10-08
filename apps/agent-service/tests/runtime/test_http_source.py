@@ -1,4 +1,10 @@
-"""Phase 6 v4 Gap 1: http_source 扩 method / path_params / query / RPC."""
+"""Phase 6 v4 Gap 1: http_source 扩 method / path_params / query / RPC.
+
+凭据、泳道核对和拒绝时的回答外壳在 :mod:`app.runtime.http_auth`，跟插件宿主的路由共用，测试在
+``tests/host/test_routes.py``；``requires_inner_secret`` / ``requires_lane_match`` 在 http_source
+这边的接法由 ``tests/messaging/test_operator.py``、``tests/world/test_admin.py`` 和
+``tests/apps/test_surface.py`` 按行为钉住。
+"""
 from __future__ import annotations
 
 from typing import Annotated
@@ -169,113 +175,3 @@ def test_http_source_post_body_overrides_query():
     r = client.post("/post-bq?name=fromquery", json={"name": "frombody"})
     assert r.status_code == 202
     assert captured[-1].name == "frombody"
-
-
-# ---------------------------------------------------------------------------
-# requires_lane_match：请求要去的泳道和进程所在的泳道不一致时，一步都不做
-# ---------------------------------------------------------------------------
-
-
-def _lane_bound_app(monkeypatch, *, process_lane: str | None, answers_with_lane=True):
-    """一条声明了 requires_lane_match 的路由；返回 (client, 被调用的记录)。"""
-    if process_lane is None:
-        monkeypatch.delenv("LANE", raising=False)
-    else:
-        monkeypatch.setenv("LANE", process_lane)
-    seen: list = []
-
-    @node
-    async def lane_bound(p: _Ping) -> _Pong:
-        seen.append(p)
-        return _Pong(name=p.name)
-
-    wire(_Ping).from_(
-        Source.http(
-            "/lane-bound",
-            method="POST",
-            response=True,
-            requires_lane_match=True,
-            answers_with_lane=answers_with_lane,
-        )
-    ).to(lane_bound)
-    app = FastAPI()
-    register_http_sources(app)
-    return TestClient(app), seen
-
-
-def test_a_request_for_another_lane_is_refused_before_the_handler(monkeypatch):
-    client, seen = _lane_bound_app(monkeypatch, process_lane="coe-here")
-
-    r = client.post("/lane-bound", json={"name": "x"}, headers={"x-ctx-lane": "coe-there"})
-
-    assert r.status_code == 409
-    assert r.json()["detail"]["lane"] == "coe-here"
-    assert "coe-there" in r.json()["detail"]["message"]
-    assert seen == []
-
-
-def test_a_request_without_a_lane_is_meant_for_prod(monkeypatch):
-    client, seen = _lane_bound_app(monkeypatch, process_lane="coe-here")
-
-    r = client.post("/lane-bound", json={"name": "x"})
-
-    assert r.status_code == 409
-    assert seen == []
-
-
-def test_a_request_for_this_lane_goes_through(monkeypatch):
-    client, seen = _lane_bound_app(monkeypatch, process_lane="coe-here")
-
-    r = client.post("/lane-bound", json={"name": "x"}, headers={"x-ctx-lane": "coe-here"})
-
-    assert r.status_code == 200
-    assert r.json() == {"name": "x"}
-    assert len(seen) == 1
-
-
-@pytest.mark.parametrize("header", [None, "prod"])
-def test_prod_takes_requests_without_a_lane_or_for_prod(monkeypatch, header):
-    client, seen = _lane_bound_app(monkeypatch, process_lane=None)
-
-    headers = {"x-ctx-lane": header} if header else {}
-    r = client.post("/lane-bound", json={"name": "x"}, headers=headers)
-
-    assert r.status_code == 200
-    assert len(seen) == 1
-
-
-def test_the_lane_is_checked_before_the_parameters_are_read(monkeypatch):
-    """落错泳道的请求不该拿到 422：那等于把参数结构告诉了一个本不该到这里的请求。"""
-    client, seen = _lane_bound_app(monkeypatch, process_lane="coe-here")
-
-    r = client.post("/lane-bound", json={"wrong": 1}, headers={"x-ctx-lane": "coe-there"})
-
-    assert r.status_code == 409
-    assert seen == []
-
-
-def test_a_route_that_does_not_report_its_lane_refuses_with_a_sentence(monkeypatch):
-    client, _ = _lane_bound_app(monkeypatch, process_lane="coe-here", answers_with_lane=False)
-
-    r = client.post("/lane-bound", json={"name": "x"}, headers={"x-ctx-lane": "coe-there"})
-
-    assert r.status_code == 409
-    assert isinstance(r.json()["detail"], str)
-
-
-def test_routes_without_the_declaration_are_not_checked(monkeypatch):
-    monkeypatch.setenv("LANE", "coe-here")
-    seen: list = []
-
-    @node
-    async def open_route(p: _Ping) -> None:
-        seen.append(p)
-
-    wire(_Ping).from_(Source.http("/open", method="POST")).to(open_route)
-    app = FastAPI()
-    register_http_sources(app)
-
-    r = TestClient(app).post("/open", json={"name": "x"}, headers={"x-ctx-lane": "coe-there"})
-
-    assert r.status_code == 202
-    assert len(seen) == 1

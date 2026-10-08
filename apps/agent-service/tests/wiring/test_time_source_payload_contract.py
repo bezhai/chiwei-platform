@@ -7,7 +7,7 @@
 
 ``compile_graph()`` 不跑源循环，所以一条时间源的 Data 形态不对（缺 ts / 有其他
 必填字段）编译期检测不到——整张图照样编译过、集成测试照样过，但生产源循环第一次
-tick 就 ``_build_payload`` raise → ``_record_source_error`` → watchdog
+tick 就 ``_build_payload`` raise → 钟的循环记下这个错（:mod:`app.runtime.clock`）→ watchdog
 ``os._exit(1)`` → Pod 被杀重启 → 该源驱动的整条链路在生产里永远起不来。
 
 这个文件对生产图里**每一条带 interval 源的 wire** 断言其 ``data_type``
