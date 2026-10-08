@@ -67,7 +67,7 @@ export class PixivClient {
     /**
      * 获取用户指定标签下的关注列表
      */
-    async getFollowersByTag(tag: string, userId?: string): Promise<FollowerInfo[]> {
+    async getFollowersByTag(tag: string, userId?: string, signal?: AbortSignal): Promise<FollowerInfo[]> {
         const targetUserId = userId || this.config.defaultUserId || '35384654';
         const pageSize = 24;
         const followers: FollowerInfo[] = [];
@@ -76,6 +76,7 @@ export class PixivClient {
         let total = 0;
 
         do {
+            signal?.throwIfAborted();
             const pixivUrl = `https://www.pixiv.net/ajax/user/${targetUserId}/following`;
             const referer = `https://www.pixiv.net/users/${targetUserId}/following/${encodeURIComponent(tag)}?p=${page}`;
 
@@ -91,6 +92,7 @@ export class PixivClient {
                 }
             );
 
+            signal?.throwIfAborted();
             const { error, body } = response;
             if (error || !body) {
                 throw new Error(response.message || 'Failed to fetch followers');

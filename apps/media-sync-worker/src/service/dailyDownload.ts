@@ -8,6 +8,7 @@ import {
 import { FollowerInfo } from "../pixiv/types";
 import redisClient from "../redis/redisClient";
 import { loadDownloadDelayConfig, waitMs } from "./downloadRuntime";
+import { createDiscoveryStep, type DiscoveryStep } from "./discoveryStep";
 
 const RedisDownloadUserDictKey = "download_user_dict";
 
@@ -19,10 +20,11 @@ const getRandomDays = (): number => {
 export const startDownload = async (): Promise<void> => {
   console.log("Download service started...");
   const delayConfig = loadDownloadDelayConfig();
+  const step = createDiscoveryStep();
 
   try {
     // 获取 "已上传" 标签下的关注者
-    const authorArr = await getFollowersByTag("已上传");
+    const authorArr = await step("pixiv.followers", (signal) => getFollowersByTag("已上传", signal));
 
     // 如果成功获取关注者
     if (authorArr && authorArr.length > 0) {
@@ -34,12 +36,14 @@ export const startDownload = async (): Promise<void> => {
       }
     } else {
       // 如果没有关注者，发送消息
-      await send_msg(process.env.SELF_CHAT_ID!, "没有找到关注者");
+      await step("notify.no_followers", () => send_msg(process.env.SELF_CHAT_ID!, "没有找到关注者"));
     }
   } catch (err) {
     // 如果获取关注者出错，发送错误消息
     console.error("Error fetching followers:", err);
-    await send_msg(process.env.SELF_CHAT_ID!, "下载图片服务获取元信息失败");
+    await step("notify.discovery_failure", () => send_msg(process.env.SELF_CHAT_ID!, "下载图片服务获取元信息失败"))
+      .catch((error) => console.error("Discovery failure notification failed:", error.message));
+    throw err;
   }
 };
 
@@ -50,13 +54,14 @@ const downloadEachUser = async (
   console.log(`Downloading images for author: ${author.userName}`);
   // 执行下载逻辑...
   const authorId = author.userId;
+  const step = createDiscoveryStep(authorId);
 
   try {
     // 从 Redis 获取对应作者的下载时间，使用封装的 hGetValue 函数
-    const lastDownloadTime = await redisClient.hget(
+    const lastDownloadTime = await step("redis.hget", () => redisClient.hget(
       RedisDownloadUserDictKey,
       authorId
-    );
+    ));
 
     if (!lastDownloadTime) {
       console.log(
@@ -78,24 +83,20 @@ const downloadEachUser = async (
       }
     }
 
-    // 更新 Redis 中的下载时间，使用封装的 hSetValue 函数
-    await redisClient.hset(
-      RedisDownloadUserDictKey,
-      authorId,
-      `${Math.floor(Date.now() / 1000)}`
-    );
-
     // 执行下载逻辑
     const downloadRequest = {
       authorId: authorId,
       authorLastFilter: true,
     };
 
-    const result = await DownloadIllusts(downloadRequest);
+    const result = await DownloadIllusts(downloadRequest, step);
 
     await waitMs(delayConfig.afterAuthorMs);
 
     if (result) {
+      await step("redis.record_success", () => redisClient.hset(
+        RedisDownloadUserDictKey, authorId, `${Math.floor(Date.now() / 1000)}`
+      ));
       console.log(`Download successful for author: ${authorId}`);
     } else {
       throw new Error(`Download failed for author: ${authorId}`);
@@ -103,7 +104,8 @@ const downloadEachUser = async (
   } catch (err) {
     // 错误处理，如果下载失败则发送消息
     console.error(`Download failed for author: ${authorId}:`, err);
-    await send_msg(process.env.SELF_CHAT_ID!, `作者：${authorId} 图片下载失败`);
+    await step("notify.author_failure", () => send_msg(process.env.SELF_CHAT_ID!, `作者：${authorId} 图片下载失败`))
+      .catch((error) => console.error(`Failure notification failed for author ${authorId}:`, error.message));
   }
 };
 
@@ -118,14 +120,15 @@ interface DownloadIllustsReq {
 }
 
 export const DownloadIllusts = async (
-  req: DownloadIllustsReq
+  req: DownloadIllustsReq,
+  step: DiscoveryStep = createDiscoveryStep(req.authorId),
 ): Promise<boolean> => {
   let illustIds: string[] = req.limitIllusts || [];
 
   try {
     // 1. 如果传入了 authorId，则获取该作者的作品
     if (req.authorId) {
-      illustIds = await getAuthorArtwork(req.authorId);
+      illustIds = await step("pixiv.author_artworks", () => getAuthorArtwork(req.authorId!));
       console.log(
         `作者：${req.authorId} 查询到 ${illustIds.length} 张图片`
       );
@@ -133,7 +136,7 @@ export const DownloadIllusts = async (
 
     // 2. 如果传递了 keyword，则获取与该关键词相关的作品
     if (req.keyword) {
-      illustIds = await getTagArtwork(req.keyword, req.page || 1);
+      illustIds = await step("pixiv.tag_artworks", () => getTagArtwork(req.keyword!, req.page || 1));
     }
 
     // 3. 对作品ID进行排序，按降序排列
@@ -161,14 +164,14 @@ export const DownloadIllusts = async (
 
     // 如果需要过滤作者的最后作品
     if (req.authorLastFilter) {
-      const maxIllustId = await getMaxIllustId(
+      const maxIllustId = await step("mongo.history", () => getMaxIllustId(
         illustIds.map((id) => parseInt(id, 10))
-      );
+      ));
       if (!maxIllustId) {
-        await send_msg(
+        await step("notify.download", () => send_msg(
           process.env.SELF_CHAT_ID!,
           `作者：${req.authorId} 历史没有数据，请注意`
-        );
+        ));
       } else {
         console.log(
           `作者：${req.authorId} 历史最大作品ID为 ${maxIllustId}, 过滤掉作者最后作品`
@@ -181,7 +184,7 @@ export const DownloadIllusts = async (
     }
 
     // 从 Redis 获取 ban_illusts 列表
-    const banIllusts = await redisClient.smembers("ban_illusts");
+    const banIllusts = await step("redis.banned_illusts", () => redisClient.smembers("ban_illusts"));
 
     // 过滤掉被禁止的作品
     if (banIllusts) {
@@ -200,31 +203,34 @@ export const DownloadIllusts = async (
     // 记录开始下载日志
     if (req.authorId) {
       console.log(`作者：${req.authorId}开始下载${illustIds.length}张图片`);
-      await send_msg(
+      await step("notify.download", () => send_msg(
         process.env.SELF_CHAT_ID!,
         `作者：${req.authorId} 开始下载 ${illustIds.length} 张图片`
-      );
+      ));
     } else if (req.keyword) {
       console.log(`关键词：${req.keyword}开始下载${illustIds.length}张图片`);
-      await send_msg(
+      await step("notify.download", () => send_msg(
         process.env.SELF_CHAT_ID!,
         `关键词：${req.keyword} 开始下载 ${illustIds.length} 张图片`
-      );
+      ));
     }
 
     // 遍历所有作品ID，插入下载任务
+    let enqueueFailures = 0;
     for (const illustId of illustIds) {
       try {
-        const insertSuccess = await insertDownloadTask(illustId);
+        const insertSuccess = await step(`mongo.enqueue.${illustId}`, (signal) => insertDownloadTask(illustId, signal));
         if (insertSuccess) {
           console.log(`插入任务 ${illustId} 成功`);
         } else {
           console.log(`任务 ${illustId} 已存在`);
         }
       } catch (err) {
+        enqueueFailures++;
         console.error(`插入任务 ${illustId} 失败: ${err}`);
       }
     }
+    if (enqueueFailures > 0) throw new Error(`${enqueueFailures} download tasks failed to enqueue`);
   } catch (err) {
     console.error("下载图片时发生错误: ", err);
     return false;

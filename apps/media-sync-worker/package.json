@@ -13,6 +13,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/ali-oss": "^6.23.3",
     "@types/lodash": "^4.17.13",
     "@types/node": "^22.10.1",
     "@types/node-cron": "^3.0.11",
