@@ -7,7 +7,7 @@ from __future__ import annotations
 from sqlalchemy.future import select
 
 from app.data.models import ModelMapping, ModelProvider
-from app.runtime.db import auto_tx, current_session
+from app.data.tx import auto_tx, current_session
 
 __all__ = [
     "parse_model_id",

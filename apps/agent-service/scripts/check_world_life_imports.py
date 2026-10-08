@@ -29,7 +29,7 @@ FORBIDDEN = {
 _DYNAMIC_IMPORTERS = {"import_module", "__import__"}
 
 
-def _module_name(root: Path, path: Path) -> tuple[list[str], bool]:
+def module_name(root: Path, path: Path) -> tuple[list[str], bool]:
     """文件对应的模块名各段，以及它是不是包的 ``__init__``。``root`` 是 ``app`` 目录。"""
     rel = path.relative_to(root).with_suffix("")
     parts = [root.name, *rel.parts]
@@ -50,7 +50,7 @@ def _hits(target: str, forbidden: str) -> bool:
     return target == forbidden or target.startswith(forbidden + ".")
 
 
-def _imported_names(tree: ast.AST, module_parts: list[str], is_package: bool):
+def imported_names(tree: ast.AST, module_parts: list[str], is_package: bool):
     """每一处 import 指向的完整模块名（可能是几个候选），连同行号。"""
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -83,9 +83,9 @@ def find_violations(root: Path) -> list[str]:
         if not side_dir.is_dir():
             continue
         for path in sorted(side_dir.rglob("*.py")):
-            module_parts, is_package = _module_name(root, path)
+            module_parts, is_package = module_name(root, path)
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for lineno, candidates in _imported_names(tree, module_parts, is_package):
+            for lineno, candidates in imported_names(tree, module_parts, is_package):
                 hit = next((c for c in candidates if _hits(c, forbidden)), None)
                 if hit is not None:
                     rel = path.relative_to(root.parent)

@@ -15,7 +15,7 @@ import asyncio
 import pytest
 from sqlalchemy import text
 
-from app.runtime.db import auto_tx, current_session, tx
+from app.data.tx import auto_tx, current_session, tx
 
 pytestmark = pytest.mark.integration
 

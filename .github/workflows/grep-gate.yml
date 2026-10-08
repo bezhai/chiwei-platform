@@ -169,7 +169,7 @@ jobs:
           # 下面这几条对**全部**业务包 exact-zero —— 它们说的是"别绕开 queries 层"，
           # 跟拥不拥有自己的表无关。
           # No `current_session` import in business (queries layer is internal)
-          c=$(grep -rnE "from app\.runtime\.db import.*current_session|from app\.runtime import.*current_session" \
+          c=$(grep -rnE "from app\.data\.tx import.*current_session|from app\.data import.*\btx\b" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c current_session imports in business"; exit 1; }
           # No AsyncSession type references in business (queries own the type)
@@ -303,6 +303,22 @@ jobs:
                   fail = True
           sys.exit(1 if fail else 0)
           PY
+
+  package-cycles:
+    name: No new cycles between app packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Only the cycles listed in KNOWN_CYCLES remain
+        shell: bash
+        working-directory: apps/agent-service
+        run: |
+          # app/ 下每个子包和顶层模块是一个节点，包里任何一处 import 另一个包就是一条边
+          # （函数里的 import、import_module 的字符串字面量都算）。互相走得到的几个包
+          # 是一组环：不在 KNOWN_CYCLES 里的环失败，名单上的环消失或缩小了也失败，
+          # 所以名单只能缩。
+          # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_package_cycles.py
+          python3 -m scripts.check_package_cycles app
 
   world-life-isolation:
     name: World and life never import each other

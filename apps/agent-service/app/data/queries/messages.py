@@ -22,7 +22,7 @@ from sqlalchemy.future import select
 from sqlalchemy.sql import text
 
 from app.data.models import CommonMessage
-from app.runtime.db import auto_tx, current_session
+from app.data.tx import auto_tx, current_session
 
 __all__ = [
     "find_unread_summary",

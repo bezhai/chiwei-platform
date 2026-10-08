@@ -85,8 +85,8 @@ async def replace_session(
     judged inside the INSERT itself. ``False`` means somebody wrote in between —
     nothing was written, and what that means is the caller's call.
 
-    ``session`` runs the write on the caller's ``AsyncSession`` so it commits
-    atomically with whatever else that transaction did.
+    ``session`` runs the write on the caller's open database session so it
+    commits atomically with whatever else that transaction did.
 
     Empty ``messages`` is rejected: it would store an empty transcript, i.e. wipe
     her context, and no caller ever means that.

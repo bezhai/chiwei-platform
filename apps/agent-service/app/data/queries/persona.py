@@ -9,7 +9,7 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from app.data.models import BotPersona
-from app.runtime.db import auto_tx, current_session
+from app.data.tx import auto_tx, current_session
 
 __all__ = [
     "find_persona",

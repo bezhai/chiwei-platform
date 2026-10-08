@@ -1,9 +1,11 @@
-"""DB session capability — Phase 7d Gap 13.
+"""Transactions over the business database — Phase 7d Gap 13.
 
 业务永远不直接拿 session。两个对外 API：
 
   - ``async with tx():``  — 表达「这几行原子」
-  - ``current_session()``  — query 函数内部用；业务区禁止 import
+  - ``current_session()``  — query 函数（``app.data.queries``）内部用；业务区禁止 import
+
+``auto_tx()`` 是 query 函数自己用的：不在 tx 里就为这一次调用开一个。
 
 session 走 contextvar。**AsyncSession 单 session 单 connection 不支持并发使用，
 所以同一 tx 内 DB 操作只能顺序 await — 在 tx 内塞 ``asyncio.gather`` 跑多条

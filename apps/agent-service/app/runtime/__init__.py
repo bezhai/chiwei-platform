@@ -12,7 +12,6 @@ needed to write a node and may change without notice.
 """
 
 from app.runtime.data import AdminOnly, Data, DedupKey, Key, Version
-from app.runtime.db import tx
 from app.runtime.emit import emit
 from app.runtime.node import node
 from app.runtime.placement import bind
@@ -31,6 +30,5 @@ __all__ = [
     "bind",
     "emit",
     "node",
-    "tx",
     "wire",
 ]

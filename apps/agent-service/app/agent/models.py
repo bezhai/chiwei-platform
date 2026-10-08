@@ -15,7 +15,7 @@ import logging
 import time
 from typing import Any
 
-from app.runtime.db import tx
+from app.data.tx import tx
 
 logger = logging.getLogger(__name__)
 
