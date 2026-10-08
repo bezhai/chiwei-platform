@@ -21,6 +21,7 @@ type passthrough struct {
 	srv      *Server
 	addr     string
 	upstream *net.TCPListener
+	served   <-chan error // what Serve returned
 }
 
 func startPassthrough(t *testing.T) *passthrough {
@@ -38,9 +39,10 @@ func startPassthrough(t *testing.T) *passthrough {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	go srv.Serve(ln)
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ln) }()
 
-	return &passthrough{srv: srv, addr: ln.Addr().String(), upstream: upstream.(*net.TCPListener)}
+	return &passthrough{srv: srv, addr: ln.Addr().String(), upstream: upstream.(*net.TCPListener), served: served}
 }
 
 // open connects through the passthrough and returns both ends of the

@@ -6,6 +6,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -69,6 +70,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+// ErrServerClosed is returned by Serve and ListenAndServe once Shutdown has
+// begun.
+var ErrServerClosed = errors.New("proxy: server closed")
+
 // Server uses cmux to multiplex a single TCP listener into HTTP and non-HTTP
 // streams. HTTP traffic gets lane-aware routing; everything else gets TCP
 // passthrough to the original destination (via SO_ORIGINAL_DST).
@@ -76,12 +81,17 @@ type Server struct {
 	handler    *Handler
 	listenAddr string
 	httpServer *http.Server
-	mux        cmux.CMux
-	listener   net.Listener
 	// originalDst finds where a passthrough connection was headed. It is
 	// GetOriginalDst in production; tests point it at a local upstream,
 	// since SO_ORIGINAL_DST only answers behind an iptables REDIRECT.
 	originalDst func(*net.TCPConn) (net.Addr, error)
+
+	mu       sync.Mutex
+	listener net.Listener
+	mux      cmux.CMux
+	closing  bool                  // Shutdown has begun: no new tunnels
+	tunnels  map[net.Conn]struct{} // app side of every open tunnel
+	open     sync.WaitGroup        // one count per entry in tunnels
 }
 
 // NewServer creates a Server that listens on listenAddr (e.g. ":15001").
@@ -91,6 +101,7 @@ func NewServer(listenAddr string, resolver registry.Resolver) *Server {
 		handler:     handler,
 		listenAddr:  listenAddr,
 		originalDst: GetOriginalDst,
+		tunnels:     make(map[net.Conn]struct{}),
 	}
 	s.httpServer = &http.Server{
 		Handler:      handler,
@@ -110,30 +121,105 @@ func (s *Server) ListenAndServe() error {
 }
 
 // Serve multiplexes ln: HTTP/1.x requests get lane routing, everything else
-// is tunnelled to its original destination.
+// is tunnelled to its original destination. After Shutdown it returns
+// ErrServerClosed.
 func (s *Server) Serve(ln net.Listener) error {
-	s.listener = ln
-	log.Printf("[proxy] listening on %s", ln.Addr())
-
-	s.mux = cmux.New(ln)
-
+	mux := cmux.New(ln)
 	// HTTP matcher: match requests starting with an HTTP method
-	httpLn := s.mux.Match(httpMethodMatcher())
+	httpLn := mux.Match(httpMethodMatcher())
 	// Everything else: TCP passthrough
-	tcpLn := s.mux.Match(cmux.Any())
+	tcpLn := mux.Match(cmux.Any())
+
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		ln.Close()
+		return ErrServerClosed
+	}
+	s.listener, s.mux = ln, mux
+	s.mu.Unlock()
+	log.Printf("[proxy] listening on %s", ln.Addr())
 
 	go s.httpServer.Serve(httpLn)
 	go s.serveTCPPassthrough(tcpLn)
 
-	return s.mux.Serve()
+	err := mux.Serve()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return ErrServerClosed
+	}
+	return err
 }
 
-// Shutdown gracefully shuts down the server.
+// Shutdown stops accepting connections, then waits for in-flight HTTP
+// requests and open tunnels to finish on their own. If ctx ends first, it
+// closes whatever is still open and returns ctx's error.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.mux != nil {
-		s.mux.Close()
+	s.mu.Lock()
+	s.closing = true
+	ln, mux := s.listener, s.mux
+	s.mu.Unlock()
+	if ln != nil {
+		// cmux.Close only stops handing out connections; closing the
+		// listener is what stops accepting them.
+		mux.Close()
+		ln.Close()
 	}
-	return s.httpServer.Shutdown(ctx)
+
+	httpErr := s.httpServer.Shutdown(ctx)
+	if errors.Is(httpErr, net.ErrClosed) {
+		// cmux backs the HTTP listener with ln, already closed above.
+		httpErr = nil
+	}
+	if httpErr != nil {
+		s.httpServer.Close()
+	}
+	if err := s.waitTunnels(ctx); err != nil {
+		return err
+	}
+	return httpErr
+}
+
+// waitTunnels waits for every open tunnel to finish. If ctx ends first, it
+// closes their app side, which tears each tunnel down, and returns ctx's
+// error.
+func (s *Server) waitTunnels(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.open.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		s.mu.Lock()
+		for conn := range s.tunnels {
+			conn.Close()
+		}
+		s.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+// track registers conn as an open tunnel; once Shutdown has begun it refuses.
+func (s *Server) track(conn net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return false
+	}
+	s.tunnels[conn] = struct{}{}
+	s.open.Add(1)
+	return true
+}
+
+func (s *Server) untrack(conn net.Conn) {
+	s.mu.Lock()
+	delete(s.tunnels, conn)
+	s.mu.Unlock()
+	s.open.Done()
 }
 
 // serveTCPPassthrough accepts non-HTTP connections and tunnels them to
@@ -150,6 +236,10 @@ func (s *Server) serveTCPPassthrough(ln net.Listener) {
 
 func (s *Server) handleTCPConn(conn net.Conn) {
 	defer conn.Close()
+	if !s.track(conn) {
+		return
+	}
+	defer s.untrack(conn)
 
 	// Unwrap to get the raw TCP connection for SO_ORIGINAL_DST
 	rawConn := unwrapTCPConn(conn)
