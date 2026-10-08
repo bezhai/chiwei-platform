@@ -1,6 +1,14 @@
 config:
   clients:
     - url: http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push
+  snippets:
+    # paas-engine 给每个 Pod 打 lane 标签，日志 API（make logs LANE=...）按 lane="<泳道>" 选流。
+    # 不把它搬成流标签，非 prod 泳道查不到日志，prod 查询会混进所有泳道的 Pod。
+    extraRelabelConfigs:
+      - action: replace
+        source_labels:
+          - __meta_kubernetes_pod_label_lane
+        target_label: lane
 
 # cpu1 (node-role: infra) 没有外网，所有镜像必须从内网 Harbor 拉。
 # Harbor 里镜像名被拍平成 library/<短名>，所以 registry 和 repository 都要覆盖。
