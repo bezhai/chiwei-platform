@@ -52,16 +52,7 @@ func main() {
 
 	if cs != nil {
 		deployer = kubernetes.NewK8sDeployer(cs, cfg.DeployNamespace, cfg.SidecarImage)
-		buildExecutor = kubernetes.NewKanikoBuildExecutor(cs, kubernetes.KanikoBuildConfig{
-			Namespace:          cfg.KanikoNamespace,
-			KanikoImage:        cfg.KanikoImage,
-			RegistrySecret:     cfg.RegistrySecret,
-			RegistryMirrors:    cfg.RegistryMirrors,
-			InsecureRegistries: cfg.InsecureRegistries,
-			CacheRepo:          cfg.KanikoCacheRepo,
-			HttpProxy:          cfg.BuildHttpProxy,
-			NoProxy:            cfg.BuildNoProxy,
-		})
+		buildExecutor = kubernetes.NewKanikoBuildExecutor(cs, kanikoBuildConfig(cfg))
 		testExecutor = kubernetes.NewK8sTestExecutor(cs, kubernetes.TestExecutorConfig{
 			Namespace: cfg.CINamespace,
 			GitRepo:   cfg.CIGitRepo,
@@ -203,5 +194,22 @@ func main() {
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("server shutdown error", "error", err)
+	}
+}
+
+func kanikoBuildConfig(cfg *config.Config) kubernetes.KanikoBuildConfig {
+	return kubernetes.KanikoBuildConfig{
+		Namespace:          cfg.KanikoNamespace,
+		KanikoImage:        cfg.KanikoImage,
+		RegistrySecret:     cfg.RegistrySecret,
+		RegistryMirrors:    cfg.RegistryMirrors,
+		InsecureRegistries: cfg.InsecureRegistries,
+		CacheRepo:          cfg.KanikoCacheRepo,
+		HttpProxy:          cfg.BuildHttpProxy,
+		NoProxy:            cfg.BuildNoProxy,
+
+		GitToken:            cfg.GitHubToken,
+		GitAuthSecretPrefix: cfg.KanikoGitAuthSecretPrefix,
+		Lane:                cfg.Lane,
 	}
 }

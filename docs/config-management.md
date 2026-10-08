@@ -188,6 +188,7 @@ paas-engine 读取这些变量：
 | `INSECURE_REGISTRIES` | CSV |
 | `REGISTRY_BASE` | 默认 `registry.example.com` |
 | `KANIKO_CACHE_REPO` | 空则禁用远程层缓存 |
+| `KANIKO_GIT_AUTH_SECRET_PREFIX` | 默认 `kaniko-git-auth`。构建克隆用的 git 凭据 Secret 名为 `<前缀>-<LANE>`，建在 `KANIKO_NAMESPACE` 里，见下方「构建克隆用的 GitHub token」 |
 | `BUILD_HTTP_PROXY` | 构建 Pod 代理 |
 | `BUILD_NO_PROXY` | 构建 Pod no_proxy |
 | `API_TOKEN` | PaaS API token |
@@ -197,9 +198,37 @@ paas-engine 读取这些变量：
 | `SIDECAR_IMAGE` | lane sidecar 镜像 |
 | `CI_NAMESPACE` | 默认 `paas-builds` |
 | `CI_GIT_REPO` | Git poller 仓库 |
-| `GITHUB_TOKEN` | Git poller token |
+| `GITHUB_TOKEN` | App env。Git poller 用它轮询分支；kaniko 构建用它认证克隆。为空时构建匿名克隆 |
 | `GIT_POLL_INTERVAL` | 默认 `60s` |
 | `LEGACY_LANE_WHITELIST` | CSV，历史 lane 兼容白名单 |
+| `LANE` | 自动注入，本实例所在泳道。决定构建 git 凭据 Secret 的名字；为空时构建不带凭据 |
+
+### 构建克隆用的 GitHub token
+
+kaniko 构建 Job 克隆代码时用 `GITHUB_TOKEN` 认证（`GIT_USERNAME=x-access-token`、`GIT_PASSWORD=<token>`）。匿名克隆走共享代理，出口 IP 上有大量别人的匿名 GitHub 流量，被限流时 GitHub 对公开仓库也回 401 `Repository not found`；认证后走 token 自己的额度。
+
+token 的唯一配置入口是 paas-engine 的 App env。每个 paas-engine 实例（prod、blue、任意 ppe）在每次提交构建时，把自己启动时读到的 token 写进 `KANIKO_NAMESPACE` 里名为 `<KANIKO_GIT_AUTH_SECRET_PREFIX>-<LANE>` 的 Secret（例如 `kaniko-git-auth-prod`），它创建的 Job 只引用自己这一份。这些 Secret 是结果态，不要手改，也不要手工另建一份。本次写入失败时（例如 paas-builds 的 Role 缺 secrets 权限），这次构建不带凭据、按匿名克隆，paas-engine 日志里有一条 `sync git auth secret failed` 告警，点名 Secret 和错误。
+
+轮换 token 的正常路径是**先换上新 token，再撤销旧的**。重新部署 paas-engine 本身要构建，而这次构建是由还持有旧 token 的旧进程提交的，所以旧 token 在这一步必须仍然有效：
+
+1. 在 GitHub 上生成新 token，旧 token 先不撤销。
+2. 改 App env：`PUT /api/paas/apps/paas-engine/`，body `{"envs":{"GITHUB_TOKEN":"<新 token>"}}`。
+3. 重新部署所有存活的 paas-engine 实例：`make self-deploy GIT_REF=main` 同时更新 prod 和 blue；有 ppe 实例的也要重新部署或下掉。token 只在进程启动时读一次，没重新部署的实例会一直写旧 token。
+4. 重新部署后，每个实例在它的下一次构建时把新 token 写进自己的 Secret。确认新进程提交的构建成功之后，再到 GitHub 上撤销旧 token。
+
+**旧 token 已经失效（过期或已撤销）时不能走 self-deploy**：所有构建都会 401，包括构建 paas-engine 自己的那一次。恢复方法是改完 App env（上面第 2 步）后不构建，直接用各泳道当前的镜像重新发布 paas-engine。App env 变了，Pod 模板跟着变，Deployment 会滚出读到新 token 的新 Pod：
+
+```bash
+make status APP=paas-engine                                     # 每条泳道当前的镜像，tag 是最后一个冒号后面那段
+make release APP=paas-engine LANE=prod VERSION=<prod 当前 tag>
+make release APP=paas-engine LANE=blue VERSION=<blue 当前 tag>   # 只在 blue 有 Release 时
+```
+
+ppe 上的 paas-engine 同样用 `make release APP=paas-engine LANE=ppe-<name> VERSION=<该泳道当前 tag>`，或者直接下掉。`make release` 的请求不带 envs，会清空该 Release 已有的 Release envs，self-deploy 也是这样，所以 paas-engine 的 Release 上本来就不该放需要保留的 Release envs。如果确实有，改用 `PUT /api/paas/releases/{id}/`、body `{}`，它用当前镜像重新发布，Release envs 保持不变。
+
+从 App env 删掉 `GITHUB_TOKEN` 后，重新部署的实例不再引用也不再写 Secret。已下掉的实例留下的 Secret 不会被自动删除（paas-engine 没有 secrets 的 delete 权限），里面是该实例最后持有的 token，在 GitHub 上撤销后就失效了。
+
+排查：**全部构建都 401 `Repository not found`，先查 token 是否过期或被撤销。** token 失效时 GitHub 对公开仓库也回 401，go-git 不会退回匿名，报错文字和匿名限流时一样。确认失效后按上面「旧 token 已经失效」的方法恢复。只有零星构建 401、其余成功，才像匿名限流；这时用 `make logs APP=paas-engine KEYWORD="sync git auth secret failed"` 看那次构建是不是因为同步失败退回了匿名克隆。
 
 ## 变更流程
 

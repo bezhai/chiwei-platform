@@ -19,10 +19,18 @@
 （:meth:`app.living.snapshot.MomentSnapshot.render_new`）、传到她这里的消息里还没看过的
 （:func:`app.living.received.render_received`；别人做了什么，只有传到她这里的这一段）、手机上刚来了什么
 （:func:`app.living.phone.render_arrived`）。她此刻的样子（在哪、在做什么、上一次写下的
-那天、心里挂着什么、刚做过说过什么、手机上还有什么没看）读一百遍字字一样，上一轮读过的
-还在上下文里，所以它只在清理那一下作为新起点重铺一次
-（:func:`app.agent.continuity.trim_for_round`）。"心里挂着没了结的事"那份清单由
-:func:`keep_in_mind` 重写（:mod:`app.living.loose_ends`）。
+那天、心里挂着什么、手机上还有什么没看）读一百遍字字一样，上一轮读过的还在上下文里，
+所以它只在清理那一下作为新起点重铺一次（:func:`app.agent.continuity.trim_for_round`），
+而且上下文里永远只留最新那一份。"心里挂着没了结的事"那份清单由 :func:`keep_in_mind`
+重写（:mod:`app.living.loose_ends`）。
+
+**她自己说过的话，在她眼前只出现一次。** 上下文连着的时候，那就是她自己那次
+``say`` / ``send_message`` 调用：回执不抄原话（发出去的只给撤回编号），状态也不再附
+"你刚做过、说过"。那一段只在上下文接不住她最近说过的话时才给 —— 上下文是空的（第一次
+跑、清过库）、硬顶把标记消息全裁掉了、上一轮没存下来
+（:func:`app.agent.continuity.continues_unbroken`）。上下文不按天清零，所以正常跑着的
+时候它不出现。2026-09-13 上下文连起来之后，同一批话在一轮输入里一度出现了几十次，她的
+说话方式跟着一天天收窄成同一个样子。
 
 **位置和手上的事是例外，每轮都给**（``render_new`` 里那一行）：那两样她自己就能改
 （:func:`switch_to`、:func:`move_to`），铺在界桩上的那份到下一个清理点之前一直是旧的，
@@ -31,8 +39,8 @@
 **挂线头是独立的一件事，不绑在 ``switch_to`` 上。** 「是否换事」不等于「是否记住」：
 绫奈跟她说"周末陪我去祭典"，她手上的书没放下（这个 moment 答「继续」），但她记住了——这是
 真人每天都在做的事。把清单绑在换事情上，这句话在她看过之后就永久消失了：传到她这里的消息
-只摆一次，她自己最近那十二条里只有她**自己**说做的，别人说的话不在里面，谁也救不回来。
-而"跨 moment 因果延续"恰好是整个实验最想验证的东西。
+只摆一次，上下文里那一段 4 小时就裁掉，状态里「你刚做过、说过」那一段只有她**自己**说做
+的，别人说的话不在里面，谁也救不回来。而"跨 moment 因果延续"恰好是整个实验最想验证的东西。
 
 **每个 moment 串行。** 一个人不能同时想两件事——这是物理事实，不是给她加冷却。用 T1 的
 :func:`app.living.serial.hold`，后到的排队等前一次做完（两条路：固定的钟，和
@@ -108,6 +116,7 @@ from app.agent.context import AgentContext
 from app.agent.continuity import (
     TrimPolicy,
     commit_transcript,
+    continues_unbroken,
     next_transcript,
     trim_for_round,
 )
@@ -690,7 +699,10 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
         medium=MEDIUM_IN_PERSON,
     )
     note_recorded(happening_id)
-    return f"记下了：{said}"
+    # 不把原话再抄一遍：它就在这次调用的参数里，而这条回执跟她的话一样在上下文里留
+    # 4 小时（:data:`KEPT_TOOLS`），抄一遍就是同一句话在她每一轮的输入里多出现一次。
+    # 当面说的话没有撤回编号，所以这里也没有编号可给。
+    return "记下了。"
 
 
 @tool
@@ -1328,15 +1340,24 @@ async def run_moment_held(
     #
     # **只送新发生的事**：几点了、离上一次隔了多久、她在哪在做什么、有什么到点了、
     # 传到她这里的消息、手机上刚来了什么。她此刻的样子（在哪、在做什么、上一次写下的那天、心里
-    # 挂着什么、刚做过说过什么、手机上还有什么没看）不在这里 —— 那份读一百遍字字一样，
+    # 挂着什么、手机上还有什么没看）不在这里 —— 那份读一百遍字字一样，
     # 每轮重发就是把同一段话抄一遍，而她上一轮读过的还在上下文里。它由清理那一下作为
-    # 新起点重铺（:func:`app.agent.continuity.trim_for_round`，默认一小时一次；一天的
-    # 第一轮上下文是空的，那一下也会立一根界桩，所以冷启动她照样知道自己站在哪）。
+    # 新起点重铺（:func:`app.agent.continuity.trim_for_round`，默认一小时一次；上下文
+    # 是空的那一轮也会立一根界桩，所以冷启动她照样知道自己站在哪）。
+    #
+    # 「你刚做过、说过」那一段只在这份历史接不住她最近说过的话时才带：一根标记消息
+    # 都没有（冷启动、清过库、硬顶全裁掉了），或者上一轮没存下来。判据问的是**这份
+    # 历史**，不是这一轮要立哪种标记消息 —— 缺口撞上清理点、硬顶之后那一轮，立的都是
+    # 清理那根。
     #
     # **未读必须在界桩上**：眼前那份只给新到的，一条她一直不看的通知会随着摆出它的
     # 那一轮刺激一起在 own_minutes 之后被裁掉，界桩不重铺的话之后再没有第二处说得出
     # 有人找过她。
-    state = f"{snapshot.render_state()}\n\n{render_unread(unread, now=now)}"
+    in_view = continues_unbroken(history, lost_last_round=gap)
+    state = (
+        f"{snapshot.render_state(her_words_in_view=in_view)}\n\n"
+        f"{render_unread(unread, now=now)}"
+    )
     arrived = render_arrived(unread, since=previous_at, now=now)
     stimulus = Message(
         role=Role.USER,

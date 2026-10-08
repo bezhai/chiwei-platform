@@ -28,8 +28,9 @@ import { createHash } from 'node:crypto';
 
 import { NeedNotRobotMention, OnlyGroup } from '@inner/shared/rules';
 
+import { larkTextToPostContent } from '../outbound/post-content';
 import type { LarkCommand, LarkCommandDeps } from '../rules/commands';
-import { echoPostContent, larkAtTaggedText } from './echo';
+import { larkAtTaggedText } from './echo';
 
 /** 连着出现几次才复读。拆分前就是 3。 */
 const REPEAT_AT = 3;
@@ -56,7 +57,7 @@ export function repeatCommand(deps: LarkCommandDeps): LarkCommand {
             if (message.isTextOnly()) {
                 const echo = larkAtTaggedText(context.content);
                 if ((await deps.repeatCounter.bump(chatId, contentHash(echo))) === REPEAT_AT) {
-                    await deps.api.sendPost(chatId, await echoPostContent(deps.emoji, echo));
+                    await deps.api.sendPost(chatId, await larkTextToPostContent(deps.emoji, echo));
                 }
                 return;
             }

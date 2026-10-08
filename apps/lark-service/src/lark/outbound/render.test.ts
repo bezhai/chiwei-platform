@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'bun:test';
 
+import type { LarkEmojiRow } from '../emoji/catalog';
 import { createLarkPostRenderer, type LarkRenderDeps } from './render';
+
+/** 表情表里有的那几个。飞书的 key 有字母的也有纯数字的。 */
+const EMOJIS: LarkEmojiRow[] = [
+    { key: 'SLIGHT', text: '白眼' },
+    { key: '7164219805602873347', text: '右哼哼' },
+];
 
 interface Harness {
     deps: LarkRenderDeps;
@@ -9,6 +16,8 @@ interface Harness {
     /** mention 那一步拿到的正文。它必须是**赤尾原话**，没被任何别的步骤加工过。 */
     mentionSaw: string[];
     mentionChatIds: string[];
+    /** 每次查表情问了哪几个文本。 */
+    emojiAsked: string[][];
 }
 
 function harness(
@@ -23,6 +32,7 @@ function harness(
         steps: [],
         mentionSaw: [],
         mentionChatIds: [],
+        emojiAsked: [],
     };
 
     h.deps = {
@@ -31,6 +41,12 @@ function harness(
             h.mentionSaw.push(text);
             h.mentionChatIds.push(chatId);
             return text.replaceAll('@小明', '<at user_id="on_xm">小明</at>');
+        },
+        emoji: {
+            async emojisByText(texts) {
+                h.emojiAsked.push([...texts]);
+                return EMOJIS.filter((row) => texts.includes(row.text));
+            },
         },
         pictures: {
             async sign(fileName) {
@@ -64,15 +80,15 @@ function keyFromBytes(bytes: Buffer): string {
 }
 
 describe('createLarkPostRenderer', () => {
-    it('纯文本：不查群成员、不签图，直接一个 md 节点', async () => {
+    it('纯文本：不查群成员、不签图，直接一个 text 节点', async () => {
         const h = harness();
         const { post } = await createLarkPostRenderer(h.deps)('你好呀', {});
 
-        expect(post).toEqual({ content: [[{ tag: 'md', text: '你好呀' }]] });
+        expect(post).toEqual({ content: [[{ tag: 'text', text: '你好呀' }]] });
         expect(h.steps).toEqual([]);
     });
 
-    it('群聊：@ 用给的 chat id 解析，结果落进 md 节点', async () => {
+    it('群聊：@ 用给的 chat id 解析，结果成了 at 节点', async () => {
         const h = harness();
         const { post } = await createLarkPostRenderer(h.deps)('喂 @小明 在吗', {
             mentionChatId: 'oc_group',
@@ -80,8 +96,65 @@ describe('createLarkPostRenderer', () => {
 
         expect(h.mentionChatIds).toEqual(['oc_group']);
         expect(post).toEqual({
-            content: [[{ tag: 'md', text: '喂 <at user_id="on_xm">小明</at> 在吗' }]],
+            content: [
+                [
+                    { tag: 'text', text: '喂 ' },
+                    { tag: 'at', user_id: 'on_xm' },
+                    { tag: 'text', text: ' 在吗' },
+                ],
+            ],
         });
+    });
+
+    // 她学着群里的人写 `[白眼]`。飞书 text 消息里的表情就是这么写的，但 post 里要是
+    // 独立的 emotion 节点，原样发出去就是一串字。
+    it('她写的 [表情] 查得到就变成飞书表情，查不到留原文', async () => {
+        const h = harness();
+        const { post } = await createLarkPostRenderer(h.deps)('@小明 少来[白眼]\n摸鱼是吧[右哼哼][旺柴]', {
+            mentionChatId: 'oc_group',
+        });
+
+        expect(post).toEqual({
+            content: [
+                [
+                    { tag: 'at', user_id: 'on_xm' },
+                    { tag: 'text', text: ' 少来' },
+                    { tag: 'emotion', emoji_type: 'SLIGHT' },
+                ],
+                [
+                    { tag: 'text', text: '摸鱼是吧' },
+                    { tag: 'emotion', emoji_type: '7164219805602873347' },
+                    { tag: 'text', text: '[旺柴]' },
+                ],
+            ],
+        });
+    });
+
+    it('表情表查不了：那句话照常渲染，[xxx] 留原文', async () => {
+        const h = harness();
+        h.deps.emoji = {
+            emojisByText: async () => {
+                throw new Error('pg is down');
+            },
+        };
+
+        const { post } = await createLarkPostRenderer(h.deps)('少来[白眼]', {});
+
+        expect(post).toEqual({
+            content: [
+                [
+                    { tag: 'text', text: '少来' },
+                    { tag: 'text', text: '[白眼]' },
+                ],
+            ],
+        });
+    });
+
+    it('没有 [xxx] 的正文一次表情表都不查', async () => {
+        const h = harness();
+        await createLarkPostRenderer(h.deps)('你好呀', {});
+
+        expect(h.emojiAsked).toEqual([]);
     });
 
     it('私聊（没给 chat id）：整个不解析 @，一个人都不查', async () => {
@@ -90,13 +163,13 @@ describe('createLarkPostRenderer', () => {
         const { post } = await createLarkPostRenderer(h.deps)('私聊 @小明', {});
 
         expect(h.steps).toEqual([]);
-        expect(post).toEqual({ content: [[{ tag: 'md', text: '私聊 @小明' }]] });
+        expect(post).toEqual({ content: [[{ tag: 'text', text: '私聊 @小明' }]] });
     });
 
     it('空正文也产出一个节点（飞书不收空 content）', async () => {
         const h = harness();
         expect((await createLarkPostRenderer(h.deps)('', {})).post).toEqual({
-            content: [[{ tag: 'md', text: '' }]],
+            content: [[{ tag: 'text', text: '' }]],
         });
     });
 });
@@ -110,7 +183,7 @@ describe('结构化图片：句柄现签之后接在正文后面', () => {
 
         expect(post).toEqual({
             content: [
-                [{ tag: 'md', text: '看这张' }],
+                [{ tag: 'text', text: '看这张' }],
                 [{ tag: 'img', image_key: 'img_v3_uploaded' }],
             ],
         });
@@ -127,9 +200,9 @@ describe('结构化图片：句柄现签之后接在正文后面', () => {
             pictureFileNames: ['pictures/cat.png'],
         });
 
-        expect(post.content[0]).toEqual([{ tag: 'md', text: '看这张' }]);
+        expect(post.content[0]).toEqual([{ tag: 'text', text: '看这张' }]);
         expect(post.content).toHaveLength(2);
-        expect(post.content[1]![0]!.tag).toBe('md');
+        expect(post.content[1]![0]!.tag).toBe('text');
     });
 
     it('没有 pictureFileNames 的老消息：一次都不签，逐字就是没有图的老样子', async () => {
@@ -138,7 +211,7 @@ describe('结构化图片：句柄现签之后接在正文后面', () => {
         const withoutField = await createLarkPostRenderer(h.deps)('在的', {});
         const withEmpty = await createLarkPostRenderer(h.deps)('在的', { pictureFileNames: [] });
 
-        expect(withoutField.post).toEqual({ content: [[{ tag: 'md', text: '在的' }]] });
+        expect(withoutField.post).toEqual({ content: [[{ tag: 'text', text: '在的' }]] });
         expect(withoutField.pictures).toEqual([]);
         expect(withEmpty).toEqual(withoutField);
         expect(h.steps).toEqual([]);
@@ -218,13 +291,13 @@ describe('渲染交回"哪几张真的发出去了"', () => {
         // 真人那侧：7 行，顺序就是她给的顺序，挂掉的各自在自己的位置上降级成文字，
         // 而"第 N 张"的数法跨批次照样是全局的。
         expect(post.content).toEqual([
-            [{ tag: 'md', text: '看这几张' }],
+            [{ tag: 'text', text: '看这几张' }],
             [{ tag: 'img', image_key: 'img_v3_p1' }],
             [{ tag: 'img', image_key: 'img_v3_p2' }],
-            [{ tag: 'md', text: '(第 3 张图取不到地址)' }],
+            [{ tag: 'text', text: '(第 3 张图取不到地址)' }],
             [{ tag: 'img', image_key: 'img_v3_p4' }],
             [{ tag: 'img', image_key: 'img_v3_p5' }],
-            [{ tag: 'md', text: '(第 6 张图取不到地址)' }],
+            [{ tag: 'text', text: '(第 6 张图取不到地址)' }],
             [{ tag: 'img', image_key: 'img_v3_p7' }],
         ]);
 
@@ -253,7 +326,7 @@ describe('护栏：正文里的图片引用毒不倒整条消息', () => {
     // 而飞书认不出那个 image_key 就**拒收整条消息** —— 不是丢一张图，是她那句话整条
     // 发不出去。
     //
-    // 判据：正文里的引用一个都不变成 img 节点，而结构化那张图正常发出。
+    // 判据：正文里的引用一个都不变成 img 节点（它就是一串字），而结构化那张图正常发出。
 
     it('结构化图片有效、同时正文里带一个非法引用：图照发，正文那个引用没变成 image_key', async () => {
         const h = harness();
@@ -264,8 +337,11 @@ describe('护栏：正文里的图片引用毒不倒整条消息', () => {
 
         expect(post).toEqual({
             content: [
-                [{ tag: 'md', text: '先看这个' }],
-                [{ tag: 'md', text: '再看那个' }],
+                [
+                    { tag: 'text', text: '先看这个 !' },
+                    { tag: 'text', text: '[我编的]' },
+                    { tag: 'text', text: '(img_v3_totally_made_up) 再看那个' },
+                ],
                 [{ tag: 'img', image_key: 'img_v3_uploaded' }],
             ],
         });
@@ -299,7 +375,7 @@ describe('渲染顺序不变量：mention 看见的必须是赤尾原话', () =>
     // 图片那一步现在**根本不碰正文**（它只往后面追加行），所以这条不变量只剩一句：
     // mention 跑在切节点之前，拿到的是原文。
 
-    const input = '@小明 看这张 ![给@小明看的图](cat.png)';
+    const input = '@小明 看这张 ![给@小明看的图](cat.png)[白眼]';
 
     it('mention 拿到原文，图片语法还在里面', async () => {
         const h = harness();
@@ -309,6 +385,13 @@ describe('渲染顺序不变量：mention 看见的必须是赤尾原话', () =>
         });
 
         expect(h.mentionSaw).toEqual([input]);
+    });
+
+    it('mention 看到的 [白眼] 还是原文，没被换成表情', async () => {
+        const h = harness();
+        await createLarkPostRenderer(h.deps)(input, { mentionChatId: 'oc_group' });
+
+        expect(h.mentionSaw[0]).toContain('[白眼]');
     });
 
     it('先 mention，后现签 / 下载 / 上传', async () => {
@@ -326,7 +409,7 @@ describe('渲染顺序不变量：mention 看见的必须是赤尾原话', () =>
         ]);
     });
 
-    it('两步都跑完之后：@ 成了 at 标签，正文那个引用被丢掉，结构化的图成了 img 节点', async () => {
+    it('全跑完之后：@ 成了 at 节点，表情成了 emotion，正文那个引用还是字，结构化的图成了 img 节点', async () => {
         const h = harness();
         const { post } = await createLarkPostRenderer(h.deps)(input, {
             mentionChatId: 'oc_group',
@@ -335,7 +418,13 @@ describe('渲染顺序不变量：mention 看见的必须是赤尾原话', () =>
 
         expect(post).toEqual({
             content: [
-                [{ tag: 'md', text: '<at user_id="on_xm">小明</at> 看这张' }],
+                [
+                    { tag: 'at', user_id: 'on_xm' },
+                    { tag: 'text', text: ' 看这张 ![给' },
+                    { tag: 'at', user_id: 'on_xm' },
+                    { tag: 'text', text: '看的图](cat.png)' },
+                    { tag: 'emotion', emoji_type: 'SLIGHT' },
+                ],
                 [{ tag: 'img', image_key: 'img_v3_uploaded' }],
             ],
         });

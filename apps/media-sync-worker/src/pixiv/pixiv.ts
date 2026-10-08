@@ -18,8 +18,8 @@ const pixivClient = createPixivClient({
  * @param tag 标签名称
  * @returns 关注者信息数组
  */
-async function getFollowersByTag(tag: string): Promise<FollowerInfo[]> {
-  return pixivClient.getFollowersByTag(tag);
+async function getFollowersByTag(tag: string, signal: AbortSignal): Promise<FollowerInfo[]> {
+  return pixivClient.getFollowersByTag(tag, undefined, signal);
 }
 
 /**

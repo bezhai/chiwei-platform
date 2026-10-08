@@ -1274,6 +1274,7 @@ describe('图片每一步失败时：她那句话照常送到飞书', () => {
         const h = harness();
         h.deps.render = createLarkPostRenderer({
             mentions: async (text) => text,
+            emoji: { emojisByText: async () => [] },
             pictures: {
                 sign: async (fileName) => `https://tos.example/${fileName}`,
                 download: async () => Buffer.from('bytes'),
@@ -1294,7 +1295,7 @@ describe('图片每一步失败时：她那句话照常送到飞书', () => {
 
         expect(h.api.replied).toHaveLength(1);
         const content = h.api.replied[0]!.content.content;
-        expect(content[0]).toEqual([{ tag: 'md', text: '看这张' }]);
+        expect(content[0]).toEqual([{ tag: 'text', text: '看这张' }]);
         expect(content.flat().some((node) => node.tag === 'img')).toBe(false);
     });
 
@@ -1308,7 +1309,7 @@ describe('图片每一步失败时：她那句话照常送到飞书', () => {
         await deliverLarkChatResponse(h.deps, reply(carrying));
 
         expect(h.api.replied).toHaveLength(1);
-        expect(h.api.replied[0]!.content.content[0]).toEqual([{ tag: 'md', text: '看这张' }]);
+        expect(h.api.replied[0]!.content.content[0]).toEqual([{ tag: 'text', text: '看这张' }]);
     });
 
     it('上传飞书失败：正文照发', async () => {
@@ -1317,7 +1318,7 @@ describe('图片每一步失败时：她那句话照常送到飞书', () => {
         await deliverLarkChatResponse(h.deps, reply(carrying));
 
         expect(h.api.replied).toHaveLength(1);
-        expect(h.api.replied[0]!.content.content[0]).toEqual([{ tag: 'md', text: '看这张' }]);
+        expect(h.api.replied[0]!.content.content[0]).toEqual([{ tag: 'text', text: '看这张' }]);
     });
 
     it('三张图全挂：整条消息照样发出去，台账照样收口', async () => {
@@ -1345,7 +1346,7 @@ describe('图片每一步失败时：她那句话照常送到飞书', () => {
         await deliverLarkChatResponse(h.deps, reply(carrying));
 
         expect(h.api.replied[0]!.content.content).toEqual([
-            [{ tag: 'md', text: '看这张' }],
+            [{ tag: 'text', text: '看这张' }],
             [{ tag: 'img', image_key: 'img_v3_uploaded' }],
         ]);
     });
@@ -1363,10 +1364,9 @@ describe('图片每一步失败时：她那句话照常送到飞书', () => {
             }),
         );
 
-        expect(h.api.replied[0]!.content.content).toEqual([
-            [{ tag: 'md', text: '先看这个' }],
-            [{ tag: 'md', text: '再看那个' }],
-            [{ tag: 'img', image_key: 'img_v3_uploaded' }],
+        const nodes = h.api.replied[0]!.content.content.flat();
+        expect(nodes.filter((node) => node.tag === 'img')).toEqual([
+            { tag: 'img', image_key: 'img_v3_uploaded' },
         ]);
     });
 });

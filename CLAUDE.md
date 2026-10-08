@@ -1,240 +1,130 @@
 # chiwei-platform
 
-## 宪法级文档（禁止修改）
+`MANIFESTO.md`（赤尾宣言）是本项目的宪法，未经 bezhai 明确许可，任何人和任何 AI 不得修改。
 
-**`MANIFESTO.md`（赤尾宣言）是本项目的宪法。未经 bezhai 明确许可，任何人和任何 AI 不得修改此文件。**
+单人维护的 monorepo，应用在 `apps/` 下，部署在 K8s `prod` namespace。
 
----
-
-Monorepo，所有应用在 `apps/` 下。部署在 K8s `prod` namespace。
-
-## 项目结构
+## 服务
 
 ```
 apps/
-  paas-engine/    # PaaS 引擎 (Go) - 管理应用构建和蓝绿部署
-  lite-registry/  # 泳道注册表 (Go) - Watch K8s Services，提供泳道路由数据
-  lark-service/   # 飞书渠道服务 (Bun/TS) - 入站 + 出站，同一镜像产出 2 个独立 Deployment（见下方映射表）
-  channel-server/ # QQ 渠道服务 (Bun/TS) - 同一镜像产出 2 个独立 Deployment（见下方映射表）
-  qq-gateway/     # QQ 官方 bot 适配 (Bun/TS) - QQ 协议 ↔ channel-server 通用协议
-  agent-service/  # 生活引擎 (Python) - 她自己醒、自己看、自己决定说不说；同一镜像另出独立的 world App（world 引擎）
+  paas-engine/    # PaaS 引擎 (Go)：管理应用构建和部署
+  lite-registry/  # 泳道注册表 (Go)：watch K8s Service，提供泳道路由数据
+  lark-service/   # 飞书渠道 (Bun/TS)：入站 + 出站
+  channel-server/ # QQ 渠道 (Bun/TS)
+  qq-gateway/     # QQ 官方 bot 适配 (Bun/TS)：QQ 协议 ↔ channel-server 通用协议
+  agent-service/  # 生活引擎 (Python)：由定时源触发运行，每轮自行决定是否发消息
   api-gateway/    # 反向代理入口 (Go)
 ```
 
-### 镜像与服务映射（一镜像多服务）
+一个镜像会产出多个独立的 Deployment，它们是不同进程、不同 Pod，查日志和排查必须用实际服务名：
 
-**一个 Docker 镜像可以产出多个独立的 K8s Deployment。** 它们是不同进程、不同 Pod，日志和排查必须按实际服务名来，不能混淆。
-
-| 镜像（ImageRepo） | 产出的 K8s Deployment | 角色 |
+| 镜像 | Deployment | 角色 |
 |---|---|---|
-| lark-service | **lark-service** | 飞书入站：websocket 长连 + webhook 路由 + 泳道交接接收端（`POST /api/internal/lark/lane-inbound`）+ 三个定时任务（daily-photo / daily-new-photo / emoji-sync） |
-| lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark` 两条出站队列，发飞书消息与撤回 |
-| channel-server | **channel-server** | HTTP 服务，QQ 入站（`POST /api/internal/qq/inbound`，由 qq-gateway 投递） |
-| channel-server | **chat-response-worker** | 消费 RabbitMQ 回复队列，经 qq-gateway 发 QQ 消息 |
-| agent-service | **agent-service** | 生活引擎：五条钟自己跑，每次醒来查库决定要不要开口。**不消费任何渠道入站队列**。另有运维 HTTP（health、admin DLQ）和通信机制的人工入口（`/admin/messaging/*` + `operator` 收件箱）。不挂 world 的卷 |
-| agent-service | **world** | world 引擎：只通过通信机制（具名收件箱 `world` + 定时送达）和其他参与者交流，被收到的消息或自己定的时刻叫醒；私有记录放在只挂给它的卷上（`$WORLD_DATA_DIR/<泳道>/`），人工读写走 `/admin/world/records*`。**不是 sibling**，单独发布：`make deploy APP=world` |
+| lark-service | **lark-service** | 飞书入站：websocket 长连接、webhook 路由、泳道交接接收端（`POST /api/internal/lark/lane-inbound`）、daily-photo / daily-new-photo / emoji-sync 三个定时任务 |
+| lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark`，发飞书消息和撤回 |
+| channel-server | **channel-server** | QQ 入站 HTTP（`POST /api/internal/qq/inbound`，由 qq-gateway 投递） |
+| channel-server | **chat-response-worker** | 消费 QQ 回复队列，经 qq-gateway 发出 |
+| agent-service | **agent-service** | 生活引擎，不消费任何入站队列；另有运维 HTTP（health、admin DLQ） |
+| agent-service | **world** | world 引擎，独立 App：只通过通信机制（具名收件箱 + 定时送达）和其他参与者交流。不是 sibling，单独部署 `make deploy APP=world`；日志用 `make logs APP=world`，不在 `APP=agent-service` 里 |
 
-**常见错误：查 chat-response-worker 的日志时用 `make logs APP=channel-server`，这是错的。** chat-response-worker 是独立 Deployment，必须用 `make logs APP=chat-response-worker`。同理 lark-outbound 也是独立服务，飞书发不出消息要查 `make logs APP=lark-outbound`，不是 `APP=lark-service`；world 的日志用 `make logs APP=world`，不在 `APP=agent-service` 里。
+飞书消息发送失败查 `make logs APP=lark-outbound`，QQ 查 `APP=chat-response-worker`，不是查 `lark-service` / `channel-server`。
 
-## 核心数据流
+## 消息链路
 
-### 飞书消息处理
+入站和出站是断开的：
 
-入站走 websocket 长连，**不经 api-gateway**：lark-service 主动连飞书开放平台，事件由飞书推过来。
-长连对同一 app_id 是随机投递，所以持连的是单副本 Deployment，且只有 prod 部署 + `LARK_DIRECT_INGRESS=true` 才连（泳道部署不连，消息由 prod 带 `x-ctx-lane` 打一次内部 HTTP 交接过来，lane-sidecar 选路）。
-`/webhook/{bot}/{event,card}` 路由仍然注册着，走 api-gateway 进来，是长连之外的被动入口。
+- 飞书入站走 websocket 长连接，不经过 api-gateway。只有 prod 部署且 `LARK_DIRECT_INGRESS=true` 时才建立长连接（单副本，因为飞书对同一 app_id 的多个连接是随机投递）。lark-service 把消息转换成通用格式写进 `common_message`，同时执行飞书指令的规则引擎、判定泳道，入站到此结束，没有队列。`/webhook/{bot}/{event,card}` 仍经 api-gateway 进入，是长连接之外的另一个入口。
+- QQ 入站：qq-gateway → channel-server `/api/internal/qq/inbound` → `common_message`，同样到此结束。
+- agent-service 不消费入站队列。它每轮运行时查询 `common_message`，决定回复时才把消息发到 `chat_response_lark` / `recall_lark` / `chat_response_qq`，由 lark-outbound / chat-response-worker 发出。代码里没有「收到消息立即回复」的逻辑。
 
-```
-飞书 --websocket 长连--> lark-service:3000 (投影成 common 口径写进 common_message + 规则引擎跑飞书指令 + 决定 lane)
-     ↓ 入站到此为止，没有队列
+泳道路由：请求带 `x-lane`，lite-registry watch K8s Service 聚合出 `service → {lanes, port}`，LaneRouter SDK（`packages/ts-shared/`、`packages/py-shared/`）拼出 `{app}-{lane}:port`，不存在就回退到 `{app}:port`。这只覆盖入站的 HTTP 交接和出站队列。agent-service 不在任何泳道路由上，`common_message` 也没有 lane 列，共用一个库的两条泳道看到的是同一批消息。泳道测试的细节见 `.claude/rules/e2e-testing.md`。
 
-agent-service:8000 (五条钟自己醒，每次醒来直接查 common_message，自己决定要不要开口)
-     → RabbitMQ: chat_response_lark / recall_lark 队列
-     → lark-outbound → 飞书
-```
+## 配置
 
-### QQ 消息处理
+- 基础设施连接和密钥走 ConfigBundle / App envs / Release envs；业务参数（模型、阈值、开关）走 Dynamic Config，运行时由 SDK 读取，10s 缓存。规则、优先级和 API 见 `docs/config-management.md`。
+- 一律通过 PaaS API 修改配置，不直接修改 K8s Secret/ConfigMap。查看最终配置：`GET /api/paas/apps/{app}/resolved-config?lane=prod`。`PUT /api/paas/apps/{app}/` 是 merge 语义。
+- 改 Release envs 会立即重新部署（pod 重启），改 App envs 不会。
 
-```
-QQ bot gateway --websocket 长连--> qq-gateway (QQ 协议 → CustomInboundMessage)
-   → channel-server:3000 (POST /api/internal/qq/inbound) → 投影成 common 口径写进 common_message
-     ↓ 同样到此为止
+## 泳道
 
-agent-service:8000 (同上，每次醒来查库)
-   → RabbitMQ: chat_response_qq 队列
-   → chat-response-worker → qq-gateway (POST /qq/outbound) → QQ
-```
-
-**入站和出站是断开的。** agent-service 不消费任何入站队列（`Source.mq` 在 `app/` 下零命中），「收到消息就回」这件事在代码里不存在——她看完未读自己决定说不说，说了才走出站那两条队列。
-
-未部署泳道的服务自动 fallback 到 prod（基于 K8s Service DNS，不依赖 Istio）。**但这条只覆盖入站的 HTTP 交接和出站队列**：agent-service 那一段不在任何泳道路由上，她读的 `common_message` 也没有 lane 列，所以共用同一个库的两条泳道会看到同一批消息。详见 `.claude/rules/e2e-testing.md`。
-
-### 部署链路
-
-```
-PaaS Engine API
-  → 构建: Kaniko Job (paas-builds ns) → Harbor Registry
-  → 发布: K8s Deployment + Service (prod ns)
-```
-
-蓝绿部署仅限 paas-engine 自身：prod 和 blue 泳道互相部署对方（`make self-deploy`）。其他服务直接部署到 prod。
-
-### 泳道路由
-
-```
-请求 → 反向代理 ($PAAS_API, 支持 x-lane header)
-     → lite-registry (Watch K8s Services, 聚合 service → {lanes, port})
-     → LaneRouter SDK (拼接 {app}-{lane}:port, 不存在则 fallback {app}:port)
-```
-
-SDK 在 `packages/ts-shared/`（TS）和 `packages/py-shared/`（Python）。
-
-### 配置管理
-
-```
-Dashboard → monitor-dashboard → paas-engine
-  ├─ ConfigBundle / App envs / Release envs（部署时环境变量）
-  └─ Dynamic Config（运行时业务参数，SDK 读取）
-```
-
-- 基础设施连接和密钥走 ConfigBundle、App envs 或 Release envs。
-- 业务行为参数（模型/阈值/flag）走 Dynamic Config（运行时 SDK 读取，10s 缓存）。
-- 配置规则、优先级和 API 见 `docs/config-management.md`。
-
-## 通用规范
-
-- 镜像 tag: 语义化版本号（如 `1.0.0.2`），由 PaaS Engine 服务端分配
-- **配置管理统一走 PaaS API**，禁止直接操作 K8s Secret/ConfigMap。查看 app 最终配置用 `GET /api/paas/apps/{app}/resolved-config?lane=prod`，详见 `docs/config-management.md`。
-
-## 泳道命名规范（强制，paas-engine 校验）
-
-paas-engine `domain.ClassifyLane` fail-closed 拒绝未知前缀。**所有新泳道必须用以下命名**：
+paas-engine 的 `domain.ClassifyLane` 按前缀校验，未知前缀直接拒绝：
 
 | 命名 | 基础设施 | 用途 |
 |---|---|---|
-| `prod` | 线上 | 生产，所有服务共用 |
-| `blue` | 共用线上 | **仅 paas-engine 蓝绿自部署专用**，其他服务禁用 |
-| `ppe-<name>` | 共用 prod 全部组件（PG/Redis/MQ/Qdrant/Mongo） | **功能性验证**：业务逻辑、prompt、agent 行为，对线上数据有读写 |
-| `coe-<name>` | 独立离线（chiwei-test 容器集，连接串由 ConfigBundle `class_overrides[coe]` 注入） | **基建开发 / 破坏性改动**：schema 变更、消息协议变更、重写 worker，不污染 prod 数据 |
+| `prod` | 线上 | 生产 |
+| `blue` | 共用线上 | 仅供 paas-engine 蓝绿自部署，其他服务禁用 |
+| `ppe-<name>` | 共用 prod 全部组件（PG/Redis/MQ/Qdrant/Mongo） | 业务逻辑、prompt 验证；读写的是线上数据 |
+| `coe-<name>` | 独立的 chiwei-test 容器集，连接串由 ConfigBundle `class_overrides[coe]` 注入 | schema 变更、协议变更、可能写入错误数据的改动 |
 
-**选型口诀**：能复用线上数据且本次改动不会污染线上就 `ppe-*`，要建表 / 改协议 / 可能炸 / 改完会写脏数据的就 `coe-*`。飞书 dev bot 测试两者都可，coe 需先把所需 schema + 种子数据（user / persona / bot 配置等 dev bot 跑通必读项）从 prod 复刻到 chiwei-test，详见 `.claude/rules/e2e-testing.md`。
+验证 agent-service 的改动只能用 `coe-*`（原因见 e2e-testing.md）。非 prod 泳道默认不启动 cron/interval 定时源，要启动就设 Release env `DATAFLOW_ENABLE_TIME_SOURCES=1`。
 
-ConfigBundle 通过 `class_overrides[coe]` + `required_keys[coe]` 自动把 coe-* 的连接串切到 chiwei-test 容器，业务代码不感知。详见 `docs/config-management.md`。
-
-## 开发流程
-
-**禁止直接在 main 分支上修改代码。** 分支由用户切好递给主会话（worktree 不归 AI 管），主会话接到需求后按下面主线推进。
-
-以下流程以 Claude Code 机制描述，适用于所有 AI 工具。Codex 作为主会话时的机制映射（子 agent、slash command、安全 hook 等）见 `AGENTS.md`。
-
-0. **必须委派子 agent（强制，不是建议）**：
-
-   - **所有需求开发的具体任务一律委派，主会话禁止自行实现**——不写产品代码、不写测试、不改实现。
-   - **预期超过 5 次工具调用的请求一律委派**，调研、排查、批量修改都算。
-   - 主会话只做这几件：接需求、写 spec、派子 agent、审 diff 与证据、叫 codex、运维与部署命令、跟用户对话。
-   - **例外只有两类**：① typo / rename / format 这类无行为变化的改动；② 单次确认一个事实（读一两个文件、跑一两条命令）。两类都仍然受 5 次工具调用上限约束。
-   - **判据是动手前的预估，不是每一步的大小。** 估算在动手之前做；做到一半发现要超，把剩下的派出去，不要"都做到这儿了"。每一步单独看都是轻活、加起来十二个文件——那正是这条规则要挡的形状，按步判断永远挡不住它。
-
-1. **判断简单 / 复杂**：typo / rename / 一两行无行为变化的改动，主会话可直接做，跳过下面的 spec / review 流程。其他走完整流程。**这一条不覆盖第 0 条**：无行为变化只是免掉 spec / review，工具调用上限仍然成立。
-2. **先 Explore，再写 spec**：建议先派 Explore 子 agent 查清调用方、现有实现、相关数据流，主对话只接结论；**禁止**凭印象写 spec。涉及大范围调研时尤其应该走 Explore，避免把试错烧在主会话上下文里。
-3. **写 spec（`/spec`）**：含目标、不做什么、关键设计决策、调用方全覆盖、数据&部署影响、粗颗粒 task 清单。**spec 里的 task 只写"目标 + 产出 + 验收口径"，禁止出现代码片段 / 文件行号 / 实现步骤**；具体验证命令在实现阶段基于实际改动补齐 —— 实现细节是动手时才能生成的知识，spec 阶段预写就是想象，必失真。
-4. **codex T1 review**：spec 定稿叫一次 codex，重点检查任务颗粒度是否合适、有没有藏着的实现想象。逐条采纳 / 驳回写理由，更新 spec。
-5. **实现（一律委派子 agent，主会话禁止自行实现）**：
-   - **要并行就先 map 再 parallel**：并行派修改类子 agent 之前，先派一个 Explore 子 agent 摸出"哪些 task 互不碰文件"的真实分区图——按各 task 方法实际能触达的文件算，**不是**按声明产出算。据此分区结果再并行。这条在用并行子 agent 时仍然有效。
-   - **无文件冲突时鼓励并行**：分区图确认互不碰文件的 task，派 `general-purpose` 子 agent 并行做，每个 agent 自己生成实现细节并产出验证证据，主会话只接产出 + 证据。这是处理大批量 / 可并行改动的推荐方式。
-   - **有文件冲突 / 有依赖的 task**：按依赖顺序**串行委派**，一条一条派。不因为"串行了反正也不省时间"就自己上手——委派省的是上下文，顺带强制产生一个 reviewer，这两样跟并行与否无关。
-   - 跨需求并行（多个独立 feature）走另一个 worktree / 会话。
-   - **TDD 红-绿-重构**：由承接的子 agent 自己完成红-绿-重构，自己跑变异验证，自己交证据（命令 + 实际输出）。主会话不代劳其中任何一步——**写测试也不行**：测试是实现的一部分，主会话自己写完测试之后，"让它变绿"就只剩一步之遥，这条交接线就是这样被跨过去的。
-6. **遇到死循环必停**：同一报错 ≥2 次 / 同一测试 ≥3 次 / A↔B 往返。结构化分析根因，必要时叫 codex T4 独立诊断（必须先告诉用户、等同意）。
-7. **commit 前**：含设计或逻辑变动的批叫 codex T3 review。完成前必须列出验证证据（命令 + 实际输出），禁止"看着对、应该没问题"。
-8. `git push` 到远端（Kaniko 从 git remote 拉代码，本地 commit 不够）。
-9. 部署独立泳道（命名遵守上方规范：功能性验证用 `ppe-<name>`，基建 / 破坏性改动用 `coe-<name>`），不直接用 `dev`。
-10. 飞书测试必须绑定 dev bot：`/ops bind bot dev <lane>`。
-11. 验收后解绑 + 下泳道：`/ops unbind bot dev` → `make undeploy APP=<app> LANE=<lane>`。
-12. `/ship` 合码并部署 prod（合码铁律见 `.claude/rules/merge-and-ship.md`）。
-
-### 子 agent 与 codex 的使用边界
-
-子 agent **不是推荐工具，是强制**（见第 0 条）：需求开发的具体任务和预期超过 5 次工具调用的请求一律委派，主会话禁止自行实现。主会话仍可直接读写仓库文件，但只用于第 0 条列出的那几件事和那两类例外。
-
-- **Explore 子 agent**：研究代码，不写代码。查调用方 / 现有实现 / 类似模式、需要读多个文件回答问题时派它，主对话只接结论。只有"单次确认一个事实"（读一两个文件）才留在主会话。
-- **general-purpose 子 agent**：承接仓库文件修改。**要并行就先 map 再 parallel**：并行前先派一个 Explore 子 agent 按"各 task 方法实际能触达哪些文件"摸出真实分区图（不是按声明产出算），无文件冲突的 task **鼓励并行**派多个子 agent；有冲突 / 有依赖的**串行委派**。每个 agent 拿一条 task 自己想细节、自己走 TDD 红-绿-重构（先写测试再写实现）、自己跑验证和变异、自己报产出。
-- **应用 reviewer 反馈**：采纳 codex 反馈去改代码同样是实现，委派。只改 spec / 文档措辞的，主会话可以自己改。
-- **跨需求并行**：用 worktree + 多会话，不在一个会话里塞多个独立 feature。
-- **codex**：外部 reviewer，不是 worker。T1（spec 写完）/ T2（plan 写完，本项目 plan 合并进 spec 不单独触发）/ T3（一批含设计变动的代码 commit 前）/ T4（debug 死循环，需用户先同意），详见 `~/.claude/rules/agent-collaboration.md`。
-
-### 上线前必须完成的检查（TODO）
-
-代码改完、泳道验证通过后，**合码前**逐条过：
-
-- [ ] **调用方全覆盖**：`grep` 被修改函数的所有调用方，列出每个调用场景（群聊/私聊/rebuild/afterthought/...），确认每个场景下的行为是否正确。不是看一眼，是每个场景都要有运行验证的证据。
-- [ ] **数据读写一致**：如果改了写入的目标表，确认所有读取方也已切换。如果新建了表，确认旧表的读取方不会读到空数据。
-- [ ] **副作用清单**：列出这次改动的所有副作用（新表、新 prompt、新 agent 注册、DB schema 变更），确认每个都已就绪。
-- [ ] **部署影响**：如果有后台异步任务正在运行（rebuild、afterthought），部署会杀掉它们。部署前确认没有正在跑的任务，或者明确告知用户"部署会中断 X"。
-
-## 部署命令
-
-部署命令必须显式写 `GIT_REF`，如 `make deploy APP=channel-server GIT_REF=main`，禁止省略。
+## 部署
 
 ```bash
-make deploy APP=<app> [LANE=ppe-<name>] [BUMP=minor] [VERSION=2.0.0.1] [GIT_REF=main]  # 构建 → 等待 → 发布
-make self-deploy [BUMP=minor]                                      # paas-engine 蓝绿自部署
-make release APP=<app> LANE=prod VERSION=1.0.0.5                   # 仅发布（不构建，用于回滚）
-make undeploy APP=<app> LANE=ppe-<name>                            # 删除 Release
-make status [APP=xxx]                                              # 查看状态
-make latest-build APP=<app>                                        # 最近成功构建
+make deploy APP=<app> LANE=<lane> GIT_REF=<ref> [BUMP=minor]  # 构建 + 发布，GIT_REF 必须显式写
+make release APP=<app> LANE=<lane> VERSION=<x.y.z.w>          # 只发布，不构建（回滚用）
+make undeploy APP=<app> LANE=<lane>
+make self-deploy [BUMP=minor]                                 # paas-engine 蓝绿自部署（prod ↔ blue）
+make status [APP=<app>]
+make latest-build APP=<app>
+make logs APP=<app> [KEYWORD=... EXCLUDE=... REGEXP=... SINCE=...]
 ```
 
-### 部署铁律
+- `make` 要在仓库根目录执行，部署类 target 只在根 Makefile 里。
+- `deploy` / `release` 会按 `SIBLINGS` 同步发布同镜像的另一个服务（lark-service → lark-outbound，channel-server → chat-response-worker）；`undeploy` 不会，要对它单独再执行一次。
+- Kaniko 从 git remote 拉代码，部署前先 push。镜像 tag 由 PaaS 分配。
+- 部署会重建 Pod，正在执行的异步任务（rebuild 等）会中断。部署前确认没有这类任务，或者先告诉用户。
+- 任何改动先在泳道验证，再部署到 prod，除非用户明确要求直接部署。
 
-1. **禁止未经泳道验证直接部署到 prod。** 任何代码改动，无论多小（"就改了一行"不是理由），必须先部署到泳道、用真实流量或 rebuild 验证通过，再走 `/ship` 上线。唯一例外：用户明确说"直接上"。
-2. **部署 = 杀 Pod = 中断所有异步任务。** 部署前必须确认没有正在跑的后台任务（rebuild、afterthought 等）。如果有，要么等它跑完，要么告知用户会中断。
-3. **rebuild 等批量操作的参数（persona、chat_id、时间范围）必须由用户指定。** 不要自己填默认值，不要"顺便"扩大范围。
-4. **一镜像多服务同步。** `make deploy` / `make release` 按 Makefile 的 `SIBLINGS` 映射自动同步 release sibling（channel-server → chat-response-worker，lark-service → lark-outbound），无需手动操作。
+## 操作边界
 
-## AI 行为约束
+可以直接执行，完成后报告结果：
 
-### 赤尾设计原则
+- 在分支上 commit、push，运行测试。
+- `ppe-*` / `coe-*` 泳道的 deploy、release、undeploy、重启，dev bot 绑定和解绑。用户正在验收的泳道除外。
+- 读 prod 数据库、查日志、查 Langfuse。
 
-不要用工程思维解决 agent 的不确定性问题。
-当赤尾的行为不符合预期时，正确的方向是优化她的输入（context、prompt、stimulus、agent 协作），
-而不是在逻辑层加确定性规则（阈值、计数器、格式化函数、随机池、if/else 分支）。
-不确定性是 agent 像人的来源，不是需要被消除的 bug。
+先说明、等用户明确同意再做。每次同意只覆盖那一次操作，不延伸到下一步；用户提问或表达意向不等于同意：
 
-### 生产环境操作
+- 创建 PR；合并 PR（用户说「合」才合）；部署、发布或回滚 prod。
+- prod 数据库写入和 DDL；删除有数据的资源。
+- 通过 PaaS API 改 prod 的配置（ConfigBundle、App / Release envs、Dynamic Config、gateway 规则）。
+- 发消息、写外部系统、把凭据复制到其他位置或生成密钥。
+- rebuild 这类批量任务的参数（persona、chat_id、时间范围）由用户指定，不自己填默认值、不扩大范围。
 
-- **写操作（PUT/POST/DELETE）影响线上前，必须先告知用户并等确认。** GET 随便做。
-- **不熟悉的 API，先确认语义。** PUT 是 partial 还是 full replace？先问。
-- **遇到不理解的现象，问用户而不是猜测然后改线上。**
-- **出事故时聚焦用户关心的点，不要撒网式检查。**
-- **e2e 测试禁止直接改线上真实资源。**
+用户说「跳过某个用例」「直接上线」是产品层面的让步，不包括上线后必然出问题的工程验证（真实并发、真实数据的读取路径）。这类验证不能跳过，要直接说明跳过后会出什么问题。
 
-### 基础设施
+硬性限制：
 
-- **开发机到集群的唯一出口是 `$PAAS_API`（反向代理）。** 不要尝试直连容器（port-forward、svc.cluster.local、Pod IP、localhost:端口、psql/redis-cli），没有网络通路，hook 也会拦截。运维查询走 Dashboard API（`/ops` skill），构建/部署/日志走 `make`。
-- **外部暴露服务走 api-gateway 动态规则。** 新增或调整外部可访问 API 时，使用 `/ops gateway upsert` 配置 gateway rules，并先用 `/ops gateway explain` 预览命中结果；需要回滚时用 `/ops gateway snapshots` + `/ops gateway rollback`。不要再改静态 `routes.yaml` 作为日常入口。
-- **默认不做路径改写。** 对外路径应由服务自身提供清晰 prefix；gateway 只做入口匹配和转发。确实需要 rewrite/strip prefix 时，必须在方案里单独说明原因、影响面和验证证据。
-- **用户说怎么做就怎么做，不要自作主张换方案。**
-- **不要在没有充分验证的情况下否定用户的方案。**
-- **同一操作失败两次，必须停下来分析根因或问用户，禁止暴力重试。**
+- 开发机到集群只有 `$PAAS_API`（反向代理）一个出口。不要 port-forward、直连 Pod/Service IP、psql、redis-cli，hook 会拦截。运维查询用 `/ops`、`/ops-db`（数据库必须指定 `@chiwei` 或 `@paas_engine`），构建、部署、日志用 `make`，Langfuse 只通过 langfuse skill 操作。已有 skill 能做的事不另写脚本绕过；JSON API 调用优先用 `/api-test` 的 `http.sh`，它不支持的场景（stream、文件、长超时）可以直接 curl。
+- `kubectl exec` 只做只读排查；不从 Pod 里取密钥给本地脚本用。
+- 内网 IP、端口、内部域名、真实姓名不进 git（代码、文档、commit、PR 都算），需要时写「见 memory infrastructure.md」。
+- GitHub CLI 用 `ghc`，不用 `gh`。
 
-### 运维查询命令
+## 开发与上线
 
-运维查询优先走 Dashboard API（自动审计），构建/部署/日志仍走 `make`：
+- 不在 main 上直接修改，分支由用户准备。
+- PR 标题和正文全英文，`grep -P '\p{Han}'` 必须为空。合并用 `ghc pr merge --squash --subject "..." --body-file <file>`，不要省略这两个参数，否则默认的 squash message 会带上 `Co-Authored-By` 里的邮箱。一批相关改动合成一个 PR。
+- 合并前列出分支上的全部 commit 和改动文件；有意料之外的文件（Makefile、基础设施）先问。rebase / merge 冲突先给用户看，由用户决定取哪边。
+- 对外暴露的 API 走 api-gateway 动态规则（`/ops gateway upsert`，先用 `/ops gateway explain` 预览；回滚用 `snapshots` + `rollback`），不改静态 `routes.yaml`。默认不做路径改写，确实需要时单独说明原因。
+- 代码里不按泳道名做判断。线上的可选功能用 Dynamic Config 做开关。prod 上执行不到的逻辑不合并进 main。
+- 功能全部做完再上线，上线节奏由用户定。本仓库单人维护，不存在并行分支冲突、发布窗口这类问题，不要以此为理由推动上线；新系统在 prod 上没有历史数据是正常的初始状态，也不是阻塞理由。
+- 合并前逐项确认：被修改函数的所有调用场景（群聊、私聊、主动消息等）都有运行验证；改了写入目标的，读取方也已切换；新表、新 prompt、schema 变更等副作用都已就绪。
+- 一次性的数据迁移、补数据逻辑写进服务代码，通过 admin endpoint 触发；`scripts/` 里不放一次性业务脚本。
+- 状态存在可查询的 DB 表里，追加写入保留历史，不用 UPSERT 覆盖；核心业务状态不放 Redis。
+- 讨论还没结束时不写 spec；用户质疑设计时，回答设计上怎么改，不要用缓解症状的办法代替设计修改。
+- 跟用户说话不用仓库代码注释里的自造比喻（例如「缝」「界桩」「手」「刺激」「信封」「台账」），换成直白描述；代码标识符照写。
 
-| 操作 | 命令 | 说明 |
-|------|------|------|
-| 服务状态 | `/ops status` | Dashboard API |
-| Pod 状态 | `/ops pods APP [LANE]` | Dashboard API |
-| 最近构建 | `/ops latest-build APP` | Dashboard API |
-| 受控数据库访问 | `/ops-db @数据库 SQL` | `@chiwei`（业务）或 `@paas_engine`（PaaS），必须指定 |
-| 泳道绑定 | `/ops bindings` / `/ops bind` / `/ops unbind` | Dashboard API |
-| 审计日志 | `/ops audit` | Dashboard API |
-| 应用日志 | `make logs [APP=<app>] [KEYWORD=error]` | Loki（无 Dashboard 端点） |
+## 赤尾设计原则
 
-**排查问题时必须用 `make logs`，禁止进容器捞日志或直接调 Loki API。** 支持 APP/KEYWORD/EXCLUDE/REGEXP/SINCE 等参数，详见 Makefile。
-
-## 环境配置
-
-- **GitHub CLI**: 因特殊原因，必须用 `ghc` 而不是 `gh`
-- **PaaS API PUT /apps/{app}/**: merge 语义，无需带完整字段
+- 她的行为不符合预期时，改她的输入（context、prompt、给她的信息和工具、agent 协作），不在逻辑层加确定性规则（阈值、计数器、随机池、格式化函数、if/else）。不确定性是她像人的来源，不是 bug。
+- 不在代码或配置里规定这个世界是什么样：作息表、固定钟点、坐标这类内容，移到配置里也一样不允许。读到这类既有机制，先判断它该不该存在，再讲它怎么工作。
+- 提供给她的真实输入不截断、不用另一个模型概括。担心 token 量就控制条数，不截断单条内容。
+- 她做不到某件事时，先检查她的输入里有没有做这件事需要的信息（比如消息 id），不要用模糊匹配去猜她想指什么。
+- 每轮给她的只放新发生的变化（像手机通知），不重复放入全量列表或整点状态快照。
+- 由她自己的输出累积起来的记录（日页、人格版本）会自我强化；长期记忆的证据来源要用她无法改写的数据（原始消息、别人写的记录）。
+- 设计她的功能时，先从她的视角写她会怎么想、需要看到什么，再推导工程实现；不先画 schema / dataflow，不用 room_id、presence 表这类离散结构模拟她的世界。
+- 让模型做决定或写入时用 function calling，一个决定一个工具；不用正则从自然语言输出里提取语义。
+- 所有 LLM 调用都接 Langfuse trace。
+- 赤尾的范式和产品设计不找 codex 评审：它倾向于加入确定性结构，和上面这些原则的方向相反。

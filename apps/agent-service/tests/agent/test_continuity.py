@@ -11,6 +11,9 @@
   4. **阈值和素材表都由调用方给**，这一层一个默认值都没有，也不读任何配置。
   5. **裁剪的规则对任意工具名成立**：素材载荷过期换短语、整组过期整组删、图片只活在
      最新那一代、上一轮没存下来就补一条缺口标记消息、硬顶从最老的组开始丢。
+  6. **上下文里的状态永远只有一份**：插入新标记消息的那一下，之前每一条都折叠成只剩
+     表头；两次插入之间一个字节都不动。"上下文是不是一路连着的"由
+     :func:`continues_unbroken` 判，调用方拿它决定状态里要不要补那些本来就在上下文里的东西。
 
 她那一侧怎么用这一层（她的阈值、她的素材表、她一轮跑下来存了什么）在
 ``tests/living/test_context_trim.py`` 和 ``tests/living/test_continuity.py``。
@@ -34,6 +37,7 @@ from app.agent.continuity import (
     TranscriptConflict,
     TrimPolicy,
     commit_transcript,
+    continues_unbroken,
     estimate_tokens,
     next_transcript,
     trim_for_round,
@@ -118,6 +122,15 @@ def _tool_payload(ctx: list[Message], call_id: str) -> str:
     got = [m for m in ctx if m.role is Role.TOOL and m.tool_call_id == call_id]
     assert len(got) == 1, f"{call_id} 的结果不在了或者不止一条：{len(got)}"
     return got[0].text()
+
+
+def _header(head: str, at: dt.datetime) -> str:
+    """折叠之后一条标记消息剩下的全部：开头 + 时刻 + 收尾括号。"""
+    return f"{head}{at.isoformat()}】"
+
+
+def _markers(messages: list[Message]) -> list[Message]:
+    return [m for m in messages if m.text().startswith((CHECKPOINT_HEAD, GAP_HEAD))]
 
 
 def _orphans(messages: list[Message]) -> list[str]:
@@ -335,7 +348,11 @@ def test_a_picture_only_lives_in_the_newest_generation():
 
 
 def test_a_lost_round_gets_a_gap_marker_and_keeps_the_history():
-    """上一轮没存下来：没跨清理点也补一条缺口标记消息，时刻是这一轮，往前的历史一条不丢。"""
+    """上一轮没存下来：没跨清理点也补一条缺口标记消息，时刻是这一轮，往前的历史一条不丢。
+
+    唯一变了的是之前那条标记消息：新的一条带着此刻的状态插进来，它折叠成只剩表头
+    （第六节）。别的每一条逐字节不动。
+    """
     history = _play(start=_at(13, 0), until=_at(13, 20), events={})
 
     fed = trim_for_round(
@@ -347,7 +364,9 @@ def test_a_lost_round_gets_a_gap_marker_and_keeps_the_history():
         lost_last_round=True,
     )
 
-    assert fed[:-1] == history
+    assert len(fed) == len(history) + 1
+    assert fed[0].text() == _header(CHECKPOINT_HEAD, _at(13))
+    assert fed[1:-1] == history[1:]
     assert _marker_time(fed[-1], GAP_HEAD) == _at(13, 40)
     assert STATE in fed[-1].text()
 
@@ -362,3 +381,121 @@ def test_the_hard_cap_drops_the_oldest_groups_and_never_this_round():
     assert stored[-2:] == this_round
     assert "第0段" not in "".join(m.text() for m in stored)
     assert estimate_tokens(stored) <= tight.trim_target_tokens
+
+
+# ---------------------------------------------------------------------------
+# 六 · 状态只留一份：插入新标记消息时，之前的折叠成只剩表头
+#
+# 标记消息的正文是插入那一刻调用方给的状态，下一条带着新状态插进来之后，它就是一份过时
+# 的副本。不折叠的话一天清理十几次就叠十几份，同一段状态在一轮输入里出现十几遍。表头
+# 留着：它是分代的边界，每条消息的年龄下界就是它之后第一条标记消息的时刻。
+# ---------------------------------------------------------------------------
+
+
+def _round_with(history: list[Message], at: dt.datetime, state: str) -> list[Message]:
+    fed = trim_for_round(
+        history, now=at, state=state, policy=POLICY, material_tools=MATERIAL
+    )
+    round_input = Message(role=Role.USER, content=f"现在 {at:%H:%M}。")
+    return next_transcript(fed, [round_input, _said("继续")], policy=POLICY)
+
+
+def test_a_new_marker_folds_every_earlier_one_down_to_its_header():
+    """跑了几个清理周期：只有最新那条标记消息带着状态，之前的只剩表头。"""
+    ctx: list[Message] = []
+    at = _at(9, 5)
+    while at <= _at(12, 35):
+        ctx = _round_with(ctx, at, f"状态：{at:%H:%M} 那会儿。")
+        at += dt.timedelta(minutes=10)
+
+    markers = _markers(ctx)
+    assert [m.text() for m in markers[:-1]] == [
+        _header(CHECKPOINT_HEAD, _at(hour)) for hour in (9, 10, 11)
+    ], "旧的标记消息没折叠成只剩表头"
+    assert markers[-1].text().startswith(_header(CHECKPOINT_HEAD, _at(12)))
+    assert "状态：12:05 那会儿。" in markers[-1].text()
+
+    joined = "\n".join(m.text() for m in ctx)
+    for stale in ("09:05", "10:05", "11:05"):
+        assert f"状态：{stale} 那会儿。" not in joined, f"{stale} 那份状态还在"
+    assert joined.count("你现在：") == 1, "上下文里叠着不止一份状态"
+    assert joined.count("再往前的那一段不在你眼前了") == 1, (
+        "那句话只对最新那条是实话，留在一条已经过时的标记消息上就说错了"
+    )
+
+
+def test_a_later_cleanup_folds_the_gap_marker_too():
+    """缺口那条带进来的状态跟清理那条一样会过时，下一个清理点同样折叠。"""
+    ctx = _round_with([], _at(14, 5), "状态：14:05 那会儿。")
+    fed = trim_for_round(
+        ctx,
+        now=_at(14, 35),
+        state="状态：14:35 那会儿。",
+        policy=POLICY,
+        material_tools=MATERIAL,
+        lost_last_round=True,
+    )
+    ctx = next_transcript(fed, [Message(role=Role.USER, content="现在 14:35。")], policy=POLICY)
+    ctx = _round_with(ctx, _at(15, 5), "状态：15:05 那会儿。")
+
+    assert [m.text() for m in _markers(ctx)[:-1]] == [
+        _header(CHECKPOINT_HEAD, _at(14)),
+        _header(GAP_HEAD, _at(14, 35)),
+    ]
+    assert "状态：14:35 那会儿。" not in "\n".join(m.text() for m in ctx)
+
+
+def test_between_two_markers_nothing_is_folded_and_the_prefix_stays_put():
+    """折叠只发生在插入新标记消息那一下。同一个清理周期里的几轮，前缀逐字节不动。"""
+    ctx = _round_with([], _at(14, 5), "状态：14:05 那会儿。")
+    for minute in (15, 25, 35, 45, 55):
+        before = list(ctx)
+        fed = trim_for_round(
+            ctx, now=_at(14, minute), state="不该出现", policy=POLICY, material_tools=MATERIAL
+        )
+        assert fed == before, f"14:{minute} 那一轮改动了前缀"
+        ctx = next_transcript(
+            fed, [Message(role=Role.USER, content=f"现在 14:{minute}。")], policy=POLICY
+        )
+    assert "状态：14:05 那会儿。" in ctx[0].text()
+
+
+def test_a_folded_marker_is_still_a_marker():
+    """折叠之后它照样是一条标记消息：一个有内容的 USER，时刻读得回来。
+
+    空串会被 provider 拒掉整个请求；时刻读不回来的话，它左边那一代的年龄就无从判断。
+    """
+    ctx = _round_with([], _at(13, 5), STATE)
+    ctx = _round_with(ctx, _at(14, 5), STATE)
+
+    folded = ctx[0]
+    assert folded.role is Role.USER and folded.text() == _header(CHECKPOINT_HEAD, _at(13))
+    assert _marker_time(folded, CHECKPOINT_HEAD) == _at(13)
+
+
+def test_the_context_continues_unbroken_only_with_a_marker_and_no_lost_round():
+    """一路连着 = 历史里至少有一条标记消息，而且上一轮存下来了。
+
+    不按这一轮要插哪种标记消息判：缺口和清理点重叠时插的是清理那条，硬顶把标记消息全
+    裁掉之后下一轮插的也是清理那条 —— 这两种情况上下文同样是断过的。
+    """
+    ctx = _round_with([], _at(14, 5), STATE)
+
+    assert continues_unbroken(ctx, lost_last_round=False)
+    assert not continues_unbroken(ctx, lost_last_round=True), "上一轮没存下来"
+    assert not continues_unbroken([], lost_last_round=False), "上下文是空的"
+    assert not continues_unbroken(ctx[1:], lost_last_round=False), (
+        "硬顶把标记消息全裁掉了：剩下那一截说不清是从哪儿接上的"
+    )
+
+
+def test_a_folded_marker_still_counts_as_the_context_carrying_on():
+    """只剩折叠过的标记消息（最新那条被硬顶裁掉了）也算一路连着：表头就是标记。"""
+    ctx = _round_with([], _at(13, 5), STATE)
+    ctx = _round_with(ctx, _at(14, 5), STATE)
+    newest = max(i for i, m in enumerate(ctx) if _markers([m]))
+    only_folded = ctx[:newest]
+
+    assert _markers(only_folded) and "你现在：" not in only_folded[0].text()
+    assert continues_unbroken(only_folded, lost_last_round=False)
+

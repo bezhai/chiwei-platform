@@ -38,6 +38,10 @@ Pixiv 图片元数据本地镜像例外：下载成功后，worker 会在 `PIXIV
 
 ## 可选环境变量
 
+- `REDIS_COMMAND_TIMEOUT_MS`：本 worker 的 Redis 命令超时，默认 `10000` 毫秒。
+- `DOWNLOAD_DISCOVERY_STEP_TIMEOUT_MS`：扫描每个外部操作的等待上限，默认 `180000` 毫秒；关注列表按整次分页计时，大规模关注列表可调高。非法超时配置会报错。
+- 扫描日志 `discovery_step` 包含作者 ID、调用阶段和耗时。作者失败后继续下一位；只有全部候选入队或确认已存在才更新作者扫描时间（没有新作品也算成功）。超时会阻止查重后的新写入，但已发送的 Mongo/Redis 写入可能迟到完成，最终扫描时间写入超时的结果可能未知。
+
 - `DOWNLOAD_CRON`：Pixiv 下载任务 cron 表达式，默认 `12 10 * * *`（每天 10:12）。
 - `DOWNLOAD_AFTER_ILLUST_INFO_DELAY_MS`：取作品信息后的等待时间，默认 `1500`（旧值减半）。
 - `DOWNLOAD_BEFORE_PAGE_DOWNLOAD_DELAY_MS`：单页图片代理下载前等待时间，默认 `1000`（旧值减半）。

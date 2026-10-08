@@ -13,7 +13,8 @@
   * **裁剪**：:func:`trim_for_round`（喂给模型之前）和 :func:`next_transcript`（存下去
     之前）。按调用方给的 :class:`TrimPolicy` 和素材工具表裁。
   * **标记消息**：到了清理点、或者上一轮没存下来时，插入一条带时刻的 USER 消息，内容是
-    那个时刻加调用方渲染好的状态，作为往后那一段的新起点。
+    那个时刻加调用方渲染好的状态，作为往后那一段的新起点；之前的标记消息同时折叠成只剩
+    表头。:func:`continues_unbroken` 告诉调用方这份上下文是不是一路连着的。
 
 **调用方自己定的**：存储键（带不带泳道、分不分人）、五个阈值、哪些工具的返回算素材、
 标记消息里写的那段状态、写失败之后这一轮算不算数。这一层对这些一个默认值都不给：给了默认
@@ -64,6 +65,18 @@ adapter 回放历史时会把 http(s) 地址重新下载，过期就在模型请
 自己的记录里还有，标记消息把"现在"重新交代一遍，作为新起点。空历史（第一次跑、刚清过库）也
 插入一条。标记消息同时是**分代的边界**：每条消息的年龄下界就是它之后第一条标记消息的时刻，
 不需要给每条消息单独存时刻。第一条标记消息之前写下的东西没有上界，一律留着。
+
+**上下文里的状态永远只有一份。** 插入新标记消息的那一下，之前每一条都折叠成只剩表头
+（:func:`_folded`）：表头是分代的边界，得留着；正文是插入那一刻的状态，新的一份进来之后
+它就是一份过时的副本，留着的话一天清理十几次就叠十几份。实测过这个后果：一个 agent 的
+上下文里叠了 5 份状态，它自己说过的话在一轮输入里出现了几十次，输出跟着一轮比一轮收窄
+成同一个样子。折叠只发生在插入那一下，而那一下本来就在改上下文，所以两次插入之间前缀
+照样逐字节不变。不分调用方、不给开关：任何调用方的状态都只对插入那一刻成立。
+
+**上下文是不是一路连着的**（:func:`continues_unbroken`）：历史里至少有一条标记消息、
+而且上一轮存下来了。调用方拿它决定状态里要不要补那些本来就在上下文里的东西 —— 连着的
+时候再补一份就是重复；断过的时候（空的、硬顶把标记消息全裁掉了、上一轮没存下来）上下文
+接不住，得补。
 
 **上一轮没存下来时插入的是另一种标记消息**（:data:`GAP_HEAD`）。历史一条不丢，少的是中间那一
 轮的经过；文案因此跟清理那种分开，说的是"接不上"而不是"看不到"。判据由调用方给
@@ -237,7 +250,11 @@ def _marker(head: str, at: datetime, what_happened: str, state: str) -> Message:
 
 
 def _checkpoint(at: datetime, state: str) -> Message:
-    """固定时刻清理时插入的那条：再往前的东西这一下真的从眼前走了。"""
+    """固定时刻清理时插入的那条：再往前的东西这一下真的从眼前走了。
+
+    那句"再往前的那一段不在你眼前了"只对最新这条是实话，下一条插入时它连同状态一起
+    折叠掉（:func:`_folded`）。
+    """
     return _marker(
         CHECKPOINT_HEAD, at, "再往前的那一段不在你眼前了，只剩你自己记下来的。", state
     )
@@ -268,6 +285,51 @@ def _marker_at(message: Message) -> datetime | None:
         return datetime.fromisoformat(message.content[len(head) : end])
     except ValueError:
         return None
+
+
+def _folded(message: Message) -> Message:
+    """一条旧标记消息只留表头（开头 + 时刻 + 收尾括号）；不是标记消息就原样还回去。
+
+    **表头是标记消息上唯一还有人读的部分**：分代边界和按代裁剪都只读它
+    （:func:`_marker_at`）。正文那份状态只对插入它的那一刻成立。
+
+    **不是删掉**：删了分代边界就没了，它之前那些消息的年龄无从判断。表头之后那句"再往
+    前的那一段不在你眼前了"一起走 —— 放在一条已经过时的标记消息上，它说的就不是实话了。
+
+    表头永远不是空串（开头本身就有字），所以折叠之后这条仍然是一个有内容的 USER：空串
+    会被 gemini adapter 编码成一个没有 parts 的 content，provider 拒掉整个请求。
+
+    按第一个收尾括号切：两种开头和时刻里都没有这个字符，所以它就是表头的结尾，跟
+    :func:`_marker_at` 认的是同一个位置。
+    """
+    if _marker_at(message) is None:
+        return message
+    header, tail, _state = message.content.partition(_MARKER_TAIL)
+    return replace(message, content=header + tail)
+
+
+def continues_unbroken(history: list[Message], *, lost_last_round: bool) -> bool:
+    """这份上下文是不是一路连着写下来的 —— 历史里至少有一条标记消息，而且上一轮存下来了。
+
+    ``history`` 是这一轮读到、还没裁的那一份；``lost_last_round`` 同 :func:`trim_for_round`。
+
+    连着的时候，调用方的 agent 最近几个小时的输入和产出都原样在上下文里，状态里再补一份
+    就是同一批话在一轮输入里出现好几遍。断过的有两类：
+
+      * **一条标记消息都没有**：第一次跑、清过库，眼前什么都没有；或者硬顶把标记消息全
+        裁掉了（:func:`_under_cap` 从最老的组开始整组丢），剩下那一截说不清是从哪儿接
+        上的，丢掉的可能正是刚产出的东西；
+      * **上一轮没存下来**：那一轮的产出比眼前剩下的都新，却不在眼前。
+
+    **不按这一轮要插哪种标记消息来判。** 缺口和清理点撞在一起时插的是清理那条（先判
+    :func:`_crossed`），硬顶之后下一轮插的也是清理那条 —— 按类型判，这两种断过的情况
+    就会被当成连着的。
+
+    折叠过的标记消息照样算：表头就是标记。
+    """
+    if lost_last_round:
+        return False
+    return any(_marker_at(m) is not None for m in history)
 
 
 def _groups(messages: list[Message]) -> list[list[int]]:
@@ -421,7 +483,8 @@ def trim_for_round(
 
     跨过清理点（或者历史是空的）：插入一条清理标记消息，再按两档时长裁一遍。没跨过但
     ``lost_last_round``：插入一条时刻为 ``now`` 的缺口标记消息，历史一条不丢。两样都没有：
-    原样还回来，一个字节都不动（硬顶除外）。
+    原样还回来，一个字节都不动（硬顶除外）。插入的那一下，之前每一条标记消息都折叠成只剩
+    表头（:func:`_folded`）；缺口那条在清理周期中间插入，那一轮前缀会多变一次。
 
     ``state`` 是调用方渲染好的"此刻的状态"，只写进标记消息。``material_tools`` 是哪些工具
     的返回算素材。``lost_last_round`` 是"上一轮的上下文没存下来"，判据归调用方。
@@ -430,16 +493,21 @@ def trim_for_round(
     的那条不许被硬顶裁掉：它是这一轮唯一一份"你现在"。
     """
     at = _cleanup_instant(now, policy.cleanup_minutes)
-    staged = list(history)
-    inserted = _crossed(history, at)
-    if inserted:
-        staged.append(_checkpoint(at, state))
+    if _crossed(history, at):
+        marker: Message | None = _checkpoint(at, state)
     elif lost_last_round:
         # 跨清理点插入的那条已经重新写过状态了，两条一起插入没有意义。
-        staged.append(_gap_marker(now, state))
-        inserted = True
+        marker = _gap_marker(now, state)
+    else:
+        marker = None
+    if marker is None:
+        staged = list(history)
+    else:
+        # 新的一条带着此刻的状态插进来，之前每一条都只剩表头：上下文里的状态永远只有
+        # 一份。只在这一下折叠，所以两次插入之间前缀照样一个字节都不动。
+        staged = [*(_folded(m) for m in history), marker]
     cleaned = _clean(staged, at=at, policy=policy, material_tools=material_tools)
-    return _under_cap(cleaned, floor=1 if inserted else 0, policy=policy)
+    return _under_cap(cleaned, floor=0 if marker is None else 1, policy=policy)
 
 
 def next_transcript(

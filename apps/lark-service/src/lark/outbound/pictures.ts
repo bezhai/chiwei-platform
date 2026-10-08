@@ -119,5 +119,5 @@ async function sendOne(
 }
 
 function degraded(position: number, what: string): LarkRenderedPicture {
-    return { nodes: [{ tag: 'md', text: `(第 ${position} 张图${what})` }] };
+    return { nodes: [{ tag: 'text', text: `(第 ${position} 张图${what})` }] };
 }

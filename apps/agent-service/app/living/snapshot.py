@@ -13,7 +13,7 @@
   手上正在做的事      最新一条 ``Whereabouts``    1 行（"当前"只有一个）
   上一次写下的那天    ``read_day_page_before``    1 页（严格早于当前生活日的最新一页）
   挂着没了结的事      还开着的 ``LooseEnd``       她自己列多少就是多少
-  她刚做过 / 说过     她自己的 ``Happening``      最近 N 条
+  她刚做过 / 说过     她自己的 ``Happening``      最近 N 条，只在她自己的话不在眼前时给
   ==================  ==========================  ==============================
 
 **四层全是她自己的。** 别人做了什么、说了什么，不从这里读：谁会察觉由 world 判断后告诉她，
@@ -30,6 +30,10 @@
   * :meth:`MomentSnapshot.render_state` —— **她此刻的样子**（上一次写下的那天、心里挂着
     什么、刚做过说过什么）。读一百遍字字一样，所以每轮重发就是把同一段话抄一遍。只在
     清理那一下作为新起点重铺（:func:`app.agent.continuity.trim_for_round`），默认一小时一次。
+    「刚做过说过什么」那段只在这份历史接不住她最近说过的话时才带（上下文是空的、硬顶
+    把标记消息全裁掉了、上一轮没存下来，判据见 :func:`app.agent.continuity.continues_unbroken`）：
+    其余时候她 4 小时内说过的话都原样在上下文里，每小时再抄一份就是同一句话在一轮输入里
+    出现好几遍。
   * :meth:`MomentSnapshot.render_new` —— **这一轮的实况**：几点了、离上一次隔了多久、她在
     哪在做什么、有什么到点了。每轮都送，因为每轮都不一样。
 
@@ -44,7 +48,9 @@
 :func:`~app.living.day_page.read_day_page_before` 里。
 
 **"她刚做过、说过"那层为什么必须单独存在**：她的上下文会被裁剪，传到她这里的消息也只摆
-一次。少了这一层，她上一轮答应姐姐的话下一轮就凭空消失，"接得上昨天"永远无从谈起。
+一次。上下文连着的时候她说过的话就在上下文里；上下文是空的、断过、上一轮没存下来的那一
+轮，上下文接不住，少了这一层，她上一轮答应姐姐的话下一轮就凭空消失，"接得上昨天"永远
+无从谈起。
 
 唯一一处在这里**算**出来的东西是线头那层的「到点了 / 还没到」：她给线头挂的时刻当场跟
 ``now`` 比，库里没有这个状态（:func:`_open_end_line`）。这不是压缩，是把同一个事实
@@ -73,6 +79,11 @@ from app.runtime.migrator import _table_name
 #
 # 12 的量级依据：她真正动手 / 开口的轮次远少于"继续"的轮次，12 条大致覆盖她最近几个
 # 小时的行为轨迹 —— 足够让"刚答应姐姐的事"活到她下一次换事情、把它列进心上为止。
+#
+# 这一段只在上下文接不住她最近说过的话时给（上下文是空的、硬顶把标记消息全裁掉了、上一
+# 轮没存下来）。上下文不按天清零，所以正常跑着的时候它不出现；出现的那一轮，这 12 条就
+# 是她眼前唯一的说话样本，之前的腔调会跟着带进来。这是有意保留的：她得记得自己刚说过
+# 什么。
 OWN_RECENT_LIMIT = 12
 
 _HAPPENING_TABLE = _table_name(Happening)
@@ -90,13 +101,19 @@ class MomentSnapshot:
     open_ends: list[LooseEnd]
     own_recent: list[Happening]
 
-    def render_state(self) -> str:
-        """她此刻的样子：上一次写下的那一天、心里挂着什么、刚做过说过什么。
-        每段空的时候如实说空，不留白洞。
+    def render_state(self, *, her_words_in_view: bool) -> str:
+        """她此刻的样子：上一次写下的那一天、心里挂着什么，她自己的话不在眼前时再加上
+        刚做过说过什么。每段空的时候如实说空，不留白洞。
 
         **这一份不是每轮都送的**，只在清理那一下当作新起点重铺一次
         （:func:`app.agent.continuity.trim_for_round`）。四段读一百遍字字一样，连续
         上下文里她上一轮已经读过；每轮重发只是把同一段话抄二十四遍。
+
+        **``her_words_in_view`` 是这一轮的历史接不接得住她最近说过的话**，由组装那一
+        层判（:func:`app.agent.continuity.continues_unbroken`），这里只照着摆：
+        接得住就不给「你刚做过、说过」那一段 —— 她 4 小时内说过的话都原样在上下文里，
+        再抄一份最近 12 句就是同一句话在一轮输入里出现好几遍。这里判不了：渲染在裁剪
+        之前，不知道这一轮会立哪种界桩，也看不见历史。
 
         **不带时刻。** 界桩自己头上就印着这次清理的时刻，这里再报一次就是同一份输入里
         两个"现在"，而且两个数还不一样（界桩取整点，这一轮的 ``now`` 不是）。
@@ -106,13 +123,10 @@ class MomentSnapshot:
         ``switch_to``），改完到下一个清理点之间，重铺那份说的还是旧位置 —— 而她在哪是
         这一轮里最不能过期的一样（world 按她报的位置判断谁看得见她）。
         """
-        return "\n\n".join(
-            (
-                self._render_day_page(),
-                self._render_open_ends(),
-                self._render_own_recent(),
-            )
-        )
+        parts = [self._render_day_page(), self._render_open_ends()]
+        if not her_words_in_view:
+            parts.append(self._render_own_recent())
+        return "\n\n".join(parts)
 
     def render_new(self, *, previous_at: datetime | None) -> str:
         """这一轮的实况：几点了、离上一次隔了多久、**你在哪在干嘛**、有什么到点了。
