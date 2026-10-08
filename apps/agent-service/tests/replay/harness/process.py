@@ -10,6 +10,10 @@ skill registry is empty (no guides on hand), as it is wherever ``SKILLS_DIR`` ha
 
 Stop mirrors the lifespan's shutdown. A restart is stop + start with the database, the broker's
 queues and the volume left as they were, which is what a new process finds.
+
+The durable consumer names itself ``hostname:pid`` (``app.runtime.durable.WORKER_ID``) on the
+inflight rows it claims; a replayed process is named ``<app>#<n>`` (the n-th process the scenario
+started) instead, so a claim a dead process left behind reads the same on every machine.
 """
 
 from __future__ import annotations
@@ -82,10 +86,13 @@ def _execute_wiring(app_name: str) -> None:
 
 
 class AppProcess:
-    def __init__(self, app_name: str, monkeypatch, broker) -> None:
+    def __init__(
+        self, app_name: str, monkeypatch, broker, *, worker: str | None = None
+    ) -> None:
         self.app_name = app_name
         self._monkeypatch = monkeypatch
         self._broker = broker
+        self._worker = worker
         self.running = False
 
     async def start(self) -> None:
@@ -98,6 +105,10 @@ class AppProcess:
         from app.runtime.durable import start_consumers
 
         self._monkeypatch.setenv("APP_NAME", self.app_name)
+        if self._worker is not None:
+            import app.runtime.durable as durable
+
+            self._monkeypatch.setattr(durable, "WORKER_ID", self._worker)
         _fresh_process_state(self._monkeypatch)
         _execute_wiring(self.app_name)
         await prepare_for_run(self.app_name)

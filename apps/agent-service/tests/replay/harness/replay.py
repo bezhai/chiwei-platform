@@ -32,6 +32,7 @@ from tests.replay.harness.broker import FakeBroker
 from tests.replay.harness.database import Tables, WriteLog, create_schema, row_changes
 from tests.replay.harness.errors import describe_error
 from tests.replay.harness.ids import DeterministicIds
+from tests.replay.harness.objects import ObjectStore
 from tests.replay.harness.process import AppProcess
 from tests.replay.harness.timeline import Timeline
 from tests.replay.harness.volume import file_changes, read_tree
@@ -71,7 +72,9 @@ class Replay:
         # Everything with an order that matters, in the order it happened during a step: write
         # transactions ending, publishes, deliveries and how they settled, file writes/deletes.
         self.effects = Timeline()
-        self.model = model.ModelScript(self.effects)
+        # Object storage and tool-service's image pipeline (attachment and picture bytes).
+        self.objects = ObjectStore(self.effects)
+        self.model = model.ModelScript(self.effects, objects=self.objects)
         self.broker = FakeBroker(self.effects)
         self.ids = DeterministicIds()
         # Dynamic Config as this scenario sees it: key -> raw string value. Unset keys read as
@@ -88,6 +91,8 @@ class Replay:
         self._tables = Tables(engine)
         self.redis = None
         self.process: AppProcess | None = None
+        # Processes started so far; names each one's durable worker (``<app>#<n>``).
+        self._started = 0
         self.steps: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------ lifecycle
@@ -114,6 +119,7 @@ class Replay:
         self.ids.install(mp)
         model.install(self.model, mp)
         self.broker.install(mp)
+        self.objects.install(mp)
         volume.install(mp, self.volume, self.effects)
         self._install_langfuse(mp)
         self._install_dynamic_config(mp)
@@ -176,7 +182,7 @@ class Replay:
 
     async def start(self, app_name: str) -> None:
         """Start ``app_name``'s process; recorded as a step."""
-        self.process = AppProcess(app_name, self._monkeypatch, self.broker)
+        self.process = self._new_process(app_name)
         await self.step(f"start {app_name}", self.process.start)
 
     async def restart(self) -> None:
@@ -186,8 +192,17 @@ class Replay:
         assert self.process is not None, "replay: no process to restart"
         self.effects.revive()
         await self.process.stop()
-        self.process = AppProcess(self.process.app_name, self._monkeypatch, self.broker)
+        self.process = self._new_process(self.process.app_name)
         await self.step(f"restart {self.process.app_name}", self.process.start)
+
+    def _new_process(self, app_name: str) -> AppProcess:
+        self._started += 1
+        return AppProcess(
+            app_name,
+            self._monkeypatch,
+            self.broker,
+            worker=f"{app_name}#{self._started}",
+        )
 
     # ------------------------------------------------------------------ faults
 

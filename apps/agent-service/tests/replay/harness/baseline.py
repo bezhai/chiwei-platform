@@ -29,14 +29,20 @@ step whose messages begin with an earlier call's messages says so (``"continues"
 only what was added (``"then"``) — the ReAct loop resends the whole conversation every turn.
 
 Normalisation: ids produced by ``uuid4`` during the scenario become ``<uuid:N>`` (by first
-appearance; a truncated one ``<uuid:N>[:k]``); any string spanning several lines becomes a list
-of its lines, so a diff points at the line that changed. Nothing else is rewritten.
+appearance; a truncated one ``<uuid:N>[:k]``); the payload of a base64 ``data:`` URI becomes
+``<N bytes, sha256:12 hex>`` (the mime type stays); the SQLAlchemy release in its error help
+links (``https://sqlalche.me/e/20/...``, which the code stores in full in some error columns)
+becomes ``<release>``; any string spanning several lines becomes a list of its lines, so a diff
+points at the line that changed. Nothing else is rewritten.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import difflib
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -126,6 +132,28 @@ def build(name: str, steps: list[dict[str, Any]], produced_ids: list) -> dict[st
     return _Normaliser(produced_ids).apply(document)
 
 
+# A base64 ``data:`` URI (an inline image a model request or a stored row may carry).
+_DATA_URI = re.compile(
+    r"(data:[\w.+-]*/?[\w.+-]*(?:;[\w.+-]+=[^;,]*)*;base64,)([A-Za-z0-9+/=]+)"
+)
+
+
+def _describe_data_uri(match: re.Match) -> str:
+    """The payload of a ``data:`` URI as its length and a hash: bytes do not belong in a
+    baseline, and the length and hash still change when the content does."""
+    try:
+        raw = base64.b64decode(match.group(2), validate=True)
+    except (binascii.Error, ValueError):
+        return match.group(0)
+    digest = hashlib.sha256(raw).hexdigest()[:12]
+    return f"{match.group(1)}<{len(raw)} bytes, sha256:{digest}>"
+
+
+# SQLAlchemy appends a help link naming its release series to every error message; code that
+# stores ``str(exc)`` (an inflight row's ``last_error``) would tie a baseline to the release.
+_SQLALCHEMY_HELP = re.compile(r"https://sqlalche\.me/e/\d+/")
+
+
 class _Normaliser:
     _CANDIDATE = re.compile(
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8,32}"
@@ -156,6 +184,10 @@ class _Normaliser:
         return token
 
     def _string(self, s: str) -> str:
+        if "data:" in s:
+            s = _DATA_URI.sub(_describe_data_uri, s)
+        if "sqlalche.me" in s:
+            s = _SQLALCHEMY_HELP.sub("https://sqlalche.me/e/<release>/", s)
         return self._CANDIDATE.sub(self._replace, s) if self._by_form else s
 
     def apply(self, node: Any) -> Any:

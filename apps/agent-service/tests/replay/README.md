@@ -33,7 +33,7 @@ wiring and the dataflow graph.
 
 | Boundary | Where | What the replay does |
 |---|---|---|
-| Model calls | `app.agent.client.build_model_client`: `resolve_model_info` resolves every model id to client type `replay`, registered as `ScriptedModel` (`harness/model.py`) | Answers from a script, one queue per agent (the Langfuse prompt the call was rendered from). Records the complete request. Reports usage through `generation_span`, as the real adapters do, so cost rows come from the code under test. |
+| Model calls | `app.agent.client.build_model_client`: `resolve_model_info` resolves every model id to client type `replay`, registered as `ScriptedModel` (`harness/model.py`) | Answers from a script, one queue per agent (the Langfuse prompt the call was rendered from). Records the complete request. Reports usage through `generation_span`, as the real adapters do, so cost rows come from the code under test. The provider adapters never run, so neither does the Gemini adapter's own download of every image url in a request (`_fetch_remote_image`, history included); instead each image block pointing into the object store is recorded with what fetching it at the time of the call returns (`"fetched"`, below). |
 | Prompts | `app.agent.prompts._get_client` (the Langfuse SDK client; the lane-label fallback logic stays) | Serves `prompts/<id>`; each prompt object remembers the variables it was compiled with. |
 | Tracing | `app.agent.trace._get_client`, `app.agent.core._get_trace_client` | Off (the spans take their no-op path). Not part of the baseline. |
 | Clock | `time-machine` (not freezegun: freezegun swaps `datetime.date` for a subclass, which changes the migrator's and persist's type checks and which asyncpg will not encode) | Frozen; moves only when a step says `at=`. The event loop's monotonic clock is untouched. `TZ` is set to the container's `Asia/Shanghai`. |
@@ -41,9 +41,10 @@ wiring and the dataflow graph.
 | Random ids | `uuid.uuid4` (`harness/ids.py`) | Derived from the calling function and how often it has asked, so they are reproducible and one new call does not shift other functions' ids. |
 | Dynamic Config | `dynamic_config._get_snapshot` | Reads `replay.config` (key → raw string); unset keys fall back to the code's defaults. |
 | Redis | `app.infra.redis._redis` | `fakeredis` (`replay.redis`); only the banned-word set is read today. Keys are lane-prefixed (`coe-replay:banned_words`). |
-| RabbitMQ | the methods of `app.infra.rabbitmq.mq` and `app.runtime.durable.publish_with_confirm` (`harness/broker.py`) | In-memory queues, bindings and consumers. Nothing is delivered unless the scenario delivers it (`replay.broker.deliver(queue)`), except replies to a process's own reply queue. Other processes' inboxes are declared with `broker.declare_inbox(name, answers=...)`. |
+| RabbitMQ | the methods of `app.infra.rabbitmq.mq` and `app.runtime.durable.publish_with_confirm` (`harness/broker.py`) | In-memory queues, bindings and consumers. Nothing is delivered unless the scenario delivers it (`replay.broker.deliver(queue)`), except replies to a process's own reply queue. Other processes' inboxes are declared with `broker.declare_inbox(name, answers=...)`. A rejected message moves to a dead-letter queue only for isolated routes (their lane's `isolated_dead_letters`); the broker-side dead-lettering of other queues (DLX, lane TTL fallback) is not modelled, so for a durable queue the record is the `reject` itself. A delivery whose consumer was killed is never settled; `replay.broker.requeue_unsettled()` puts it back at the front of its queue, marked redelivered, as RabbitMQ does when the dead consumer's channel closes. |
 | Database | real Postgres (`tests/runtime/conftest.py::test_db`); SQLAlchemy engine events (`harness/database.py`) | The full schema both apps run on. Write statements are recorded by transaction; every table is read before and after each step. |
-| Process | `harness/process.py` | Starts an app the way `app.main`'s lifespan does (wiring, graph, durable consumers, messaging, debounce consumers), without the interval clocks, HTTP routes, outbox dispatcher or skill reload. Rounds run when a scenario calls them. |
+| Object storage and tool-service's image pipeline | `httpx.AsyncHTTPTransport.handle_async_request`, for two hosts only (`harness/objects.py`); requests to any other host go out as before | `tool-service` `POST /api/image-pipeline/get-url` signs a name into `https://object-store.replay/<file_name>?signed-until=<frozen clock + 1.5 h>` (signing is pure computation, as in tool-service: it signs names nothing was stored under). A `GET` on the store answers what the scenario put there (`replay.objects.put(file_name, bytes, content_type)`), `404` for anything else, `403` once the signature has run out. `image_client` (envelope, lane header, error handling), the reading round's byte fetch and the phone's reachability check all run for real above it. Any other tool-service path raises `UnservedRequest` (a `BaseException`, so `image_client`'s `except Exception` cannot hide it): add it to `harness/objects.py`. Every request to these hosts goes onto the effects timeline. |
+| Process | `harness/process.py` | Starts an app the way `app.main`'s lifespan does (wiring, graph, durable consumers, messaging, debounce consumers), without the interval clocks, HTTP routes, outbox dispatcher or skill reload. Rounds run when a scenario calls them. The durable consumer's worker name (`app.runtime.durable.WORKER_ID`, `hostname:pid` in production, written on the inflight rows it claims) is `<app>#<n>`, the n-th process the scenario started. |
 
 ## What a baseline holds
 
@@ -56,10 +57,18 @@ One JSON document per scenario: the steps in order, and the schema of every tool
   sent, and the reply (or the error). Messages are written in full on an agent's first call in
   the step; a later call that continues an earlier one says `"continues": "<agent> #<n>"` and
   lists only the messages added (`"then"`). Structured calls also record the JSON schema.
+  An image block (`{"type": "image_url", "image_url": {"url": ...}}`, or `"image"` with `url`)
+  whose url points into the object store carries `"fetched"`: what fetching that url at the time
+  of the call returns, as `image/png, 69 bytes, sha256:7eaea0ddaf8d`, `404: no such object` or
+  `403: signed until 15:30:00, fetched at 15:40:00`. That is what the provider adapter would
+  download and send; the url stays as the code built it.
 - `effects`: one timeline, in the order things happened: write transactions ending
   (`{"db": "commit", "writes": ["INSERT data_life_moment", ...]}`; one entry is one
   transaction), publishes (target queues, routing key, delay, headers, body, confirmed),
-  deliveries and how the consumer settled them, file writes and deletes. This is where the
+  deliveries and how the consumer settled them, file writes and deletes, and requests to
+  tool-service and the object store (`{"http": "POST tool-service/api/image-pipeline/get-url",
+  "lane": ..., "request": {...}, "status": 200}`, `{"http": "GET object-store/<file_name>",
+  "status": 200, "served": "<content type>, <n> bytes, sha256:<12 hex>"}`). This is where the
   phases of a round's end show (spec decision 3).
 - `consumers_started`: queues that got a consumer (the start step lists what the app opens).
 - `rows`: per table, rows added / changed / removed by the step.
@@ -76,6 +85,9 @@ Nothing is dropped; these values are replaced:
 | serial / identity columns | `<serial>` | Depend on everything else that ever inserted. |
 | `dedup_hash` | `<dedup>` | A hash of the row's Key columns, which are compared verbatim. |
 | exception messages | first line only | Later lines are driver boilerplate (SQL, version-specific help URLs). |
+| the payload of a base64 `data:` URI | `data:<mime>;base64,<N bytes, sha256:12 hex>` | Bytes are unreadable in a diff; the length and hash still change when the content does. |
+| the release in a SQLAlchemy help link (`https://sqlalche.me/e/20/...`) | `https://sqlalche.me/e/<release>/...` | Code that stores `str(exc)` (an inflight row's `last_error`) would otherwise tie a baseline to the library release. |
+| bytes fetched over HTTP | `<content type>, <n> bytes, sha256:<12 hex>` | Same as `data:` URIs; the fixture bytes live in the scenario. |
 
 Readability only: timestamps are shown in CST, JSON stored as text is shown parsed, and any
 string with line breaks becomes a list of its lines, so a diff points at the line that changed.
@@ -112,6 +124,11 @@ replay.check("living_moment/continuation")
   `raises=ProcessKilled`, then `await replay.restart()`). Each fault fires once by default
   (`times=`).
 - `replay.config[key] = "value"` for Dynamic Config; `replay.redis` for Redis.
+- `replay.objects.put(file_name, data, content_type)`: an object in the store (an attachment the
+  inbound pipeline cached, a picture she made). A name nothing was put under signs fine and
+  fetches as `404`, which is what a cache miss looks like in production.
+- `replay.broker.requeue_unsettled()` after `replay.restart()`: the message a killed consumer was
+  handling comes back (see `test_reading.py`'s kill scenarios).
 
 ## Adding a round kind
 
@@ -128,8 +145,11 @@ replay.check("living_moment/continuation")
 5. Record: `REPLAY_RECORD=<kind>/<scenario> uv run pytest tests/replay/test_<kind>.py`. Read the
    baseline before committing it: it is the claim of what the code does today.
 
-If a kind reads something no boundary covers (an HTTP fetch, a picture store), add the boundary
-to the core, document it in the table above, and make sure the existing baselines still pass.
+If a kind reads something no boundary covers (an HTTP service other than tool-service and the
+object store, an image-generation or search provider), add the boundary to the core, document it
+in the table above, and make sure the existing baselines still pass. Requests to hosts the
+harness does not serve go out to the network unchanged, so a missing boundary shows up as a
+connection error in what the step recorded, or as a hang; read the baseline for it.
 
 ## Re-recording after an intended change
 

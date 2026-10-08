@@ -14,8 +14,11 @@ out of the conversation, the way a model would).
 
 Each call is recorded in full: the agent, the prompt version and the variables it was compiled
 with, the model id, call options, the tool definitions offered, every message sent, and what the
-script answered. Usage is reported through the same generation span the real adapters use, so
-cost rows are produced by the code under test, not by the harness.
+script answered. An image block that points into the replay's object store also says what
+fetching it at the time of the call returns (``"fetched"``; see
+:mod:`tests.replay.harness.objects`), since that is what the real adapter would send. Usage is
+reported through the same generation span the real adapters use, so cost rows are produced by
+the code under test, not by the harness.
 """
 
 from __future__ import annotations
@@ -96,8 +99,11 @@ class ScriptExhausted(AssertionError):
 class ModelScript:
     """The scripted replies, and the record of every call made against them."""
 
-    def __init__(self, effects) -> None:
+    def __init__(self, effects, objects=None) -> None:
         self._effects = effects
+        # The object store (:mod:`tests.replay.harness.objects`): image blocks that point into
+        # it are recorded with what fetching them at the time of the call returns.
+        self._objects = objects
         self._queues: dict[str | None, deque[Scripted]] = defaultdict(deque)
         self._numbers: dict[str | None, int] = defaultdict(int)
         # Raw call records, in the order the calls were made. The step that is open when a call
@@ -121,6 +127,10 @@ class ModelScript:
         if not isinstance(step, (Reply, Fail)):
             step = step(request)
         return step
+
+    def _recorded(self, message: Message) -> dict[str, Any]:
+        recorded = message.to_replay_dict()
+        return recorded if self._objects is None else self._objects.annotate(recorded)
 
     def _open(
         self, kind: str, model: str, messages, tools, kwargs
@@ -151,7 +161,7 @@ class ModelScript:
                 }
                 for t in tools or []
             ],
-            "messages": [m.to_replay_dict() for m in messages],
+            "messages": [self._recorded(m) for m in messages],
         }
         self.calls.append(record)
         return record, Request(agent, number, list(messages), list(tools or []))

@@ -1,0 +1,6 @@
+[replay fixture for Langfuse prompt book_reading_impression; stands in for the real text]
+你是{{persona_name}}。
+
+{{persona_lite}}
+
+你在读别人发给你的一本书，读的时候就是你自己在读。

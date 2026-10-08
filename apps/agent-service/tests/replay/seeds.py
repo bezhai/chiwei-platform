@@ -84,6 +84,18 @@ async def seed_akaos_phone() -> None:
 
 async def bezhai_says(words: str, *, at: datetime, name: str) -> None:
     """bezhai writes to her in the private chat (what lark-service would have stored)."""
+    await bezhai_sends(
+        [{"kind": "text", "text": words}], summary=words, at=at, name=name
+    )
+
+
+async def bezhai_sends(
+    items: list[dict], *, summary: str, at: datetime, name: str
+) -> None:
+    """bezhai sends her a message made of ``items`` (common content items: ``text``, ``image``
+    with its store ``object``, ``file`` with ``key`` and ``meta.file_name``) in the private
+    chat. ``summary`` is the ``content_text`` the projection would have written (text
+    items verbatim, every other item as ``[kind]``)."""
     async with get_session() as s:
         await s.execute(
             text(
@@ -98,10 +110,8 @@ async def bezhai_says(words: str, *, at: datetime, name: str) -> None:
                 "m": str(fixed_id(f"message:{name}")),
                 "c": str(DM_WITH_BEZHAI),
                 "u": str(BEZHAI),
-                "body": json.dumps(
-                    [{"kind": "text", "text": words}], ensure_ascii=False
-                ),
-                "words": words,
+                "body": json.dumps(items, ensure_ascii=False),
+                "words": summary,
                 "at": int(at.timestamp() * 1000),
                 "named": [],
             },

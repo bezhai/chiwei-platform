@@ -24,12 +24,16 @@ What the broker does and does not do on its own:
   (it is input, not output of the code under test).
 * :meth:`FakeBroker.refuse_confirms` makes ``publish_with_confirm`` report "not confirmed" for
   matching routing keys (a send failure); the message is then not queued.
-* A killed process (:mod:`tests.replay.harness.timeline`) publishes nothing more.
+* A killed process (:mod:`tests.replay.harness.timeline`) publishes nothing more. A delivery
+  whose consumer was killed is never settled; RabbitMQ puts such a message back on its queue when
+  the dead consumer's channel closes, and :meth:`FakeBroker.requeue_unsettled` does that (marked
+  ``redelivered``) when the scenario calls it, typically right after ``restart()``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import itertools
 import json
 from collections import deque
@@ -46,6 +50,7 @@ from app.infra.rabbitmq import (
     lane_queue,
     mq,
 )
+from tests.replay.harness.timeline import ProcessKilled
 
 _MQ_METHODS = (
     "connect",
@@ -76,6 +81,7 @@ class _Queued:
     body: bytes
     headers: dict[str, Any]
     routing_key: str
+    redelivered: bool = False
 
 
 @dataclass
@@ -136,7 +142,7 @@ class FakeIncoming:
         self.body = queued.body
         self.headers = dict(queued.headers)
         self.routing_key = queued.routing_key
-        self.redelivered = False
+        self.redelivered = queued.redelivered
         self.channel = channel
         self.settled: str | None = None
         self._queued = queued
@@ -175,6 +181,8 @@ class FakeBroker:
         self._refused: list[list] = []
         self._private = itertools.count(1)
         self._tasks: set[asyncio.Task] = set()
+        # Deliveries whose consumer was killed before settling them: (queue, message).
+        self._unsettled: list[tuple[str, _Queued]] = []
         # The step's effects timeline (shared with the database and file recorders), and the
         # queues that got a consumer.
         self._effects = effects
@@ -317,6 +325,9 @@ class FakeBroker:
         )
         try:
             await task
+        except ProcessKilled:
+            self._unsettled.append((queue_name, queued))
+            raise
         except Exception as exc:
             settled["consumer_raised"] = f"{type(exc).__name__}: {exc}"
         settled["settled"] = incoming.settled
@@ -326,6 +337,18 @@ class FakeBroker:
         elif incoming.settled in ("reject", "nack") and queue.dead_letter_to:
             self._queue(queue.dead_letter_to).messages.append(queued)
         return incoming.settled or "unsettled"
+
+    def requeue_unsettled(self) -> int:
+        """Put every message a killed consumer never settled back at the front of its queue,
+        marked redelivered, as RabbitMQ does once the dead consumer's channel closes. Not
+        recorded (it is the broker's doing, not the code's). Returns how many."""
+        count = len(self._unsettled)
+        for queue_name, queued in reversed(self._unsettled):
+            self.queues[queue_name].messages.appendleft(
+                dataclasses.replace(queued, redelivered=True)
+            )
+        self._unsettled.clear()
+        return count
 
     async def settle(self) -> None:
         """Wait for deliveries the broker started on its own (private reply queues)."""
