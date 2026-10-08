@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -234,5 +235,65 @@ func TestTunnel_ResetReleasesBothEnds(t *testing.T) {
 	case <-done:
 	case <-time.After(waitLimit):
 		t.Fatalf("tunnel still running %s after the app reset its end", waitLimit)
+	}
+}
+
+// countingListener counts the connections it accepts.
+type countingListener struct {
+	net.Listener
+	accepted atomic.Int64
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err == nil {
+		l.accepted.Add(1)
+	}
+	return c, err
+}
+
+// A connection that reached the proxy without the iptables redirect (anything
+// dialing the pod IP and proxy port directly) has the proxy itself as its
+// original destination. Tunnelling it would dial the proxy again, whose new
+// connection would do the same, without end.
+func TestPassthrough_RefusesConnectionsAddressedToItself(t *testing.T) {
+	cases := []struct {
+		name string
+		send func(*net.TCPConn)
+	}{
+		{"client sends data", func(c *net.TCPConn) { c.Write([]byte("PING")) }},
+		{"client sends nothing and closes", func(c *net.TCPConn) { c.CloseWrite() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewServer("", &mockResolver{})
+			// What SO_ORIGINAL_DST reports for a connection that was not
+			// redirected: the address it was accepted on.
+			srv.originalDst = func(c *net.TCPConn) (net.Addr, error) { return c.LocalAddr(), nil }
+			raw, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ln := &countingListener{Listener: raw}
+			t.Cleanup(func() { ln.Close() })
+			go srv.Serve(ln)
+
+			c, err := net.Dial("tcp", raw.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := c.(*net.TCPConn)
+			defer client.Close()
+			tc.send(client)
+
+			client.SetReadDeadline(time.Now().Add(waitLimit))
+			n, err := client.Read(make([]byte, 1))
+			if accepted := ln.accepted.Load(); accepted != 1 {
+				t.Fatalf("proxy accepted %d connections for one client: it dialed itself", accepted)
+			}
+			if n != 0 || err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("read %d bytes, %v; want the proxy to close the connection", n, err)
+			}
+		})
 	}
 }

@@ -261,6 +261,14 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		log.Printf("[proxy] get original dst: %v", err)
 		return
 	}
+	// A redirected connection always lands somewhere other than where it
+	// was headed. One that was not redirected (anything dialing this port
+	// directly) is headed for the proxy itself: dialing that would land
+	// here again, and the new connection would do the same, without end.
+	if sameTCPAddr(origDst, rawConn.LocalAddr()) {
+		log.Printf("[proxy] refusing %s: addressed to the proxy itself", conn.RemoteAddr())
+		return
+	}
 
 	upstream, err := net.DialTimeout("tcp", origDst.String(), 5*time.Second)
 	if err != nil {
@@ -313,6 +321,13 @@ func closeWrite(c net.Conn) error {
 		return fmt.Errorf("cannot half-close %T", c)
 	}
 	return tc.CloseWrite()
+}
+
+// sameTCPAddr reports whether a and b are the same IP and port.
+func sameTCPAddr(a, b net.Addr) bool {
+	ta, ok := a.(*net.TCPAddr)
+	tb, ok2 := b.(*net.TCPAddr)
+	return ok && ok2 && ta.Port == tb.Port && ta.IP.Equal(tb.IP)
 }
 
 // unwrapTCPConn extracts the underlying *net.TCPConn from a possibly
