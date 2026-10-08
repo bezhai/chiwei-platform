@@ -23,7 +23,9 @@ func main() {
 	registryURL := flag.String("registry-url", envOrDefault("REGISTRY_URL", "http://lite-registry:8080"), "lite-registry URL")
 	pollInterval := flag.Duration("poll-interval", 30*time.Second, "registry poll interval")
 	// As a native sidecar, lane-sidecar gets SIGTERM only after the app has
-	// exited, so its tunnels are already closing and the cap rarely matters.
+	// exited. Shutdown closes the tunnels the app has left without waiting
+	// on their upstreams, so nothing is left to drain and the cap rarely
+	// matters.
 	// As a plain container it gets SIGTERM together with the app, and has to
 	// keep the app's open connections working through the app's own graceful
 	// shutdown (agent-service waits up to 20s) yet still exit by itself

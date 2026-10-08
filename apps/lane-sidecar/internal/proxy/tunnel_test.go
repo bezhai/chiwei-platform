@@ -224,7 +224,7 @@ func TestTunnel_ResetReleasesBothEnds(t *testing.T) {
 	upSide, up := tcpPair(t)
 	done := make(chan struct{})
 	go func() {
-		tunnel(appSide, upSide)
+		tunnel(appSide, upSide, nil)
 		close(done)
 	}()
 

@@ -90,6 +90,7 @@ type Server struct {
 	listener net.Listener
 	mux      cmux.CMux
 	closing  bool                  // Shutdown has begun: no new tunnels
+	draining chan struct{}         // closed when closing becomes true
 	tunnels  map[net.Conn]struct{} // app side of every open tunnel
 	open     sync.WaitGroup        // one count per entry in tunnels
 }
@@ -101,6 +102,7 @@ func NewServer(listenAddr string, resolver registry.Resolver) *Server {
 		handler:     handler,
 		listenAddr:  listenAddr,
 		originalDst: GetOriginalDst,
+		draining:    make(chan struct{}),
 		tunnels:     make(map[net.Conn]struct{}),
 	}
 	s.httpServer = &http.Server{
@@ -160,12 +162,18 @@ func (s *Server) Serving() bool {
 	return s.listener != nil && !s.closing
 }
 
-// Shutdown stops accepting connections, then waits for in-flight HTTP
-// requests and open tunnels to finish on their own. If ctx ends first, it
-// closes whatever is still open and returns ctx's error.
+// Shutdown stops accepting connections and closes every tunnel the app has
+// stopped sending on (and each one the app stops sending on from then on)
+// without waiting for its upstream's answer. It waits for in-flight HTTP
+// requests and the tunnels the app still holds open to finish on their own.
+// If ctx ends first, it closes whatever is still open and returns ctx's
+// error.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
-	s.closing = true
+	if !s.closing {
+		s.closing = true
+		close(s.draining)
+	}
 	ln, mux := s.listener, s.mux
 	s.mu.Unlock()
 	if ln != nil {
@@ -276,7 +284,7 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		return
 	}
 
-	tunnel(conn, upstream)
+	tunnel(conn, upstream, s.draining)
 }
 
 // tunnel relays bytes between client and upstream until both directions are
@@ -285,7 +293,17 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 // flowing (clients that close a connection, or cancel a query, wait for the
 // server's close and send nothing more). A direction that fails closes both
 // ends, which also ends the other direction.
-func tunnel(client, upstream net.Conn) {
+//
+// Once draining is closed, a tunnel whose client has stopped sending is
+// closed instead of waiting for the upstream's answer. The client is the
+// app: as a native sidecar the proxy drains only after the app has exited,
+// and an upstream that never answers the app's close (an HTTPS gateway
+// still working on a request the app gave up on) would otherwise hold the
+// drain until its cap. An app that is still running keeps its tunnels for
+// as long as it holds them open. The cost: an app that half-closed and is
+// still waiting for the answer when the drain begins loses that answer; it
+// is shutting down by then.
+func tunnel(client, upstream net.Conn, draining <-chan struct{}) {
 	closeBoth := func() {
 		client.Close()
 		upstream.Close()
@@ -300,14 +318,21 @@ func tunnel(client, upstream net.Conn) {
 		}
 	}
 
+	toClientDone := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		relay(upstream, client)
+		select {
+		case <-toClientDone:
+		case <-draining:
+			closeBoth()
+		}
 	}()
 	go func() {
 		defer wg.Done()
+		defer close(toClientDone)
 		relay(client, upstream)
 	}()
 	wg.Wait()
