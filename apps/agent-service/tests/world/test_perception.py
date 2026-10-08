@@ -28,7 +28,7 @@ from .conftest import LANE, ScriptedAgent, sets_wake, tools_built_for
 
 def judges(*judgments: tuple, said: str = "判断完了。"):
     """感知判断替身：按顺序判断这些人会察觉到什么。每条是 (谁, 察觉到什么)，或者再加一项要不要
-    现在就让他注意到（不写就是要）。"""
+    现在就叫他来看（不写就是要）。"""
 
     async def plan(_input):
         for who, what, *right_away in judgments:
@@ -200,7 +200,7 @@ async def test_a_change_messaging_could_not_carry_is_handed_back_before_anyone_j
 
 
 # ---------------------------------------------------------------------------
-# 要不要现在就让他注意到：每条告知由感知判断自己说，代码不替它定
+# 要不要现在就叫他来看：每条告知由感知判断自己说，代码不替它定
 # ---------------------------------------------------------------------------
 
 
@@ -239,8 +239,9 @@ def test_the_model_is_told_what_not_waking_does():
     """false 不是"不告诉他"：这段话照样交给他，只是不为它打断他。模型据此判断，说明里要写清楚。"""
     described = perception.someone_notices.definition.parameters["properties"]["right_away"]
     assert described["description"] == (
-        "要不要现在就让他注意到。true：现在就打断他，让他注意到这件事；"
-        "false：不为这件事打断他，这段话照样会交给他，他过一会儿自己会看到"
+        "要不要为这件事现在就打断他，叫他来看。true：现在就打断他，他马上来看这段话；"
+        "false：不为这件事打断他，这段话照样会交给他，他下一次看的时候看到。"
+        "不管哪一种，他读到的都是他在那个时刻察觉到的"
     )
 
 

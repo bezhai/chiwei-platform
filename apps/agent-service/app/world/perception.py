@@ -4,7 +4,7 @@
 （:func:`app.world.actions.report_change`），或者一个 NPC 出场之后（他的言行原样作为变化），
 就起一个感知判断 agent：它拿到全部已启用知识来源的查询工具（:func:`app.world.sources.query_tools`），
 加上只有它有的 :func:`someone_notices`——每判断一个会察觉的人调一次，写下那个人察觉到的是什么，
-以及要不要现在就让他注意到。谁会察觉、要不要现在就让他注意到，完全是它依据各来源做的判断：代码里
+以及要不要现在就叫他来看。谁会察觉、要不要现在就叫他来看，完全是它依据各来源做的判断：代码里
 没有按位置、距离或者任何规则决定感知，也没有规则替它定哪些事急。
 
 **它知道这一轮是被谁的什么消息叫醒的。** 输入里除了现在几点、这一次的变化，还有主 agent 这一轮
@@ -75,7 +75,7 @@ PERCEPTION = AgentKind(
     model_key="world_perception_model",
 )
 
-# ``AgentContext.features`` 里这一次判断的结果：参与者名字 → (他察觉到的那段话, 要不要现在就让他注意到)。
+# ``AgentContext.features`` 里这一次判断的结果：参与者名字 → (他察觉到的那段话, 要不要现在就叫他来看)。
 _JUDGMENTS = "world_perception_judgments"
 
 # 感知判断那次模型调用遇到临时失败（5xx、超时、连不上、限流，跟 Agent 层自己重试的是同一组：
@@ -107,13 +107,14 @@ async def someone_notices(
         bool,
         Field(
             description=(
-                "要不要现在就让他注意到。true：现在就打断他，让他注意到这件事；"
-                "false：不为这件事打断他，这段话照样会交给他，他过一会儿自己会看到"
+                "要不要为这件事现在就打断他，叫他来看。true：现在就打断他，他马上来看这段话；"
+                "false：不为这件事打断他，这段话照样会交给他，他下一次看的时候看到。"
+                "不管哪一种，他读到的都是他在那个时刻察觉到的"
             )
         ),
     ],
 ) -> str:
-    """判断一个参与者会察觉到这个变化，写下他察觉到的是什么，以及要不要现在就让他注意到。
+    """判断一个参与者会察觉到这个变化，写下他察觉到的是什么，以及要不要现在就叫他来看。
 
     每个会察觉的人调一次；同一个人再调一次，以最后一次为准。没有人会察觉，就一次都不调。
     """
@@ -132,7 +133,7 @@ async def someone_notices(
         ) from exc
     if not isinstance(right_away, bool):
         raise CapabilityInvalidArg(
-            f"要不要现在就让他注意到，写 true 或 false，不是 {right_away!r}"
+            f"要不要现在就叫他来看，写 true 或 false，不是 {right_away!r}"
         )
     get_context().features[_JUDGMENTS][name] = (body, right_away)
     return f"记下了：{name} 会察觉到。"

@@ -26,7 +26,7 @@ class Crash(BaseException):
 
 
 def judges(*judgments: tuple):
-    """每条是 (谁, 察觉到什么)，或者再加一项要不要现在就让他注意到（不写就是要）。"""
+    """每条是 (谁, 察觉到什么)，或者再加一项要不要现在就叫他来看（不写就是要）。"""
 
     async def plan(_input):
         for who, what, *right_away in judgments:
