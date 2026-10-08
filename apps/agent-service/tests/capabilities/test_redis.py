@@ -4,12 +4,10 @@ The ``RedisCapability`` wraps a raw ``redis.asyncio.Redis`` client behind a
 domain-shaped API. Business code never reaches into the raw client; every
 write/read goes through this capability so:
 
-* Keys auto-prefix with ``{lane}:`` when ``current_lane()`` is non-None
-  (prod stays bare-key so existing prod data isn't migrated).
+* Keys reach the client verbatim, with no lane prefix: cross-lane isolation
+  is the ConfigBundle's job (see "Lane key space" below).
 * Raw redis failures map to the typed ``CapabilityCallFailed`` /
   ``CapabilityTimeout`` exceptions (contract §4.8).
-* The acceptance scenario — two lanes concurrently running the same
-  Lua against the same logical key — produces fully isolated state.
 
 Uses ``fakeredis[lua]`` so Lua scripts execute against a real interpreter.
 """
