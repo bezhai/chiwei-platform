@@ -7,7 +7,6 @@ package proxy
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -89,10 +88,10 @@ type Server struct {
 	mu       sync.Mutex
 	listener net.Listener
 	mux      cmux.CMux
-	closing  bool                  // Shutdown has begun: no new tunnels
-	draining chan struct{}         // closed when closing becomes true
-	tunnels  map[net.Conn]struct{} // app side of every open tunnel
-	open     sync.WaitGroup        // one count per entry in tunnels
+	closing  bool                 // Shutdown has begun: no new tunnels
+	draining chan struct{}        // closed when closing becomes true
+	tunnels  map[*tunnel]struct{} // every open tunnel
+	open     sync.WaitGroup       // one count per entry in tunnels
 }
 
 // NewServer creates a Server that listens on listenAddr (e.g. ":15001").
@@ -103,7 +102,7 @@ func NewServer(listenAddr string, resolver registry.Resolver) *Server {
 		listenAddr:  listenAddr,
 		originalDst: GetOriginalDst,
 		draining:    make(chan struct{}),
-		tunnels:     make(map[net.Conn]struct{}),
+		tunnels:     make(map[*tunnel]struct{}),
 	}
 	s.httpServer = &http.Server{
 		Handler:      handler,
@@ -126,7 +125,7 @@ func (s *Server) ListenAndServe() error {
 // is tunnelled to its original destination. After Shutdown it returns
 // ErrServerClosed.
 func (s *Server) Serve(ln net.Listener) error {
-	mux := cmux.New(ln)
+	mux := cmux.New(timedListener{ln})
 	// HTTP matcher: match requests starting with an HTTP method
 	httpLn := mux.Match(httpMethodMatcher())
 	// Everything else: TCP passthrough
@@ -198,8 +197,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // waitTunnels waits for every open tunnel to finish. If ctx ends first, it
-// closes their app side, which tears each tunnel down, and returns ctx's
-// error.
+// logs and closes each tunnel still open, and returns ctx's error.
 func (s *Server) waitTunnels(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
@@ -211,29 +209,31 @@ func (s *Server) waitTunnels(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		s.mu.Lock()
-		for conn := range s.tunnels {
-			conn.Close()
+		now := time.Now()
+		for t := range s.tunnels {
+			t.logStillOpen(now)
+			t.close()
 		}
 		s.mu.Unlock()
 		return ctx.Err()
 	}
 }
 
-// track registers conn as an open tunnel; once Shutdown has begun it refuses.
-func (s *Server) track(conn net.Conn) bool {
+// track registers t as an open tunnel; once Shutdown has begun it refuses.
+func (s *Server) track(t *tunnel) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closing {
 		return false
 	}
-	s.tunnels[conn] = struct{}{}
+	s.tunnels[t] = struct{}{}
 	s.open.Add(1)
 	return true
 }
 
-func (s *Server) untrack(conn net.Conn) {
+func (s *Server) untrack(t *tunnel) {
 	s.mu.Lock()
-	delete(s.tunnels, conn)
+	delete(s.tunnels, t)
 	s.mu.Unlock()
 	s.open.Done()
 }
@@ -252,10 +252,6 @@ func (s *Server) serveTCPPassthrough(ln net.Listener) {
 
 func (s *Server) handleTCPConn(conn net.Conn) {
 	defer conn.Close()
-	if !s.track(conn) {
-		return
-	}
-	defer s.untrack(conn)
 
 	// Unwrap to get the raw TCP connection for SO_ORIGINAL_DST
 	rawConn := unwrapTCPConn(conn)
@@ -278,74 +274,19 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		return
 	}
 
+	t := newTunnel(conn, origDst)
+	if !s.track(t) {
+		return
+	}
+	defer s.untrack(t)
+
 	upstream, err := net.DialTimeout("tcp", origDst.String(), 5*time.Second)
 	if err != nil {
 		log.Printf("[proxy] dial original dst %s: %v", origDst, err)
 		return
 	}
 
-	tunnel(conn, upstream, s.draining)
-}
-
-// tunnel relays bytes between client and upstream until both directions are
-// done, then closes both. A direction that reaches EOF half-closes the end it
-// was writing to, so that peer sees the close while the other direction keeps
-// flowing (clients that close a connection, or cancel a query, wait for the
-// server's close and send nothing more). A direction that fails closes both
-// ends, which also ends the other direction.
-//
-// Once draining is closed, a tunnel whose client has stopped sending is
-// closed instead of waiting for the upstream's answer. The client is the
-// app: as a native sidecar the proxy drains only after the app has exited,
-// and an upstream that never answers the app's close (an HTTPS gateway
-// still working on a request the app gave up on) would otherwise hold the
-// drain until its cap. An app that is still running keeps its tunnels for
-// as long as it holds them open. The cost: an app that half-closed and is
-// still waiting for the answer when the drain begins loses that answer; it
-// is shutting down by then.
-func tunnel(client, upstream net.Conn, draining <-chan struct{}) {
-	closeBoth := func() {
-		client.Close()
-		upstream.Close()
-	}
-	relay := func(dst, src net.Conn) {
-		_, err := io.Copy(dst, src)
-		if err == nil {
-			err = closeWrite(dst)
-		}
-		if err != nil {
-			closeBoth()
-		}
-	}
-
-	toClientDone := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		relay(upstream, client)
-		select {
-		case <-toClientDone:
-		case <-draining:
-			closeBoth()
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		defer close(toClientDone)
-		relay(client, upstream)
-	}()
-	wg.Wait()
-	closeBoth()
-}
-
-// closeWrite sends FIN on c's socket and leaves its read side open.
-func closeWrite(c net.Conn) error {
-	tc := unwrapTCPConn(c)
-	if tc == nil {
-		return fmt.Errorf("cannot half-close %T", c)
-	}
-	return tc.CloseWrite()
+	t.run(upstream, s.draining)
 }
 
 // sameTCPAddr reports whether a and b are the same IP and port.
@@ -359,12 +300,14 @@ func sameTCPAddr(a, b net.Addr) bool {
 // wrapped connection. cmux.MuxConn embeds net.Conn, so we access it
 // via the embedded field.
 func unwrapTCPConn(conn net.Conn) *net.TCPConn {
-	if tc, ok := conn.(*net.TCPConn); ok {
-		return tc
-	}
-	// cmux.MuxConn embeds net.Conn
-	if mc, ok := conn.(*cmux.MuxConn); ok {
-		return unwrapTCPConn(mc.Conn)
+	switch c := conn.(type) {
+	case *net.TCPConn:
+		return c
+	case *timedConn:
+		return c.TCPConn
+	case *cmux.MuxConn:
+		// cmux.MuxConn embeds net.Conn
+		return unwrapTCPConn(c.Conn)
 	}
 	return nil
 }

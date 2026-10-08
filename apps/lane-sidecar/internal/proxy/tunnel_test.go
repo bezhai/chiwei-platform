@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"os"
+	"regexp"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,12 +56,20 @@ func startPassthrough(t *testing.T) *passthrough {
 // connection to the passthrough.
 func (p *passthrough) open(t *testing.T) (app, up *net.TCPConn) {
 	t.Helper()
+	return p.openAfter(t, 0)
+}
+
+// openAfter is open with the app waiting delay between connecting and
+// sending its greeting.
+func (p *passthrough) openAfter(t *testing.T, delay time.Duration) (app, up *net.TCPConn) {
+	t.Helper()
 	c, err := net.Dial("tcp", p.addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	app = c.(*net.TCPConn)
 	t.Cleanup(func() { app.Close() })
+	time.Sleep(delay)
 	if _, err := app.Write([]byte("PING")); err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +83,94 @@ func (p *passthrough) open(t *testing.T) (app, up *net.TCPConn) {
 	t.Cleanup(func() { up.Close() })
 	expectRead(t, up, "PING")
 	return app, up
+}
+
+// tunnelLine is how every log line about one tunnel through p starts.
+func (p *passthrough) tunnelLine() string {
+	return "[proxy] tunnel to " + p.upstream.Addr().String() + " "
+}
+
+// logCapture collects what the package logs while a test runs.
+type logCapture struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func captureLog(t *testing.T) *logCapture {
+	t.Helper()
+	c := &logCapture{}
+	prev := log.Writer()
+	log.SetOutput(c)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return c
+}
+
+func (c *logCapture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+func (c *logCapture) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+// lines returns the logged lines that contain every one of parts.
+func (c *logCapture) lines(parts ...string) []string {
+	var found []string
+next:
+	for _, line := range strings.Split(c.String(), "\n") {
+		for _, part := range parts {
+			if !strings.Contains(line, part) {
+				continue next
+			}
+		}
+		found = append(found, line)
+	}
+	return found
+}
+
+// waitLine waits for the one logged line that contains every one of parts.
+func (c *logCapture) waitLine(t *testing.T, parts ...string) string {
+	t.Helper()
+	deadline := time.Now().Add(waitLimit)
+	for {
+		switch found := c.lines(parts...); {
+		case len(found) == 1:
+			return found[0]
+		case len(found) > 1:
+			t.Fatalf("%d log lines with %q, want one:\n%s", len(found), parts, strings.Join(found, "\n"))
+		case time.Now().After(deadline):
+			t.Fatalf("no log line with %q within %s; logged:\n%s", parts, waitLimit, c)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// loggedDuration parses the duration that pattern's one group picks out of
+// line.
+func loggedDuration(t *testing.T, line, pattern string) time.Duration {
+	t.Helper()
+	m := regexp.MustCompile(pattern).FindStringSubmatch(line)
+	if m == nil {
+		t.Fatalf("no %q in log line %q", pattern, line)
+	}
+	d, err := time.ParseDuration(m[1])
+	if err != nil {
+		t.Fatalf("log line %q: %v", line, err)
+	}
+	return d
+}
+
+func expectContains(t *testing.T, line string, parts ...string) {
+	t.Helper()
+	for _, part := range parts {
+		if !strings.Contains(line, part) {
+			t.Errorf("log line %q lacks %q", line, part)
+		}
+	}
 }
 
 // tcpPair returns the two ends of one loopback TCP connection.
@@ -224,7 +324,7 @@ func TestTunnel_ResetReleasesBothEnds(t *testing.T) {
 	upSide, up := tcpPair(t)
 	done := make(chan struct{})
 	go func() {
-		tunnel(appSide, upSide, nil)
+		newTunnel(appSide, upSide.RemoteAddr()).run(upSide, nil)
 		close(done)
 	}()
 
@@ -293,6 +393,86 @@ func TestPassthrough_RefusesConnectionsAddressedToItself(t *testing.T) {
 			}
 			if n != 0 || err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
 				t.Fatalf("read %d bytes, %v; want the proxy to close the connection", n, err)
+			}
+		})
+	}
+}
+
+// A tunnel whose upstream ends before sending anything back gets one log
+// line. Its bytes up tell an app message that never reached the upstream
+// (next to none) from one the upstream got and never answered (all of it).
+func TestPassthrough_LogsUpstreamThatSentNothingBack(t *testing.T) {
+	ends := []struct {
+		name string
+		end  func(*testing.T, *net.TCPConn)
+		how  string
+	}{
+		{"upstream closes", func(t *testing.T, c *net.TCPConn) { c.Close() }, " with EOF"},
+		{"upstream resets", abort, " with error: "},
+	}
+	for _, e := range ends {
+		t.Run(e.name, func(t *testing.T) {
+			logs := captureLog(t)
+			p := startPassthrough(t)
+			app, up := p.openAfter(t, 100*time.Millisecond)
+			app.Write([]byte("HELLO"))
+			expectRead(t, up, "HELLO")
+			time.Sleep(100 * time.Millisecond)
+
+			e.end(t, up)
+			expectClosed(t, app)
+			app.Close()
+
+			line := logs.waitLine(t, p.tunnelLine())
+			t.Log(line)
+			expectContains(t, line, "ended with nothing back from the upstream: ",
+				"9 bytes up, 0 down", "upstream ended at ", e.how)
+			if d := loggedDuration(t, line, `client's first byte at (\S+?),`); d < 100*time.Millisecond {
+				t.Errorf("client's first byte logged at %s; the app waited 100ms after connecting", d)
+			}
+			if d := loggedDuration(t, line, `upstream ended at (\S+) with`); d < 200*time.Millisecond {
+				t.Errorf("upstream end logged at %s; it came at least 200ms after the accept", d)
+			}
+		})
+	}
+}
+
+// Tunnels that end the ordinary way log nothing: the proxy runs in every
+// pod.
+func TestPassthrough_LogsNothingForOrdinaryTunnels(t *testing.T) {
+	cases := []struct {
+		name   string
+		finish func(t *testing.T, app, up *net.TCPConn)
+	}{
+		{"upstream answers, then closes", func(t *testing.T, app, up *net.TCPConn) {
+			up.Write([]byte("PONG"))
+			up.Close()
+			expectRead(t, app, "PONG")
+			expectEOF(t, app)
+			app.Close()
+		}},
+		{"app closes, then the upstream does without answering", func(t *testing.T, app, up *net.TCPConn) {
+			app.Close()
+			expectEOF(t, up)
+			up.Close()
+		}},
+		{"app closes, then the drain closes the tunnel", func(t *testing.T, app, up *net.TCPConn) {
+			app.Close()
+			expectEOF(t, up)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			logs := captureLog(t)
+			p := startPassthrough(t)
+			app, up := p.open(t)
+
+			c.finish(t, app, up)
+			// Shutdown returns once every tunnel has finished, logging included.
+			expectDrained(t, shutdownWithin(p.srv, time.Minute))
+
+			if found := logs.lines(p.tunnelLine()); len(found) > 0 {
+				t.Fatalf("logged an ordinary tunnel:\n%s", strings.Join(found, "\n"))
 			}
 		})
 	}

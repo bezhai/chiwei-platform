@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -196,4 +197,92 @@ func TestShutdown_ClosesWhatOutlastsTheCap(t *testing.T) {
 	expectClosed(t, app)
 	expectClosed(t, up)
 	expectClosed(t, req)
+}
+
+// Each tunnel still open when the cap runs out gets a line before it is
+// closed: where it goes, how old it is, the bytes each way, and which side
+// had ended and when.
+func TestShutdown_LogsTunnelsStillOpenAtTheCap(t *testing.T) {
+	logs := captureLog(t)
+	p := startPassthrough(t)
+	p.open(t) // 4 bytes up, nothing back
+	answered, answeredUp := p.open(t)
+	answeredUp.Write([]byte("hi"))
+	expectRead(t, answered, "hi")
+	answeredUp.CloseWrite()
+	expectEOF(t, answered)
+
+	select {
+	case err := <-shutdownWithin(p.srv, 200*time.Millisecond):
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Shutdown: %v; want it to report that the cap ran out", err)
+		}
+	case <-time.After(waitLimit):
+		t.Fatalf("Shutdown still blocked %s past a 200ms cap", waitLimit)
+	}
+
+	capped := p.tunnelLine() + "still open at the drain cap: "
+	if found := logs.lines(capped); len(found) != 2 {
+		t.Fatalf("%d lines for tunnels still open at the cap, want 2:\n%s", len(found), logs)
+	}
+	silent := logs.waitLine(t, capped, "4 bytes up, 0 down")
+	t.Log(silent)
+	expectContains(t, silent, "client open, upstream open")
+	if d := loggedDuration(t, silent, `open for (\S+?),`); d < 200*time.Millisecond {
+		t.Errorf("tunnel logged open for %s; it was open through a 200ms drain", d)
+	}
+	ended := logs.waitLine(t, capped, "4 bytes up, 2 down")
+	t.Log(ended)
+	expectContains(t, ended, "client open, upstream ended at ", " with EOF")
+
+	finished := make(chan struct{})
+	go func() {
+		p.srv.open.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(waitLimit):
+		t.Fatalf("tunnels still running %s after the cap closed them", waitLimit)
+	}
+	// Closing them was the proxy's doing, not the upstream's.
+	if found := logs.lines(p.tunnelLine() + "ended with nothing back"); len(found) > 0 {
+		t.Fatalf("blamed the upstream for the cap's close:\n%s", strings.Join(found, "\n"))
+	}
+}
+
+// The cap closing a tunnel is the proxy's doing, even when it interrupts a
+// write to the upstream: that is not logged as the upstream ending the
+// tunnel without an answer.
+func TestShutdown_CapCloseIsNotBlamedOnTheUpstream(t *testing.T) {
+	logs := captureLog(t)
+	p := startPassthrough(t)
+	app, _ := p.open(t)
+	// The upstream reads nothing more, so once the socket buffers fill the
+	// proxy is stuck writing to it.
+	go app.Write(make([]byte, 64<<20))
+	time.Sleep(200 * time.Millisecond)
+
+	select {
+	case err := <-shutdownWithin(p.srv, 200*time.Millisecond):
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Shutdown: %v; want it to report that the cap ran out", err)
+		}
+	case <-time.After(waitLimit):
+		t.Fatalf("Shutdown still blocked %s past a 200ms cap", waitLimit)
+	}
+	finished := make(chan struct{})
+	go func() {
+		p.srv.open.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(waitLimit):
+		t.Fatalf("tunnel still running %s after the cap closed it", waitLimit)
+	}
+
+	if found := logs.lines(p.tunnelLine() + "ended with nothing back"); len(found) > 0 {
+		t.Fatalf("blamed the upstream for the cap's close:\n%s", strings.Join(found, "\n"))
+	}
 }
