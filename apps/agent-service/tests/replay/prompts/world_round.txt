@@ -1,0 +1,2 @@
+[replay fixture for Langfuse prompt world_round; stands in for the real text, which uses no variables]
+你是这个世界。

@@ -78,4 +78,5 @@ dev = [
     "pytest-xdist>=3.8.0",
     "ruff>=0.12.5",
     "testcontainers[postgres,rabbitmq]>=4.0",
+    "time-machine>=3.5.1",
 ]

@@ -1,0 +1,3 @@
+[replay fixture for Langfuse prompt guard_output_safety; stands in for the real text]
+判断下面这段将要发出去的话安不安全：
+{{response}}

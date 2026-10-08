@@ -1,0 +1,145 @@
+# Behaviour replay
+
+Replays one kind of round with fixed model replies and compares everything the round did with a
+recorded baseline. It is the T0 baseline of the plugin-host refactor
+(`~/.claude/specs/agent-service-plugin-host.md`, decision 6): every refactor step must replay
+identically, and every intended difference is re-recorded and listed one by one.
+
+Run it as part of the normal suite, or alone:
+
+```bash
+uv run pytest tests/replay
+```
+
+It needs docker (a real Postgres via testcontainers). Without docker the replays fail instead of
+skipping, because a baseline that silently skips guards nothing.
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `harness/` | The core. Scenarios should not need to change it. |
+| `prompts/<prompt id>.txt` / `.json` | Fixture text for each Langfuse prompt a round renders (text prompt, or a chat prompt as a list of `{role, content}`). |
+| `seeds.py` | Rows the rounds read that no round writes (personas, her bot, a private chat). |
+| `test_<kind>.py` | Scenarios of one round kind. |
+| `baselines/<kind>/<scenario>.json` | The recorded baselines. |
+| `.actual/` | Written when a comparison fails; git-ignored. |
+
+## What is intercepted, and where
+
+Everything between these boundaries runs for real: the agent loop, tool dispatch, retries,
+prompt compilation, transcript storage, the messaging layer's records, claims and retries, the
+wiring and the dataflow graph.
+
+| Boundary | Where | What the replay does |
+|---|---|---|
+| Model calls | `app.agent.client.build_model_client`: `resolve_model_info` resolves every model id to client type `replay`, registered as `ScriptedModel` (`harness/model.py`) | Answers from a script, one queue per agent (the Langfuse prompt the call was rendered from). Records the complete request. Reports usage through `generation_span`, as the real adapters do, so cost rows come from the code under test. |
+| Prompts | `app.agent.prompts._get_client` (the Langfuse SDK client; the lane-label fallback logic stays) | Serves `prompts/<id>`; each prompt object remembers the variables it was compiled with. |
+| Tracing | `app.agent.trace._get_client`, `app.agent.core._get_trace_client` | Off (the spans take their no-op path). Not part of the baseline. |
+| Clock | `time-machine` (not freezegun: freezegun swaps `datetime.date` for a subclass, which changes the migrator's and persist's type checks and which asyncpg will not encode) | Frozen; moves only when a step says `at=`. The event loop's monotonic clock is untouched. `TZ` is set to the container's `Asia/Shanghai`. |
+| File clock | `os.replace` / `os.unlink` / `os.rmdir` under the world volume (`harness/volume.py`) | A written file's mtime is set to the frozen clock (world shows when a record changed). Writes and deletes go onto the effects timeline. |
+| Random ids | `uuid.uuid4` (`harness/ids.py`) | Derived from the calling function and how often it has asked, so they are reproducible and one new call does not shift other functions' ids. |
+| Dynamic Config | `dynamic_config._get_snapshot` | Reads `replay.config` (key → raw string); unset keys fall back to the code's defaults. |
+| Redis | `app.infra.redis._redis` | `fakeredis` (`replay.redis`); only the banned-word set is read today. Keys are lane-prefixed (`coe-replay:banned_words`). |
+| RabbitMQ | the methods of `app.infra.rabbitmq.mq` and `app.runtime.durable.publish_with_confirm` (`harness/broker.py`) | In-memory queues, bindings and consumers. Nothing is delivered unless the scenario delivers it (`replay.broker.deliver(queue)`), except replies to a process's own reply queue. Other processes' inboxes are declared with `broker.declare_inbox(name, answers=...)`. |
+| Database | real Postgres (`tests/runtime/conftest.py::test_db`); SQLAlchemy engine events (`harness/database.py`) | The full schema both apps run on. Write statements are recorded by transaction; every table is read before and after each step. |
+| Process | `harness/process.py` | Starts an app the way `app.main`'s lifespan does (wiring, graph, durable consumers, messaging, debounce consumers), without the interval clocks, HTTP routes, outbox dispatcher or skill reload. Rounds run when a scenario calls them. |
+
+## What a baseline holds
+
+One JSON document per scenario: the steps in order, and the schema of every tool offered
+(`tool_schemas`). Each step records:
+
+- `outcome`: what the step's action returned, or the exception (type and first line).
+- `model_calls`: agent, call number, model id, prompt name/version and the variables passed,
+  options (`session_id`, `reasoning_effort`, ...), the tools offered (by name), the messages
+  sent, and the reply (or the error). Messages are written in full on an agent's first call in
+  the step; a later call that continues an earlier one says `"continues": "<agent> #<n>"` and
+  lists only the messages added (`"then"`). Structured calls also record the JSON schema.
+- `effects`: one timeline, in the order things happened: write transactions ending
+  (`{"db": "commit", "writes": ["INSERT data_life_moment", ...]}`; one entry is one
+  transaction), publishes (target queues, routing key, delay, headers, body, confirmed),
+  deliveries and how the consumer settled them, file writes and deletes. This is where the
+  phases of a round's end show (spec decision 3).
+- `consumers_started`: queues that got a consumer (the start step lists what the app opens).
+- `rows`: per table, rows added / changed / removed by the step.
+- `files`: per file on the world volume, added / before→after / removed.
+
+### What is normalised
+
+Nothing is dropped; these values are replaced:
+
+| Value | Shown as | Why it is safe |
+|---|---|---|
+| ids from `uuid4` during the scenario | `<uuid:N>` by first appearance (a prefix: `<uuid:N>[:k]`) | They are random by design; ids *derived* from a round's identity (`uuid5`) are kept verbatim. |
+| columns defaulting to the server clock (`created_at`, `recorded_at`, ...) | `<db-clock>` | Postgres's clock is not frozen. Ordering by them is unaffected. |
+| serial / identity columns | `<serial>` | Depend on everything else that ever inserted. |
+| `dedup_hash` | `<dedup>` | A hash of the row's Key columns, which are compared verbatim. |
+| exception messages | first line only | Later lines are driver boilerplate (SQL, version-specific help URLs). |
+
+Readability only: timestamps are shown in CST, JSON stored as text is shown parsed, and any
+string with line breaks becomes a list of its lines, so a diff points at the line that changed.
+
+## Scenario API (`replay` fixture)
+
+```python
+await seeds.seed_household()                        # rows the round reads
+replay.broker.declare_inbox("world", answers=...)  # another process's inbox
+await replay.start("agent-service")                 # recorded as a step
+replay.model.script("living_life_moment", Reply(tools=(ToolUse("switch_to", {...}),)), ...)
+await replay.step("first moment", lambda: run_moment(...), at=datetime(...))
+replay.check("living_moment/continuation")
+```
+
+- `Reply(text=..., tools=(ToolUse(name, args),...), thought=..., thought_signature=b"...",
+  usage={...}, data={...})`. `data` answers a structured call. Tool-call ids default to
+  `<agent>:<call>:<n>`.
+- A script entry can be a function of the `Request` (its messages, tools,
+  `request.tool_results()`), for replies that copy something out of the conversation the way the
+  model would (see `_take_back_what_she_sent`).
+- `Fail(lambda: SomeError(...))`: the provider call raises.
+- `replay.step(name, action, at=..., raises=ExpectedError)`: run one round (or delivery).
+  Anything between steps is not recorded.
+- Messages: `replay.message_arrives(sender=, recipient=, body=, message_id=, time=)` puts a
+  message on an inbox; `replay.broker.deliver(queue)` hands the oldest one to the consumer;
+  `replay.inbox(name)`, `replay.scheduled()` give queue names; `replay.broker.queued(queue)` shows
+  what is waiting; `replay.broker.inject(queue, body, headers)` puts anything else on a queue
+  (a question: headers `x-reply-rk` and `x-answer-by`).
+- Faults: `Fail(...)` (model call), `replay.fail_commits(lambda writes: ...)` (the matching
+  transaction fails at COMMIT and rolls back), `replay.broker.refuse_confirms(lambda rk: ...)`
+  (a send is not confirmed), `replay.kill_after(lambda effect: ...)` (the process dies right
+  after that effect: the next boundary it touches raises `ProcessKilled`; run the step with
+  `raises=ProcessKilled`, then `await replay.restart()`). Each fault fires once by default
+  (`times=`).
+- `replay.config[key] = "value"` for Dynamic Config; `replay.redis` for Redis.
+
+## Adding a round kind
+
+1. Find how production triggers it and call that from a step: a clock-driven function
+   (`run_moment`, the nudge tick, `day_page_tick`, `persona_review_tick`) or a delivery to a
+   consumer (an inbox, a question queue, the scheduled queue, a durable queue such as
+   `durable_file_picked_up_read_a_round_<lane>`). Prefer the outermost entry that production
+   calls, so a refactor of what is underneath stays covered.
+2. Add a fixture under `prompts/` for every prompt id the round renders. A missing fixture fails
+   loudly with the file name to add.
+3. Seed what the round reads in `seeds.py` (shared with other kinds) or in the test.
+4. Script the model per agent and write the steps. Cover at least one continuation if the kind
+   keeps history, and its fault cases.
+5. Record: `REPLAY_RECORD=<kind>/<scenario> uv run pytest tests/replay/test_<kind>.py`. Read the
+   baseline before committing it: it is the claim of what the code does today.
+
+If a kind reads something no boundary covers (an HTTP fetch, a picture store), add the boundary
+to the core, document it in the table above, and make sure the existing baselines still pass.
+
+## Re-recording after an intended change
+
+1. Run the replays; a difference fails with the JSON paths that differ, a unified diff, and the
+   full replay written to `.actual/<name>.json`.
+2. When every difference is intended, re-record only the affected baselines:
+   `REPLAY_RECORD=world_round/continuation uv run pytest tests/replay` (names or globs, comma
+   separated; `REPLAY_RECORD=1` records everything the run reaches).
+3. `git diff tests/replay/baselines` is the list of intended changes; describe each in the
+   commit.
+
+A refactor that moves a boundary itself (for example where model clients are built) changes the
+harness adapter in `harness/`, not the baselines.

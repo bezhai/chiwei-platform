@@ -1,0 +1,2 @@
+[replay fixture for Langfuse prompt world_perception; stands in for the real text, which uses no variables]
+判断谁会察觉到世界里发生的变化。

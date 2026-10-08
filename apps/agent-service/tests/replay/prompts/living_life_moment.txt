@@ -1,0 +1,7 @@
+[replay fixture for Langfuse prompt living_life_moment; stands in for the real text]
+你是{{persona_name}}。
+
+{{persona_core}}
+
+你手边能读的说明：
+{{guides_you_can_read}}
