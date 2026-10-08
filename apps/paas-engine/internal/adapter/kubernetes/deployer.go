@@ -267,12 +267,23 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 	container.VolumeMounts = pvcMounts
 
 	var initContainers []corev1.Container
-	var sidecarContainers []corev1.Container
 
+	// lane-sidecar 以原生 sidecar 注入（init 容器 + restartPolicy=Always），由 kubelet
+	// 保证启停顺序：启动探针通过后才启动应用，应用全部退出后才给它发 SIGTERM。iptables
+	// 把应用的出站 TCP 全转给它，它晚于应用起来或早于应用停下，应用的出站连接就会被拒。
 	if app.SidecarEnabled {
 		sidecarImage := d.sidecarImage
 		proxyUID := int64(1337)
 		rootUID := int64(0)
+		sidecarRestart := corev1.ContainerRestartPolicyAlways
+		// 探针打 15021 的 /healthz，不打代理端口 15001：kubelet 打进来的连接没经过
+		// iptables 重定向，SO_ORIGINAL_DST 取到的是 15001 自己，透传会连回自己。
+		healthz := corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/healthz",
+				Port: intstr.FromInt(15021),
+			},
+		}
 
 		initContainers = append(initContainers, corev1.Container{
 			Name:    "lane-sidecar-init",
@@ -286,10 +297,11 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 			},
 		})
 
-		sidecarContainers = append(sidecarContainers, corev1.Container{
+		initContainers = append(initContainers, corev1.Container{
 			Name:            "lane-sidecar",
 			Image:           sidecarImage,
 			ImagePullPolicy: corev1.PullAlways,
+			RestartPolicy:   &sidecarRestart,
 			Env: []corev1.EnvVar{
 				{Name: "REGISTRY_URL", Value: "http://lite-registry:8080"},
 				{Name: "LANE", Value: release.Lane},
@@ -298,13 +310,13 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 				{Name: "sidecar", ContainerPort: 15001},
 				{Name: "sidecar-health", ContainerPort: 15021},
 			},
+			StartupProbe: &corev1.Probe{
+				ProbeHandler:     healthz,
+				PeriodSeconds:    1,
+				FailureThreshold: 30,
+			},
 			LivenessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/healthz",
-						Port: intstr.FromInt(15021),
-					},
-				},
+				ProbeHandler:        healthz,
 				InitialDelaySeconds: 2,
 				PeriodSeconds:       10,
 			},
@@ -331,7 +343,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 					ServiceAccountName: app.ServiceAccount,
 					NodeSelector:       map[string]string{"node-role": "app"},
 					InitContainers:     initContainers,
-					Containers:         append([]corev1.Container{container}, sidecarContainers...),
+					Containers:         []corev1.Container{container},
 					Volumes:            pvcVolumes,
 				},
 			},
