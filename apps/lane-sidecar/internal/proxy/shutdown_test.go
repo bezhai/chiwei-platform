@@ -56,6 +56,81 @@ func hungBackend(t *testing.T) (addr string, arrived <-chan struct{}) {
 	return b.Listener.Addr().String(), ch
 }
 
+// expectDrained waits for Shutdown's result and requires nil: what was open
+// finished, or was closed, well inside the cap.
+func expectDrained(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Shutdown: %v; want nil", err)
+		}
+	case <-time.After(waitLimit):
+		t.Fatalf("Shutdown still waiting %s on, with nothing left that the app holds open", waitLimit)
+	}
+}
+
+// A tunnel the app has stopped sending on is closed once a drain begins,
+// not waited for: an upstream that never answers the app's close would
+// otherwise hold the drain until its cap.
+func TestShutdown_ClosesTunnelsTheAppHasLeft(t *testing.T) {
+	leaves := []struct {
+		name  string
+		leave func(*net.TCPConn)
+	}{
+		{"app half-closed", func(c *net.TCPConn) { c.CloseWrite() }},
+		{"app closed", func(c *net.TCPConn) { c.Close() }},
+	}
+	for _, l := range leaves {
+		t.Run(l.name+" before shutdown", func(t *testing.T) {
+			p := startPassthrough(t)
+			app, up := p.open(t)
+			l.leave(app)
+			expectEOF(t, up) // and the upstream stays silent
+
+			expectDrained(t, shutdownWithin(p.srv, time.Minute))
+		})
+		t.Run(l.name+" during the drain", func(t *testing.T) {
+			p := startPassthrough(t)
+			app, up := p.open(t)
+			done := shutdownWithin(p.srv, time.Minute)
+			expectRefused(t, p.addr)
+
+			l.leave(app)
+			expectEOF(t, up) // and the upstream stays silent
+
+			expectDrained(t, done)
+		})
+	}
+}
+
+// The drain still waits for a tunnel the app holds open, even once its
+// upstream has finished sending, and keeps it passing data; it closes only
+// the tunnels the app has left.
+func TestShutdown_WaitsOnlyForTunnelsTheAppHolds(t *testing.T) {
+	p := startPassthrough(t)
+	left, leftUp := p.open(t)
+	held, heldUp := p.open(t)
+	left.CloseWrite()
+	expectEOF(t, leftUp)
+	heldUp.CloseWrite()
+	expectEOF(t, held)
+
+	done := shutdownWithin(p.srv, time.Minute)
+
+	expectEOF(t, left) // its tunnel was torn down without the upstream's answer
+	held.Write([]byte("more"))
+	expectRead(t, heldUp, "more")
+	select {
+	case err := <-done:
+		t.Fatalf("Shutdown returned (%v) while the app still held a tunnel open", err)
+	default:
+	}
+	held.Close()
+	expectEOF(t, heldUp)
+	expectDrained(t, done)
+}
+
 func TestShutdown_LetsOpenTunnelsFinish(t *testing.T) {
 	p := startPassthrough(t)
 	app, up := p.open(t)
