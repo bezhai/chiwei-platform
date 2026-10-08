@@ -46,12 +46,66 @@ func TestDetectPodFailure(t *testing.T) {
 		},
 	}
 
+	// 原生 sidecar 的 Pod：lane-sidecar-init 已跑完，lane-sidecar 的状态在 InitContainerStatuses 里
+	latestLabels := map[string]string{"app": "myapp", "lane": "prod", "pod-template-hash": latestHash}
+	started, notStarted := true, false
+	initDone := corev1.ContainerStatus{
+		Name:  "lane-sidecar-init",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+	}
+	appRunning := corev1.ContainerStatus{
+		Name: "myapp", Ready: true, Started: &started,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}
+	appWaitingForInit := corev1.ContainerStatus{
+		Name:  "myapp",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+	}
+	sidecarWaiting := func(reason, message string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			Name: "lane-sidecar", Started: &notStarted,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: message}},
+		}
+	}
+
 	tests := []struct {
 		name       string
 		objects    []runtime.Object
 		wantFail   bool
 		wantReason string
 	}{
+		{
+			name: "native sidecar running",
+			objects: []runtime.Object{latestRS, makeNativeSidecarPod("myapp-prod-abc", latestLabels, corev1.PodRunning,
+				[]corev1.ContainerStatus{initDone, {Name: "lane-sidecar", Ready: true, Started: &started,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+				[]corev1.ContainerStatus{appRunning})},
+			wantFail: false,
+		},
+		{
+			name: "native sidecar waiting for its startup probe",
+			objects: []runtime.Object{latestRS, makeNativeSidecarPod("myapp-prod-abc", latestLabels, corev1.PodPending,
+				[]corev1.ContainerStatus{initDone, {Name: "lane-sidecar", Started: &notStarted,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+				[]corev1.ContainerStatus{appWaitingForInit})},
+			wantFail: false,
+		},
+		{
+			name: "native sidecar CrashLoopBackOff",
+			objects: []runtime.Object{latestRS, makeNativeSidecarPod("myapp-prod-abc", latestLabels, corev1.PodRunning,
+				[]corev1.ContainerStatus{initDone, sidecarWaiting("CrashLoopBackOff", "back-off 40s")},
+				[]corev1.ContainerStatus{appRunning})},
+			wantFail:   true,
+			wantReason: "init container lane-sidecar is in CrashLoopBackOff",
+		},
+		{
+			name: "native sidecar ImagePullBackOff",
+			objects: []runtime.Object{latestRS, makeNativeSidecarPod("myapp-prod-abc", latestLabels, corev1.PodPending,
+				[]corev1.ContainerStatus{initDone, sidecarWaiting("ImagePullBackOff", "manifest unknown")},
+				[]corev1.ContainerStatus{appWaitingForInit})},
+			wantFail:   true,
+			wantReason: "init container lane-sidecar failed to pull image",
+		},
 		{
 			name:     "healthy pods",
 			objects:  []runtime.Object{latestRS, oldRS, makePod("myapp-prod-abc", labels, latestHash, nil)},
