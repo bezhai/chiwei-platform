@@ -76,24 +76,19 @@ async def test_banned_word(replay):
     assert BANNED_KEYS[1] == f"{replay.lane}:banned_words"
     await replay.redis.sadd(BANNED_KEYS[0], "darkroom")
     await replay.redis.sadd(BANNED_KEYS[1], "胶片")
-    try:
-        replay.model.script(
-            MOMENT,
-            _sends("在家整理胶片呢。"),
-            _sends("下午一直待在 Dark Room 里。"),
-            _stops(),
-        )
-        replay.model.script(GUARD, _safe())
-        await replay.step(
-            "a word only under the lane-prefixed key does not stop her message; "
-            "one under the bare key stops the next",
-            _moment(replay),
-            at=_at(14, 0),
-        )
-    finally:
-        # Every replay's fakeredis gets the same server (its random host comes from the
-        # replayed uuid4), so a word left behind would stop later scenarios' messages.
-        await replay.redis.delete(*BANNED_KEYS)
+    replay.model.script(
+        MOMENT,
+        _sends("在家整理胶片呢。"),
+        _sends("下午一直待在 Dark Room 里。"),
+        _stops(),
+    )
+    replay.model.script(GUARD, _safe())
+    await replay.step(
+        "a word only under the lane-prefixed key does not stop her message; "
+        "one under the bare key stops the next",
+        _moment(replay),
+        at=_at(14, 0),
+    )
 
     replay.check("output_safety/banned_word")
 

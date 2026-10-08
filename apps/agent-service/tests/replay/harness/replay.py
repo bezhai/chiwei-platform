@@ -163,12 +163,18 @@ class Replay:
         )
 
     async def _install_redis(self, mp) -> None:
+        import fakeredis
         import fakeredis.aioredis
 
         import app.capabilities.redis as redis_cap
         import app.infra.redis as redis_infra
 
-        self.redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        # A server of its own. Without one, FakeRedis looks its server up by a random host name
+        # (``uuid4().hex``), which the replay makes deterministic: every replay would share one
+        # server, and a key one scenario set would still be there in the next.
+        self.redis = fakeredis.aioredis.FakeRedis(
+            server=fakeredis.FakeServer(), decode_responses=True
+        )
         mp.setattr(redis_infra, "_redis", self.redis)
         mp.setattr(redis_cap, "_singleton", None)
 

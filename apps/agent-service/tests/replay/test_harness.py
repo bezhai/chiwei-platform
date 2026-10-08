@@ -5,18 +5,23 @@ breaking, because a broken one still passes.
   ``ScriptExhausted``, but product code may swallow it (here the output check treats it as "the
   check failed" and sends anyway), so the step passes. The replay must still fail, naming the
   agent and call number, and must neither compare nor record a baseline.
+* ``redis_is_per_replay`` — what one scenario puts in Redis is not there in the next. fakeredis
+  picks its server by a random host name from ``uuid4``, which the replay makes deterministic.
 """
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 
 import pytest
 
+from app.capabilities import banned_words
 from app.infra.cst_time import CST, now_cst
 from app.living.moment import run_moment
 from tests.replay import seeds
-from tests.replay.harness import Reply, ToolUse
+from tests.replay.conftest import DEFAULT_START, LANE
+from tests.replay.harness import Replay, Reply, ToolUse
 from tests.replay.harness import baseline as baseline_mod
 
 pytestmark = pytest.mark.integration
@@ -61,3 +66,42 @@ async def test_script_runs_out(replay, monkeypatch):
     with pytest.raises(AssertionError, match=r"'guard_output_safety' call #1\b"):
         replay.check("harness/script_runs_out")
     assert compared == [], "a replay whose script ran out was compared or recorded"
+
+
+_DROP_TABLES = """
+DO $$
+DECLARE r RECORD;
+BEGIN
+    FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+        EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE';
+    END LOOP;
+END $$;
+"""
+
+
+@contextlib.asynccontextmanager
+async def _scenario(engine, root):
+    """One replay, opened and closed the way the ``replay`` fixture does for each scenario, and
+    on an empty database afterwards, as the next scenario gets it (``test_db``'s teardown)."""
+    from sqlalchemy import text
+
+    with pytest.MonkeyPatch.context() as mp:
+        r = Replay(
+            engine=engine, monkeypatch=mp, root=root, lane=LANE, start=DEFAULT_START
+        )
+        await r.open()
+        try:
+            yield r
+        finally:
+            await r.close()
+    async with engine.begin() as conn:
+        await conn.execute(text(_DROP_TABLES))
+
+
+async def test_redis_is_per_replay(real_pg_required, test_db, tmp_path):
+    async with _scenario(test_db, tmp_path / "first") as first:
+        await first.redis.sadd("banned_words", "darkroom")
+        assert await banned_words.contains("在 Dark Room 里") == "darkroom"
+
+    async with _scenario(test_db, tmp_path / "second"):
+        assert await banned_words.contains("在 Dark Room 里") is None
