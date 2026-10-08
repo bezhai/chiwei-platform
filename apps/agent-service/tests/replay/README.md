@@ -26,6 +26,31 @@ skipping, because a baseline that silently skips guards nothing.
 | `baselines/<kind>/<scenario>.json` | The recorded baselines. |
 | `.actual/` | Written when a comparison fails; git-ignored. |
 
+## Prompt fixtures
+
+Each fixture is the text of one Langfuse prompt version, copied byte for byte, read-only, with the
+langfuse skill (`langfuse_api.py get-prompt '{"name": "<id>", "label": "<label>"}'`); a chat
+prompt keeps the `role` and `content` of each message. The label is the one the `coe-world` lane
+is served (`app.agent.prompts.get_prompt`): the lane's own label where the prompt has one,
+otherwise `production`. The loader reports every fixture as version 1
+(`harness/prompts.py::FIXTURE_VERSION`), so the `version` in a baseline is not the Langfuse
+version; this table is. Copied on 2026-10-08.
+
+| Fixture | Langfuse prompt | Label | Version | Type |
+|---|---|---|---|---|
+| `living_life_moment.txt` | `living_life_moment` | `production` | 8 | text |
+| `living_day_page.txt` | `living_day_page` | `production` | 2 | text |
+| `living_persona_review.txt` | `living_persona_review` | `production` | 2 | text |
+| `book_reading_impression.txt` | `book_reading_impression` | `production` | 1 | text |
+| `guard_output_safety.json` | `guard_output_safety` | `production` | 5 | chat (system, user) |
+| `world_round.txt` | `world_round` | `coe-world` | 6 | text |
+| `world_perception.txt` | `world_perception` | `coe-world` | 5 | text |
+| `world_answer.txt` | `world_answer` | `coe-world` | 2 | text |
+| `world_npc.txt` | `world_npc` | `coe-world` | 2 | text |
+
+Moving a fixture to a newer version is an intended change like any other: replace the text,
+update its row, and re-record the baselines that render it.
+
 ## What is intercepted, and where
 
 Everything between these boundaries runs for real: the agent loop, tool dispatch, retries,
@@ -143,8 +168,9 @@ replay.check("living_moment/continuation")
    consumer (an inbox, a question queue, the scheduled queue, a durable queue such as
    `durable_file_picked_up_read_a_round_<lane>`). Prefer the outermost entry that production
    calls, so a refactor of what is underneath stays covered.
-2. Add a fixture under `prompts/` for every prompt id the round renders. A missing fixture fails
-   loudly with the file name to add.
+2. Add a fixture under `prompts/` for every prompt id the round renders, copied from Langfuse
+   (not a stand-in: the refactor reshapes real prompts), and add its row to the table above. A
+   missing fixture fails loudly with the file name to add.
 3. Seed what the round reads in `seeds.py` (shared with other kinds) or in the test.
 4. Script the model per agent and write the steps. Cover at least one continuation if the kind
    keeps history, and its fault cases.
