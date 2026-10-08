@@ -509,6 +509,148 @@ func TestGetDeploymentStatus(t *testing.T) {
 	}
 }
 
+// TestGetDeploymentStatusCountsNativeSidecar 验证 lane-sidecar 以原生 sidecar
+// （restartPolicy=Always 的 init 容器）运行时，Pod 的就绪、重启次数和原因都把它算进去，
+// 而跑完就退出的 lane-sidecar-init 不拖住就绪（它结束后 Ready 恒为 false）。
+func TestGetDeploymentStatusCountsNativeSidecar(t *testing.T) {
+	labels := map[string]string{"app": "myapp", "lane": "prod"}
+	replicas := int32(1)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "myapp-prod", Namespace: "default", Labels: labels},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+		},
+	}
+
+	started, notStarted := true, false
+	initDone := corev1.ContainerStatus{
+		Name:  "lane-sidecar-init",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+	}
+	sidecarCrashing := func(restarts int32) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			Name:         "lane-sidecar",
+			Started:      &notStarted,
+			RestartCount: restarts,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+				Reason:  "CrashLoopBackOff",
+				Message: "back-off 40s restarting failed container=lane-sidecar",
+			}},
+		}
+	}
+	appWaitingForInit := corev1.ContainerStatus{
+		Name:  "myapp",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+	}
+
+	tests := []struct {
+		name         string
+		phase        corev1.PodPhase
+		initStatuses []corev1.ContainerStatus
+		statuses     []corev1.ContainerStatus
+		wantReady    bool
+		wantRestarts int32
+		wantReason   string
+	}{
+		{
+			name:  "sidecar 和应用都在跑",
+			phase: corev1.PodRunning,
+			initStatuses: []corev1.ContainerStatus{
+				initDone,
+				{Name: "lane-sidecar", Ready: true, Started: &started, RestartCount: 1,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+			statuses: []corev1.ContainerStatus{
+				{Name: "myapp", Ready: true, Started: &started, RestartCount: 2,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+			wantReady:    true,
+			wantRestarts: 3,
+		},
+		{
+			name:  "sidecar 已启动但启动探针未通过，应用还没创建",
+			phase: corev1.PodPending,
+			initStatuses: []corev1.ContainerStatus{
+				initDone,
+				{Name: "lane-sidecar", Started: &notStarted,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+			statuses:   []corev1.ContainerStatus{appWaitingForInit},
+			wantReady:  false,
+			wantReason: "PodInitializing: ",
+		},
+		{
+			name:         "应用跑起来之后 sidecar 崩溃重启",
+			phase:        corev1.PodRunning,
+			initStatuses: []corev1.ContainerStatus{initDone, sidecarCrashing(4)},
+			statuses: []corev1.ContainerStatus{
+				{Name: "myapp", Ready: true, Started: &started,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+			wantReady:    false,
+			wantRestarts: 4,
+			wantReason:   "CrashLoopBackOff: back-off 40s restarting failed container=lane-sidecar",
+		},
+		{
+			name:         "启动阶段 sidecar 就崩溃，应用卡在它后面",
+			phase:        corev1.PodPending,
+			initStatuses: []corev1.ContainerStatus{initDone, sidecarCrashing(3)},
+			statuses:     []corev1.ContainerStatus{appWaitingForInit},
+			wantReady:    false,
+			wantRestarts: 3,
+			wantReason:   "CrashLoopBackOff: back-off 40s restarting failed container=lane-sidecar",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := makeNativeSidecarPod("myapp-prod-abc-1", labels, tt.phase, tt.initStatuses, tt.statuses)
+			client := fakeclient.NewSimpleClientset(deploy, pod)
+			deployer := NewK8sDeployer(client, "default", "")
+
+			status, err := deployer.GetDeploymentStatus(context.Background(), "myapp-prod")
+			if err != nil {
+				t.Fatalf("GetDeploymentStatus() error = %v", err)
+			}
+			if len(status.Pods) != 1 {
+				t.Fatalf("Pods count = %d, want 1", len(status.Pods))
+			}
+			got := status.Pods[0]
+			if got.Ready != tt.wantReady {
+				t.Errorf("Ready = %v, want %v", got.Ready, tt.wantReady)
+			}
+			if got.Restarts != tt.wantRestarts {
+				t.Errorf("Restarts = %d, want %d", got.Restarts, tt.wantRestarts)
+			}
+			if got.Reason != tt.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// makeNativeSidecarPod 构造 paas-engine 注入 lane-sidecar 后的 Pod：spec 里
+// lane-sidecar-init 是一次性 init 容器，lane-sidecar 是 restartPolicy=Always 的 init 容器。
+func makeNativeSidecarPod(name string, labels map[string]string, phase corev1.PodPhase, initStatuses, statuses []corev1.ContainerStatus) *corev1.Pod {
+	always := corev1.ContainerRestartPolicyAlways
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels},
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{
+				{Name: "lane-sidecar-init"},
+				{Name: "lane-sidecar", RestartPolicy: &always},
+			},
+			Containers: []corev1.Container{{Name: labels["app"]}},
+		},
+		Status: corev1.PodStatus{
+			Phase:                 phase,
+			InitContainerStatuses: initStatuses,
+			ContainerStatuses:     statuses,
+		},
+	}
+}
+
 func TestGetDeploymentStatusNotFound(t *testing.T) {
 	client := fakeclient.NewSimpleClientset()
 	deployer := NewK8sDeployer(client, "default", "")

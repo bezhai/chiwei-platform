@@ -168,8 +168,9 @@ func (d *K8sDeployer) GetDeploymentStatus(ctx context.Context, name string) (*do
 		}
 
 		// 计算 ready 状态和 restarts
-		allReady := len(pod.Status.ContainerStatuses) > 0
-		for _, cs := range pod.Status.ContainerStatuses {
+		statuses := longRunningContainerStatuses(&pod)
+		allReady := len(statuses) > 0
+		for _, cs := range statuses {
 			ps.Restarts += cs.RestartCount
 			if !cs.Ready {
 				allReady = false
@@ -184,6 +185,30 @@ func (d *K8sDeployer) GetDeploymentStatus(ctx context.Context, name string) (*do
 	}
 
 	return status, nil
+}
+
+// longRunningContainerStatuses 返回 Pod 运行期间一直在跑的容器的状态：普通容器，
+// 加上原生 sidecar（restartPolicy=Always 的 init 容器，状态在 InitContainerStatuses 里）。
+// 跑完即退出的 init 容器不在其中：它结束后 Ready 恒为 false，算进来 Pod 就永远不就绪。
+//
+// 原生 sidecar 排在普通容器后面，调用方按"后写覆盖"取 Waiting 原因时取到的是它的：
+// sidecar 没在跑时，应用要么卡在它后面没创建（只会报 PodInitializing），要么没有出站网络，
+// sidecar 的原因才是要看的那个。
+func longRunningContainerStatuses(pod *corev1.Pod) []corev1.ContainerStatus {
+	sidecars := make(map[string]bool)
+	for _, c := range pod.Spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			sidecars[c.Name] = true
+		}
+	}
+
+	statuses := append([]corev1.ContainerStatus{}, pod.Status.ContainerStatuses...)
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if sidecars[cs.Name] {
+			statuses = append(statuses, cs)
+		}
+	}
+	return statuses
 }
 
 func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Release, app *domain.App, bundleEnvs map[string]string) error {
