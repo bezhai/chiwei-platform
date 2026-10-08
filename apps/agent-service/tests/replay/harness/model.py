@@ -93,7 +93,13 @@ Scripted = Reply | Fail | Callable[[Request], "Reply | Fail"]
 
 
 class ScriptExhausted(AssertionError):
-    pass
+    """A model call found its agent's script empty.
+
+    Raising it is not enough: product code can swallow it (an ``except Exception`` around a
+    tool, a fail-open check, ``gather(return_exceptions=True)`` in a tick), and then the step
+    passes with a call that has neither a reply nor an error. :attr:`ModelScript.exhausted`
+    remembers every such call, and :meth:`tests.replay.harness.replay.Replay.check` fails on it.
+    """
 
 
 class ModelScript:
@@ -109,6 +115,9 @@ class ModelScript:
         # Raw call records, in the order the calls were made. The step that is open when a call
         # happens takes them (see :class:`tests.replay.harness.replay.Replay`).
         self.calls: list[dict[str, Any]] = []
+        # Every call that found its agent's script empty, as (agent, call number), whatever the
+        # code under test then did with the ScriptExhausted.
+        self.exhausted: list[tuple[str | None, int]] = []
 
     def script(self, agent: str, *replies: Scripted) -> None:
         self._queues[agent].extend(replies)
@@ -119,6 +128,7 @@ class ModelScript:
     def _next(self, agent: str | None, request: Request) -> Reply | Fail:
         queue = self._queues.get(agent)
         if not queue:
+            self.exhausted.append((agent, request.number))
             raise ScriptExhausted(
                 f"replay: agent {agent!r} made model call #{request.number} but its script is "
                 f"empty; add a reply for it"

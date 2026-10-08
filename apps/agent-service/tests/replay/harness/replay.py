@@ -319,7 +319,19 @@ class Replay:
     # ------------------------------------------------------------------ baseline
 
     def check(self, name: str) -> None:
-        """Compare everything recorded with ``baselines/<name>.json`` (or record it)."""
+        """Compare everything recorded with ``baselines/<name>.json`` (or record it).
+
+        A model call that found its script empty fails the replay here, before anything is
+        compared or recorded, even when the step passed because the code under test swallowed
+        the ``ScriptExhausted``."""
+        ran_out = self.model.exhausted
+        if ran_out:
+            calls = ", ".join(f"{agent!r} call #{number}" for agent, number in ran_out)
+            raise AssertionError(
+                f"replay: the model script ran out: {calls} found no scripted reply; add one "
+                f"for each. The code under test may have swallowed the ScriptExhausted, so the "
+                f"steps passing proves nothing. Nothing was compared or recorded."
+            )
         unused = self.model.unused()
         assert not unused, f"replay: scripted replies never used: {unused}"
         baseline.compare_or_record(

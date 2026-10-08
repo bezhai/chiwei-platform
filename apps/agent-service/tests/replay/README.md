@@ -22,6 +22,7 @@ skipping, because a baseline that silently skips guards nothing.
 | `prompts/<prompt id>.txt` / `.json` | Fixture text for each Langfuse prompt a round renders (text prompt, or a chat prompt as a list of `{role, content}`). |
 | `seeds.py` | Rows the rounds read that no round writes (personas, her bot, a private chat). |
 | `test_<kind>.py` | Scenarios of one round kind. |
+| `test_harness.py` | Self-tests of the core, for guarantees whose breaking no scenario would notice (a swallowed `ScriptExhausted`). |
 | `baselines/<kind>/<scenario>.json` | The recorded baselines. |
 | `.actual/` | Written when a comparison fails; git-ignored. |
 
@@ -110,6 +111,11 @@ replay.check("living_moment/continuation")
   `request.tool_results()`), for replies that copy something out of the conversation the way the
   model would (see `_take_back_what_she_sent`).
 - `Fail(lambda: SomeError(...))`: the provider call raises.
+- Every model call needs a scripted entry. A call that finds its agent's script empty raises
+  `ScriptExhausted`, which the code under test may swallow (an `except Exception` around a tool,
+  the output check's fail-open, `gather(return_exceptions=True)` in a tick), so the step can
+  still pass. `replay.check()` therefore fails on any such call, naming the agent and call
+  number, before it compares or records anything. Replies left unused fail it too.
 - `replay.step(name, action, at=..., raises=ExpectedError)`: run one round (or delivery).
   Anything between steps is not recorded.
 - Messages: `replay.message_arrives(sender=, recipient=, body=, message_id=, time=)` puts a
