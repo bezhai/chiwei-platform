@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/chiwei-platform/lane-sidecar/internal/proxy"
 )
 
 // argsEnv carries main's flags to a child process. When it is set, this
@@ -37,6 +39,7 @@ const waitLimit = 3 * time.Second
 
 type sidecar struct {
 	proxy  string
+	health string // URL of the health endpoint
 	cmd    *exec.Cmd
 	exited chan struct{}
 	err    error        // cmd.Wait's result; read only after exited is closed
@@ -58,7 +61,11 @@ func startSidecar(t *testing.T, flags ...string) *sidecar {
 		"-health-port=" + healthPort,
 		"-registry-url=" + registry.URL,
 	}, flags...)
-	s := &sidecar{proxy: "127.0.0.1:" + proxyPort, exited: make(chan struct{})}
+	s := &sidecar{
+		proxy:  "127.0.0.1:" + proxyPort,
+		health: "http://127.0.0.1:" + healthPort + "/healthz",
+		exited: make(chan struct{}),
+	}
 	s.cmd = exec.Command(os.Args[0])
 	s.cmd.Env = append(os.Environ(), argsEnv+"="+strings.Join(args, " "))
 	s.cmd.Stdout = &s.log
@@ -75,23 +82,29 @@ func startSidecar(t *testing.T, flags ...string) *sidecar {
 		<-s.exited
 	})
 
-	// An HTTP request through the proxy, to the registry stub, proves the
-	// proxy is serving.
-	probe := proxiedClient(s.proxy)
+	// Wait the way the kubelet's startup probe does.
 	deadline := time.Now().Add(waitLimit)
 	for {
-		resp, err := probe.Get(registry.URL)
-		if err == nil {
-			resp.Body.Close()
+		status, err := s.healthStatus()
+		if status == http.StatusOK {
 			return s
 		}
 		if time.Now().After(deadline) {
 			s.cmd.Process.Kill()
 			<-s.exited
-			t.Fatalf("proxy not serving after %s: %v\n%s", waitLimit, err, &s.log)
+			t.Fatalf("health not ok after %s: %d %v\n%s", waitLimit, status, err, &s.log)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+func (s *sidecar) healthStatus() (int, error) {
+	resp, err := http.Get(s.health)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
 }
 
 func freePort(t *testing.T) string {
@@ -206,6 +219,9 @@ func TestSIGTERM_LetsInFlightRequestFinish(t *testing.T) {
 		t.Fatalf("exited (%v) with a request still in flight\n%s", s.err, &s.log)
 	case <-time.After(300 * time.Millisecond):
 	}
+	if status, err := s.healthStatus(); status != http.StatusServiceUnavailable {
+		t.Errorf("health while draining: %d %v; want 503", status, err)
+	}
 	close(release)
 
 	select {
@@ -228,4 +244,44 @@ func TestSIGTERM_DrainTimeoutBoundsExit(t *testing.T) {
 	s.terminate(t)
 
 	s.expectExitZero(t)
+}
+
+func expectHealth(t *testing.T, h http.Handler, want int, when string) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/healthz", nil))
+	if w.Code != want {
+		t.Fatalf("health %s: %d, want %d", when, w.Code, want)
+	}
+}
+
+// The app container starts once the sidecar's startup probe passes, so the
+// probe must not pass before the proxy it is redirected to is listening.
+func TestHealth_OKOnlyWhileProxyServes(t *testing.T) {
+	srv := proxy.NewServer("", nil)
+	h := health(srv)
+	expectHealth(t, h, http.StatusServiceUnavailable, "before the proxy listens")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go srv.Serve(ln)
+	deadline := time.Now().Add(waitLimit)
+	for w := httptest.NewRecorder(); ; w = httptest.NewRecorder() {
+		h.ServeHTTP(w, httptest.NewRequest("GET", "/healthz", nil))
+		if w.Code == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("health still %d %s after Serve started", w.Code, waitLimit)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	expectHealth(t, h, http.StatusServiceUnavailable, "once shutdown has begun")
 }
