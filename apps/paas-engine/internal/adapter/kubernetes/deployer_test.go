@@ -440,6 +440,117 @@ func TestApplyDeploymentInjectsAppName(t *testing.T) {
 	}
 }
 
+// TestApplyDeploymentInjectsNativeSidecar 验证开了 sidecar 的 App，lane-sidecar 以原生
+// sidecar 注入：排在设置 iptables 的 lane-sidecar-init 之后、restartPolicy=Always、
+// 带启动探针，kubelet 才会等它就绪再启动应用、等应用退出后才停它。普通容器里只剩应用。
+func TestApplyDeploymentInjectsNativeSidecar(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	const sidecarImage = "harbor.local:30002/inner-bot/lane-sidecar:1.0.0.13"
+	deployer := NewK8sDeployer(client, "default", sidecarImage)
+
+	app := &domain.App{Name: "agent-service", Port: 8000, SidecarEnabled: true}
+	release := &domain.Release{
+		ID:       "r-sidecar",
+		AppName:  "agent-service",
+		Lane:     "coe-world",
+		Image:    "harbor.local/inner-bot/agent-service:abc123",
+		Replicas: 1,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "agent-service-coe-world", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+	spec := deploy.Spec.Template.Spec
+
+	if len(spec.Containers) != 1 || spec.Containers[0].Name != "agent-service" {
+		names := []string{}
+		for _, c := range spec.Containers {
+			names = append(names, c.Name)
+		}
+		t.Fatalf("containers = %v, want only the app container", names)
+	}
+
+	if len(spec.InitContainers) != 2 {
+		t.Fatalf("expected 2 init containers, got %d", len(spec.InitContainers))
+	}
+	initC, sidecar := spec.InitContainers[0], spec.InitContainers[1]
+	if initC.Name != "lane-sidecar-init" || sidecar.Name != "lane-sidecar" {
+		t.Fatalf("init containers = [%s %s], want [lane-sidecar-init lane-sidecar]", initC.Name, sidecar.Name)
+	}
+	if initC.RestartPolicy != nil {
+		t.Errorf("lane-sidecar-init RestartPolicy = %v, want unset (runs once)", *initC.RestartPolicy)
+	}
+
+	if sidecar.RestartPolicy == nil || *sidecar.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Errorf("lane-sidecar RestartPolicy = %v, want Always", sidecar.RestartPolicy)
+	}
+	if sidecar.Image != sidecarImage {
+		t.Errorf("lane-sidecar image = %q, want %q", sidecar.Image, sidecarImage)
+	}
+	if sidecar.SecurityContext == nil || sidecar.SecurityContext.RunAsUser == nil || *sidecar.SecurityContext.RunAsUser != 1337 {
+		t.Errorf("lane-sidecar must run as UID 1337 (iptables exempts it), got %+v", sidecar.SecurityContext)
+	}
+	envs := map[string]string{}
+	for _, e := range sidecar.Env {
+		envs[e.Name] = e.Value
+	}
+	if envs["LANE"] != "coe-world" {
+		t.Errorf("lane-sidecar LANE = %q, want coe-world", envs["LANE"])
+	}
+
+	assertHealthzProbe := func(kind string, p *corev1.Probe) {
+		t.Helper()
+		if p == nil || p.HTTPGet == nil {
+			t.Fatalf("lane-sidecar %s probe = %+v, want HTTP GET /healthz on 15021", kind, p)
+		}
+		if p.HTTPGet.Path != "/healthz" || p.HTTPGet.Port.IntValue() != 15021 {
+			t.Errorf("lane-sidecar %s probe = GET %s on %s, want GET /healthz on 15021", kind, p.HTTPGet.Path, p.HTTPGet.Port.String())
+		}
+	}
+	assertHealthzProbe("startup", sidecar.StartupProbe)
+	assertHealthzProbe("liveness", sidecar.LivenessProbe)
+}
+
+// TestApplyDeploymentWithoutSidecar 验证没开 sidecar 的 App，PodSpec 里没有任何
+// init 容器，普通容器只有应用自己。
+func TestApplyDeploymentWithoutSidecar(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default", "")
+
+	app := &domain.App{Name: "lark-service", Port: 3000}
+	release := &domain.Release{
+		ID:       "r-no-sidecar",
+		AppName:  "lark-service",
+		Lane:     "prod",
+		Image:    "harbor.local/inner-bot/lark-service:abc123",
+		Replicas: 1,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "lark-service-prod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+	spec := deploy.Spec.Template.Spec
+
+	if len(spec.InitContainers) != 0 {
+		t.Errorf("expected no init containers, got %d", len(spec.InitContainers))
+	}
+	if len(spec.Containers) != 1 || spec.Containers[0].Name != "lark-service" {
+		t.Fatalf("expected only the app container, got %d containers", len(spec.Containers))
+	}
+	c := spec.Containers[0]
+	if c.RestartPolicy != nil || c.StartupProbe != nil || c.LivenessProbe != nil {
+		t.Errorf("app container got restartPolicy/probes it did not ask for: %+v", c)
+	}
+}
+
 // TestBuildEnvFrom 验证 buildEnvFrom 函数的各种组合。
 func TestGetDeploymentStatus(t *testing.T) {
 	labels := map[string]string{"app": "myapp", "lane": "prod"}
