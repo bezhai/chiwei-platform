@@ -633,10 +633,16 @@ func (d *K8sDeployer) detectPodFailure(ctx context.Context, deploy *appsv1.Deplo
 			}
 		}
 
+		// 原生 sidecar（lane-sidecar）也是 init 容器，它拉不到镜像时应用卡在 PodInitializing，
+		// 只有这里看得到
 		for _, cs := range pod.Status.InitContainerStatuses {
 			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
-				return fmt.Sprintf("pod %s init container is in CrashLoopBackOff: %s",
-					pod.Name, cs.State.Waiting.Message), true
+				return fmt.Sprintf("pod %s init container %s is in CrashLoopBackOff: %s",
+					pod.Name, cs.Name, cs.State.Waiting.Message), true
+			}
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "ImagePullBackOff" {
+				return fmt.Sprintf("pod %s init container %s failed to pull image: %s",
+					pod.Name, cs.Name, cs.State.Waiting.Message), true
 			}
 		}
 	}
