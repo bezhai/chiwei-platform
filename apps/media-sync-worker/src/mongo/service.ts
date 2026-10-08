@@ -59,12 +59,14 @@ export async function getMaxIllustId(illustIds: number[]): Promise<number> {
  * @returns 返回一个 Promise，表示是否成功插入新任务
  * @throws 如果在数据库操作中发生错误，将抛出错误
  */
-export async function insertDownloadTask(illustId: string): Promise<boolean> {
+export async function insertDownloadTask(illustId: string, signal: AbortSignal): Promise<boolean> {
   // 查询是否已经存在相同 illustId 的任务
   const filter: Filter<DownloadTask> = { illust_id: illustId };
 
   // 使用封装的 find 方法查找是否已经存在此任务
+  signal.throwIfAborted();
   const existingTasks = await DownloadTaskMap.find(filter);
+  signal.throwIfAborted();
 
   // 如果找到了现有任务，返回 false 表示未插入
   if (existingTasks.length > 0) {

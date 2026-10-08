@@ -7,6 +7,7 @@ export interface RedisConfig {
     host: string;
     port: number;
     password?: string;
+    commandTimeout?: number;
     retryStrategy?: (times: number) => number;
 }
 

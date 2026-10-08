@@ -29,6 +29,19 @@ async function withoutFollowerDelay<T>(run: () => Promise<T>): Promise<T> {
 }
 
 describe('PixivClient 关注列表分页', () => {
+    it('does not start another page after a cancelled page returns late', async () => {
+        const controller = new AbortController();
+        const client = new PixivClient();
+        let finish!: (value: unknown) => void;
+        const request = mock(() => new Promise((resolve) => { finish = resolve; }));
+        (client as any).pixivProxy = request;
+        const pending = client.getFollowersByTag('tag', '42', controller.signal);
+        controller.abort(new Error('discovery deadline'));
+        finish({ error: false, body: { total: 48, users: [] } });
+        await expect(pending).rejects.toThrow('discovery deadline');
+        expect(request).toHaveBeenCalledTimes(1);
+    });
+
     it('请求所有包含尾页的 offset，并按页序聚合结果', async () => {
         for (const total of [24, 25, 48, 457]) {
             const offsets: number[] = [];

@@ -93,6 +93,7 @@
         "unzipper": "^0.12.3",
       },
       "devDependencies": {
+        "@types/ali-oss": "^6.23.3",
         "@types/lodash": "^4.17.13",
         "@types/node": "^22.10.1",
         "@types/node-cron": "^3.0.11",
@@ -480,6 +481,8 @@
     "@sqltools/formatter": ["@sqltools/formatter@1.2.5", "https://bnpm.byted.org/@sqltools/formatter/-/formatter-1.2.5.tgz", {}, "sha512-Uy0+khmZqUrUGm5dmMqVlnvufZRSK0FbYzVgp0UMstm+F5+W2/jnEEQyc9vo1ZR/E5ZI/B1WjjoTqBqwJL6Krw=="],
 
     "@tootallnate/quickjs-emscripten": ["@tootallnate/quickjs-emscripten@0.23.0", "https://bnpm.byted.org/@tootallnate/quickjs-emscripten/-/quickjs-emscripten-0.23.0.tgz", {}, "sha512-C5Mc6rdnsaJDjO3UpGW/CQTHtCKaYlScZTly4JIu97Jxo/odCiH0ITnDXSJPTOrEKk/ycSZ0AOgTmkDtkOsvIA=="],
+
+    "@types/ali-oss": ["@types/ali-oss@6.23.3", "https://bnpm.byted.org/@types/ali-oss/-/ali-oss-6.23.3.tgz", {}, "sha512-huSf6njkqhSeR37OMJTGMCyUg2d9Zp2AioefhYuUMeh0vNM+WybctrBor7bO/RcCbLCQI6sHn6NtPBIWALYVJg=="],
 
     "@types/amqplib": ["@types/amqplib@0.10.8", "https://bnpm.byted.org/@types/amqplib/-/amqplib-0.10.8.tgz", { "dependencies": { "@types/node": "*" } }, "sha512-vtDp8Pk1wsE/AuQ8/Rgtm6KUZYqcnTgNvEHwzCkX8rL7AGsC6zqAfKAAJhUZXFhM/Pp++tbnUHiam/8vVpPztA=="],
 
