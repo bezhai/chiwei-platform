@@ -197,7 +197,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 	var bundleSecretName string
 	if len(bundleEnvs) > 0 {
 		bundleSecretName = name + "-config"
-		if err := d.applySecret(ctx, bundleSecretName, bundleEnvs); err != nil {
+		if err := applySecret(ctx, d.client, d.namespace, bundleSecretName, bundleEnvs); err != nil {
 			return fmt.Errorf("apply config secret: %w", err)
 		}
 	}
@@ -401,29 +401,6 @@ func (d *K8sDeployer) applyBaseService(ctx context.Context, release *domain.Rele
 	}
 	existing.Spec.Ports = svc.Spec.Ports
 	_, err = d.client.CoreV1().Services(d.namespace).Update(ctx, existing, metav1.UpdateOptions{})
-	return err
-}
-
-func (d *K8sDeployer) applySecret(ctx context.Context, name string, data map[string]string) error {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: d.namespace,
-			Labels:    map[string]string{"managed-by": "paas-engine"},
-		},
-		StringData: data,
-	}
-
-	existing, err := d.client.CoreV1().Secrets(d.namespace).Get(ctx, name, metav1.GetOptions{})
-	if errors.IsNotFound(err) {
-		_, err = d.client.CoreV1().Secrets(d.namespace).Create(ctx, secret, metav1.CreateOptions{})
-		return err
-	}
-	if err != nil {
-		return err
-	}
-	existing.StringData = data
-	_, err = d.client.CoreV1().Secrets(d.namespace).Update(ctx, existing, metav1.UpdateOptions{})
 	return err
 }
 

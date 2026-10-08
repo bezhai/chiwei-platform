@@ -7,29 +7,34 @@ import (
 )
 
 type Config struct {
-	HTTPPort        string
-	DatabaseURL     string
-	KubeconfigPath  string
-	DeployNamespace string
-	KanikoNamespace string
-	KanikoImage       string
-	RegistrySecret    string
-	RegistryMirrors   []string
-	InsecureRegistries []string
-	RegistryBase      string
-	KanikoCacheRepo   string
-	BuildHttpProxy    string
-	BuildNoProxy      string
-	APIToken          string
-	LokiURL           string
+	HTTPPort              string
+	DatabaseURL           string
+	KubeconfigPath        string
+	DeployNamespace       string
+	KanikoNamespace       string
+	KanikoImage           string
+	RegistrySecret        string
+	RegistryMirrors       []string
+	InsecureRegistries    []string
+	RegistryBase          string
+	KanikoCacheRepo       string
+	BuildHttpProxy        string
+	BuildNoProxy          string
+	APIToken              string
+	LokiURL               string
 	ChiweiDatabaseURL     string
 	ChiweiTestDatabaseURL string
 	SidecarImage          string
 
+	// 本实例所在泳道，deployer 给每个 Release 注入 LANE；不是经 Release 跑起来的进程为空。
+	Lane string
+	// kaniko 构建克隆用的 git 凭据 Secret 名为 <前缀>-<Lane>，建在 KanikoNamespace 里。
+	KanikoGitAuthSecretPrefix string
+
 	// CI Pipeline
 	CINamespace     string        // K8s namespace for CI test jobs
 	CIGitRepo       string        // monorepo git URL for CI test jobs
-	GitHubToken     string        // GitHub PAT for polling branch commits
+	GitHubToken     string        // GitHub PAT：GitPoller 轮询分支，kaniko 构建认证克隆
 	GitPollInterval time.Duration // git polling interval (default 60s)
 
 	// Lane 命名前缀强制校验的历史兼容白名单。CSV，例如 "dev,old-lane"。
@@ -39,24 +44,27 @@ type Config struct {
 
 func Load() *Config {
 	return &Config{
-		HTTPPort:        getEnv("HTTP_PORT", "8080"),
-		DatabaseURL:     getEnv("DATABASE_URL", "postgres://paas:paas@localhost:5432/paas_engine?sslmode=disable"),
-		KubeconfigPath:  getEnv("KUBECONFIG", ""),
-		DeployNamespace: getEnv("DEPLOY_NAMESPACE", "default"),
-		KanikoNamespace: getEnv("KANIKO_NAMESPACE", "paas-builds"),
-		KanikoImage:        getEnv("KANIKO_IMAGE", "harbor.local:30002/inner-bot/kaniko:latest"),
-		RegistrySecret:    getEnv("REGISTRY_SECRET", "harbor-secret"),
-		RegistryMirrors:    splitCSV(os.Getenv("REGISTRY_MIRRORS")),
-		InsecureRegistries: splitCSV(os.Getenv("INSECURE_REGISTRIES")),
-		RegistryBase:      getEnv("REGISTRY_BASE", "registry.example.com"),
-		KanikoCacheRepo:   os.Getenv("KANIKO_CACHE_REPO"),
-		BuildHttpProxy:    os.Getenv("BUILD_HTTP_PROXY"),
-		BuildNoProxy:      os.Getenv("BUILD_NO_PROXY"),
-		APIToken:          os.Getenv("API_TOKEN"),
-		LokiURL:           getEnv("LOKI_URL", "http://loki-gateway.monitoring.svc.cluster.local"),
+		HTTPPort:              getEnv("HTTP_PORT", "8080"),
+		DatabaseURL:           getEnv("DATABASE_URL", "postgres://paas:paas@localhost:5432/paas_engine?sslmode=disable"),
+		KubeconfigPath:        getEnv("KUBECONFIG", ""),
+		DeployNamespace:       getEnv("DEPLOY_NAMESPACE", "default"),
+		KanikoNamespace:       getEnv("KANIKO_NAMESPACE", "paas-builds"),
+		KanikoImage:           getEnv("KANIKO_IMAGE", "harbor.local:30002/inner-bot/kaniko:latest"),
+		RegistrySecret:        getEnv("REGISTRY_SECRET", "harbor-secret"),
+		RegistryMirrors:       splitCSV(os.Getenv("REGISTRY_MIRRORS")),
+		InsecureRegistries:    splitCSV(os.Getenv("INSECURE_REGISTRIES")),
+		RegistryBase:          getEnv("REGISTRY_BASE", "registry.example.com"),
+		KanikoCacheRepo:       os.Getenv("KANIKO_CACHE_REPO"),
+		BuildHttpProxy:        os.Getenv("BUILD_HTTP_PROXY"),
+		BuildNoProxy:          os.Getenv("BUILD_NO_PROXY"),
+		APIToken:              os.Getenv("API_TOKEN"),
+		LokiURL:               getEnv("LOKI_URL", "http://loki-gateway.monitoring.svc.cluster.local"),
 		ChiweiDatabaseURL:     os.Getenv("CHIWEI_DATABASE_URL"),
 		ChiweiTestDatabaseURL: os.Getenv("CHIWEI_TEST_DATABASE_URL"),
-		SidecarImage:      os.Getenv("SIDECAR_IMAGE"),
+		SidecarImage:          os.Getenv("SIDECAR_IMAGE"),
+
+		Lane:                      os.Getenv("LANE"),
+		KanikoGitAuthSecretPrefix: getEnv("KANIKO_GIT_AUTH_SECRET_PREFIX", "kaniko-git-auth"),
 
 		CINamespace:     getEnv("CI_NAMESPACE", "paas-builds"),
 		CIGitRepo:       os.Getenv("CI_GIT_REPO"),
@@ -98,4 +106,3 @@ func getEnv(key, defaultVal string) string {
 	}
 	return defaultVal
 }
-
