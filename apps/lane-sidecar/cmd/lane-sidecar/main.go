@@ -49,11 +49,8 @@ func main() {
 	srv := proxy.NewServer(fmt.Sprintf(":%d", *proxyPort), reg)
 
 	healthSrv := &http.Server{
-		Addr: fmt.Sprintf(":%d", *healthPort),
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("ok"))
-		}),
+		Addr:    fmt.Sprintf(":%d", *healthPort),
+		Handler: health(srv),
 	}
 	go healthSrv.ListenAndServe()
 
@@ -75,6 +72,21 @@ func main() {
 	}
 	healthSrv.Shutdown(shutdownCtx)
 	log.Println("[proxy] stopped")
+}
+
+// health answers the kubelet's probes: ok only while the proxy is serving.
+// The app container starts once this sidecar's startup probe passes, and
+// every connection it opens is redirected to the proxy, so ok must not come
+// before the proxy's listener is bound; it stops once shutdown begins.
+func health(srv *proxy.Server) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !srv.Serving() {
+			http.Error(w, "proxy not serving", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
 }
 
 func envOrDefault(key, fallback string) string {

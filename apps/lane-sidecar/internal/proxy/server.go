@@ -152,6 +152,14 @@ func (s *Server) Serve(ln net.Listener) error {
 	return err
 }
 
+// Serving reports whether the server has its listener bound and is taking
+// connections: false before Serve and again once Shutdown has begun.
+func (s *Server) Serving() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listener != nil && !s.closing
+}
+
 // Shutdown stops accepting connections, then waits for in-flight HTTP
 // requests and open tunnels to finish on their own. If ctx ends first, it
 // closes whatever is still open and returns ctx's error.
