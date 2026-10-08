@@ -115,12 +115,14 @@ async def test_unknown_channel_raises_instead_of_publishing_into_the_void():
 
 @pytest.mark.asyncio
 async def test_non_partitioned_queue_is_untouched():
-    wire(_NoChannelTrigger).to(Sink.mq("runtime_delayed_trigger_agent-service"))
+    # chat_response_lark is a route of its own in ALL_ROUTES (a channel's queue), not a
+    # channel-partitioned base: a Sink.mq on it publishes to that route as it is.
+    wire(_NoChannelTrigger).to(Sink.mq("chat_response_lark"))
 
     route = await _published_route(_NoChannelTrigger(key="k1"))
 
-    assert route.queue == "runtime_delayed_trigger_agent-service"
-    assert route.rk == "runtime.delayed_trigger.agent-service"
+    assert route.queue == "chat_response_lark"
+    assert route.rk == "chat.response.lark"
 
 
 @pytest.mark.asyncio

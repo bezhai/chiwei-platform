@@ -764,7 +764,7 @@ async def test_starting_an_app_does_not_create_the_record_table(test_db, monkeyp
     monkeypatch.setattr(engine_mod, "DATA_REGISTRY", set())
     async with test_db.begin() as conn:
         await conn.execute(text("DROP TABLE IF EXISTS message_record"))
-    await Runtime(app_name="world", migrate_schema_on_run=False).migrate_schema()
+    await Runtime(app_name="world").migrate_schema()
 
     async with test_db.begin() as conn:
         exists = (

@@ -5,8 +5,8 @@ Start: fresh in-process state (registries, messaging's module state, residents, 
 lock), that app's wiring executed again (``app.deployment.APP_WIRING``), the graph compiled
 (``prepare_for_run``), then durable consumers, messaging (inboxes, question queues, scheduled
 delivery) and debounce consumers. Not started: the interval clocks, the HTTP routes, the
-outbox dispatcher, the skill reload loop. Rounds run when the scenario calls them, and the
-skill registry is empty (no guides on hand), as it is wherever ``SKILLS_DIR`` has none.
+skill reload loop. Rounds run when the scenario calls them, and the skill registry is empty
+(no guides on hand), as it is wherever ``SKILLS_DIR`` has none.
 
 Stop mirrors the lifespan's shutdown. A restart is stop + start with the database, the broker's
 queues and the volume left as they were, which is what a new process finds.

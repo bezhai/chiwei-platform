@@ -16,7 +16,7 @@ name: dataflow grep gate
 #     agent  living  memory  nodes  skills  world
 #
 # 不在里面的是框架和基建：runtime / data / infra / api / capabilities / messaging /
-# domain / wiring / workers。加一个业务包就要把它加进每一处清单 —— 漏一处等于
+# domain / wiring。加一个业务包就要把它加进每一处清单 —— 漏一处等于
 # 那个包不受任何一条 gap 管，这正是 app/living/ 建起来之后发生过的事（22 个
 # 文件、一条 gap 都没扫到）。删一个包同理要从每一处摘掉，否则清单会慢慢变成
 # 一份指向空目录的名单，每条断言都因为扫不到东西而通过。
@@ -52,11 +52,11 @@ jobs:
         run: |
           set -e
           # trace_id_var / lane_var allowlist: runtime/{propagation,middleware,
-          # durable,sink_dispatch,emit,outbox,outbox_dispatcher}, api/middleware, infra/rabbitmq,
+          # durable,sink_dispatch}, api/middleware, infra/rabbitmq,
           # capabilities/* (HTTP capability injects trace into outbound calls).
           c=$(grep -rn "trace_id_var\|lane_var" apps/agent-service/app/ \
               2>/dev/null \
-              | grep -v "runtime/propagation.py\|runtime/middleware.py\|api/middleware.py\|infra/rabbitmq.py\|runtime/durable.py\|runtime/sink_dispatch.py\|runtime/emit.py\|runtime/outbox.py\|runtime/outbox_dispatcher.py\|capabilities/\|__pycache__\|/test_" \
+              | grep -v "runtime/propagation.py\|runtime/middleware.py\|api/middleware.py\|infra/rabbitmq.py\|runtime/durable.py\|runtime/sink_dispatch.py\|capabilities/\|__pycache__\|/test_" \
               | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c contextvar reads outside allowlist"; exit 1; }
           # nobody reads message.headers["trace_id"|"lane"] except propagation
@@ -123,7 +123,7 @@ jobs:
               2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c don't-catch comments in business code"; exit 1; }
           # Manual ack/nack/requeue=False belongs to the framework
-          # (runtime/* + workers/common). The DLQ admin tooling at
+          # (runtime/*). The DLQ admin tooling at
           # nodes/dlq_admin.py is the only business-facing exception
           # (the 6-step requeue protocol). Scan business dirs only.
           c=$(grep -rn "requeue=False\|\.nack(" \
@@ -167,8 +167,8 @@ jobs:
               "${NO_OWN_TABLES[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           c=$((c1 + c2))
           [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c direct session.* in business"; exit 1; }
-          # 下面这几条对**全部**业务包 exact-zero —— 它们说的是"别绕开 queries 层
-          # 和 outbox"，跟拥不拥有自己的表无关。
+          # 下面这几条对**全部**业务包 exact-zero —— 它们说的是"别绕开 queries 层"，
+          # 跟拥不拥有自己的表无关。
           # No `current_session` import in business (queries layer is internal)
           c=$(grep -rnE "from app\.runtime\.db import.*current_session|from app\.runtime import.*current_session" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
@@ -177,14 +177,6 @@ jobs:
           c=$(grep -rn "AsyncSession" "${BUSINESS[@]}" 2>/dev/null \
               | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c AsyncSession references in business"; exit 1; }
-          # transactional_emit was renamed; emit_tx via app.runtime is the public surface
-          c=$(grep -rn "transactional_emit" "${BUSINESS[@]}" 2>/dev/null \
-              | grep -v "__pycache__\|/test_" | wc -l) || true
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c transactional_emit in business"; exit 1; }
-          # Business must not import from app.runtime.outbox (use app.runtime.emit_tx)
-          c=$(grep -rn "from app\.runtime\.outbox import" "${BUSINESS[@]}" 2>/dev/null \
-              | grep -v "__pycache__\|/test_" | wc -l) || true
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c app.runtime.outbox imports in business"; exit 1; }
       - name: Gap 14 — no Redis primitives in business code
         shell: bash
         run: |

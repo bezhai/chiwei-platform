@@ -1,21 +1,18 @@
-"""Runtime: orchestrates startup for one deployment (one app).
+"""Runtime: schema migration and the source loops of one deployment (one app).
 
-A process boots ``Runtime(app_name=...).run()`` (default ``app_name``
-falls back to ``placement.DEFAULT_APP``). Responsibilities:
+``app.main``'s lifespan builds ``Runtime(app_name=...)`` and drives it:
 
   1. **Migrate schema** — introspect ``information_schema`` and apply
      the additive DDL plan for every registered ``Data`` class.
-  2. **Start durable consumers** — filtered to the wires whose consumers
-     are bound to this app (see ``start_consumers(app_name)``).
-  3. **Start source loops** — one background task per ``cron`` /
-     ``interval`` source attached to a wire whose consumers belong here.
-  4. **Keep running** — block until cancelled; on cancel, stop the
-     background tasks and the durable consumers.
+  2. **Start source loops** — one background task per ``cron`` /
+     ``interval`` / ``mq`` source attached to a wire whose consumers
+     belong here, plus a watchdog that exits the process on a fatal
+     loop error; ``stop_source_loops`` cancels them.
 
-What Runtime does *not* do: wiring imports. The caller (Phase 1's
-``app/workers/runtime_entry.py``) is responsible for importing the
-modules that register ``@node`` / ``wire()`` / ``bind()`` before calling
-``run()``. Runtime only sees whatever was already registered.
+What Runtime does *not* do: wiring imports, durable consumers,
+messaging. The lifespan imports the app's wiring (through
+``app.runtime.bootstrap.prepare_for_run``) and starts the consumers
+itself; Runtime only sees whatever was already registered.
 """
 
 from __future__ import annotations
@@ -28,14 +25,12 @@ from datetime import UTC, datetime
 from pydantic import ValidationError
 
 from app.runtime.data import DATA_REGISTRY
-from app.runtime.durable import start_consumers, stop_consumers
 from app.runtime.graph import compile_graph
 from app.runtime.lane_policy import (
     current_deployment_lane,
     time_sources_enabled_by_default,
 )
 from app.runtime.migrator import plan_migration
-from app.runtime.outbox_dispatcher import dispatcher_loop
 from app.runtime.placement import DEFAULT_APP, known_apps, nodes_for_app
 from app.runtime.source import SourceSpec
 from app.runtime.wire import WireSpec
@@ -44,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 class Runtime:
-    """Single-process entrypoint for a dataflow deployment.
+    """Schema migration and source loops for one dataflow deployment.
 
     ``app_name`` determines which subset of the wired graph this process
     serves. Resolution order:
@@ -52,21 +47,15 @@ class Runtime:
       1. explicit ``app_name=`` kwarg,
       2. ``APP_NAME`` environment variable,
       3. ``placement.DEFAULT_APP`` ("agent-service").
-
-    ``migrate_schema_on_run`` defaults to ``True``; set ``False`` for
-    tests that already control the schema (e.g. via the ``test_db``
-    fixture with a pre-migrated table) or that don't need DB at all.
     """
 
     def __init__(
         self,
         app_name: str | None = None,
         *,
-        migrate_schema_on_run: bool = True,
         time_sources_enabled: bool | None = None,
     ) -> None:
         self.app_name = app_name or os.getenv("APP_NAME") or DEFAULT_APP
-        self._migrate_schema_on_run = migrate_schema_on_run
         self._time_sources_enabled = (
             time_sources_enabled_by_default()
             if time_sources_enabled is None
@@ -74,12 +63,11 @@ class Runtime:
         )
         self._source_tasks: list[asyncio.Task] = []
         self._stop_event: asyncio.Event | None = None
-        # First fatal error a source loop hit (so ``run()`` can re-raise
-        # after cleanup). Any extra errors are logged but not saved —
+        # First fatal error a source loop hit (the watchdog exits the
+        # process on it). Any extra errors are logged but not saved —
         # reporting the first one is enough to fail the pod fast.
         self._source_error: BaseException | None = None
         self._watchdog_task: asyncio.Task | None = None
-        self._outbox_dispatcher_task: asyncio.Task | None = None
         # Fire-and-forget emit tasks spawned by cron / interval source loops.
         # The time-advancing loop投出心跳即进下一拍、绝不同步等下游——下游一轮挂
         # 死不能堵停后续心跳（world 永睡的真机机制）。每条 emit 跑在独立后台
@@ -130,13 +118,8 @@ class Runtime:
         # framework state, not Data, and aren't tracked by plan_migration.
         from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
         from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
-        from app.runtime.outbox import RUNTIME_OUTBOX_DDL
 
-        runtime_internal_stmts = (
-            list(RUNTIME_INFLIGHT_DDL)
-            + list(RUNTIME_DLQ_AUDIT_DDL)
-            + list(RUNTIME_OUTBOX_DDL)
-        )
+        runtime_internal_stmts = list(RUNTIME_INFLIGHT_DDL) + list(RUNTIME_DLQ_AUDIT_DDL)
 
         if not plan.stmts and not runtime_internal_stmts:
             logger.info("runtime: schema migration plan is empty, nothing to do")
@@ -164,67 +147,6 @@ class Runtime:
             len(runtime_internal_stmts),
         )
 
-    async def run(self) -> None:
-        """Boot the runtime and block until cancelled."""
-        if self._migrate_schema_on_run:
-            await self.migrate_schema()
-        # Register the runtime-internal delayed-trigger wire BEFORE
-        # start_consumers (which calls compile_graph and freezes the
-        # WIRING_REGISTRY snapshot). Skip silently when the configured
-        # APP_NAME doesn't have a trigger route — emit_delayed durable
-        # publishes will then fail-fast with a clear error rather than
-        # crashing runtime startup.
-        from app.infra.rabbitmq import KNOWN_APPS_FOR_DELAYED_TRIGGER
-        from app.runtime.delayed_trigger import register_runtime_trigger_wire
-
-        if self.app_name in KNOWN_APPS_FOR_DELAYED_TRIGGER:
-            register_runtime_trigger_wire(self.app_name)
-        else:
-            logger.info(
-                "runtime: app=%s has no delayed trigger route; "
-                "emit_delayed(durability='durable') will be unavailable",
-                self.app_name,
-            )
-        await start_consumers(app_name=self.app_name)
-        # Messaging (this app's inboxes + the lane's scheduled delivery) runs
-        # wherever a broker is configured — same condition, same place as the
-        # FastAPI entry in app.main, so the two entries can't drift apart.
-        from app.infra import config
-        from app.messaging import lifecycle as messaging
-
-        messaging_on = bool(config.settings.rabbitmq_url)
-        if messaging_on:
-            await messaging.start_messaging()
-        # Outbox dispatcher needs DB. Tests opting out via
-        # migrate_schema_on_run=False are signalling "no DB in this
-        # process" and must also opt out of the dispatcher.
-        if self._migrate_schema_on_run:
-            self._outbox_dispatcher_task = asyncio.create_task(
-                dispatcher_loop(), name="outbox_dispatcher"
-            )
-        await self.start_source_loops()
-        try:
-            assert self._stop_event is not None
-            await self._stop_event.wait()
-        finally:
-            # Cancel the dispatcher before stopping consumers so any
-            # in-flight emit() the dispatcher started can still complete
-            # against a live wire/consumer. Same teardown order as
-            # main.py lifespan.
-            if self._outbox_dispatcher_task is not None:
-                self._outbox_dispatcher_task.cancel()
-                try:
-                    await self._outbox_dispatcher_task
-                except asyncio.CancelledError:
-                    pass
-            await self.stop_source_loops()
-            if messaging_on:
-                await messaging.stop_messaging()
-            await stop_consumers()
-
-        if self._source_error is not None:
-            raise self._source_error
-
     # ------------------------------------------------------------------
     # source loops
     # ------------------------------------------------------------------
@@ -249,10 +171,10 @@ class Runtime:
             ) from e
 
     def _record_source_error(self, name: str, e: BaseException) -> None:
-        """Record the first fatal source-loop error and wake ``run()``.
+        """Record the first fatal source-loop error and wake the watchdog.
 
-        Subsequent errors are logged only — the first one is what we
-        re-raise after cleanup.
+        Subsequent errors are logged only — the first one is what the
+        watchdog reports before it exits the process.
         """
         logger.exception("runtime: source loop %s raised %r", name, e)
         if self._source_error is None:
@@ -312,8 +234,8 @@ class Runtime:
         source loop hits a fatal error, watchdog calls ``os._exit(1)``
         so PaaS restarts the pod.
 
-        Migrate / durable consumer / blocking 不在本方法范围 —— 调用方
-        （main.py lifespan 或 Runtime.run()）自己负责。
+        Migrate / durable consumer 不在本方法范围 —— 调用方（main.py
+        lifespan）自己负责。
         """
         if self._source_tasks or self._watchdog_task is not None:
             raise RuntimeError(
@@ -389,14 +311,7 @@ class Runtime:
         )
 
     async def stop_source_loops(self) -> None:
-        """Cancel + await every source task + watchdog (explicit cancel).
-
-        Also drains the in-process scheduled task pool (Gap 9.2
-        best_effort emit_delayed): pending best_effort tasks would
-        otherwise leak into the next process instance.
-        """
-        from app.runtime.scheduled import cancel_all_scheduled
-
+        """Cancel + await every source task + watchdog (explicit cancel)."""
         for t in self._source_tasks:
             t.cancel()
         if self._watchdog_task is not None:
@@ -425,7 +340,6 @@ class Runtime:
         self._fire_and_forget_emits.clear()
         self._watchdog_task = None
         self._stop_event = None
-        cancel_all_scheduled()
 
     async def _watch_source_error(self) -> None:
         """Wait for `_stop_event`; on fire (with `_source_error` set),
@@ -453,7 +367,7 @@ class Runtime:
         ``croniter.get_next`` is absolute-time based, so drift is
         naturally bounded to one tick. Fatal errors (bad payload shape,
         emit failure) surface via ``_source_error`` + ``_stop_event`` so
-        ``run()`` can re-raise and the pod exits non-zero.
+        the watchdog exits the pod non-zero.
 
         Each tick auto-generates ``trace_id = f"cron:<expr>:<uuid8>"`` and
         binds it to the contextvar for the duration of ``emit()``. Without
@@ -516,7 +430,7 @@ class Runtime:
         skew the cadence.
 
         Fatal errors surface via ``_source_error`` + ``_stop_event`` so
-        ``run()`` re-raises and the pod exits non-zero.
+        the watchdog exits the pod non-zero.
 
         Each tick auto-generates ``trace_id = f"interval:<seconds>s:<uuid8>"``
         bound for the duration of ``emit()``. See ``_source_loop_cron`` for
@@ -586,7 +500,7 @@ class Runtime:
           frames don't loop). Business exceptions from the node bubble
           out of ``process`` so aio-pika nacks and the DLX catches them;
         * shutdown: the outer ``asyncio.Task`` is cancelled by
-          ``run()``'s ``finally``. ``CancelledError`` unwinds both the
+          ``stop_source_loops``. ``CancelledError`` unwinds both the
           ``async for`` and the ``queue.iterator()`` context cleanly;
           no extra consumer-tag tracking needed.
         """
@@ -696,8 +610,7 @@ class Runtime:
                         # without requeue -> aio-pika dead-letters via
                         # DLX. We let the raise escape *process* but
                         # catch it right after so one bad @node call
-                        # never terminates the outer loop (equivalent to
-                        # ``@mq_error_handler`` in legacy workers).
+                        # never terminates the outer loop.
                         logger.info(
                             "mq source %s: received frame (%d bytes)",
                             actual_queue,

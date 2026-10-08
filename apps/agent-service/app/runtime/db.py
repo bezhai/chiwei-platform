@@ -1,9 +1,8 @@
 """DB session capability — Phase 7d Gap 13.
 
-业务永远不直接拿 session。三个对外 API：
+业务永远不直接拿 session。两个对外 API：
 
   - ``async with tx():``  — 表达「这几行原子」
-  - ``await emit_tx(data)``  — 在 tx 内追加 outbox row（强制：tx 外调用 raise）
   - ``current_session()``  — query 函数内部用；业务区禁止 import
 
 session 走 contextvar。**AsyncSession 单 session 单 connection 不支持并发使用，
@@ -23,8 +22,6 @@ from contextvars import ContextVar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.data.session import get_session as _get_session_internal
-from app.runtime.data import Data
-from app.runtime.outbox import OutboxEmitter
 
 logger = logging.getLogger(__name__)
 
@@ -65,19 +62,6 @@ async def tx() -> AsyncIterator[None]:
                     "external IO inside tx block",
                     elapsed, _TX_SLOW_THRESHOLD_S,
                 )
-
-
-async def emit_tx(data: Data) -> None:
-    """Append an outbox row in the current tx. Raises if not in a tx.
-
-    Why strict: outbox MUST commit atomically with business writes.
-    Allowing emit_tx outside tx would let the row sneak into a one-shot
-    transaction that doesn't include the caller's business writes —
-    exactly the bug Gap 8 outbox closed.
-    """
-    s = current_session()
-    emitter = OutboxEmitter(s)
-    await emitter.append(data)
 
 
 @asynccontextmanager

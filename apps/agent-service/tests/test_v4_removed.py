@@ -125,13 +125,11 @@ def test_v4_models_removed():
 
 
 def test_mq_routes_no_v4_vectorize():
-    from app.infra.rabbitmq import ALL_ROUTES, KNOWN_APPS_FOR_DELAYED_TRIGGER
+    from app.infra.rabbitmq import ALL_ROUTES
 
     queues = {r.queue for r in ALL_ROUTES}
     assert "memory_fragment_vectorize" not in queues
     assert "memory_abstract_vectorize" not in queues
-    # vectorize-worker 已无任何节点，runtime_delayed_trigger 队列不再声明
-    assert KNOWN_APPS_FOR_DELAYED_TRIGGER == ["agent-service"]
 
 
 def test_wiring_package_drops_v4_modules():

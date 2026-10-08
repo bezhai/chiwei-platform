@@ -1,15 +1,8 @@
 """bootstrap.py: load_dataflow_graph / declare_durable_topology / prepare_for_run.
 
-prepare_for_run is the unified startup helper both entrypoints (FastAPI
-lifespan and worker runtime_entry) call so they share the same boot
-contract: (1) load + compile the graph, (2) register the runtime-internal
-delayed-trigger wire for this app, (3) optionally pre-declare durable
-topology for producer-side processes. Without this helper, two entries
-each open-coded these phases in slightly different orders and forgot to
-keep them in sync (e.g. main.py's lifespan ran load_dataflow_graph BEFORE
-register_runtime_trigger_wire, but neither Runtime.run nor runtime_entry
-called declare_durable_topology — so the FastAPI process needed extra
-boilerplate that worker processes silently skipped).
+prepare_for_run is the startup helper ``app.main``'s lifespan calls:
+(1) load + compile the graph, (2) optionally pre-declare durable topology
+for a process that publishes.
 """
 
 from __future__ import annotations
@@ -136,66 +129,15 @@ async def test_declare_durable_topology_declares_each_route():
 
 
 # ---------------------------------------------------------------------------
-# prepare_for_run: unified startup contract for FastAPI + worker entries.
+# prepare_for_run: the lifespan's startup helper.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_prepare_for_run_loads_graph_then_registers_trigger_wire():
-    """prepare_for_run() runs Phase 1 (load_dataflow_graph) BEFORE Phase 1.5
-    (register_runtime_trigger_wire). Reverse order would let
-    compile_graph snapshot a registry without the trigger wire — exactly
-    the boot-order bug both entrypoints used to open-code by hand.
-    """
-    calls: list[str] = []
-
-    def _fake_load(app_name: str) -> object:
-        calls.append(f"load_dataflow_graph:{app_name}")
-        return MagicMock()
-
-    def _fake_register(app: str) -> None:
-        calls.append(f"register_runtime_trigger_wire:{app}")
-
-    with patch("app.runtime.bootstrap.load_dataflow_graph", _fake_load), \
-         patch(
-             "app.runtime.delayed_trigger.register_runtime_trigger_wire",
-             _fake_register,
-         ):
-        await prepare_for_run("agent-service")
-
-    assert calls == [
-        "load_dataflow_graph:agent-service",
-        "register_runtime_trigger_wire:agent-service",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_prepare_for_run_skips_trigger_wire_for_unknown_app():
-    """Apps outside KNOWN_APPS_FOR_DELAYED_TRIGGER must not call
-    register_runtime_trigger_wire (which would raise) — they should
-    fall through silently, same as Runtime.run does today.
-    """
-    register_calls: list[str] = []
-
-    def _fake_register(app: str) -> None:
-        register_calls.append(app)
-
-    with patch("app.runtime.bootstrap.load_dataflow_graph", MagicMock()), \
-         patch(
-             "app.runtime.delayed_trigger.register_runtime_trigger_wire",
-             _fake_register,
-         ):
-        await prepare_for_run("some-other-service")
-
-    assert register_calls == []
-
-
-@pytest.mark.asyncio
 async def test_prepare_for_run_declares_topology_when_requested():
-    """The FastAPI lifespan is a producer (proactive -> a downstream worker),
-    so it must pre-declare durable routes before publishing. Worker
-    entries already declare their own consumer routes via
-    start_consumers and don't need this. Flag controls it.
+    """A process that publishes must pre-declare durable routes before
+    publishing; the lifespan asks for it when a broker is configured.
+    Flag controls it.
     """
     declare_called: list[bool] = []
 
@@ -203,10 +145,6 @@ async def test_prepare_for_run_declares_topology_when_requested():
         declare_called.append(True)
 
     with patch("app.runtime.bootstrap.load_dataflow_graph", MagicMock()), \
-         patch(
-             "app.runtime.delayed_trigger.register_runtime_trigger_wire",
-             MagicMock(),
-         ), \
          patch(
              "app.runtime.bootstrap.declare_durable_topology",
              _fake_declare,
@@ -218,8 +156,8 @@ async def test_prepare_for_run_declares_topology_when_requested():
 
 @pytest.mark.asyncio
 async def test_prepare_for_run_skips_topology_by_default():
-    """Default declare_topology=False — worker entries should not force a
-    broker connection at this phase.
+    """Default declare_topology=False — a process without a broker must
+    not be forced to connect at this phase.
     """
     declare_called: list[bool] = []
 
@@ -227,10 +165,6 @@ async def test_prepare_for_run_skips_topology_by_default():
         declare_called.append(True)
 
     with patch("app.runtime.bootstrap.load_dataflow_graph", MagicMock()), \
-         patch(
-             "app.runtime.delayed_trigger.register_runtime_trigger_wire",
-             MagicMock(),
-         ), \
          patch(
              "app.runtime.bootstrap.declare_durable_topology",
              _fake_declare,

@@ -7,15 +7,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.infra.rabbitmq import (
+    _LANE_FALLBACK_TTL_MS,
+    _NON_PROD_EXPIRES_MS,
     ALL_ROUTES,
     CHAT_RESPONSE,
-    DELAYED_TRIGGER_ROUTES,
     DLX_NAME,
     EXCHANGE_NAME,
     RECALL,
     Route,
-    _LANE_FALLBACK_TTL_MS,
-    _NON_PROD_EXPIRES_MS,
     _build_queue_args,
     _lane_rk,
     current_lane,
@@ -205,25 +204,14 @@ class TestRouteConstants:
             CHAT_RESPONSE,
             RECALL,
             *CHANNEL_ROUTES,
-            *DELAYED_TRIGGER_ROUTES,
         }
         assert set(ALL_ROUTES) == expected
 
-    def test_all_routes_match_business_plus_delayed_trigger(self):
+    def test_all_routes_match_business_routes(self):
         # 2 business routes + 每个 channel-partitioned base × 每个已知 channel
-        # + one runtime_delayed_trigger route per KNOWN_APPS_FOR_DELAYED_TRIGGER
-        # entry (Phase 7a Gap 9.1.2).
         from app.infra.rabbitmq import CHANNEL_ROUTES
 
-        assert len(ALL_ROUTES) == 2 + len(CHANNEL_ROUTES) + len(DELAYED_TRIGGER_ROUTES)
-
-    def test_delayed_trigger_only_for_agent_service(self):
-        # vectorize-worker 已无任何节点，runtime_delayed_trigger 队列只剩
-        # agent-service 一条。
-        from app.infra.rabbitmq import KNOWN_APPS_FOR_DELAYED_TRIGGER
-
-        assert KNOWN_APPS_FOR_DELAYED_TRIGGER == ["agent-service"]
-        assert len(DELAYED_TRIGGER_ROUTES) == 1
+        assert len(ALL_ROUTES) == 2 + len(CHANNEL_ROUTES)
 
     def test_each_route_has_queue_and_rk(self):
         for route in ALL_ROUTES:

@@ -51,30 +51,18 @@ def setup_function() -> None:
     seen_ctx.clear()
 
 
-async def _run_runtime() -> tuple[Runtime, asyncio.Task]:
-    """Start a Runtime with schema migration off; return (rt, task)."""
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
-    task = asyncio.create_task(rt.run())
-    # Yield so the engine gets past start_consumers() + dispatcher setup
-    # before the test starts publishing.
-    for _ in range(20):
-        if rt._stop_event is not None and rt._source_tasks:
-            break
-        await asyncio.sleep(0.05)
-    return rt, task
+async def _run_runtime() -> Runtime:
+    """Start a Runtime's source loops; return it."""
+    rt = Runtime(app_name="agent-service")
+    await rt.start_source_loops()
+    # Yield so the MQ loop gets its consumer on the queue before the test
+    # starts publishing.
+    await asyncio.sleep(0.2)
+    return rt
 
 
-async def _stop_runtime(rt: Runtime, task: asyncio.Task) -> None:
-    if rt._stop_event is not None:
-        rt._stop_event.set()
-    try:
-        await asyncio.wait_for(task, timeout=5.0)
-    except TimeoutError:
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+async def _stop_runtime(rt: Runtime) -> None:
+    await rt.stop_source_loops()
 
 
 async def _wait_until(predicate, timeout: float = 5.0) -> bool:
@@ -106,7 +94,7 @@ async def test_mq_source_consumes_and_invokes_node(rabbitmq):
     route = Route("mqsrc_basic", "mqsrc_basic.rk")
     await mq.declare_route(route)
 
-    rt, task = await _run_runtime()
+    rt = await _run_runtime()
     try:
         # Headers exercise trace/lane propagation on the consumer side.
         await mq.publish(
@@ -131,7 +119,7 @@ async def test_mq_source_consumes_and_invokes_node(rabbitmq):
         # Sanity check: the engine is consuming the lane-aware queue name.
         assert lane_queue("mqsrc_basic", current_lane()) == "mqsrc_basic"
     finally:
-        await _stop_runtime(rt, task)
+        await _stop_runtime(rt)
 
 
 @pytest.mark.integration
@@ -156,7 +144,7 @@ async def test_mq_source_generates_fallback_trace_id_when_header_missing(
     route = Route("mqsrc_no_trace", "mqsrc_no_trace.rk")
     await mq.declare_route(route)
 
-    rt, task = await _run_runtime()
+    rt = await _run_runtime()
     try:
         # NO headers — mirror channel-server's current publish shape.
         await mq.publish(route, {"message_id": "x1"})
@@ -174,7 +162,7 @@ async def test_mq_source_generates_fallback_trace_id_when_header_missing(
         # messages as prod).
         assert lane is None
     finally:
-        await _stop_runtime(rt, task)
+        await _stop_runtime(rt)
 
 
 @pytest.mark.integration
@@ -205,7 +193,7 @@ async def test_mq_source_binds_lane_from_header(rabbitmq):
     route = Route("mqsrc_lane_hdr", "mqsrc_lane_hdr.rk")
     await mq.declare_route(route)
 
-    rt, task = await _run_runtime()
+    rt = await _run_runtime()
     try:
         await mq.publish(
             route,
@@ -222,7 +210,7 @@ async def test_mq_source_binds_lane_from_header(rabbitmq):
             f"lane header must reach lane_var inside the node; got {lane!r}"
         )
     finally:
-        await _stop_runtime(rt, task)
+        await _stop_runtime(rt)
 
 
 @pytest.mark.integration
@@ -248,7 +236,7 @@ async def test_mq_source_keeps_lane_when_trace_id_header_missing(rabbitmq):
     route = Route("mqsrc_lane_no_trace", "mqsrc_lane_no_trace.rk")
     await mq.declare_route(route)
 
-    rt, task = await _run_runtime()
+    rt = await _run_runtime()
     try:
         await mq.publish(route, {"message_id": "l2"}, headers={"lane": "ppe-y"})
 
@@ -263,7 +251,7 @@ async def test_mq_source_keeps_lane_when_trace_id_header_missing(rabbitmq):
             f"lane must survive the trace_id fallback rebuild; got {lane!r}"
         )
     finally:
-        await _stop_runtime(rt, task)
+        await _stop_runtime(rt)
 
 
 @pytest.mark.integration
@@ -281,7 +269,7 @@ async def test_mq_source_dlqs_decode_failures(rabbitmq, caplog):
     route = Route("mqsrc_bad", "mqsrc_bad.rk")
     await mq.declare_route(route)
 
-    rt, task = await _run_runtime()
+    rt = await _run_runtime()
     try:
         # Publish a bad frame directly through the exchange so the engine
         # sees raw bytes, not a dict-encoded body.
@@ -315,7 +303,7 @@ async def test_mq_source_dlqs_decode_failures(rabbitmq, caplog):
             f"{[r.getMessage() for r in caplog.records]}"
         )
     finally:
-        await _stop_runtime(rt, task)
+        await _stop_runtime(rt)
 
 
 @pytest.mark.integration
@@ -338,7 +326,7 @@ async def test_mq_source_lane_aware_queue_name(rabbitmq, monkeypatch):
     # lane-scoped binding + TTL fallback automatically.
     await mq.declare_route(route)
 
-    rt, task = await _run_runtime()
+    rt = await _run_runtime()
     try:
         await mq.publish(route, {"message_id": "lane-1"})
 
@@ -346,7 +334,7 @@ async def test_mq_source_lane_aware_queue_name(rabbitmq, monkeypatch):
         assert ok, "lane-scoped queue delivery never arrived"
         assert received[0].message_id == "lane-1"
     finally:
-        await _stop_runtime(rt, task)
+        await _stop_runtime(rt)
 
 
 @pytest.mark.integration
@@ -369,7 +357,7 @@ async def test_mq_source_business_error_does_not_poison_loop(rabbitmq):
     route = Route("mqsrc_err", "mqsrc_err.rk")
     await mq.declare_route(route)
 
-    rt, task = await _run_runtime()
+    rt = await _run_runtime()
     try:
         await mq.publish(route, {"message_id": "boom"})
         await mq.publish(route, {"message_id": "good"})
@@ -381,7 +369,7 @@ async def test_mq_source_business_error_does_not_poison_loop(rabbitmq):
         # Allow small margin in case of a single redelivery cycle.
         assert call_count["n"] <= 3
     finally:
-        await _stop_runtime(rt, task)
+        await _stop_runtime(rt)
 
 
 # ---------------------------------------------------------------------------

@@ -12,8 +12,7 @@ Owns runtime semantics and must be changed only with a spec reference.
 - `apps/agent-service/app/runtime/**`
 - `apps/agent-service/app/wiring/**`
 - `apps/agent-service/app/deployment.py`
-- runtime entrypoints: `apps/agent-service/app/main.py`,
-  `apps/agent-service/app/workers/runtime_entry.py`
+- runtime entrypoint: `apps/agent-service/app/main.py`
 - framework contracts, governance docs, and CI gates under `docs/guides/`,
   `docs/governance/`, and `.github/workflows/`
 
@@ -50,13 +49,9 @@ new runtime behavior, extend [A] first instead of bypassing the framework.
 
 - Any PR touching [A] must cite a markdown spec in the PR body with:
   `Framework-Layer-Spec: docs/.../*.md`.
-- [A] changes must cover both FastAPI lifespan and worker `Runtime.run()` when
-  the behavior affects startup, source loops, consumers, or emit semantics.
 - Single-output `@node` functions return `Data` and let the wrapper auto-emit.
 - Per-key fan-out uses `wire(Data).fan_out_per(extractor)`, not hand-written
   persona loops.
-- DB mutation followed by emit uses `emit_tx` / outbox semantics, not
-  commit-then-emit in business code.
 - Manual `await emit(...)` in business code is allowed only for non-node code,
   genuinely multiple dynamic outputs, streaming segments, or deliberate
   fire-and-forget side effects with local error handling.

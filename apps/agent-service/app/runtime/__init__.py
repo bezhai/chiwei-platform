@@ -12,8 +12,8 @@ needed to write a node and may change without notice.
 """
 
 from app.runtime.data import AdminOnly, Data, DedupKey, Key, Version
-from app.runtime.db import emit_tx, tx
-from app.runtime.emit import emit, emit_at, emit_delayed
+from app.runtime.db import tx
+from app.runtime.emit import emit
 from app.runtime.errors import DuplicateData, NeedsReview
 from app.runtime.node import node
 from app.runtime.placement import bind
@@ -34,9 +34,6 @@ __all__ = [
     "Source",
     "bind",
     "emit",
-    "emit_at",
-    "emit_delayed",
-    "emit_tx",
     "node",
     "query",
     "tx",

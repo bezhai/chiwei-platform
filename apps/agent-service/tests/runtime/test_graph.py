@@ -238,7 +238,7 @@ def test_compile_graph_accepts_wire_with_sink_mq_in_all_routes():
     @node
     async def f(m: M) -> None: ...
 
-    wire(M).to(f, Sink.mq("runtime_delayed_trigger_agent-service"))
+    wire(M).to(f, Sink.mq("chat_response_lark"))
 
     g = compile_graph()
     assert any(s.kind == "mq" for w in g.wires for s in w.sinks)

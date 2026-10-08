@@ -53,7 +53,7 @@ async def create_schema(engine) -> None:
     * the SQLAlchemy models (``ensure_business_schema``),
     * every ``Data`` class defined under ``app`` (the runtime migrator; both apps' wiring is
       imported so all of them are defined),
-    * the runtime's own tables (inflight, dlq audit, outbox),
+    * the runtime's own tables (inflight, dlq audit),
     * the two tables channel-server owns that her phone reads (``bot_config``,
       ``common_bot_presence``; same DDL as ``tests/living``).
     """
@@ -64,7 +64,6 @@ async def create_schema(engine) -> None:
     from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
     from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
     from app.runtime.migrator import plan_migration
-    from app.runtime.outbox import RUNTIME_OUTBOX_DDL
     from tests.living.conftest import _BOT_CONFIG_DDL, _BOT_PRESENCE_DDL
 
     data_classes = sorted(
@@ -76,7 +75,7 @@ async def create_schema(engine) -> None:
         await conn.run_sync(Base.metadata.create_all)
         for stmt in plan.stmts:
             await conn.execute(text(stmt.sql))
-        for ddl in (*RUNTIME_INFLIGHT_DDL, *RUNTIME_DLQ_AUDIT_DDL, *RUNTIME_OUTBOX_DDL):
+        for ddl in (*RUNTIME_INFLIGHT_DDL, *RUNTIME_DLQ_AUDIT_DDL):
             await conn.execute(text(ddl))
         await conn.execute(text(_BOT_CONFIG_DDL))
         await conn.execute(text(_BOT_PRESENCE_DDL))

@@ -8,8 +8,10 @@ per-module unit tests:
     consumers see them without a RabbitMQ roundtrip);
   - ``nodes_for_app`` filtering keeps this-app runtimes from starting
     source loops for other-app wires;
-  - the cron/interval payload contract is enforced at startup (missing
-    ``ts`` field raises rather than silently dropping ticks).
+  - an app nobody bound a node to fails to start its loops.
+
+The payload contract (a missing ``ts`` field is fatal) is covered in
+``test_engine_source_error.py``.
 """
 
 from __future__ import annotations
@@ -36,12 +38,6 @@ class OtherTick(Data):
     ts: Annotated[str, Key]
 
 
-class BadTick(Data):
-    """Lacks a ``ts`` field — cron/interval payload construction must fail."""
-
-    tid: Annotated[str, Key]
-
-
 agent_counter: list[Tick] = []
 worker_counter: list[OtherTick] = []
 
@@ -56,11 +52,6 @@ async def count_other_ticks(t: OtherTick) -> None:
     worker_counter.append(t)
 
 
-@node
-async def bad_consumer(b: BadTick) -> None:  # pragma: no cover - never fires
-    raise AssertionError("bad_consumer should not be reachable")
-
-
 def setup_function() -> None:
     clear_wiring()
     clear_bindings()
@@ -70,22 +61,12 @@ def setup_function() -> None:
 
 
 async def _run_for(runtime: Runtime, seconds: float) -> None:
-    """Start ``runtime.run()`` as a task, wait ``seconds``, then cancel."""
-    task = asyncio.create_task(runtime.run())
+    """Start the runtime's source loops, wait ``seconds``, then stop them."""
+    await runtime.start_source_loops()
     try:
         await asyncio.sleep(seconds)
     finally:
-        # Trigger the engine's internal stop path.
-        if runtime._stop_event is not None:
-            runtime._stop_event.set()
-        try:
-            await asyncio.wait_for(task, timeout=2.0)
-        except TimeoutError:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        await runtime.stop_source_loops()
 
 
 async def test_runtime_fires_interval_consumer() -> None:
@@ -97,7 +78,7 @@ async def test_runtime_fires_interval_consumer() -> None:
     """
     wire(Tick).to(count_ticks).from_(Source.interval(seconds=0.1))
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await _run_for(rt, seconds=1.0)
 
     assert len(agent_counter) >= 3, (
@@ -114,7 +95,7 @@ async def test_runtime_skips_other_app_source_loops() -> None:
     bind(count_other_ticks).to_app("vectorize-worker")
     # count_ticks stays unbound -> default "agent-service".
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await _run_for(rt, seconds=0.3)
 
     assert len(agent_counter) >= 2, (
@@ -124,20 +105,6 @@ async def test_runtime_skips_other_app_source_loops() -> None:
         "vectorize-worker wire must not fire in the agent-service runtime; "
         f"got {len(worker_counter)} unexpected invocations"
     )
-
-
-async def test_runtime_rejects_payload_without_ts_field() -> None:
-    """A cron/interval source wired to a Data class without a ``ts``
-    field must bubble a RuntimeError out of ``Runtime.run()`` — silent
-    drops or warning-only exits would leave the pod "healthy" with a
-    dead source loop.
-    """
-    wire(BadTick).to(bad_consumer).from_(Source.interval(seconds=0.05))
-
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
-
-    with pytest.raises(RuntimeError, match="requires a 'ts: str' field"):
-        await asyncio.wait_for(rt.run(), timeout=2.0)
 
 
 async def test_runtime_rejects_unknown_app_name() -> None:
@@ -151,51 +118,7 @@ async def test_runtime_rejects_unknown_app_name() -> None:
     # known_apps() now = {"agent-service", "vectorize-worker"}.
     # "totally-not-a-real-app" is not in there.
 
-    rt = Runtime(app_name="totally-not-a-real-app", migrate_schema_on_run=False)
+    rt = Runtime(app_name="totally-not-a-real-app")
 
     with pytest.raises(RuntimeError, match="totally-not-a-real-app.*known"):
-        await rt.run()
-
-
-async def test_runtime_runs_messaging_when_a_broker_is_configured(monkeypatch) -> None:
-    """worker 入口跟 FastAPI 入口一样启停通信机制：两个入口不能一个有一个没有。"""
-    import dataclasses
-    from unittest.mock import AsyncMock
-
-    from app.infra import config
-    from app.messaging import lifecycle
-
-    calls: list[str] = []
-    monkeypatch.setattr(
-        config, "settings", dataclasses.replace(config.settings, rabbitmq_url="amqp://x")
-    )
-    monkeypatch.setattr(
-        lifecycle, "start_messaging", AsyncMock(side_effect=lambda: calls.append("start"))
-    )
-    monkeypatch.setattr(
-        lifecycle, "stop_messaging", AsyncMock(side_effect=lambda: calls.append("stop"))
-    )
-
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
-    await _run_for(rt, seconds=0.2)
-
-    assert calls == ["start", "stop"]
-
-
-async def test_runtime_leaves_messaging_alone_without_a_broker(monkeypatch) -> None:
-    import dataclasses
-    from unittest.mock import AsyncMock
-
-    from app.infra import config
-    from app.messaging import lifecycle
-
-    monkeypatch.setattr(
-        config, "settings", dataclasses.replace(config.settings, rabbitmq_url=None)
-    )
-    start = AsyncMock()
-    monkeypatch.setattr(lifecycle, "start_messaging", start)
-
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
-    await _run_for(rt, seconds=0.1)
-
-    start.assert_not_called()
+        await rt.start_source_loops()

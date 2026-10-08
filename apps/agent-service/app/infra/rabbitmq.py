@@ -158,41 +158,6 @@ def channel_route_for_payload(base_queue: str, payload: Any) -> Route:
     return channel_route_for(base_queue, channel)
 
 
-# runtime_delayed_trigger queues (Phase 7a Gap 9.1.2): one per origin
-# APP_NAME so an envelope published from agent-service is consumed only
-# by an agent-service runtime (preserving emit()'s in-process / cross-
-# process fan-out decisions which depend on APP_NAME). Lane queues use
-# lane_fallback=False so a feat-x lane envelope never spills into prod.
-# （vectorize-worker 随 v4 记忆整机删除，已无任何节点，不再注册。）
-KNOWN_APPS_FOR_DELAYED_TRIGGER = ["agent-service"]
-DELAYED_TRIGGER_ROUTES = [
-    Route(
-        queue=f"runtime_delayed_trigger_{app}",
-        rk=f"runtime.delayed_trigger.{app}",
-        lane_fallback=False,
-    )
-    for app in KNOWN_APPS_FOR_DELAYED_TRIGGER
-]
-
-
-def trigger_route_for(app: str) -> Route:
-    """Return the runtime_delayed_trigger Route for ``app``.
-
-    Caller MUST pass an app from KNOWN_APPS_FOR_DELAYED_TRIGGER; an
-    unknown app would publish to a queue that no consumer subscribes
-    to and the envelope would never fire.
-    """
-    if app not in KNOWN_APPS_FOR_DELAYED_TRIGGER:
-        raise ValueError(
-            f"app={app!r} not in KNOWN_APPS_FOR_DELAYED_TRIGGER "
-            f"({KNOWN_APPS_FOR_DELAYED_TRIGGER}); update the list in "
-            f"app/infra/rabbitmq.py to register a new origin app."
-        )
-    for r in DELAYED_TRIGGER_ROUTES:
-        if r.queue == f"runtime_delayed_trigger_{app}":
-            return r
-    raise RuntimeError(f"trigger route for {app!r} not registered")  # unreachable
-
 # ALL_ROUTES 身兼两职，删东西之前先看清是哪一职：
 #
 #   声明面   declare_topology 遍历它建队列 + 绑定
@@ -218,7 +183,6 @@ ALL_ROUTES = [
     CHAT_RESPONSE,
     RECALL,
     *CHANNEL_ROUTES,
-    *DELAYED_TRIGGER_ROUTES,
 ]
 
 # ---------------------------------------------------------------------------
@@ -500,9 +464,8 @@ class _RabbitMQ:
     ) -> bool:
         """Publish with broker publish-confirm; return True iff broker ack-ed.
 
-        Used by the durable retry transport (Gap 7.2) and emit_delayed
-        durable path (Gap 9). Caller decides on False — DLQ-fallback for
-        retry, or raise for emit_delayed.
+        Used by the durable retry transport (Gap 7.2). Caller decides on
+        False (DLQ-fallback for retry).
 
         aio-pika channels default to ``publisher_confirms=True`` so the
         underlying ``exchange.publish`` already awaits broker confirm. We

@@ -15,7 +15,6 @@ from app.api.middleware import HeaderContextMiddleware, PrometheusMiddleware
 from app.api.routes import router as api_router
 from app.data.bootstrap import ensure_business_schema
 from app.infra.config import settings
-from app.runtime.outbox_dispatcher import dispatcher_loop
 from app.runtime.placement import DEFAULT_APP
 
 load_dotenv()
@@ -40,10 +39,9 @@ async def lifespan(app: FastAPI):
 
     logger.info("shared pkg loaded: %s", shared_hello())
 
-    # Wire up the dataflow graph + register runtime-internal trigger wire
-    # + (when MQ is configured) pre-declare durable topology so this
-    # producer-side process can emit() to downstream worker queues
-    # before the worker pods have had a chance to declare them.
+    # Wire up the dataflow graph + (when MQ is configured) pre-declare
+    # durable topology so this producer-side process can emit() to
+    # downstream queues before their consumers have declared them.
     # See app/runtime/bootstrap.py for the contract.
     from app.runtime.bootstrap import prepare_for_run
 
@@ -57,10 +55,7 @@ async def lifespan(app: FastAPI):
     # exist before the source loops start delivering.
     from app.runtime.engine import Runtime
 
-    runtime_for_sources = Runtime(
-        app_name=app_name,
-        migrate_schema_on_run=False,  # we drive migrate explicitly below
-    )
+    runtime_for_sources = Runtime(app_name=app_name)
     await runtime_for_sources.migrate_schema()
 
     # Load skill definitions
@@ -105,20 +100,7 @@ async def lifespan(app: FastAPI):
     await runtime_for_sources.start_source_loops()
     logger.info("dataflow source loops started")
 
-    # Phase 7b Gap 8: outbox dispatcher (HTTP process entry).
-    # Dual-entry with Runtime.run() (worker process entry) — both must
-    # drain the outbox so mutations from either process are forwarded.
-    outbox_task = asyncio.create_task(dispatcher_loop(), name="outbox_dispatcher")
-
     yield
-
-    # Phase 7b Gap 8: stop outbox dispatcher before tearing down consumers
-    # so any in-flight emit() calls can still complete.
-    outbox_task.cancel()
-    try:
-        await outbox_task
-    except asyncio.CancelledError:
-        pass
 
     # Phase 4: stop source loops first; in-progress sources can still
     # emit() to durable consumers cleanly because consumers are still alive.

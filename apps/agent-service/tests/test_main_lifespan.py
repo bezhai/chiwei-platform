@@ -1,8 +1,9 @@
 """Test agent-service main.py lifespan bootstrap."""
 
 import asyncio
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import FastAPI
 
 
@@ -35,28 +36,26 @@ async def test_lifespan_calls_ensure_business_schema():
                 mock_runtime.start_source_loops = AsyncMock()
                 mock_runtime.stop_source_loops = AsyncMock()
 
-                with patch("app.infra.rabbitmq.KNOWN_APPS_FOR_DELAYED_TRIGGER", []):
-                    with patch("app.infra.config.settings") as mock_settings:
-                        mock_settings.rabbitmq_url = None
+                with patch("app.infra.config.settings") as mock_settings:
+                    mock_settings.rabbitmq_url = None
 
-                        with patch("app.skills.registry.SkillRegistry.load_all"):
-                            with patch("app.runtime.outbox_dispatcher.dispatcher_loop", new=AsyncMock()):
-                                with patch("asyncio.create_task") as mock_create_task:
-                                    # Return a real task that can be properly cancelled and awaited
-                                    mock_create_task.return_value = mock_task
+                    with patch("app.skills.registry.SkillRegistry.load_all"):
+                        with patch("asyncio.create_task") as mock_create_task:
+                            # Return a real task that can be properly cancelled and awaited
+                            mock_create_task.return_value = mock_task
 
-                                    app = FastAPI()
+                            app = FastAPI()
+                            try:
+                                async with lifespan(app):
+                                    pass
+                            finally:
+                                # Clean up the mock task
+                                if not mock_task.done():
+                                    mock_task.cancel()
                                     try:
-                                        async with lifespan(app):
-                                            pass
-                                    finally:
-                                        # Clean up the mock task
-                                        if not mock_task.done():
-                                            mock_task.cancel()
-                                            try:
-                                                await mock_task
-                                            except asyncio.CancelledError:
-                                                pass
+                                        await mock_task
+                                    except asyncio.CancelledError:
+                                        pass
 
-                                    # Assert ensure_business_schema was called during startup
-                                    mock_ensure.assert_awaited_once()
+                            # Assert ensure_business_schema was called during startup
+                            mock_ensure.assert_awaited_once()

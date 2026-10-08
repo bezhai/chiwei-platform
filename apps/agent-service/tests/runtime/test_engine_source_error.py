@@ -72,7 +72,7 @@ async def test_interval_emit_exception_does_not_kill_pod(monkeypatch) -> None:
         _always_raises_interval
     )
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await rt.start_source_loops()
     # Long enough for several ticks to fire and raise.
     await asyncio.sleep(0.25)
@@ -100,7 +100,7 @@ async def test_cron_emit_exception_does_not_kill_pod(monkeypatch) -> None:
     exits: list[int] = []
     monkeypatch.setattr("os._exit", lambda code: exits.append(code))
 
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     def fake_croniter(expr, base):
         class _Iter:
@@ -117,7 +117,7 @@ async def test_cron_emit_exception_does_not_kill_pod(monkeypatch) -> None:
 
     wire(_CronTick).from_(Source.cron("* * * * *")).to(_always_raises_cron)
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await rt.start_source_loops()
     await asyncio.sleep(0.3)
     assert rt._source_error is None, (
@@ -152,7 +152,7 @@ async def test_payload_build_failure_is_still_fatal(monkeypatch) -> None:
 
     wire(_NoTsField).from_(Source.interval(seconds=0.05)).to(_unreachable)
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await rt.start_source_loops()
     # _build_payload raises immediately on the first tick → fatal.
     await asyncio.sleep(0.2)

@@ -24,7 +24,7 @@ _PROBE = (
     "patch('inner_shared.logger.setup_logging', MagicMock()).start();"
     "from app.runtime.bootstrap import load_dataflow_graph;"
     "load_dataflow_graph({app!r});"
-    "import app.workers.runtime_entry, app.main, app.messaging.lifecycle;"
+    "import app.main, app.messaging.lifecycle;"
     "from app.runtime.wire import WIRING_REGISTRY;"
     "from app.messaging.receiving import INBOX_REGISTRY, INBOXES_AT_START;"
     "print(json.dumps({{"
@@ -111,6 +111,6 @@ def test_every_declared_app_is_a_known_app():
 
 async def test_an_app_without_any_node_still_boots_its_runtime():
     """world 第一期可能一个 dataflow 节点都没有（它靠收件箱醒），运行时照样起得来。"""
-    rt = Runtime(app_name="world", migrate_schema_on_run=False)
+    rt = Runtime(app_name="world")
     await rt.start_source_loops()
     await rt.stop_source_loops()

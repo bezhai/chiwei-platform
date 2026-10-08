@@ -85,7 +85,7 @@ async def test_interval_does_not_block_on_hung_downstream(monkeypatch) -> None:
 
     wire(_FFTick).from_(Source.interval(seconds=0.05)).to(_ff_consumer)
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await rt.start_source_loops()
     try:
         # ~6 个间隔窗口。若同步 await，第一拍挂死后再无 emit 发生（len==1）。
@@ -117,7 +117,7 @@ async def test_interval_fire_and_forget_exception_is_logged_not_swallowed(
 
     wire(_FFTick).from_(Source.interval(seconds=0.05)).to(_ff_consumer)
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     with caplog.at_level(logging.ERROR):
         await rt.start_source_loops()
         try:

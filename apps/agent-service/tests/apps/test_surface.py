@@ -79,7 +79,6 @@ EXPECTED_TABLES: dict[str, list[str]] = {
         "common_conversation",
         "common_message",
         "common_user",
-        "data_delayed_trigger_envelope",
         "data_dlq_clear_idempotent_request",
         "data_dlq_clear_idempotent_response",
         "data_dlq_dry_run_request",
@@ -112,7 +111,6 @@ EXPECTED_TABLES: dict[str, list[str]] = {
         "model_provider",
         "runtime_dlq_audit",
         "runtime_inflight",
-        "runtime_outbox",
     ],
     "world": [
         "bot_persona",
@@ -120,7 +118,6 @@ EXPECTED_TABLES: dict[str, list[str]] = {
         "common_conversation",
         "common_message",
         "common_user",
-        "data_delayed_trigger_envelope",
         "data_session_transcript",
         "data_thinking_tokens_spent",
         "message_record",
@@ -128,7 +125,6 @@ EXPECTED_TABLES: dict[str, list[str]] = {
         "model_provider",
         "runtime_dlq_audit",
         "runtime_inflight",
-        "runtime_outbox",
     ],
 }
 

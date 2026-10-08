@@ -82,7 +82,7 @@ def test_time_source_data_type_satisfies_single_field_ts_contract(wire_name):
         w for w in _time_source_wires(graph) if w.data_type.__name__ == wire_name
     )
 
-    runtime = Runtime(migrate_schema_on_run=False)
+    runtime = Runtime()
     # 不 raise == 满足单字段 ts 约定（生产源循环能正常 tick）。
     payload = runtime._build_payload(wire, datetime.now(tz=UTC))
     assert payload is not None

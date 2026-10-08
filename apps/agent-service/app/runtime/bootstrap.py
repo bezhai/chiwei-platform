@@ -20,35 +20,24 @@ in the dataflow runtime:
     publish to a route that doesn't exist yet, and the broker silently
     drops the message. Calling this helper from every potential
     publisher closes that window. Re-declaring is a no-op on the
-    broker, so it is safe to call from ``runtime_entry`` as well even
-    though ``Runtime`` already declares the consumer's own routes.
+    broker, so it is safe to call even though ``start_consumers``
+    declares the consumer's own routes as well.
 
-  * :func:`prepare_for_run` is the unified startup helper both
-    entrypoints (FastAPI ``app.main`` lifespan and worker
-    ``app.workers.runtime_entry``) call so they share the same boot
-    contract. It composes the phases that previously lived open-coded
-    in two places:
+  * :func:`prepare_for_run` is the startup helper ``app.main``'s lifespan
+    calls. It composes:
 
-      1. ``load_dataflow_graph(app_name)`` — Phase 1+2: import that app's
-         wiring, then compile_graph to validate.
-      2. ``register_runtime_trigger_wire(app)`` — Phase 1.5: append the
-         runtime-internal delayed-trigger wire into ``WIRING_REGISTRY``
-         BEFORE downstream consumers freeze a snapshot. Skips silently
-         for apps outside ``KNOWN_APPS_FOR_DELAYED_TRIGGER`` (same
-         policy as ``Runtime.run``).
-      3. ``declare_durable_topology()`` — Phase 3.5 (opt-in via
-         ``declare_topology=True``): producer processes that may emit
-         BEFORE any consumer pod has had time to declare its queue
-         must pre-declare the routes themselves. Worker entries
-         already declare their own routes via ``start_consumers``, so
-         they leave this off.
+      1. ``load_dataflow_graph(app_name)`` — import that app's wiring,
+         then compile_graph to validate.
+      2. ``declare_durable_topology()`` (opt-in via
+         ``declare_topology=True``): a process that may emit BEFORE any
+         consumer has had time to declare its queue must pre-declare
+         the routes itself.
 
     What it does **not** do: ``ensure_business_schema``,
     ``migrate_schema``, ``start_consumers``,
     ``start_source_loops``. Those depend on resources / Runtime state
-    that the entrypoint owns. ``prepare_for_run`` is only the part
-    that's identical in both entries — keeping the rest at the call
-    site makes the per-entry phase order explicit.
+    that the lifespan owns; keeping them at the call site makes the
+    phase order explicit.
 """
 
 from __future__ import annotations
@@ -135,19 +124,16 @@ async def prepare_for_run(
     *,
     declare_topology: bool = False,
 ) -> None:
-    """Unified startup helper for FastAPI + worker entries. See module docstring.
+    """Startup helper for ``app.main``'s lifespan. See module docstring.
 
-    Phase order is config-wiring -> load-graph -> register-trigger-wire ->
-    (opt) declare-durable-topology. Reversing the graph phases would either
-    let compile_graph snapshot a registry without the trigger wire (durable
-    consumers then drop trigger envelopes) or let a producer publish
-    before its consumer's queue exists (broker silently drops).
+    Phase order is config-wiring -> load-graph -> (opt)
+    declare-durable-topology: declaring before the graph is loaded would
+    miss the durable wires the graph registers, and a producer would
+    publish before its consumer's queue exists (broker silently drops).
     """
     # Phase 0: process-level config wiring. Dynamic Config resolves
-    # per-lane; both entries (FastAPI lifespan / worker runtime_entry) go
-    # through here, so the provider is set no matter which process boots —
-    # wiring it in only one entry would leave the other reading prod
-    # config on coe/ppe lanes (the classic dual-entry footgun).
+    # per-lane, so the provider is set before anything reads config —
+    # otherwise coe/ppe lanes would read prod config.
     from inner_shared.dynamic_config import dynamic_config
 
     from app.runtime.lane_policy import current_deployment_lane
@@ -159,25 +145,7 @@ async def prepare_for_run(
     # validate the topology.
     load_dataflow_graph(app_name)
 
-    # Phase 1.5: append the runtime-internal trigger wire BEFORE any
-    # consumer freezes a WIRING_REGISTRY snapshot. Apps that don't have
-    # a trigger route configured fall through silently — emit_delayed
-    # with durability='durable' will then fail-fast at call time.
-    from app.infra.rabbitmq import KNOWN_APPS_FOR_DELAYED_TRIGGER
-    from app.runtime.delayed_trigger import register_runtime_trigger_wire
-
-    if app_name in KNOWN_APPS_FOR_DELAYED_TRIGGER:
-        register_runtime_trigger_wire(app_name)
-    else:
-        logger.info(
-            "bootstrap: app=%s has no delayed trigger route; "
-            "emit_delayed(durability='durable') will be unavailable",
-            app_name,
-        )
-
-    # Phase 3.5: opt-in pre-declare of every durable wire's route. Only
-    # producer-side entries (e.g. FastAPI lifespan publishing into a
-    # downstream worker's queue) need this; worker entries already
-    # declare their own routes when start_consumers runs.
+    # Phase 3.5: opt-in pre-declare of every durable wire's route, for a
+    # process that publishes (main.py gates it on a configured broker).
     if declare_topology:
         await declare_durable_topology()

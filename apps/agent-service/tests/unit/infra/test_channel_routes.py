@@ -22,7 +22,6 @@ from app.infra.rabbitmq import (
     ALL_ROUTES,
     CHANNEL_PARTITIONED_ROUTES,
     CHAT_RESPONSE,
-    DELAYED_TRIGGER_ROUTES,
     DLX_NAME,
     EXCHANGE_NAME,
     KNOWN_CHANNELS,
@@ -179,8 +178,8 @@ class TestChannelRouteFor:
             channel_route_for("chat_response", "")
 
     def test_queue_that_is_not_channel_partitioned_raises(self):
-        # 一条真实存在、但只有单一 Route 的队列（不按 channel 分区）。
-        single = DELAYED_TRIGGER_ROUTES[0].queue
+        # 一条真实存在、但只有单一 Route 的队列（不按 channel 分区）：某个渠道自己那条。
+        single = CHANNEL_PARTITIONED_ROUTES["chat_response"]["lark"].queue
         with pytest.raises(ValueError) as excinfo:
             channel_route_for(single, "lark")
         assert single in str(excinfo.value)

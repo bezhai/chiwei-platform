@@ -22,7 +22,7 @@ jobs:
           set -euo pipefail
 
           changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
-          framework_changed="$(printf '%s\n' "$changed" | grep -E '^(apps/agent-service/app/runtime/|apps/agent-service/app/wiring/|apps/agent-service/app/deployment\.py|apps/agent-service/app/main\.py|apps/agent-service/app/workers/runtime_entry\.py|docs/governance/|docs/guides/dataflow-|\.github/workflows/)' || true)"
+          framework_changed="$(printf '%s\n' "$changed" | grep -E '^(apps/agent-service/app/runtime/|apps/agent-service/app/wiring/|apps/agent-service/app/deployment\.py|apps/agent-service/app/main\.py|docs/governance/|docs/guides/dataflow-|\.github/workflows/)' || true)"
 
           if [ -z "$framework_changed" ]; then
             echo "No framework-layer files changed."

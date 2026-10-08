@@ -66,7 +66,7 @@ async def test_cron_source_uses_declared_tz(monkeypatch):
 
     wire(_TzTick).from_(Source.cron("0 5 * * *", tz="Asia/Shanghai")).to(_record_tz_tick)
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     # Use start_source_loops once Task 2 lands; for now invoke private
     # helper to validate tz wiring. Rewrite this test in Task 2.
     # NOTE: this assertion requires _source_loop_cron to honor tz.
@@ -114,7 +114,7 @@ async def test_start_source_loops_starts_only_sources():
 
     wire(_StartTick).from_(Source.interval(seconds=0.05)).to(_record_start)
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await rt.start_source_loops()
     try:
         await asyncio.sleep(0.2)
@@ -134,7 +134,7 @@ async def test_start_source_loops_skips_time_sources_in_ppe(monkeypatch, caplog)
 
     wire(_StartTick).from_(Source.interval(seconds=0.05)).to(_record_start)
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await rt.start_source_loops()
     try:
         await asyncio.sleep(0.2)
@@ -155,7 +155,7 @@ async def test_start_source_loops_override_allows_time_sources_in_ppe(monkeypatc
 
     wire(_StartTick).from_(Source.interval(seconds=0.05)).to(_record_start)
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await rt.start_source_loops()
     try:
         await asyncio.sleep(0.2)
@@ -179,7 +179,7 @@ async def test_start_source_loops_keeps_mq_sources_in_ppe(monkeypatch):
 
     wire(_MqTick).from_(Source.mq("runtime_test_mq")).to(_record_mq_tick)
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await rt.start_source_loops()
     try:
         assert [t.get_name() for t in rt._source_tasks] == ["mq[_MqTick]"]
@@ -199,7 +199,7 @@ async def test_normal_stop_does_not_exit(monkeypatch):
     monkeypatch.setattr("os._exit", lambda code: exits.append(code))
 
     wire(_StartTick).from_(Source.interval(seconds=0.05)).to(_record_start)
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await rt.start_source_loops()
     await asyncio.sleep(0.1)
     await rt.stop_source_loops()
@@ -238,7 +238,7 @@ async def test_watchdog_exits_on_source_error(monkeypatch):
 
     wire(_BadTick).from_(Source.interval(seconds=0.05)).to(_bad_consumer)
 
-    rt = Runtime(app_name="agent-service", migrate_schema_on_run=False)
+    rt = Runtime(app_name="agent-service")
     await rt.start_source_loops()
     await asyncio.sleep(0.2)  # give watchdog time to react
     await rt.stop_source_loops()
