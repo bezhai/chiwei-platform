@@ -27,8 +27,6 @@ from tests.messaging.conftest import (  # noqa: F401
 from tests.messaging.helpers import eventually
 from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
 
-from .conftest import load_world_wiring
-
 pytestmark = pytest.mark.usefixtures("messaging_db")
 
 
@@ -51,7 +49,8 @@ class ScriptedRunner:
 
 
 @pytest.fixture
-def world_process(broker, tmp_path, monkeypatch):  # noqa: F811
+async def world_process(broker, tmp_path, monkeypatch, app_host):  # noqa: F811
+    """world 的宿主只跑了 setup（收件箱、来源都登记好），通信机制由用例自己起。"""
     monkeypatch.setenv("WORLD_DATA_DIR", str(tmp_path / "world-volume"))
     from inner_shared.dynamic_config import dynamic_config
 
@@ -73,7 +72,7 @@ def world_process(broker, tmp_path, monkeypatch):  # noqa: F811
     runner = ScriptedRunner([2.0, 1.5, 86_400.0])
     monkeypatch.setattr(agents, "build_runner", lambda config, tools: runner)
 
-    load_world_wiring()
+    await app_host("world")
     return runner
 
 
@@ -320,8 +319,24 @@ class WakesTomorrow:
         return reply
 
 
+@pytest.fixture
+def short_rounds(monkeypatch):
+    """一轮 3 秒、一次投递的租约 3×2 + 0.5 秒：租约过期在测试的时间里。
+
+    要在 world 的宿主起来之前设好（用例里排在 ``world_process`` 前面）：收件箱的处理时限和租约
+    在插件 setup 时按它们算。
+    """
+    from app.messaging import receiving
+    from app.plugins import world as world_plugin
+    from app.world import rounds
+
+    monkeypatch.setattr(world_plugin, "ROUND_TIMEOUT", timedelta(seconds=3))
+    monkeypatch.setattr(rounds, "_SETTLING", timedelta(0))
+    monkeypatch.setattr(receiving, "LEASE_OVER_TIMEOUT_MS", 500)
+
+
 async def test_a_round_whose_success_was_not_recorded_does_not_run_again_after_the_lease(
-    world_process, broker, test_db, monkeypatch  # noqa: F811
+    short_rounds, world_process, broker, test_db, monkeypatch  # noqa: F811
 ):
     """通信机制在处理函数返回之后才记成功。那一笔没写成：这次投递放回去，同一条在占位租约过期
     之后被接管、又交到 world 的处理函数手里。它那一轮已经跑完了，不能再跑一遍。"""
@@ -330,15 +345,9 @@ async def test_a_round_whose_success_was_not_recorded_does_not_run_again_after_t
     from sqlalchemy import text
 
     from app.messaging import receiving
-    from app.world import rounds
 
-    # 一轮 3 秒、一次投递的租约 3×2 + 0.5 秒：租约过期在测试的时间里。
-    monkeypatch.setattr(main_agent, "ROUND_TIMEOUT", timedelta(seconds=3))
-    monkeypatch.setattr(rounds, "_SETTLING", timedelta(0))
-    monkeypatch.setattr(receiving, "LEASE_OVER_TIMEOUT_MS", 500)
     runner = WakesTomorrow()
     monkeypatch.setattr(agents, "build_runner", lambda config, tools: runner)
-    load_world_wiring()
 
     knock = uuid.uuid4().hex
     real_mark = receiving.mark_succeeded

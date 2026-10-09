@@ -16,14 +16,14 @@ from pathlib import Path
 from scripts.check_world_life_imports import imported_names, module_name
 
 APP = Path(__file__).resolve().parents[2] / "app"
-FORBIDDEN = ("app.living", "app.world", "app.wiring", "app.plugins")
+FORBIDDEN = ("app.living", "app.world", "app.plugins")
 
 
 def _forbidden(name: str) -> bool:
     return any(name == f or name.startswith(f + ".") for f in FORBIDDEN)
 
 
-def test_no_module_in_app_host_imports_living_world_or_the_old_wiring():
+def test_no_module_in_app_host_imports_living_world_or_a_plugin():
     found: list[str] = []
     for path in sorted((APP / "host").rglob("*.py")):
         parts, is_package = module_name(APP, path)

@@ -21,8 +21,9 @@ from app.host import (
     UndeclaredService,
     UnknownApp,
 )
+from tests.hosting import start_without_io
 
-from .conftest import no_clocks_no_io, plugin
+from .conftest import plugin
 
 
 def _names(host: Host) -> list[str]:
@@ -135,7 +136,7 @@ async def test_a_service_reaches_the_plugins_that_require_it():
             plugin("skills", lambda ctx: ctx.provide("skills", skills), provides=("skills",)),
         ],
     )
-    await no_clocks_no_io(host)
+    await start_without_io(host)
     try:
         assert seen == [skills]
     finally:
@@ -152,7 +153,7 @@ async def test_a_plugin_gets_only_the_services_it_requires():
     )
 
     with pytest.raises(UndeclaredService, match="plugin 'ops'.*'skills'"):
-        await no_clocks_no_io(host)
+        await start_without_io(host)
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,7 @@
 # Framework/runtime changes should always get an explicit owner review.
 /apps/agent-service/app/runtime/ @bezhai
-/apps/agent-service/app/wiring/ @bezhai
+/apps/agent-service/app/host/ @bezhai
+/apps/agent-service/app/plugins/ @bezhai
 /apps/agent-service/app/deployment.py @bezhai
 /apps/agent-service/app/main.py @bezhai
 /docs/governance/ @bezhai

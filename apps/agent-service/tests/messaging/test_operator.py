@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import dataclasses
-import importlib
 from datetime import UTC, datetime
 
 import httpx
@@ -16,7 +15,6 @@ from fastapi import FastAPI
 
 from app.infra import config
 from app.messaging.message import Answer, Delivery, SendFailed
-from app.runtime.http_source import register_http_sources
 
 SECRET = "operator-entry-secret"
 LANE = "coe-msg"
@@ -71,28 +69,18 @@ def calls(monkeypatch):
     return seen
 
 
-def _reload_messaging_wiring():
-    import app.wiring.messaging as messaging_wiring
-    from app.messaging.receiving import clear_inboxes
-    from app.runtime.wire import clear_wiring
-
-    clear_wiring()
-    clear_inboxes()
-    importlib.reload(messaging_wiring)
-
-
 @pytest.fixture
-def api(monkeypatch, calls) -> FastAPI:
+async def api(monkeypatch, calls, app_host) -> FastAPI:
+    """agent-service 的宿主把它的路由挂在这个 app 上，跟 main.py 一样带着上下文中间件。"""
     monkeypatch.setenv("LANE", LANE)
     monkeypatch.setattr(
         config, "settings", dataclasses.replace(config.settings, inner_http_secret=SECRET)
     )
-    _reload_messaging_wiring()
     application = FastAPI()
     from app.api.middleware import HeaderContextMiddleware
 
     application.add_middleware(HeaderContextMiddleware)
-    register_http_sources(application)
+    await app_host("agent-service", http=application)
     return application
 
 
@@ -392,10 +380,11 @@ async def test_a_request_without_a_lane_lands_only_on_prod(api, calls):
     assert calls == []
 
 
-def test_the_operator_owns_an_inbox_in_agent_service():
+async def test_the_operator_owns_an_inbox_in_agent_service(app_host):
     """人工参与者自己有收件箱：发给它、定时发给它都能送到，内容在记录里看。"""
     from app.messaging.receiving import INBOX_REGISTRY
 
-    _reload_messaging_wiring()
+    host = await app_host("agent-service")
+    assert [r.plugin for r in host.registered() if r.kind == "inbox"] == ["operator"]
     assert "operator" in INBOX_REGISTRY
     assert INBOX_REGISTRY["operator"].on_question is None

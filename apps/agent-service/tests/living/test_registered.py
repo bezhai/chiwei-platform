@@ -2,10 +2,10 @@
 
 两件事都是"错了就静默"：
 
-  * 拉不到 registry 的后果是静默的：``Runtime.migrate_schema()`` 只看
+  * 拉不到 registry 的后果是静默的：``migrate_schema()`` 只看
     ``DATA_REGISTRY``，没进 registry 就不建表，一路跑到真读写才炸。所以这条用子进程
-    验——只 import ``app.wiring``（跟线上启动同一条链），不许靠测试自己额外 import
-    兜底。
+    验——只按线上那样起 agent-service 的插件宿主（:func:`tests.hosting.in_a_fresh_process`），
+    不许靠测试自己额外 import 兜底。
   * 列的类型和字段集合**落表之后改不了**：migrator 是 additive-only，加列随时可以，
     删列 / 改类型直接 ``MigrationError`` 崩启动。所以把它们钉在这里——把
     ``occurred_at`` 手滑写回 ``str``、或者顺手加一个"可能有用"的字段，在这条测试就
@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-import subprocess
-import sys
 
 import pytest
 from pydantic import ValidationError
@@ -35,6 +33,7 @@ from app.living.records import (
     Whereabouts,
 )
 from app.runtime.schema_types import pg_type
+from tests.hosting import in_a_fresh_process
 
 _AWARE = dt.datetime(2026, 7, 25, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
 _NAIVE = dt.datetime(2026, 7, 25, 10, 0)
@@ -295,20 +294,13 @@ _PINNED: dict[type, dict[str, str]] = {
 }
 
 
-def test_living_data_reaches_the_registry_via_app_wiring():
-    code = (
-        "import app.wiring;"
+def test_living_data_reaches_the_registry_when_agent_service_starts():
+    registered = in_a_fresh_process(
+        "agent-service",
         "from app.runtime.data import DATA_REGISTRY;"
-        "print(sorted(c.__name__ for c in DATA_REGISTRY))"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
+        "print(sorted(c.__name__ for c in DATA_REGISTRY))",
         timeout=120,
     )
-    assert proc.returncode == 0, proc.stderr
-    registered = proc.stdout
     for name in (
         "Happening",
         "Whereabouts",

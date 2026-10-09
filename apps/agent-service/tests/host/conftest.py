@@ -16,13 +16,6 @@ from app.host import Plugin
 from tests.messaging.conftest import broker, delayed_broker  # noqa: F401
 
 
-async def no_clocks_no_io(host, **flags) -> None:
-    """Start ``host`` with every IO phase off unless a flag turns it on."""
-    options = {"http": None, "schema": False, "mq": False, "clocks": False, "tasks": False}
-    options.update(flags)
-    await host.start(**options)
-
-
 def plugin(name: str, setup: Callable | None = None, **kwargs) -> Plugin:
     return Plugin(name=name, setup=setup or (lambda ctx: None), **kwargs)
 

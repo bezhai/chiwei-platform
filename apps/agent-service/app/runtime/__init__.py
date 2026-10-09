@@ -1,22 +1,21 @@
 """Public API of the dataflow runtime.
 
-Business code that writes Data classes, @node functions, wire() declarations,
-or deployment bind() rules should import from `app.runtime` only. The
-submodules (data, node, wire, source, sink, emit, placement, …)
-are internal implementation; the names re-exported here are the stable
-surface promised by `docs/guides/dataflow-framework.md`.
+Business code that writes Data classes, @node functions or wire()
+declarations should import from `app.runtime` only. The submodules (data,
+node, wire, sink, emit, …) are internal implementation; the names
+re-exported here are the stable surface promised by
+`docs/guides/dataflow-framework.md`.
 
-Engine internals (compile_graph, registries, Runtime, durable plumbing,
-migrator, http_source) intentionally stay submodule-only — they are not
-needed to write a node and may change without notice.
+Internals (compile_graph, registries, durable plumbing, migrator)
+intentionally stay submodule-only — they are not needed to write a node and
+may change without notice. Starting an app is the plugin host's
+(:mod:`app.host`).
 """
 
 from app.runtime.data import AdminOnly, Data, DedupKey, Key, Version
 from app.runtime.emit import emit
 from app.runtime.node import node
-from app.runtime.placement import bind
 from app.runtime.sink import Sink
-from app.runtime.source import Source
 from app.runtime.wire import wire
 
 __all__ = [
@@ -26,8 +25,6 @@ __all__ = [
     "Key",
     "Version",
     "Sink",
-    "Source",
-    "bind",
     "emit",
     "node",
     "wire",

@@ -9,16 +9,17 @@ leaking into business code.
 
 Owns runtime semantics and must be changed only with a spec reference.
 
+- the plugin host: `apps/agent-service/app/host/**`
+- the plugins each app is made of: `apps/agent-service/app/plugins/**`
 - `apps/agent-service/app/runtime/**`
-- `apps/agent-service/app/wiring/**`
-- `apps/agent-service/app/deployment.py`
+- the app manifests: `apps/agent-service/app/deployment.py`
 - runtime entrypoint: `apps/agent-service/app/main.py`
 - framework contracts, governance docs, and CI gates under `docs/guides/`,
   `docs/governance/`, and `.github/workflows/`
 
-Framework changes define what nodes, wires, sources, durable routing,
-startup, retries, error routing, and cross-process emit mean. They must not
-be hidden inside a business node as a local workaround.
+Framework changes define what plugins, clocks, admin routes, inboxes, nodes,
+wires, durable routing, startup and shutdown, retries and error routing mean.
+They must not be hidden inside a business node as a local workaround.
 
 ### [B] Capability Layer
 
@@ -37,13 +38,14 @@ Owns product behavior.
 
 - `apps/agent-service/app/nodes/**`
 - `apps/agent-service/app/agent/**`
-- `apps/agent-service/app/chat/**`
-- `apps/agent-service/app/life/**`
+- `apps/agent-service/app/living/**`
 - `apps/agent-service/app/memory/**`
 - `apps/agent-service/app/skills/**`
+- `apps/agent-service/app/world/**`
 
-Business code declares Data, nodes, and calls capabilities. If it needs a
-new runtime behavior, extend [A] first instead of bypassing the framework.
+Business code declares Data, nodes, and calls capabilities; a plugin in [A]
+registers it with the host. If it needs a new runtime behavior, extend [A]
+first instead of bypassing the framework.
 
 ## Change Rules
 
@@ -56,24 +58,22 @@ new runtime behavior, extend [A] first instead of bypassing the framework.
 
 ## Time Source Policy
 
-Interval sources are production side effects. In deployment lanes:
+Clocks (`ctx.clock`) are production side effects. In deployment lanes:
 
-- `prod` / `blue`: interval sources run by default.
-- `coe-*` / `ppe-*` / unknown: interval sources are skipped by default.
-- To intentionally test time sources in a lane, set
+- `prod` / `blue`: clocks run by default.
+- `coe-*` / `ppe-*` / unknown: clocks are skipped by default.
+- To intentionally test clocks in a lane, set
   `DATAFLOW_ENABLE_TIME_SOURCES=1`.
 
 ## Current Manual Emit Roster
 
-The reviewed business baseline is 10 real `await emit(...)` call sites:
+The reviewed business baseline is 3 real `await emit(...)` call sites, all in
+`living/` (grep-gate Gap 8 pins the count). Each hands something to the
+outside and only learns the outcome afterwards:
 
-- `chat/context.py`: non-node image-content sync side effect.
-- `chat/post_actions.py`: post safety and memory trigger fire-and-forget
-  emits with local exception handling.
-- `nodes/chat_node.py`: router-driven persona fan-out and streaming response
-  segment emission.
-- `nodes/life_dataflow.py`: glimpse emits per target chat with per-chat
-  request ids and per-chat error isolation.
+- `living/mouth.py`: what she says, segment by segment.
+- `living/takeback.py`: a recall of something she said.
+- `living/reading.py`: the file she picked up, onto the durable reading edge.
 
 New business `await emit(...)` sites should be treated as framework debt until
 the PR explains why one of the allowed cases applies.

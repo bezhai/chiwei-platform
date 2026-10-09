@@ -1,9 +1,9 @@
-"""wire() DSL: declarative producer-consumer connection language.
+"""The dataflow edges of this process: ``WireSpec``s in ``WIRING_REGISTRY``.
 
-Business code calls ``wire(T).to(consumer).durable()...`` to describe
-how a Data type flows through the graph. Each call appends a
-``WireSpec`` to ``WIRING_REGISTRY``; later phases (compile_graph, emit,
-durable, engine) consume the registry.
+The plugin host appends the edges its plugins register (``ctx.durable``,
+``ctx.outbound``, :mod:`app.host.host`); ``wire(T).to(consumer).durable()``
+builds the same spec directly. compile_graph, emit and durable read the
+registry.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 
 from app.runtime.data import Data
 from app.runtime.sink import SinkSpec
-from app.runtime.source import SourceSpec
 
 
 @dataclass
@@ -21,7 +20,6 @@ class WireSpec:
     data_type: type[Data]
     consumers: list[Callable] = field(default_factory=list)
     sinks: list[SinkSpec] = field(default_factory=list)
-    sources: list[SourceSpec] = field(default_factory=list)
     durable: bool = False
 
 
@@ -43,10 +41,6 @@ class WireBuilder:
                 self._spec.sinks.append(t)
             else:
                 self._spec.consumers.append(t)
-        return self
-
-    def from_(self, *sources: SourceSpec) -> WireBuilder:
-        self._spec.sources.extend(sources)
         return self
 
     def durable(self) -> WireBuilder:

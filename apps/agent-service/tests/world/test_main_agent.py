@@ -261,6 +261,17 @@ async def test_what_the_sources_return_is_trimmed_as_material(world, monkeypatch
 # ---------------------------------------------------------------------------
 
 
+def test_the_trim_policy_keeps_the_five_constraints():
+    from app.agent.continuity import MAX_CLEANUP_MINUTES
+    from app.world.main_agent import TRIM_POLICY as p
+
+    assert p.material_minutes > 0 and p.own_minutes > 0
+    assert p.own_minutes >= p.material_minutes
+    assert 1 <= p.cleanup_minutes <= MAX_CLEANUP_MINUTES
+    assert p.hard_cap_tokens > 0 and p.trim_target_tokens > 0
+    assert p.trim_target_tokens < p.hard_cap_tokens
+
+
 def _turns(n: int) -> list[Turn]:
     """``n`` 条刚说过的话，每条按 :func:`app.agent.continuity.estimate_tokens` 估约 1k token。"""
     return [

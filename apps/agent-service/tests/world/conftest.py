@@ -1,4 +1,4 @@
-"""world 测试共用：临时的私有卷、重新执行一遍 world 的接线、替身模型和一轮之外的替身。
+"""world 测试共用：临时的私有卷、起 world 的插件宿主（``app_host``）、替身模型和一轮之外的替身。
 
 四类 agent（主 agent、感知判断、NPC、应答）都经 :func:`app.world.agents.build_runner` 拿到
 runner，替身从那里换：按 prompt id 分给各自的替身，同时记下每一次建出来的是哪一类、拿到了
@@ -6,7 +6,6 @@ runner，替身从那里换：按 prompt id 分给各自的替身，同时记下
 """
 from __future__ import annotations
 
-import importlib
 from datetime import timedelta
 from pathlib import Path
 
@@ -42,58 +41,6 @@ def volume(bare_volume) -> Path:
     assert world_volume.try_acquire_writer_lock()
     yield bare_volume
     world_volume.release_writer_lock()
-
-
-def _clear_registrations() -> None:
-    """清空 world 登记过东西的那几张表：接线、节点绑定、收件箱、知识来源。"""
-    from app.messaging.receiving import clear_inboxes
-    from app.runtime.placement import clear_bindings
-    from app.runtime.wire import clear_wiring
-    from app.world.sources import clear_sources
-
-    clear_wiring()
-    clear_bindings()
-    clear_inboxes()
-    clear_sources()
-
-
-def load_world_wiring() -> None:
-    """清空登记表，再执行一遍 ``app.world.wiring``。
-
-    先 import 再清：这个 worker 第一次 import 它时模块体已经跑过一遍（收件箱、节点绑定
-    都登记了），不清就 reload 会撞上"已经登记过"。
-    """
-    import app.world.wiring as wiring
-
-    _clear_registrations()
-    importlib.reload(wiring)
-
-
-async def start_without_io(host) -> None:
-    """起宿主，只跑插件的 setup：不碰数据库、broker、HTTP，不起钟和后台任务。"""
-    await host.start(http=None, schema=False, mq=False, clocks=False, tasks=False)
-
-
-@pytest.fixture
-async def world_plugin():
-    """一个函数：清空登记表，用 world 的插件（:data:`app.plugins.world.PLUGIN`）起一个宿主（见
-    :func:`start_without_io`）并交回它。停了再 :func:`start_without_io` 一次，就是一个新进程里的
-    world。测试结束时停掉它起过的每个宿主，测试失败了也停：插件登记的来源不停就一直留在登记表里。"""
-    from app.host import Host
-    from app.plugins.world import PLUGIN
-
-    hosts = []
-
-    async def start():
-        _clear_registrations()
-        host = Host("world", [PLUGIN])
-        hosts.append(host)
-        await start_without_io(host)
-        return host
-
-    yield start
-    for host in hosts:
-        await host.stop()
 
 
 class FakeRunner:
@@ -148,8 +95,8 @@ def sets_nothing():
 
 
 @pytest.fixture
-def world(volume, monkeypatch):
-    """把一轮之外的东西换成替身，交回一个可以查看的句柄。"""
+async def world(volume, monkeypatch, app_host):
+    """起 world 的宿主（只跑 setup），把一轮之外的东西换成替身，交回一个可以查看的句柄。"""
 
     class Handle:
         runner: FakeRunner
@@ -171,7 +118,8 @@ def world(volume, monkeypatch):
         costs: list[dict] = []
         history: list[Turn] = []
         ver = 3
-        # world 收件箱的处理函数，就是接线里交给通信机制的那一个（:func:`restart` 换）。
+        # 起着的 world 宿主，和它的收件箱交给通信机制的处理函数（:func:`restart` 换）。
+        host = None
         handler = None
         # 通信机制记下了"处理成功"的消息 id：同一条再来，交不到处理函数手里。
         succeeded: set[str] = set()
@@ -251,17 +199,25 @@ def world(volume, monkeypatch):
     monkeypatch.setattr(agents, "record_round_cost", record_round_cost)
     monkeypatch.setattr(agents, "build_runner", build_runner)
     monkeypatch.setattr(receiving, "succeeded_message_ids", succeeded_message_ids)
-    restart(h)
+    h.host = await app_host("world")
+    h.handler = _world_inbox_handler(h.host)
     return h
 
 
-def restart(world_handle) -> None:
-    """一个新的 world 进程：重新执行一遍接线，之后的投递交给新的收件箱处理函数。进程里的东西
+async def restart(world_handle) -> None:
+    """一个新的 world 进程：宿主停了再起，之后的投递交给新的收件箱处理函数。进程里的东西
     都是新的，私有卷上的还在。"""
-    from app.messaging.receiving import INBOX_REGISTRY
+    from tests.hosting import start_without_io
 
-    load_world_wiring()
-    world_handle.handler = INBOX_REGISTRY["world"].on_message
+    await world_handle.host.stop()
+    await start_without_io(world_handle.host)
+    world_handle.handler = _world_inbox_handler(world_handle.host)
+
+
+def _world_inbox_handler(host):
+    """宿主登记的 ``world`` 收件箱交给通信机制的那个处理函数。"""
+    (inbox,) = [r for r in host.registered() if r.kind == "inbox" and r.name == "world"]
+    return inbox.detail["on_message"]
 
 
 def tools_built_for(world_handle, prompt_id: str) -> list[str]:

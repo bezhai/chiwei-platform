@@ -1,10 +1,8 @@
 """管理路由在 handler 之外的那几步：内网凭据、泳道核对、把请求读成路由的 Data，以及这几步拒绝
-时回答的外壳（:func:`refusal_detail`）。dataflow 的 HTTP source（:mod:`app.runtime.http_source`）
-和插件宿主的 ``ctx.route``（:mod:`app.host.http`）共用这一份，各自只管把 handler 接上；dataflow 的
-启动删掉之后（T1 计划的 C7b），这个模块整个搬进 ``app/host``。
+时回答的外壳（:func:`refusal_detail`）。插件用 ``ctx.route`` 登记路由，:mod:`app.host.http` 把它
+挂上 app 时用这几步把 handler 包起来。
 
-**内网 Bearer 校验** —— 声明了要凭据的那几条路由挂它（``Source.http(requires_inner_secret=True)``
-/ ``ctx.route(..., inner_secret=True)``）。
+**内网 Bearer 校验** —— 声明了要凭据的那几条路由挂它（``ctx.route(..., inner_secret=True)``）。
 
 凭据是 ``INNER_HTTP_SECRET`` + ``Authorization: Bearer <token>``：这个进程已经通过
 ``inter-service-auth`` 这个 ConfigBundle 拿得到它（:mod:`app.infra.config` 里的

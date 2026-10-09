@@ -63,7 +63,6 @@ class Route(NamedTuple):
 
     queue: str
     rk: str
-    lane_fallback: bool = True   # False：lane 队列过期不回落 prod（现在没有路由用）；默认 True 不破坏现有 Route("queue", "rk") 调用
     isolated: bool = False
 
 
@@ -89,11 +88,7 @@ RECALL = Route("recall", "action.recall")
 # 上意味着泳道的回复由另一个渠道发出去，比不弹严重得多。
 def channel_route(base: Route, channel: str) -> Route:
     """Return ``base`` partitioned by ``channel``."""
-    return Route(
-        queue=f"{base.queue}_{channel}",
-        rk=f"{base.rk}.{channel}",
-        lane_fallback=base.lane_fallback,
-    )
+    return Route(queue=f"{base.queue}_{channel}", rk=f"{base.rk}.{channel}")
 
 
 # 已知 channel 是一份显式清单，不动态发现：动态发现意味着队列可能压根没被声明，
@@ -221,7 +216,6 @@ def _lane_rk(base: str, lane: str | None) -> str:
 
 
 def _build_queue_args(prod_rk: str, lane: str | None,
-                     lane_fallback: bool = True,
                      isolated: bool = False) -> dict[str, Any]:
     """Build queue arguments.
 
@@ -229,11 +223,8 @@ def _build_queue_args(prod_rk: str, lane: str | None,
       lane's own ``ISOLATED_DEAD_LETTERS`` queue via the default exchange; no
       TTL fallback, no idle expiry
     - prod queues: dead-letter to DLX
-    - lane queues with lane_fallback=True: TTL -> main exchange with prod
-      routing-key (fallback), plus auto-expire after 24 h idle
-    - lane queues with lane_fallback=False: keep DLX (异常 nack 仍要进
-      dead_letters), but no ttl-back-to-prod (long-delay messages 留在
-      自己 lane 上等到期；codex review round-1 M5 + round-5 H1)
+    - lane queues: TTL -> main exchange with prod routing-key (fallback),
+      plus auto-expire after 24 h idle
     """
     if isolated:
         return {
@@ -244,8 +235,6 @@ def _build_queue_args(prod_rk: str, lane: str | None,
     if lane:
         extra["x-expires"] = _NON_PROD_EXPIRES_MS
     if not lane:
-        return {"x-dead-letter-exchange": DLX_NAME, **extra}
-    if not lane_fallback:
         return {"x-dead-letter-exchange": DLX_NAME, **extra}
     return {
         "x-message-ttl": _LANE_FALLBACK_TTL_MS,
@@ -345,7 +334,7 @@ class _RabbitMQ:
                 lane_queue(route.queue, lane),
                 durable=True,
                 arguments=_build_queue_args(
-                    route.rk, lane, route.lane_fallback, route.isolated
+                    route.rk, lane, isolated=route.isolated
                 ),
             )
             await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
@@ -364,9 +353,6 @@ class _RabbitMQ:
         lane-queue declare all continue to work). ``declare_topology()`` still
         owns the static ``ALL_ROUTES`` list; this method is its per-route
         sibling so new routes can plug in without amending that list.
-
-        Reads ``route.lane_fallback`` (default True for prod compatibility) to
-        decide whether the lane queue gets x-message-ttl-back-to-prod fallback.
 
         *lane* defaults to ``current_lane()``; pass it explicitly (``None`` for
         prod) when the queue belongs to the process's deployment lane rather
@@ -388,13 +374,13 @@ class _RabbitMQ:
             lane_queue(route.queue, lane),
             durable=True,
             arguments=_build_queue_args(
-                route.rk, lane, route.lane_fallback, route.isolated
+                route.rk, lane, isolated=route.isolated
             ),
         )
         await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
     async def _ensure_lane_queue(self, route: Route, lane: str) -> None:
-        """Lazily declare a lane queue on first publish (reads route.lane_fallback).
+        """Lazily declare a lane queue on first publish.
 
         Isolated routes are skipped: only their owner declares them.
         """
@@ -409,7 +395,7 @@ class _RabbitMQ:
             lane_queue(route.queue, lane),
             durable=True,
             arguments=_build_queue_args(
-                route.rk, lane, route.lane_fallback, route.isolated
+                route.rk, lane, isolated=route.isolated
             ),
         )
         await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))

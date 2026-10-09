@@ -15,8 +15,9 @@ name: dataflow grep gate
 #
 #     agent  living  memory  nodes  skills  world
 #
-# 不在里面的是框架和基建：runtime / data / infra / api / capabilities / messaging /
-# domain / wiring。加一个业务包就要把它加进每一处清单 —— 漏一处等于
+# 不在里面的是框架和基建：host / plugins / runtime / data / infra / api / capabilities /
+# messaging / domain。plugins 是各 App 的组装（插件把业务登记到宿主上，相当于原来的
+# 接线），跟 host 一样归框架层。加一个业务包就要把它加进每一处清单 —— 漏一处等于
 # 那个包不受任何一条 gap 管，这正是 app/living/ 建起来之后发生过的事（22 个
 # 文件、一条 gap 都没扫到）。删一个包同理要从每一处摘掉，否则清单会慢慢变成
 # 一份指向空目录的名单，每条断言都因为扫不到东西而通过。
@@ -325,11 +326,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: No import between app/world and app/living, in either direction
+      - name: No import between app/world and app/living (or their plugins), in either direction
         shell: bash
         run: |
           # world 和三姐妹的 life 是两个独立的引擎，唯一的连接是通信机制
-          # （app/messaging）。规则按语法树判 import（含相对 import 和
+          # （app/messaging）。两边各自的插件（app/plugins/world.py、
+          # app/plugins/living.py）同样不许 import 另一边：一个 App 的进程只起
+          # 它清单里的插件。规则按语法树判 import（含相对 import 和
           # importlib.import_module 的字符串），docstring 里提到另一边不算。
           # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_world_life_imports.py
           python3 apps/agent-service/scripts/check_world_life_imports.py apps/agent-service/app

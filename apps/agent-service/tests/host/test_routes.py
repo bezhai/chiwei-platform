@@ -2,8 +2,8 @@
 credential, then the lane, are checked before the parameters are read; refusals carry the lane
 when the route says so; stop takes the route back off the app.
 
-The lane-match tests are ported from ``tests/runtime/test_http_source.py``: the guard they pin
-now lives in :mod:`app.runtime.http_auth` and is shared by the dataflow HTTP sources and the host.
+The lane-match tests are ported from the dataflow HTTP source's tests; the guard they pin is
+:mod:`app.host.http_auth`.
 """
 from __future__ import annotations
 
@@ -241,7 +241,7 @@ async def test_routes_without_the_credential_flag_are_open(serve):
 
 
 # ---------------------------------------------------------------------------
-# the lane (ported from tests/runtime/test_http_source.py)
+# the lane (ported from the dataflow HTTP source's tests)
 # ---------------------------------------------------------------------------
 
 

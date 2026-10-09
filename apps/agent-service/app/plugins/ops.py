@@ -7,7 +7,7 @@
   POST /admin/dlq/requeue             dlq_requeue_node
 
 None of them asks for the inner credential or checks the lane: they never did, and
-``tests/wiring/test_ops_routes_baseline.py`` pins their responses byte for byte.
+``tests/plugins/test_ops_routes_baseline.py`` pins their responses byte for byte.
 """
 from __future__ import annotations
 

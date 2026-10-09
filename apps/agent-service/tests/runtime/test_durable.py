@@ -185,3 +185,62 @@ async def test_start_consumers_is_not_reentrant(durable_env):
     """
     with pytest.raises(RuntimeError, match="already started"):
         await start_consumers()
+
+
+# ---------------------------------------------------------------------------
+# declare_durable_topology: the host's broker phase, before anything publishes.
+# ---------------------------------------------------------------------------
+
+
+class _Probe(Data):
+    pid: Annotated[str, Key]
+
+
+def _fake_mq():
+    from unittest.mock import AsyncMock, MagicMock
+
+    fake = MagicMock()
+    fake.connect = AsyncMock()
+    fake.declare_topology = AsyncMock()
+    fake.declare_route = AsyncMock()
+    return fake
+
+
+async def test_declare_durable_topology_declares_each_route(monkeypatch):
+    """Every (data, consumer) pair on a durable wire gets one route, so a producer that comes up
+    before the consumer still publishes onto a real route."""
+    import app.runtime.durable as durable
+
+    @node
+    async def consumer_a(p: _Probe) -> None: ...
+
+    @node
+    async def consumer_b(p: _Probe) -> None: ...
+
+    wire(_Probe).to(consumer_a, consumer_b).durable()
+    fake = _fake_mq()
+    monkeypatch.setattr(durable, "mq", fake)
+
+    await durable.declare_durable_topology()
+
+    fake.connect.assert_awaited_once()
+    fake.declare_topology.assert_awaited_once()
+    queues = sorted(call.args[0].queue for call in fake.declare_route.await_args_list)
+    # "_Probe" snake-cases to "_probe": durable_ + _probe + _<consumer>.
+    assert queues == ["durable___probe_consumer_a", "durable___probe_consumer_b"]
+
+
+async def test_a_process_with_only_outbound_mq_still_gets_its_exchange(monkeypatch):
+    """No durable wire means no route to declare, but the exchange must still be there: living's
+    outbound queues publish on it, and without it every publish fails with "must call
+    declare_topology() first" (she could hear but not speak)."""
+    import app.runtime.durable as durable
+
+    fake = _fake_mq()
+    monkeypatch.setattr(durable, "mq", fake)
+
+    await durable.declare_durable_topology()
+
+    fake.connect.assert_awaited_once()
+    fake.declare_topology.assert_awaited_once()
+    fake.declare_route.assert_not_called()

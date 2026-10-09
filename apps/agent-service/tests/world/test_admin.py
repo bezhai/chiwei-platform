@@ -1,8 +1,8 @@
 """world 记录的人工读写接口：列目录、读一份、写一份、删一份。
 
-跑在真的 HTTP 这一层上（凭据、泳道核对、参数、错误码），记录落在临时的私有卷上。
-凭据和泳道核对跟通信机制的人工入口是同一套声明（``requires_inner_secret`` /
-``requires_lane_match`` / ``answers_with_lane``）。
+跑在真的 HTTP 这一层上（凭据、泳道核对、参数、错误码），路由由 world 的宿主挂上去，记录落在
+临时的私有卷上。凭据和泳道核对跟通信机制的人工入口是同一套声明（``inner_secret`` /
+``lane_match`` / ``answers_with_lane``）。
 """
 from __future__ import annotations
 
@@ -14,10 +14,9 @@ import pytest
 from fastapi import FastAPI
 
 from app.infra import config
-from app.runtime.http_source import register_http_sources
 from app.world import records
 
-from .conftest import LANE, load_world_wiring
+from .conftest import LANE
 
 SECRET = "world-admin-secret"
 BASE = "http://world.test"
@@ -26,17 +25,16 @@ DOC = "/admin/world/records/document"
 
 
 @pytest.fixture
-def api(volume, monkeypatch) -> FastAPI:
+async def api(volume, monkeypatch, app_host) -> FastAPI:
     monkeypatch.setenv("APP_NAME", "world")
     monkeypatch.setattr(
         config, "settings", dataclasses.replace(config.settings, inner_http_secret=SECRET)
     )
-    load_world_wiring()
     application = FastAPI()
     from app.api.middleware import HeaderContextMiddleware
 
     application.add_middleware(HeaderContextMiddleware)
-    register_http_sources(application)
+    await app_host("world", http=application)
     return application
 
 
@@ -191,19 +189,21 @@ async def test_a_request_without_a_lane_is_meant_for_prod_and_refused_here(api):
     assert r.status_code == 409
 
 
-def test_the_routes_run_in_the_world_app():
-    """HTTP 路由挂在跑它消费者的那个 App 的进程里：这四条的节点都绑在 world 上。"""
-    from app.runtime.placement import nodes_for_app
-    from app.runtime.wire import WIRING_REGISTRY
+async def test_the_routes_run_in_the_world_app(app_host):
+    """这四条路由只挂在 world 的进程里：world 的宿主登记它们，agent-service 的宿主一条都没有。"""
 
-    load_world_wiring()
+    def record_routes(host) -> list[str]:
+        return [
+            r.name
+            for r in host.registered()
+            if r.kind == "route" and "/admin/world/records" in r.name
+        ]
 
-    http_consumers = {
-        c for w in WIRING_REGISTRY if any(s.kind == "http" for s in w.sources) for c in w.consumers
-    }
-    assert len(http_consumers) == 4
-    assert http_consumers <= nodes_for_app("world")
-    assert not http_consumers & nodes_for_app("agent-service")
+    world = await app_host("world")
+    assert len(record_routes(world)) == 4
+    await world.stop()
+
+    assert record_routes(await app_host("agent-service")) == []
 
 
 async def test_a_process_without_the_writer_lock_refuses_writes_but_still_reads(client, volume):

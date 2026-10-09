@@ -1,8 +1,8 @@
 """world 一轮处理收件箱里所有还没经过一轮的消息，一次只跑一轮。
 
-一次投递就是调一次接线里交给通信机制的那个处理函数（``world.deliver``）；它返回就是这次投递
-处理成功（通信机制确认它），抛异常就是处理失败（通信机制按它的重试再投一次，这里就是再调一次）。
-"进程死了再起来"是重新执行一遍接线（:func:`restart`），私有卷上的东西还在。模型、上下文存储、
+一次投递就是调一次 world 的插件交给通信机制的那个处理函数（``world.deliver``）；它返回就是这次
+投递处理成功（通信机制确认它），抛异常就是处理失败（通信机制按它的重试再投一次，这里就是再调一次）。
+"进程死了再起来"是 world 的宿主停了再起（:func:`restart`），私有卷上的东西还在。模型、上下文存储、
 通信机制的发送换成替身（``conftest.py``）。
 """
 from __future__ import annotations
@@ -180,7 +180,7 @@ async def test_the_messages_of_a_round_the_process_died_in_come_back_in_the_next
     outcomes = await asyncio.gather(running, *waiting, return_exceptions=True)
     assert isinstance(outcomes[1], Crash)
 
-    restart(world)
+    await restart(world)
     await world.deliver(second)  # 没确认的那条被 broker 重投给新进程
 
     assert len(world.runner.runs) == 3
@@ -213,7 +213,7 @@ async def test_a_round_dying_after_its_transcript_was_stored_runs_its_messages_a
     assert outcomes[0] is None and isinstance(outcomes[1], Crash)
     assert len(world.committed) == 2, "那一轮的上下文已经存下了"
 
-    restart(world)
+    await restart(world)
     await world.deliver(second)  # 没确认的投递被 broker 重投给新进程
 
     assert len(world.runner.runs) == 3
@@ -664,7 +664,7 @@ async def test_a_message_handled_while_its_delivery_was_away_runs_once_even_days
 
     days_later = now_cst() + timedelta(days=3)
     monkeypatch.setattr(pending, "now_cst", lambda: days_later)
-    restart(world)
+    await restart(world)
     await world.deliver(_from("绫奈", "我回来了。"))  # 起来之后先有别的一轮，记录照样写过几遍
     await world.deliver(away)  # A 的重试
 
@@ -682,7 +682,7 @@ async def test_a_message_is_not_run_again_when_its_success_was_never_recorded(wo
     out = _from("赤尾", "我出门了。")
     await world.deliver(out, success_recorded=False)
     await world.deliver(_from("绫奈", "我在看书。"))
-    restart(world)
+    await restart(world)
     await world.deliver(_from("千凪", "我在做饭。"))
 
     await world.deliver(out)  # 租约过期，同一条又交到处理函数手里

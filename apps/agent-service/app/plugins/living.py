@@ -19,8 +19,8 @@ diary and review windows) are judged inside the nodes, on every tick; most ticks
 reading anything.
 
 **A tick builds its payload in the clock loop** (:func:`_ticker`): a tick Data that grew a
-required field fails there, and the clock's watchdog stops the process, as the dataflow interval
-source did. The node's run is the tick's work and runs on its own.
+required field fails there, and the clock's watchdog stops the process. The node's run is the
+tick's work and runs on its own.
 
 **She has no inbound edge.** Messages on her phone she reads from ``common_message`` in her own
 rounds; what world and her sisters tell her arrives in her inbox, which only stores it. The

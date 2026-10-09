@@ -17,9 +17,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import os
-import subprocess
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -49,6 +46,7 @@ from app.living.persona import LIVING_PERSONAS
 from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from app.runtime.schema_types import pg_type
+from tests.hosting import in_a_fresh_process
 from tests.living.conftest import clock_at
 
 LANE = "coe-living"
@@ -1314,23 +1312,13 @@ async def test_ticks_while_her_round_is_stuck_do_not_pile_up_behind_it(
 # --------------------------------------------------------------------------
 
 
-def _in_a_fresh_process(expr: str, *, lane: str = "coe-living") -> str:
-    """泳道是输入：living 的三条钟只在 ``coe-*`` 上注册（见 app/wiring/living.py）。"""
-    proc = subprocess.run(
-        [sys.executable, "-c", f"import app.wiring;{expr}"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env={**os.environ, "LANE": lane},
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout
-
-
-def test_the_life_tables_reach_the_registry_via_app_wiring():
-    out = _in_a_fresh_process(
+def test_the_life_tables_reach_the_registry_when_agent_service_starts():
+    out = in_a_fresh_process(
+        "agent-service",
         "from app.runtime.data import DATA_REGISTRY;"
-        "print(sorted(c.__name__ for c in DATA_REGISTRY))"
+        "print(sorted(c.__name__ for c in DATA_REGISTRY))",
+        lane="coe-living",
+        timeout=120,
     )
     for name in ("LooseEnd", "LifeMoment"):
         assert f"'{name}'" in out, (
@@ -1338,17 +1326,27 @@ def test_the_life_tables_reach_the_registry_via_app_wiring():
         )
 
 
-def test_the_life_clock_is_wired_to_an_interval_source():
-    out = _in_a_fresh_process(
-        "from app.runtime.wire import WIRING_REGISTRY;"
-        "print([(s.data_type.__name__,"
-        " sorted(c.__name__ for c in s.consumers),"
-        " [(x.kind, x.params) for x in s.sources])"
-        " for s in WIRING_REGISTRY"
-        " if s.data_type.__name__ == 'LifeMomentTick'])"
-    )
-    assert "LifeMomentTick" in out and "life_moment_tick" in out, out
-    assert "'interval'" in out, f"life 那条钟没挂上时间源 —— 她永远不会醒。拿到：{out}"
+async def test_the_life_clock_is_registered_on_the_agent_service_host(app_host):
+    """living 插件登记了 life 那条钟，每一拍把 ``LifeMomentTick`` 交给 ``life_moment_tick``。
+    没登记她永远不会醒。"""
+    import inspect
+
+    from app.living.moment import LIFE_MOMENT_TICK_SECONDS
+
+    host = await app_host("agent-service")
+    clocks = {r.name: r for r in host.registered() if r.kind == "clock"}
+    assert "LifeMomentTick" in clocks, f"life 那条钟没登记 —— 她永远不会醒。拿到：{sorted(clocks)}"
+    clock = clocks["LifeMomentTick"]
+    assert clock.plugin == "living"
+    assert clock.detail["seconds"] == LIFE_MOMENT_TICK_SECONDS
+
+    work = clock.detail["tick"](dt.datetime(2026, 7, 25, 6, 0, tzinfo=dt.UTC))
+    try:
+        called = inspect.getcoroutinelocals(work)
+        assert called["fn"] is life_moment_tick.__wrapped__
+        assert called["args"] == (LifeMomentTick(ts="2026-07-25T06:00:00+00:00"),)
+    finally:
+        work.close()
 
 
 def test_the_life_tick_is_constructible_from_ts_alone():

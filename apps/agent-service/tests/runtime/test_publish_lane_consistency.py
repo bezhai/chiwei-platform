@@ -26,7 +26,6 @@ import pytest
 
 from app.infra.rabbitmq import Route
 from app.runtime import Data, Key, Sink, emit, wire
-from app.runtime.placement import clear_bindings
 from app.runtime.propagation import Context, bind_context
 from app.runtime.wire import clear_wiring
 
@@ -55,13 +54,11 @@ class _SinkProbe(Data):
 @pytest.fixture(autouse=True)
 def _isolate():
     clear_wiring()
-    clear_bindings()
     from app.runtime.emit import reset_emit_runtime
 
     reset_emit_runtime()
     yield
     clear_wiring()
-    clear_bindings()
     reset_emit_runtime()
 
 

@@ -18,7 +18,7 @@
 （:func:`writer_lock`）。发布是滚动更新，单副本也会有新旧两个 world 进程同时在跑的一段；
 卷是 hostPath 卷、固定在单节点，挂它的 pod 都在同一台宿主机上读写同一个本地目录，flock
 在它们之间是真的互斥。拿着锁的进程才消费收件箱（收件箱开设时声明了 ``consume_while``，
-见 :mod:`app.world.wiring`），启动补醒也在拿到锁之后才跑；没拿到的进程照常起来、照常答
+见 :mod:`app.plugins.world`），启动补醒也在拿到锁之后才跑；没拿到的进程照常起来、照常答
 HTTP，读记录照常，写一律拒绝（:class:`WriterLockNotHeld`）。进程退出时先停消费、等正在
 处理的那一轮，最后才放锁（:func:`app.messaging.receiving.stop_receiving`）；进程要是直接
 死了，内核关掉它的文件，锁也跟着放开。

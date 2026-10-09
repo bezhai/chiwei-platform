@@ -7,8 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.infra.rabbitmq import (
-    _LANE_FALLBACK_TTL_MS,
-    _NON_PROD_EXPIRES_MS,
     ALL_ROUTES,
     CHAT_RESPONSE,
     DLX_NAME,
@@ -231,51 +229,11 @@ class TestRouteConstants:
 
 
 # ---------------------------------------------------------------------------
-# Route.lane_fallback + _build_queue_args(lane_fallback=...) — Phase 3 Task 1
-# ---------------------------------------------------------------------------
-def test_build_queue_args_prod_ignores_lane_fallback():
-    args = _build_queue_args("rk", lane=None, lane_fallback=True)
-    assert args == {"x-dead-letter-exchange": DLX_NAME}
-    args2 = _build_queue_args("rk", lane=None, lane_fallback=False)
-    assert args2 == {"x-dead-letter-exchange": DLX_NAME}
-
-
-def test_build_queue_args_lane_with_fallback_default():
-    args = _build_queue_args("rk", lane="dev", lane_fallback=True)
-    assert args == {
-        "x-message-ttl": _LANE_FALLBACK_TTL_MS,
-        "x-dead-letter-exchange": EXCHANGE_NAME,
-        "x-dead-letter-routing-key": "rk",
-        "x-expires": _NON_PROD_EXPIRES_MS,
-    }
-
-
-def test_build_queue_args_lane_fallback_off_keeps_dlx():
-    args = _build_queue_args("rk", lane="dev", lane_fallback=False)
-    assert args == {
-        "x-dead-letter-exchange": DLX_NAME,
-        "x-expires": _NON_PROD_EXPIRES_MS,
-    }
-    assert "x-message-ttl" not in args
-    assert "x-dead-letter-routing-key" not in args
-
-
-def test_route_default_lane_fallback_true():
-    r = Route("q", "rk")
-    assert r.lane_fallback is True
-
-
-def test_route_explicit_lane_fallback_false():
-    r = Route("q", "rk", lane_fallback=False)
-    assert r.lane_fallback is False
-
-
-# ---------------------------------------------------------------------------
-# declare_route / _ensure_lane_queue read route.lane_fallback — Phase 3 Task 2
+# declare_route / _ensure_lane_queue build the lane queue's arguments
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_declare_route_passes_lane_fallback_through(monkeypatch):
-    """declare_route 应该把 route.lane_fallback 透传给 _build_queue_args。"""
+async def test_declare_route_gives_the_lane_queue_its_fallback_to_prod(monkeypatch):
+    """declare_route 声明的泳道队列带 TTL 回落 prod 的参数（_build_queue_args）。"""
     from app.infra.rabbitmq import _RabbitMQ
 
     mq = _RabbitMQ()
@@ -292,19 +250,15 @@ async def test_declare_route_passes_lane_fallback_through(monkeypatch):
     mq._channel.declare_queue = AsyncMock(side_effect=fake_declare_queue)
 
     monkeypatch.setattr("app.infra.rabbitmq.current_lane", lambda: "dev")
-    route = Route("q", "rk", lane_fallback=False)
-    await mq.declare_route(route)
+    await mq.declare_route(Route("q", "rk"))
 
-    args = declared_args["q_dev"]
-    assert "x-message-ttl" not in args
-    assert "x-dead-letter-routing-key" not in args
-    assert args["x-dead-letter-exchange"] == DLX_NAME
+    assert declared_args["q_dev"] == _build_queue_args("rk", "dev")
+    assert declared_args["q_dev"]["x-dead-letter-routing-key"] == "rk"
 
 
 @pytest.mark.asyncio
-async def test_ensure_lane_queue_passes_lane_fallback_through_and_caches():
-    """_ensure_lane_queue (lazy declare 路径)
-    应该把 route.lane_fallback 透传给 _build_queue_args，且二次调用走 cache。"""
+async def test_ensure_lane_queue_declares_the_fallback_once_and_caches():
+    """_ensure_lane_queue (lazy declare 路径) 声明带回落参数的泳道队列，二次调用走 cache。"""
     from app.infra.rabbitmq import _RabbitMQ
 
     mq = _RabbitMQ()
@@ -320,13 +274,10 @@ async def test_ensure_lane_queue_passes_lane_fallback_through_and_caches():
 
     mq._channel.declare_queue = AsyncMock(side_effect=fake_declare_queue)
 
-    route = Route("q", "rk", lane_fallback=False)
+    route = Route("q", "rk")
     await mq._ensure_lane_queue(route, lane="dev")
 
-    args = declared_args["q_dev"]
-    assert "x-message-ttl" not in args
-    assert "x-dead-letter-routing-key" not in args
-    assert args["x-dead-letter-exchange"] == DLX_NAME
+    assert declared_args["q_dev"] == _build_queue_args("rk", "dev")
 
     # cache_key 已记录
     assert "q_dev" in mq._declared_lane_queues

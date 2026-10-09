@@ -1,4 +1,5 @@
-"""CI 规则：``app/world/`` 与 ``app/living/`` 互不 import（双向）。
+"""CI 规则：``app/world/`` 与 ``app/living/`` 互不 import（双向），两边的插件也一样：
+``app/plugins/world.py`` 不 import life，``app/plugins/living.py`` 不 import world。
 
 规则本身在 ``scripts/check_world_life_imports.py``，CI（``.github/workflows/grep-gate.yml``）
 直接跑它。这里用临时目录造出每一种写法的违规，证明它真的会拦；再对真实代码树跑一遍，
@@ -116,12 +117,36 @@ def test_look_alike_names_are_not_the_other_side(tmp_path):
     assert find_violations(root) == []
 
 
+@pytest.mark.parametrize("source", WORLD_REACHING_INTO_LIFE)
+def test_the_world_plugin_importing_life_is_caught(tmp_path, source):
+    """world 的进程只起 world 的插件：插件带进 life 的代码，world 的进程就背上了 life。"""
+    root = _tree(tmp_path, {"plugins/__init__.py": "", "plugins/world.py": source})
+
+    violations = find_violations(root)
+
+    assert len(violations) == 1, violations
+    assert "plugins/world.py" in violations[0]
+
+
+@pytest.mark.parametrize("source", LIFE_REACHING_INTO_WORLD)
+def test_the_living_plugin_importing_world_is_caught(tmp_path, source):
+    root = _tree(tmp_path, {"plugins/__init__.py": "", "plugins/living.py": source})
+
+    violations = find_violations(root)
+
+    assert len(violations) == 1, violations
+    assert "plugins/living.py" in violations[0]
+
+
 def test_everyone_else_may_import_both(tmp_path):
+    """规则只管 world、life 和它们各自的插件；别的插件、别的包不在这条规则里。"""
     root = _tree(
         tmp_path,
         {
-            "wiring/__init__.py": "",
-            "wiring/both.py": "import app.living.moment\nimport app.world.engine\n",
+            "plugins/__init__.py": "",
+            "plugins/ops.py": "import app.living.moment\nimport app.world.engine\n",
+            "data/__init__.py": "",
+            "data/both.py": "from app import living, world\n",
         },
     )
     assert find_violations(root) == []

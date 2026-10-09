@@ -56,6 +56,7 @@ from inner_shared.dynamic_config import dynamic_config
 
 from app import deployment
 from app.data.bootstrap import ensure_business_schema
+from app.host.clock import Clock, Clocks, Tick
 from app.host.errors import (
     DuplicateService,
     HostError,
@@ -69,10 +70,12 @@ from app.host.plugin import Disposer, Plugin, Registration
 from app.infra.rabbitmq import mq
 from app.messaging import receiving
 from app.messaging.lifecycle import start_messaging, stop_messaging
-from app.runtime.bootstrap import declare_durable_topology
-from app.runtime.clock import Clock, Clocks, Tick
 from app.runtime.data import Data
-from app.runtime.durable import start_consumers, stop_consumers
+from app.runtime.durable import (
+    declare_durable_topology,
+    start_consumers,
+    stop_consumers,
+)
 from app.runtime.emit import reset_emit_runtime
 from app.runtime.graph import compile_graph
 from app.runtime.lane_policy import (
@@ -114,7 +117,7 @@ class Context:
         """Every ``seconds``, call ``tick(ts)`` in the clock loop and run what it returns.
 
         ``tick`` should build its work (the payload) before returning it, so a payload that
-        cannot be built stops the process instead of failing quietly. See :mod:`app.runtime.clock`.
+        cannot be built stops the process instead of failing quietly. See :mod:`app.host.clock`.
         """
         if seconds <= 0:
             raise ValueError(f"clock {name!r}: seconds must be positive, got {seconds!r}")
@@ -168,7 +171,7 @@ class Context:
         ``inner_secret``: ``Authorization: Bearer <INNER_HTTP_SECRET>`` is required.
         ``lane_match``: a request meant for another lane (``x-ctx-lane``) is refused with 409.
         ``answers_with_lane``: the refusals the host gives carry this process's lane.
-        See :mod:`app.runtime.http_auth`.
+        See :mod:`app.host.http_auth`.
         """
         method = method.upper()
         if method not in METHODS:
@@ -461,7 +464,7 @@ class Host:
         for plugin in self._plugins:
             self._set_up(plugin)
         reset_emit_runtime()
-        compile_graph(self._app_name)
+        compile_graph()
 
         if schema:
             await ensure_business_schema()

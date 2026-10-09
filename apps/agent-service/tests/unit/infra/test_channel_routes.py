@@ -110,7 +110,7 @@ class TestContractVectorPythonSide:
     @pytest.mark.parametrize("case", CONTRACT["cases"], ids=_case_id)
     def test_queue_args(self, case: dict[str, Any]):
         route = channel_route(_base_route(case["base"]), case["channel"])
-        args = _build_queue_args(route.rk, case["lane"], route.lane_fallback)
+        args = _build_queue_args(route.rk, case["lane"])
         assert args == case["expect"]["queue_args"]
 
     def test_exchange_names_match(self):
@@ -130,11 +130,6 @@ class TestContractVectorPythonSide:
             channel_route(CHAT_RESPONSE, first).rk
             != channel_route(CHAT_RESPONSE, second).rk
         )
-
-    def test_lane_fallback_inherited_from_base(self):
-        assert channel_route(CHAT_RESPONSE, "lark").lane_fallback is True
-        base_no_fallback = CHAT_RESPONSE._replace(lane_fallback=False)
-        assert channel_route(base_no_fallback, "lark").lane_fallback is False
 
 
 class TestKnownChannelsRegistry:

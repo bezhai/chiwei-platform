@@ -92,6 +92,7 @@ from app.agent.trace import (
 from app.api.middleware import get_lane
 from app.capabilities._errors import CapabilityTimeout
 from app.capabilities.retry import retry as _retry_decorator
+from app.deployment import DEFAULT_APP
 from app.infra import cst_time
 from app.infra.config import settings
 from app.runtime.lane_policy import (
@@ -99,7 +100,6 @@ from app.runtime.lane_policy import (
     current_deployment_lane,
     normalize_deployment_lane,
 )
-from app.runtime.placement import DEFAULT_APP
 
 logger = logging.getLogger(__name__)
 

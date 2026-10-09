@@ -60,7 +60,7 @@ from app.runtime.propagation import (
     extract_context,
     inject_context,
 )
-from app.runtime.wire import WireSpec
+from app.runtime.wire import WIRING_REGISTRY, WireSpec
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 _LEASE_MS = 300_000  # 5 min
@@ -231,17 +231,36 @@ def _build_handler(w: WireSpec, consumer: Callable):
     return handler
 
 
-async def start_consumers(app_name: str | None = None) -> None:
-    """Declare and start consumers for durable wires.
+async def declare_durable_topology() -> None:
+    """Prepare the exchange, then declare every durable wire's route, so this process can publish.
 
-    Args:
-        app_name: when ``None``, iterate every ``.durable()`` wire in the
-            graph (legacy behavior — preserves the existing smoke test
-            and durable tests). When set, filter to wires whose consumers
-            are all bound to ``app_name`` via ``app.runtime.placement.bind``.
-            Wires whose consumers span multiple apps are rejected at
-            ``compile_graph`` time (layer-4 validation), so the "all
-            consumers bound to this app" check here is strict-by-design.
+    A producer that comes up before the consumer of a durable route would otherwise publish to a
+    route that does not exist yet, and the broker drops the message without a word.
+    :func:`start_consumers` declares the routes it consumes as well; declaring twice is a no-op.
+
+    The exchange is prepared even when no durable wire is registered: the outbound queues
+    (``Sink.mq``) publish on the same exchange, and without it every publish fails with
+    ``must call declare_topology() first``. The plugin host calls this in its broker phase.
+    """
+    await mq.connect()
+    await mq.declare_topology()
+
+    routes = [
+        _route_for(w, c)
+        for w in WIRING_REGISTRY
+        if w.durable
+        for c in w.consumers
+    ]
+    for route in routes:
+        await mq.declare_route(route)
+    logger.info("durable topology declared: %d route(s)", len(routes))
+
+
+async def start_consumers() -> None:
+    """Declare and start a consumer for every durable wire in the graph.
+
+    The registry holds only this process's wires: the plugin host registers the durable edges of
+    its app's plugins, and nothing else does.
 
     Not re-entrant: a second call without an intervening
     :func:`stop_consumers` would register duplicate RabbitMQ consumers on
@@ -258,29 +277,14 @@ async def start_consumers(app_name: str | None = None) -> None:
 
     graph = compile_graph()
 
-    allowed: set | None = None
-    if app_name is not None:
-        from app.runtime.placement import nodes_for_app
-
-        allowed = nodes_for_app(app_name)
-
-    # Only touch RabbitMQ if this app actually has durable consumers to
-    # start — otherwise tests / apps without durable wires would be
-    # forced to configure RABBITMQ_URL just to boot.
-    has_durable = any(
-        w.durable and (allowed is None or all(c in allowed for c in w.consumers))
-        for w in graph.wires
-    )
-    if has_durable:
+    # Only touch RabbitMQ if there are durable consumers to start, so a
+    # process without durable wires does not need RABBITMQ_URL to boot.
+    if any(w.durable for w in graph.wires):
         await mq.connect()
         await mq.declare_topology()
 
     for w in graph.wires:
         if not w.durable:
-            continue
-        if allowed is not None and not all(c in allowed for c in w.consumers):
-            # Wire belongs to a different app. compile_graph layer-4 has
-            # already ruled out mixed-app wires, so this is a clean skip.
             continue
         for consumer in w.consumers:
             route = _route_for(w, consumer)

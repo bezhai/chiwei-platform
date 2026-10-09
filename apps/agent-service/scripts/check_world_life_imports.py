@@ -1,15 +1,18 @@
-"""CI 规则：``app/world/`` 与 ``app/living/`` 互不 import，两个方向都不行。
+"""CI 规则：``app/world/`` 与 ``app/living/`` 互不 import，两个方向都不行；两边各自的插件
+（``app/plugins/world.py``、``app/plugins/living.py``）也一样。
 
-world 和三姐妹的 life 是两个独立的引擎，唯一的连接是通信机制（``app.messaging``）。
-这条规则扫两边每一个 ``.py`` 的语法树，找出指向另一边的 import：
+world 和三姐妹的 life 是两个独立的引擎，唯一的连接是通信机制（``app.messaging``）。一个 App
+的进程只起它清单里的插件（``app.deployment.APPS``），所以 world 的插件带进 life 的代码，world
+的进程就背上了 life，反过来也一样。这条规则扫这些文件每一个 ``.py`` 的语法树，找出指向另一边的
+import：
 
 * ``import app.living...`` / ``from app.living... import ...`` / ``from app import living``；
 * 相对 import（按文件所在的包解析成绝对模块名再判）；
 * ``importlib.import_module("app.living...")`` / ``import_module(...)`` / ``__import__(...)``
   里写成字符串字面量的模块名。
 
-判的是 import，不是文字：docstring 和注释里提到另一边的路径不算。两边之外的包（基础层、
-各 App 的接线）可以同时 import 两边。
+判的是 import，不是文字：docstring 和注释里提到另一边的路径不算。规则之外的代码（基础层、
+别的插件）不在这条规则里。
 
 用法：``python3 scripts/check_world_life_imports.py [app 目录]``，默认是本脚本旁边的
 ``app/``。有违规时逐条打印 ``文件:行号`` 并以 1 退出。只用标准库，CI 上不装依赖直接跑。
@@ -20,11 +23,11 @@ import ast
 import sys
 from pathlib import Path
 
-# 哪一边的代码不许 import 哪一边。
-FORBIDDEN = {
-    "world": "app.living",
-    "living": "app.world",
-}
+# 哪一边的代码（``app`` 目录下的目录或文件）不许 import 哪一边。
+FORBIDDEN: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("world", ("world", "plugins/world.py"), "app.living"),
+    ("life", ("living", "plugins/living.py"), "app.world"),
+)
 
 _DYNAMIC_IMPORTERS = {"import_module", "__import__"}
 
@@ -78,11 +81,8 @@ def find_violations(root: Path) -> list[str]:
     """``root``（``app`` 目录）下所有越界的 import，每条一行 ``相对路径:行号: 说明``。"""
     root = root.resolve()
     violations: list[str] = []
-    for side, forbidden in FORBIDDEN.items():
-        side_dir = root / side
-        if not side_dir.is_dir():
-            continue
-        for path in sorted(side_dir.rglob("*.py")):
+    for side, places, forbidden in FORBIDDEN:
+        for path in _python_files(root, places):
             module_parts, is_package = module_name(root, path)
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for lineno, candidates in imported_names(tree, module_parts, is_package):
@@ -90,10 +90,22 @@ def find_violations(root: Path) -> list[str]:
                 if hit is not None:
                     rel = path.relative_to(root.parent)
                     violations.append(
-                        f"{rel}:{lineno}: app/{side} imports {hit} "
+                        f"{rel}:{lineno}: {side} code imports {hit} "
                         f"(world and life only talk through app.messaging)"
                     )
     return violations
+
+
+def _python_files(root: Path, places: tuple[str, ...]) -> list[Path]:
+    """``places`` 下的 ``.py``：目录取其中每一个，文件取它自己；不存在的跳过。"""
+    files: list[Path] = []
+    for place in places:
+        path = root / place
+        if path.is_dir():
+            files.extend(sorted(path.rglob("*.py")))
+        elif path.is_file():
+            files.append(path)
+    return files
 
 
 def main(argv: list[str]) -> int:

@@ -14,7 +14,6 @@ import pytest
 
 from app.runtime import Data, Key, Sink, wire
 from app.runtime.emit import emit, reset_emit_runtime
-from app.runtime.placement import clear_bindings
 from app.runtime.wire import clear_wiring
 
 # Module-level Data classes so @node's get_type_hints() can resolve annotations.
@@ -48,12 +47,10 @@ class _NoChannelTrigger(Data):
 @pytest.fixture(autouse=True)
 def _reset_runtime(monkeypatch):
     clear_wiring()
-    clear_bindings()
     reset_emit_runtime()
     monkeypatch.setenv("APP_NAME", "agent-service")
     yield
     clear_wiring()
-    clear_bindings()
     reset_emit_runtime()
 
 

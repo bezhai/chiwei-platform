@@ -1,7 +1,7 @@
 """她收到的消息：三姐妹的收件箱，收件只存储；她下一轮醒来时读。
 
 **收件箱开在 agent-service 进程里，名字是她们在世界里的名字**（:mod:`app.living.participants`）。
-名字存在人设表里，接线模块 import 的时候库还没准备好，所以接线只声明"开始接收时再开"
+名字存在人设表里，插件 setup 的时候还不读库，所以 living 插件只声明"开始接收时再开"
 （:func:`app.messaging.receiving.inboxes_at_start`），:func:`open_inboxes` 在那时读名字、检查、
 逐个开设。名字有问题就抛，进程起不来。
 

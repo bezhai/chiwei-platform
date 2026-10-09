@@ -5,6 +5,7 @@ registered. See :mod:`app.host.host`.
 This package never imports living or world: a plugin module is imported only when a manifest
 names it (:meth:`Host.for_app`).
 """
+from app.host.clock import Tick
 from app.host.errors import (
     DuplicateService,
     HostError,
@@ -15,7 +16,6 @@ from app.host.errors import (
 )
 from app.host.host import Context, Host
 from app.host.plugin import Disposer, Plugin, Registration
-from app.runtime.clock import Tick
 
 __all__ = [
     "Context",

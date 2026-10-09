@@ -200,7 +200,7 @@ def test_the_layer_imports_no_app():
             imported.append(node.module)
         elif isinstance(node, ast.Import):
             imported.extend(a.name for a in node.names)
-    apps = [m for m in imported if m.startswith(("app.living", "app.world", "app.wiring"))]
+    apps = [m for m in imported if m.startswith(("app.living", "app.world", "app.plugins"))]
     assert apps == [], f"基础层 import 了 App 的代码：{apps}"
 
 

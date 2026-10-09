@@ -1,7 +1,7 @@
 """Phase 7b Gap 12: admin DLQ replay nodes.
 
-Each function is paired with a Source.http(...) admin route in
-wiring/admin.py. The 6-step requeue protocol implementation lives in
+Each function is paired with an admin route registered by
+:mod:`app.plugins.ops`. The 6-step requeue protocol implementation lives in
 dlq_requeue_impl below; see spec §3.2.
 
 Runtime-internal primitives are accessed through ``DLQAdminCapability``
@@ -270,7 +270,7 @@ async def dlq_requeue_impl(body: dict[str, Any], *, operator: str | None) -> dic
 
 
 # ---------------------------------------------------------------------------
-# @node wrappers — wired to Source.http routes in wiring/admin.py
+# @node wrappers — the handlers of the ops plugin's routes (app/plugins/ops.py)
 
 @node
 async def dlq_inspect_node(req: DlqInspectRequest) -> DlqInspectResponse:

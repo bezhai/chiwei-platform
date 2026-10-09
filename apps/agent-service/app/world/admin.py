@@ -1,7 +1,7 @@
 """world 记录的人工读写接口：列目录、读一份、写一份、删一份。只给人用。
 
 用途三个：原文灌入初始内容、人工修正、验收时读取。其他参与者不读记录，只能经通信机制问
-world。接线在 :mod:`app.world.wiring`，挂在 world App 的进程里：
+world。路由由 world 的插件（:mod:`app.plugins.world`）登记，挂在 world App 的进程里：
 
   GET    /admin/world/records                                   列目录
   GET    /admin/world/records/document?path=...                 读一份

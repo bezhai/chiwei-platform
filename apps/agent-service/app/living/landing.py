@@ -19,7 +19,7 @@
 
 **为什么是事后对账，不是投递回执/撤回回调。** 让嘴等一个回执 = 把"她说话"和"渠道
 写库"绑成一次同步往返：broker 慢一点她就卡在工具调用里，而她这一轮是有节奏的。撤回
-那一侧更彻底：生活引擎这里**没有、也不会有任何入站边**（``app/wiring/living.py``
+那一侧更彻底：生活引擎这里**没有、也不会有任何入站边**（``app/plugins/living.py``
 写死，``tests/living/test_no_inbound.py`` 守着），渠道撤成功了没有回调也没有队列能
 告诉我们，只能自己按节奏去查。事后对账把这两件事解开——她说完就走，账晚几分钟对上
 没有任何影响。
@@ -43,7 +43,7 @@ datetime 会从缝里溜进 TIMESTAMPTZ 列）→ ``insert_append(expected_curre
 **这两件事都不碰 ``state``。** 认领状态、渠道落地、撤回是三根正交的轴，理由写在
 :class:`~app.living.mouth.SpokenOutbound` 的 docstring 里。
 
-**这不是入站口。** 一条 ``Source.interval`` 的钟 + 几条 SELECT，没有队列、没有
+**这不是入站口。** 一条钟（``ctx.clock``）+ 几条 SELECT，没有队列、没有
 HTTP，外面的任何东西都没法通过它进来（``tests/living/test_no_inbound.py``）。
 """
 

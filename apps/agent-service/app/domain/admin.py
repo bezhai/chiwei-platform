@@ -1,7 +1,7 @@
-"""Admin / public-API request Data classes — for HTTP source RPC endpoints.
+"""Admin request Data classes — the input of the ops plugin's routes.
 
-Each Data wraps one HTTP endpoint's input; all transient (no DB row); wired
-via Source.http(...) with response=True.
+Each Data wraps one HTTP endpoint's input; all transient (no DB row); the
+route is registered by :mod:`app.plugins.ops`.
 
 旧 life-tick / glimpse / schedule 触发 + schedule CRUD 的 request Data 已随
 world/life 重写删除；voice 触发随 voice 子系统拆除删除。剩 search。

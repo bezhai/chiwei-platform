@@ -1,15 +1,17 @@
 """改前那五条运维口和 ``/health`` 的完整回答，钉成字面量。
 
 这一份要回答的是一个很窄的问题：**给那四条文档树端点（后来随旧世界层删掉了）装门的
-那次改动，有没有顺手改掉别的路由的行为。** 那次改动动的是所有自动注册路由共用的那一段——``Source.http`` 多了
-两个开关、``_bind_one`` 的方法分发从四路 if/elif 收成一张表、每条路由多带一个
+那次改动，有没有顺手改掉别的路由的行为。** 那次改动动的是所有自动注册路由共用的那一段——路由的声明多了
+两个开关、挂路由时的方法分发从四路 if/elif 收成一张表、每条路由多带一个
 ``dependencies=`` 参数，而参数校验失败那条 detail 现在要过一遍"回答外壳"。这几样
 里的任何一样写歪了，波及的都不止那四条。
 
-**期望值是从改前的实现上捕获的，不是从改后的实现上写下来的。** 做法：把
-``app/runtime/source.py``、``app/runtime/http_source.py``、``app/wiring/admin.py``
-临时还原到 HEAD，用下面这些**有效请求**打一遍，把整份回答（状态码、content-type、
-响应体逐字）抄成下面的字面量，再把实现还原回来。
+**期望值是从改前的实现上捕获的，不是从改后的实现上写下来的。** 做法：把那时的 dataflow
+HTTP source 和运维口的接线临时还原到改前，用下面这些**有效请求**打一遍，把整份回答（状态码、
+content-type、响应体逐字）抄成下面的字面量，再把实现还原回来。
+
+后来路由改由插件宿主挂（``app.plugins.ops``），这一份跟着改成挂宿主的路由，期望值一个字节
+都没动：同一份字面量照样通过，说明换宿主没有改掉这几条的回答。
 
 这跟"带不带凭据都答得一样"不是同一条：那条比的是改后的实现上三次调用彼此相同，证明
 得了门没扩大到它们身上，证明不了行为跟改前逐字相同。而且那条比的是 422——参数校验
@@ -22,7 +24,6 @@
 from __future__ import annotations
 
 import dataclasses
-import importlib
 import json
 
 import httpx
@@ -31,7 +32,6 @@ from fastapi import FastAPI
 
 from app.api.routes import router as health_router
 from app.infra import config
-from app.runtime.http_source import register_http_sources
 
 BASE = "http://ops-routes.test"
 
@@ -89,8 +89,8 @@ CALLS = (
 )
 
 # 改前那一版给出的完整回答。**从 HEAD 的实现上捕获**，不是照着改后的实现写的：
-# 把 source.py / http_source.py / wiring/admin.py 还原到 HEAD（那时 http_auth.py 还
-# 不存在），跑上面那几个请求，把输出抄下来。
+# 把那时的 HTTP source 和运维口的接线还原到改前（那时还没有凭据和泳道核对那一层），跑上面
+# 那几个请求，把输出抄下来。
 #
 # ``/admin/search`` 那条的 500 不是这次改动弄坏的：它 import
 # ``app.agent.tools.search._you_search``，而那个函数在 ``app.capabilities.web_search``
@@ -204,14 +204,11 @@ def downstream(monkeypatch):
 
 
 @pytest.fixture
-def api(downstream) -> FastAPI:
-    """跟 main.py 同一套：``/health`` 那个 router 加上自动注册出来的那几条。"""
-    import app.wiring.admin as admin_wiring
-
-    importlib.reload(admin_wiring)
+async def api(downstream, app_host) -> FastAPI:
+    """跟 main.py 同一套：``/health`` 那个 router 加上 agent-service 的宿主挂上去的那几条。"""
     application = FastAPI()
     application.include_router(health_router)
-    register_http_sources(application)
+    await app_host("agent-service", http=application)
     return application
 
 

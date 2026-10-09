@@ -943,13 +943,12 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 
 想快速建立体感,按下面顺序读:
 
-1. `app/wiring/living.py` —— 五条钟 + 那条 durable 边 + 出口 sink，整张图就这一个文件。开头的 docstring 讲清了"为什么这里没有、也不会有入站边"。
-2. `app/living/moment.py` —— moment，业务最重的那个 @node，`@tool` 也都在这儿；`LifeMomentTick` 是时间源 Data 形状约束（只能有一个 `ts` 字段）的例子。
-3. `app/living/phone.py` —— 她怎么查 `common_message`、游标怎么走。入站不经 MQ 这件事在这里落地。
-4. `app/domain/chat_dataflow.py` —— `ChatResponseSegment`，出图那一侧的 Data 契约。
-5. `app/domain/safety.py` —— `Recall`，撤回出图的 Data 契约。
-6. `app/deployment.py` —— 每个 App 加载哪些接线模块（`APP_WIRING`），以及 placement bind（当前一条绑定都没有，所有 node 默认 agent-service）。
-7. `app/workers/runtime_entry.py` —— Worker 启动入口。
+1. `app/living/moment.py` —— moment，业务最重的那个 @node，`@tool` 也都在这儿；`LifeMomentTick` 是时间源 Data 形状约束（只能有一个 `ts` 字段）的例子。
+2. `app/living/phone.py` —— 她怎么查 `common_message`、游标怎么走。入站不经 MQ 这件事在这里落地。
+3. `app/domain/chat_dataflow.py` —— `ChatResponseSegment`，出图那一侧的 Data 契约。
+4. `app/domain/safety.py` —— `Recall`，撤回出图的 Data 契约。
+5. `app/deployment.py` —— 每个 App 加载哪些接线模块（`APP_WIRING`），以及 placement bind（当前一条绑定都没有，所有 node 默认 agent-service）。
+6. `app/workers/runtime_entry.py` —— Worker 启动入口。
 
 ### 源码参考点(不必记,需要时回查)
 
@@ -958,11 +957,8 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 | @node 装饰器做什么 | `app/runtime/node.py` |
 | Data 校验规则 | `app/runtime/data.py::__pydantic_init_subclass__` |
 | wire DSL 全部方法（含 `.retry` / `.on_error`） | `app/runtime/wire.py::WireBuilder` |
-| 所有 Source 种类 | `app/runtime/source.py::Source` |
 | emit 分派逻辑 | `app/runtime/emit.py::emit` |
 | durable 边实现 + 错误路由 helper | `app/runtime/durable.py::_route_consumer_exception` |
-| MQSource 消费循环 | `app/runtime/engine.py::_source_loop_mq` |
-| Node → App 绑定 | `app/runtime/placement.py::bind` |
 | Capability 清单 | `app/capabilities/` |
 | `transactional_emit` / `OutboxEmitter` | `app/runtime/outbox.py` |
 | Outbox 后台调度循环 | `app/runtime/outbox_dispatcher.py::dispatcher_loop` |
@@ -981,9 +977,8 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 2. Adoption mode 的 Data **不能**带 `DedupKey` / `Version`(`__pydantic_init_subclass__`)。
 3. `@node` 必须 `async def`、参数 + 返回必须是 `Data / Data | None / None`(`node()` 装饰时)。
 4. `@node` 不能返回 `AdminOnly` Data(`node()` 装饰时)。
-5. 一个 @node 只能绑一个 App(`placement.bind` 重复绑定 raises)。
-6. durable 边的 consumer 必须**单 Data 参数**(MQSource 契约,`_source_loop_mq` 检查)。
-7. Runtime 启动时 `compile_graph()` 会检查 wire 一致性(生产者 Data 类型 ↔ 消费者签名)—— 启动报错看这里。
-8. `emit(data)` 不会匹配任何 wire 时静默 no-op(不是错),测试里的 wiring 清空是利用这一点。
-9. **mutation function（普通 async function 持有 session 写业务表 + 触发 EventData）必须用 `transactional_emit(s)` 在 session 块内 append**，不能在块外 `await emit(...)`。CI grep gate `Gap 8` 卡业务区 `await emit(` 计数。
-10. **durable consumer 内禁止 try/except 包整个 body** —— 让 framework 看到异常它才能按 `.on_error(...)` 分发。该 raise 就 raise。
+5. durable 边的 consumer 必须**单 Data 参数**(MQSource 契约,`_source_loop_mq` 检查)。
+6. Runtime 启动时 `compile_graph()` 会检查 wire 一致性(生产者 Data 类型 ↔ 消费者签名)—— 启动报错看这里。
+7. `emit(data)` 不会匹配任何 wire 时静默 no-op(不是错),测试里的 wiring 清空是利用这一点。
+8. **mutation function（普通 async function 持有 session 写业务表 + 触发 EventData）必须用 `transactional_emit(s)` 在 session 块内 append**，不能在块外 `await emit(...)`。CI grep gate `Gap 8` 卡业务区 `await emit(` 计数。
+9. **durable consumer 内禁止 try/except 包整个 body** —— 让 framework 看到异常它才能按 `.on_error(...)` 分发。该 raise 就 raise。

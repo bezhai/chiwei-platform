@@ -2,8 +2,7 @@
 
 The request becomes the route's Data (query string, then the JSON body on top for POST / PUT);
 the handler's answer, a Data, is the 200 body. The credential and lane checks, the 422 and the
-refusal shape are :mod:`app.runtime.http_auth`, shared with the dataflow HTTP sources. Compared
-with those sources, path parameters and the 202 fire-and-forget mode are gone: no route uses them.
+refusal shape are :mod:`app.host.http_auth`.
 """
 from __future__ import annotations
 
@@ -14,13 +13,13 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.routing import APIRoute
 
-from app.runtime.data import Data
-from app.runtime.http_auth import (
+from app.host.http_auth import (
     refusal_detail,
     request_data,
     request_fields,
     route_guards,
 )
+from app.runtime.data import Data
 
 METHODS = ("GET", "POST", "PUT", "DELETE")
 

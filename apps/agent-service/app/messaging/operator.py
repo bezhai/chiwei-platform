@@ -2,10 +2,10 @@
 
 它有两部分：
 
-* 一个叫 ``operator`` 的收件箱（在 agent-service 的接线里开设）。发给它、定时发给它的
+* 一个叫 ``operator`` 的收件箱（agent-service 的 operator 插件开设，:mod:`app.plugins.operator`）。发给它、定时发给它的
   消息能送到；送到之后它什么都不做——内容本来就在记录里，人去记录里看。它不接受
   提问（人没法同步回答）。
-* 六条运维 HTTP（``/admin/messaging/*``，在 ``app/wiring/messaging.py`` 里接线）：发、问、
+* 六条运维 HTTP（``/admin/messaging/*``，由同一个插件登记）：发、问、
   定时、查记录，以及看和重放本泳道的死信。六条都要内网凭据：这个入口能冒充任何参与者
   往任何收件箱里塞东西，也能把死信重新投回去。
 
@@ -16,9 +16,9 @@
 
 **请求要去的泳道和实际落在的泳道不一致时，一条都不发。** 泳道没部署这个服务时，sidecar
 会把请求静默落回 prod 的 pod 上；通信机制按进程自己的部署泳道收发，落回 prod 就等于
-往 prod 的收件箱里发。所以六条路由都声明了 ``requires_lane_match``：请求带来的泳道
+往 prod 的收件箱里发。所以六条路由都声明了 ``lane_match``：请求带来的泳道
 （``x-ctx-lane``，没有就是 prod）和进程的部署泳道不一致，框架在进 handler 之前就回 409，
-并说出自己在哪条泳道（:mod:`app.wiring.messaging`）。每个回答都带 ``lane``。
+并说出自己在哪条泳道（:mod:`app.plugins.operator`）。每个回答都带 ``lane``。
 """
 from __future__ import annotations
 

@@ -36,13 +36,11 @@ def _fresh_process_state(monkeypatch) -> None:
     import app.world.volume as volume
     from app.messaging.receiving import clear_inboxes
     from app.runtime.emit import reset_emit_runtime
-    from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
     from app.skills.registry import SkillRegistry
     from app.world.sources import clear_sources
 
     clear_wiring()
-    clear_bindings()
     clear_inboxes()
     clear_sources()
     reset_emit_runtime()

@@ -48,30 +48,60 @@ def _clear_model_cache():
 # ---------------------------------------------------------------------------
 # Runtime 注册表清理 (autouse)
 # ---------------------------------------------------------------------------
-# WIRING_REGISTRY (list) / placement bindings (dict) / emit graph cache 都是
-# module-level mutables。前一个测试声明的 wire 会污染后续测试 —— 下一个 emit()
-# 触发的 compile_graph 看到残留的 wire，可能直接 GraphError。autouse 把每个测试
-# 都重置回干净状态。
+# WIRING_REGISTRY (list) / 收件箱登记 / emit graph cache 都是 module-level
+# mutables。前一个测试登记的 wire 会污染后续测试 —— 下一个 emit() 触发的
+# compile_graph 看到残留的 wire，可能直接 GraphError。autouse 把每个测试都重置
+# 回干净状态。
 #
-# tests/wiring/ 里的测试需要真实生产 wiring，它们在自己的 setup 里调
-# importlib.reload 重新执行 module body，把 wire/bind 调用重新跑一遍
-# —— 跟 autouse 的清理顺序兼容。
+# 要真实插件登记的测试用 ``app_host``（下面），它在测试结束时停掉起过的宿主，
+# 宿主停下时撤掉自己登记的一切。
 @pytest.fixture(autouse=True)
 def _reset_runtime_registries():
     from app.messaging.receiving import clear_inboxes
     from app.runtime.emit import reset_emit_runtime
-    from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
 
     clear_wiring()
-    clear_bindings()
     clear_inboxes()
     reset_emit_runtime()
     yield
     clear_wiring()
-    clear_bindings()
     clear_inboxes()
     reset_emit_runtime()
+
+
+# ---------------------------------------------------------------------------
+# app_host — 在测试里起一个 App 的插件宿主（tests/hosting.py）
+# ---------------------------------------------------------------------------
+@pytest.fixture
+async def app_host(monkeypatch):
+    """一个函数：``await app_host("world")`` 按 ``app.deployment.APPS`` 的清单起那个 App 的宿主，
+    ``app_host("agent-service", [plugin, ...])`` 只起给定的插件；``http=`` 给一个 FastAPI，路由就
+    挂在它上面。只跑 setup，不碰数据库、broker，不起钟和后台任务（:func:`tests.hosting.start_without_io`）。
+
+    测试结束时停掉起过的每个宿主，测试失败了也停：宿主停下时撤掉它登记的路由、收件箱、知识来源。
+    起宿主会改两样进程级的东西，这里在测试结束时还原：Dynamic Config 的泳道来源，以及 skills
+    插件装进去的 guides。
+    """
+    from inner_shared.dynamic_config import dynamic_config
+
+    from app.host import Host
+    from app.skills.registry import SkillRegistry
+    from tests.hosting import start_without_io
+
+    monkeypatch.setattr(dynamic_config, "_lane_provider", dynamic_config._lane_provider)
+    monkeypatch.setattr(SkillRegistry, "_skills", {})
+    hosts: list[Host] = []
+
+    async def start(app_name: str, plugins=None, *, http=None) -> Host:
+        host = Host.for_app(app_name) if plugins is None else Host(app_name, plugins)
+        hosts.append(host)
+        await start_without_io(host, http=http)
+        return host
+
+    yield start
+    for host in reversed(hosts):
+        await host.stop()
 
 
 # ---------------------------------------------------------------------------

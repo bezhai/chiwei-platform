@@ -1,9 +1,7 @@
 """Interval clocks: one loop per clock that ticks every N seconds, plus a watchdog.
 
-Two callers run clocks through :class:`Clocks`: the dataflow engine's interval sources
-(:mod:`app.runtime.engine`) and the plugin host's ``ctx.clock`` (:mod:`app.host`). It lives here,
-below both, because the engine cannot import the host; once the engine is gone (C7b of the T1
-plan) it moves into ``app/host``.
+The plugin host runs the clocks its plugins register (``ctx.clock``, :mod:`app.host.host`)
+through :class:`Clocks`.
 
 **A tick is two steps.** ``tick(ts)`` is called inside the loop and returns the tick's work (an
 awaitable). Anything ``tick`` itself raises, such as building a payload that is missing a field,

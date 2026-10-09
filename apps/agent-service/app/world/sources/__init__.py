@@ -14,8 +14,8 @@
 都拿全部已启用来源的查询工具，按登记的先后排。主 agent 另有它自己才有的几个动作
 （:mod:`app.world.actions`），不在这里。
 
-**加一个来源**：在这个包里新增它的模块，定义一个 :class:`Source`，在 world 的接线
-（:mod:`app.world.wiring`）里登记一次（:func:`register`）。不改任何 agent，也不改 prompt。
+**加一个来源**：在这个包里新增它的模块，定义一个 :class:`Source`，在 world 的插件
+（:mod:`app.plugins.world`）里登记一次（:func:`register`）。不改任何 agent，也不改 prompt。
 
 **启用哪些走 Dynamic Config**（:data:`ENABLED_SOURCES_KEY`，逗号分隔的名字）。没配就是登记过
 的全部；配了就只启用列出来的，没登记过的名字记一条 warning、跳过。没启用的来源，工具从四个
@@ -70,7 +70,7 @@ def register(source: Source) -> None:
 
 
 def clear_sources() -> None:
-    """清空登记表。测试重新执行一遍接线之前用。"""
+    """清空登记表。world 的插件停下时调（``ctx.on_stop``）。"""
     _registered.clear()
 
 

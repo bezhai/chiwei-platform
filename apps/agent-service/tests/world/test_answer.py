@@ -9,7 +9,7 @@ from app.world import answer, records
 from app.world.sources import query_tools, told
 from app.world.sources import records as records_source
 
-from .conftest import LANE, ScriptedAgent, load_world_wiring, tools_built_for
+from .conftest import LANE, ScriptedAgent, tools_built_for
 
 
 def _question(body: str, sender: str = "operator"):
@@ -80,9 +80,9 @@ async def test_saying_nothing_is_no_answer(world):
     assert await answer.answer_question(_question("赤尾在哪？")) is None
 
 
-def test_the_world_inbox_answers_questions_with_the_answer_agent():
+async def test_the_world_inbox_answers_questions_with_the_answer_agent(app_host):
     from app.messaging.receiving import INBOX_REGISTRY
 
-    load_world_wiring()
+    await app_host("world")
 
     assert INBOX_REGISTRY["world"].on_question is answer.answer_question

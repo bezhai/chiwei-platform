@@ -1,10 +1,9 @@
 """Clocks: a tick every N seconds, fire-and-forget, under its own trace id; lane-gated; a tick
 that cannot even build its work stops the process.
 
-Ported from the engine's interval-source tests (``test_engine_phase4``,
-``test_engine_source_error``, ``test_interval_fire_and_forget``): the loop they pinned is the
-one :mod:`app.runtime.clock` now runs for both the engine and the host, so they run once, through
-``ctx.clock``. The engine keeps only the tests about how it turns interval wires into clocks.
+Ported from the dataflow engine's interval-source tests (``test_engine_phase4``,
+``test_engine_source_error``, ``test_interval_fire_and_forget``): the loop they pinned is
+:mod:`app.host.clock`, which the host runs for ``ctx.clock``.
 
 Why fire-and-forget (from the original): a round that hangs or times out must not stop the next
 tick. That is how world once slept for good on coe: the loop awaited a round stuck on an LLM call.

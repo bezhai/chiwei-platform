@@ -17,8 +17,9 @@ from app.host import Host, HostError
 from app.messaging import receiving
 from app.runtime import Data, Key, node
 from app.runtime.wire import WIRING_REGISTRY
+from tests.hosting import start_without_io
 
-from .conftest import no_clocks_no_io, plugin
+from .conftest import plugin
 
 
 class _Ask(Data):
@@ -145,7 +146,7 @@ async def test_stop_runs_the_shutdown_order_and_revokes_last(recorded_phases):
 async def test_each_phase_runs_only_when_its_flag_is_set(recorded_phases):
     host = _two_plugins(recorded_phases)
 
-    await no_clocks_no_io(host)
+    await start_without_io(host)
     started = list(recorded_phases.calls)
     recorded_phases.calls.clear()
     await host.stop()
@@ -154,12 +155,29 @@ async def test_each_phase_runs_only_when_its_flag_is_set(recorded_phases):
     assert recorded_phases.calls == ["on_stop:b", "on_stop:a"]
 
 
+async def test_after_start_dynamic_config_reads_the_deployment_lane(monkeypatch):
+    """Dynamic Config resolves per lane: a coe process must read its lane's config, not prod's.
+    Ported from the dataflow startup's test, which set the same provider."""
+    from inner_shared.dynamic_config import dynamic_config
+
+    monkeypatch.setattr(dynamic_config, "_lane_provider", None)
+    host = Host("agent-service", [plugin("a")])
+    await start_without_io(host)
+    try:
+        monkeypatch.setenv("LANE", "coe-feedwl")
+        assert dynamic_config._get_lane() == "coe-feedwl"
+        monkeypatch.delenv("LANE", raising=False)
+        assert dynamic_config._get_lane() == "prod"
+    finally:
+        await host.stop()
+
+
 async def test_starting_twice_without_stopping_is_refused(recorded_phases):
     host = _two_plugins(recorded_phases)
-    await no_clocks_no_io(host)
+    await start_without_io(host)
     try:
         with pytest.raises(HostError, match="already started"):
-            await no_clocks_no_io(host)
+            await start_without_io(host)
     finally:
         await host.stop()
 
@@ -391,7 +409,7 @@ async def test_a_cancelled_stop_is_raised_even_when_the_step_it_hit_catches_it()
         ctx.inbox("kept", on_message=_ignore)
 
     host = Host("agent-service", [plugin("p", setup)])
-    await no_clocks_no_io(host, tasks=True)
+    await start_without_io(host, tasks=True)
     await asyncio.sleep(0)
     stopping = asyncio.create_task(host.stop())
     await ending.wait()
@@ -414,7 +432,7 @@ async def test_a_cancelled_error_a_callback_raises_is_a_failure_not_a_cancellati
         ctx.on_stop(_raise_cancelled)
 
     host = Host("agent-service", [plugin("p", setup)])
-    await no_clocks_no_io(host)
+    await start_without_io(host)
 
     with pytest.raises(HostError, match="CancelledError") as caught:
         await host.stop()
@@ -439,7 +457,7 @@ async def test_a_cancelled_error_from_the_cleanup_does_not_replace_the_start_err
     host = Host("agent-service", [plugin("a", setup_a), plugin("b", setup_b)])
 
     with pytest.raises(RuntimeError, match="setup b failed"):
-        await no_clocks_no_io(host)
+        await start_without_io(host)
 
     assert host.registered() == ()
     assert receiving.INBOX_REGISTRY == {}
@@ -483,7 +501,7 @@ async def test_a_start_cancelled_while_it_cleans_up_raises_the_cancellation_with
         raise RuntimeError("setup b failed")
 
     host = Host("agent-service", [plugin("a", setup_a), plugin("b", setup_b)])
-    starting = asyncio.create_task(no_clocks_no_io(host))
+    starting = asyncio.create_task(start_without_io(host))
     await entered.wait()
     starting.cancel()
 
@@ -578,7 +596,7 @@ async def test_the_durable_and_outbound_wires_carry_emits_only_while_registered(
     monkeypatch.setattr(durable_mod, "publish_durable", publish_durable)
     monkeypatch.setattr(sink_mod, "_dispatch_mq_sink", dispatch_mq_sink)
     host = Host("agent-service", [_everything_plugin([])])
-    await no_clocks_no_io(host)
+    await start_without_io(host)
 
     await emit(_Picked(pid="1"))
     await emit(_Said(sid="1", channel="lark"))
@@ -621,7 +639,7 @@ async def test_a_disposer_takes_back_its_registration_while_the_host_runs():
 async def test_registering_outside_setup_is_refused():
     kept: list = []
     host = Host("agent-service", [plugin("p", kept.append)])
-    await no_clocks_no_io(host)
+    await start_without_io(host)
     try:
         with pytest.raises(HostError, match="only during setup"):
             kept[0].clock("late", 60, _tick)
@@ -637,7 +655,7 @@ async def test_two_registrations_with_one_name_are_refused():
     host = Host("agent-service", [plugin("p", setup)])
 
     with pytest.raises(HostError, match="clock 'c'"):
-        await no_clocks_no_io(host)
+        await start_without_io(host)
     assert host.registered() == ()
 
 
@@ -652,7 +670,7 @@ async def test_registered_shows_what_each_registration_declared():
         ctx.outbound(_Said, "recall")
 
     host = Host("world", [plugin("p", setup)])
-    await no_clocks_no_io(host)
+    await start_without_io(host)
     try:
         by_kind = {r.kind: r for r in host.registered()}
     finally:
@@ -738,7 +756,7 @@ async def test_the_host_knows_which_inboxes_each_opener_declared(recorded_phases
         ctx.inbox("operator", on_message=_ignore)
 
     host = Host("agent-service", [plugin("operator", operator), plugin("sisters", sisters)])
-    await no_clocks_no_io(host, mq=True)
+    await start_without_io(host, mq=True)
     try:
         opener = next(r for r in host.registered() if r.kind == "inboxes_at_start")
         assert opener.plugin == "sisters"
@@ -770,7 +788,7 @@ async def test_a_failing_opener_leaves_no_inbox_behind(recorded_phases, monkeypa
     host = Host("agent-service", [plugin("p", setup)])
 
     with pytest.raises(RuntimeError, match="两个人的显示名一样"):
-        await no_clocks_no_io(host, mq=True)
+        await start_without_io(host, mq=True)
 
     assert receiving.INBOX_REGISTRY == {}
     assert receiving.INBOXES_AT_START == []

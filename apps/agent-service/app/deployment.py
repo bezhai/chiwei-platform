@@ -12,18 +12,11 @@ setup 里登记的东西（钟、路由、收件箱）才会出现在那个进�
 
 App 之间不靠代码互通，靠通信机制（:mod:`app.messaging`）。App 名必须已经存在于 PaaS（先
 ``/api/paas/apps/`` 建，否则部署那步没有落脚处）。
-
-:data:`APP_WIRING` 是切到插件宿主之前的启动方式（dataflow 接线模块），生产已经不走它；它和
-那些接线模块一起删掉之前，只有旧的 dataflow 启动代码和它们的测试还读它。**起了某个 App 宿主的
-进程不能再 import 那个 App 的旧接线**（``app.wiring`` / ``app.world.wiring``）：接线 import 时
-就登记收件箱和知识来源，宿主再登记同一个会报"已经登记过"。
 """
 from __future__ import annotations
 
-APP_WIRING: dict[str, tuple[str, ...]] = {
-    "agent-service": ("app.wiring",),
-    "world": ("app.world.wiring",),
-}
+DEFAULT_APP = "agent-service"
+"""没设 ``APP_NAME`` 的进程跑的 App。"""
 
 APPS: dict[str, tuple[str, ...]] = {
     "agent-service": (

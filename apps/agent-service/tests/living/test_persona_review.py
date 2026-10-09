@@ -572,41 +572,36 @@ async def test_the_tick_payload_is_a_single_ts_field():
     assert set(key_fields(PersonaReviewTick)) == {"ts"}
 
 
-def test_the_clock_is_declared_in_the_living_wiring():
-    """挂没挂上按生产 wiring 的注册表核对，不是"我记得挂了"。
+async def test_the_clock_is_registered_by_the_living_plugin(app_host):
+    """挂没挂上按 agent-service 宿主上登记的钟核对，不是"我记得挂了"。
 
-    reload 手法同 ``tests/wiring/test_outbound_wiring.py``：根 conftest 的 autouse
-    fixture 每个用例前后都清 ``WIRING_REGISTRY``，所以这里重跑一次模块体，看
-    ``wire(...)`` 到底注册出了什么。
+    钟每一拍在循环里调 ``tick(ts)``：造出 ``PersonaReviewTick``，交给 ``persona_review_tick``。
     """
-    import importlib
+    import inspect
+    from datetime import UTC, datetime
 
     from app.living.persona_review import (
         PERSONA_REVIEW_TICK_SECONDS,
         PersonaReviewTick,
         persona_review_tick,
     )
-    from app.runtime.placement import clear_bindings
-    from app.runtime.wire import WIRING_REGISTRY, clear_wiring
 
-    # 先 import 再清再 reload —— 顺序同 ``tests/wiring/test_outbound_wiring.py``。
-    # 反过来的话，这个进程里还没 import 过 ``app.wiring.living`` 时 import 本身会跑
-    # 一遍模块体、reload 再跑一遍，注册表里就是两条同样的边。
-    module = importlib.import_module("app.wiring.living")
-    clear_wiring()
-    clear_bindings()
-    importlib.reload(module)
-
-    wires = [w for w in WIRING_REGISTRY if w.data_type is PersonaReviewTick]
-    assert len(wires) == 1, (
-        "app.wiring.living 里没有 PersonaReviewTick 那条钟 —— 模块写好了、"
-        "测试全绿，而线上一版都不会有"
+    host = await app_host("agent-service")
+    clocks = [r for r in host.registered() if r.kind == "clock" and r.name == "PersonaReviewTick"]
+    assert len(clocks) == 1, (
+        "living 插件没登记 PersonaReviewTick 那条钟 —— 模块写好了、测试全绿，而线上一版都不会有"
     )
-    (wire,) = wires
-    assert [(s.kind, s.params) for s in wire.sources] == [
-        ("interval", {"seconds": float(PERSONA_REVIEW_TICK_SECONDS)})
-    ]
-    assert wire.consumers == [persona_review_tick]
+    (clock,) = clocks
+    assert clock.plugin == "living"
+    assert clock.detail["seconds"] == float(PERSONA_REVIEW_TICK_SECONDS)
+
+    work = clock.detail["tick"](datetime(2026, 7, 27, 22, 30, tzinfo=UTC))
+    try:
+        called = inspect.getcoroutinelocals(work)
+        assert called["fn"] is persona_review_tick.__wrapped__
+        assert called["args"] == (PersonaReviewTick(ts="2026-07-27T22:30:00+00:00"),)
+    finally:
+        work.close()
 
 
 @pytest.mark.integration

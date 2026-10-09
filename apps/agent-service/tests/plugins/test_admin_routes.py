@@ -1,39 +1,19 @@
-"""Admin wiring acceptance.
+"""agent-service 的运维路由：起它的插件宿主、把路由挂上 app 之后有哪些。
 
 旧 life-tick / glimpse / schedule 触发 + schedule CRUD 路由已随 world/life
 重写删除；voice 触发随 voice 子系统拆除一并删除。剩 search（DLQ admin 在
-test_dlq_admin 覆盖）。
+test_dlq_admin 覆盖）。完整的路由集合和各自的检查由 ``tests/apps/test_surface.py`` 按进程钉住。
 """
 from __future__ import annotations
 
 import importlib
 
-
-def _reload_admin_wiring():
-    """Reset registry and re-import wiring so routes are clean per test.
-
-    Reload the admin submodule directly: importlib.reload(parent_package)
-    doesn't re-execute submodules because the names are already cached
-    in sys.modules. Mirrors the pattern in test_outbound_wiring.py /
-    test_memory.py.
-    """
-    import app.wiring.admin as a
-    from app.runtime.placement import clear_bindings
-    from app.runtime.wire import clear_wiring
-
-    clear_wiring()
-    clear_bindings()
-    importlib.reload(a)
+from fastapi import FastAPI
 
 
-def test_admin_wiring_registers_all_paths():
-    _reload_admin_wiring()
-    from fastapi import FastAPI
-
-    from app.runtime.http_source import register_http_sources
-
+async def test_the_agent_service_host_puts_the_admin_routes_on_the_app(app_host):
     app = FastAPI()
-    register_http_sources(app)
+    await app_host("agent-service", http=app)
 
     paths_methods = set()
     for r in app.routes:
@@ -45,7 +25,7 @@ def test_admin_wiring_registers_all_paths():
         ("/admin/search", "POST"),
     }
     missing = expected - paths_methods
-    assert not missing, f"missing wires: {missing}"
+    assert not missing, f"missing routes: {missing}"
 
     # 旧 life / glimpse / schedule / voice 路由必须已删干净。
     deleted = {
@@ -61,7 +41,7 @@ def test_admin_wiring_registers_all_paths():
         ("/api/schedule/{schedule_id}", "DELETE"),
     }
     leftover = deleted & paths_methods
-    assert not leftover, f"deleted routes still wired: {leftover}"
+    assert not leftover, f"deleted routes still registered: {leftover}"
 
 
 def test_routes_py_only_health():

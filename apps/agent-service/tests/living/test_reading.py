@@ -15,9 +15,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
-import subprocess
-import sys
 import uuid
 
 import pytest
@@ -34,6 +31,7 @@ from app.living.reading import (
     read_a_round,
     read_so_far,
 )
+from tests.hosting import in_a_fresh_process
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -824,49 +822,32 @@ def test_no_reading_tool_ever_asks_her_how_long_something_takes():
             )
 
 
-def _in_a_fresh_process(expr: str, *, lane: str) -> str:
-    env = dict(os.environ)
-    env["LANE"] = lane
-    proc = subprocess.run(
-        [sys.executable, "-c", f"import app.wiring;{expr}"],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        env=env,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout
-
-
 def test_the_reading_round_is_a_durable_edge_and_not_an_inbound_one():
-    """读一程那条 durable 边**不产生任何 source** —— 它不是给外面的消息开的口。
+    """读一程那条 durable 边**不是给外面开的口**：没有哪条路由收 ``FilePickedUp``。
 
-    ``.durable()`` 只是 ``WireBuilder`` 上的一个标志位（见 ``app/runtime/wire.py``），
-    它不往 ``WireSpec.sources`` 里放东西，所以 ``tests/living/test_no_inbound.py``
-    那条"实验泳道上一条 mq / http 源都没有"照旧成立。这条边上跑的东西只有她自己
-    刚刚在某一轮里拿起的那个文件，投递方和消费方都是这一个进程。
+    这条边上跑的东西只有她自己刚刚在某一轮里拿起的那个文件，投递方和消费方都是这一个进程
+    （``tests/living/test_no_inbound.py`` 那条"外面的东西到不了 living"照旧成立）。
 
-    同时钉住这条边在每条泳道上都挂着：挂边跟泳道名无关（那道按泳道名分流的门随
-    旧实现一起删掉了）。
+    同时钉住这条边在每条泳道上都登记着：登记跟泳道名无关（那道按泳道名分流的门随旧实现
+    一起删掉了）。
     """
-    pairs = (
-        "from app.runtime.wire import WIRING_REGISTRY;"
-        "print(sorted((s.data_type.__name__, c.__name__)"
-        " for s in WIRING_REGISTRY for c in s.consumers));"
-        "print(sorted((s.data_type.__name__, x.kind)"
-        " for s in WIRING_REGISTRY for x in s.sources))"
+    probe = (
+        "print(sorted((r.detail['data_type'].__name__, r.detail['consumer'].__name__)"
+        " for r in host.registered() if r.kind == 'durable'));"
+        "print(sorted(r.detail['request'].__name__"
+        " for r in host.registered() if r.kind == 'route'))"
     )
     on_lane, off_lane = (
-        _in_a_fresh_process(pairs, lane=LANE),
-        _in_a_fresh_process(pairs, lane="prod"),
+        in_a_fresh_process("agent-service", probe, lane=LANE),
+        in_a_fresh_process("agent-service", probe, lane=None),
     )
-    wired, sources = on_lane.strip().splitlines()
-    assert "('FilePickedUp', 'read_a_round')" in wired, wired
-    assert "FilePickedUp" not in sources, (
-        f"读一程那条边挂上了 source —— 那就是个信箱了。拿到：{sources}"
+    durable, requests = on_lane.strip().splitlines()
+    assert durable == "[('FilePickedUp', 'read_a_round')]", durable
+    assert "FilePickedUp" not in requests, (
+        f"有一条路由收 FilePickedUp —— 读一程那条边成了信箱。拿到：{requests}"
     )
     assert "('FilePickedUp', 'read_a_round')" in off_lane, (
-        f"读一程在别的泳道上不见了 —— 挂边不该看泳道名。拿到：{off_lane}"
+        f"读一程在别的泳道上不见了 —— 登记不该看泳道名。拿到：{off_lane}"
     )
 
 

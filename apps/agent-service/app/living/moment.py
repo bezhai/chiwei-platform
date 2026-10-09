@@ -227,8 +227,8 @@ _MOMENT_CFG = AgentConfig(
 LIVING_LIFE_MOMENT_MINUTES_KEY = "living_life_moment_minutes"
 DEFAULT_LIFE_MOMENT_MINUTES = 10
 
-# 钟拍得比最密的 moment 还密，间隔判在节点里 —— ``Source.interval`` 的秒数在 import 时
-# 就固定了，想让间隔可调只能这么做（理由写在 :mod:`app.wiring.living`）。
+# 钟拍得比最密的 moment 还密，间隔判在节点里 —— 钟的秒数在登记时
+# 就固定了，想让间隔可调只能这么做（理由写在 :mod:`app.plugins.living`）。
 # 一分钟一拍的代价只有一次读库 + 比大小。
 LIFE_MOMENT_TICK_SECONDS = 60
 

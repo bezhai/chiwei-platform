@@ -19,7 +19,6 @@ APP_DIR = Path(__file__).resolve().parent.parent / "app"
 REMOVED_MODULES = [
     # afterthought 触发链
     "app.domain.memory_triggers",
-    "app.wiring.memory_triggers",
     "app.nodes.memory_pipelines",
     # reviewer 全家
     "app.memory.reviewer",
@@ -37,9 +36,7 @@ REMOVED_MODULES = [
     "app.memory.notes_format",
     "app.memory._timeline",
     "app.domain.agent_tool_events",
-    "app.wiring.agent_tool_events",
     # v4 向量化
-    "app.wiring.memory_vectorize",
     "app.nodes.memory_vectorize",
     "app.memory.vectorize_memory",
     "app.domain.memory_request",
@@ -130,13 +127,6 @@ def test_mq_routes_no_v4_vectorize():
     queues = {r.queue for r in ALL_ROUTES}
     assert "memory_fragment_vectorize" not in queues
     assert "memory_abstract_vectorize" not in queues
-
-
-def test_wiring_package_drops_v4_modules():
-    import app.wiring as wiring
-
-    for name in ("memory_triggers", "memory_vectorize", "agent_tool_events"):
-        assert not hasattr(wiring, name), f"app.wiring.{name} 应已删除"
 
 
 def test_queries_package_drops_v4_domains():

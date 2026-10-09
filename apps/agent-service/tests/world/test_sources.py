@@ -17,7 +17,7 @@ from app.world.sources import Source, private_dir, reality
 from app.world.sources import records as records_source
 from tests.capabilities import qweather as qw
 
-from .conftest import LANE, load_world_wiring
+from .conftest import LANE
 
 WEATHER_TOOLS = {"check_current_weather", "check_hourly_forecast", "check_daily_forecast"}
 
@@ -29,15 +29,15 @@ async def look_up_tides() -> str:
 
 
 @pytest.fixture
-def registered(monkeypatch):
-    """接线登记过的那几个来源；Dynamic Config 按 ``config`` 里给的值，没给就是没配。"""
+async def registered(monkeypatch, app_host):
+    """world 的插件登记过的那几个来源；Dynamic Config 按 ``config`` 里给的值，没给就是没配。"""
     from inner_shared.dynamic_config import dynamic_config
 
     config: dict[str, str] = {}
     monkeypatch.setattr(
         dynamic_config, "get", lambda k, default="": config.get(k, default)
     )
-    load_world_wiring()
+    await app_host("world")
     return config
 
 

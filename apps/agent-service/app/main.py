@@ -12,9 +12,9 @@ from inner_shared.middlewares.context_propagation import (
 
 from app.api.middleware import HeaderContextMiddleware, PrometheusMiddleware
 from app.api.routes import router as api_router
+from app.deployment import DEFAULT_APP
 from app.host import Host
 from app.infra.config import settings
-from app.runtime.placement import DEFAULT_APP
 
 load_dotenv()
 setup_logging(log_dir="/logs/agent-service", log_file="app.log")

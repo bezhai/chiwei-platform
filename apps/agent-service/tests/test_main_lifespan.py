@@ -108,7 +108,7 @@ async def test_with_time_sources_enabled_each_of_the_five_clocks_ticks(
     from app.main import lifespan
 
     monkeypatch.setenv("DATAFLOW_ENABLE_TIME_SOURCES", "1")
-    caplog.set_level(logging.INFO, logger="app.runtime.clock")
+    caplog.set_level(logging.INFO, logger="app.host.clock")
 
     async with lifespan(FastAPI()):
         async with asyncio.timeout(5):
@@ -129,7 +129,7 @@ async def test_with_time_sources_enabled_each_of_the_five_clocks_ticks(
 async def test_in_a_coe_lane_without_the_override_no_clock_ticks(pod, ticks, caplog):
     from app.main import lifespan
 
-    caplog.set_level(logging.INFO, logger="app.runtime.clock")
+    caplog.set_level(logging.INFO, logger="app.host.clock")
 
     async with lifespan(FastAPI()):
         await asyncio.sleep(0.1)

@@ -16,10 +16,10 @@ from __future__ import annotations
 import importlib.util
 
 import pytest
+from fastapi import FastAPI
 
 REMOVED_MODULES = [
     "app.domain.book_ingest",
-    "app.wiring.book",
     # Task 2：整个书注册物模块删除（读时取文件、现解码现分页，无书注册表）。
     "app.domain.book",
 ]
@@ -37,22 +37,11 @@ def test_book_side_channel_module_removed(module):
     assert not _spec_exists(module), f"{module} 应随书侧通道删除"
 
 
-def test_book_ingest_route_not_registered():
+async def test_book_ingest_route_not_registered(app_host):
     """``/api/internal/book/ingest`` 不再注册成任何 HTTP endpoint。"""
-    import app.wiring  # noqa: F401  — 触发全部 wiring 注册
-    from fastapi import FastAPI
-
-    from app.runtime.http_source import register_http_sources
-
     app = FastAPI()
-    register_http_sources(app)
+    await app_host("agent-service", http=app)
 
     paths = {getattr(r, "path", None) for r in app.routes}
+    assert "/admin/search" in paths, "用例前提没成立：插件的路由没挂上"
     assert "/api/internal/book/ingest" not in paths
-
-
-def test_wiring_package_drops_book_module():
-    """``app/wiring/__init__.py`` 不再 import book 子模块。"""
-    import app.wiring as wiring_pkg
-
-    assert not hasattr(wiring_pkg, "book"), "app.wiring 不应再聚合 book 子模块"

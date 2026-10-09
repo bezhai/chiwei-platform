@@ -1,6 +1,6 @@
 """应答 agent：回答别人问 world 的问题——某处现在什么样、谁在哪。
 
-world 的收件箱声明了 ``on_question``（:mod:`app.world.wiring`），每个问题起一个应答 agent：它拿到
+world 的收件箱声明了 ``on_question``（:mod:`app.plugins.world`），每个问题起一个应答 agent：它拿到
 全部已启用知识来源的查询工具（:func:`app.world.sources.query_tools`，跟另外三类拿的是同一份），
 依据它们回答。能当场推出来的东西（按现在的时间、天气和记录）由它当场推，主 agent 不为此提前
 写下，也不为此醒。

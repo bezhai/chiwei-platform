@@ -1,6 +1,6 @@
 """接收一侧：拥有者开设收件箱、处理送来的消息和问题；以及定时送达到点时的那一步。
 
-**收件箱由拥有者开设。** 一个 App 在自己的接线模块里调 :func:`inbox` 声明它拥有的
+**收件箱由拥有者开设。** 一个 App 的插件在 setup 里（经宿主的 ``ctx.inbox``）调 :func:`inbox` 声明它拥有的
 收件箱和处理函数；进程启动时 :func:`start_receiving` 在本泳道建队列、开始消费。一个收件箱
 是两条队列：收件箱本身装普通消息和退回的告知，旁边一条问题队列装问它的问题（布局见
 :mod:`app.messaging.broker`），两条一起建、各自消费。发送方永远不会建它们，所以"这个名字
@@ -45,9 +45,9 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
   上下文。进了上下文之后 ``on_open`` 失败，就退出上下文、隔 :data:`OPEN_RETRY_SECONDS`
   再来一次——这时启动早已返回，失败不能再靠让启动失败来暴露。
 
-**名字到进程启动时才知道的收件箱**（:func:`inboxes_at_start`）。:func:`inbox` 在接线模块
-import 时就要名字，可有的名字存在库里（三姐妹的名字取自人设表），import 的时候库还没准备好。
-这类拥有者在接线里只声明一个"开设它们"的函数，:func:`start_receiving` 在开设任何收件箱之前
+**名字到进程启动时才知道的收件箱**（:func:`inboxes_at_start`）。:func:`inbox` 在插件
+setup 时就要名字，可有的名字存在库里（三姐妹的名字取自人设表），setup 不读库。
+这类拥有者在 setup 里只声明一个"开设它们"的函数，:func:`start_receiving` 在开设任何收件箱之前
 调它一次，它在里面取名字、对每个名字调 :func:`inbox`。它抛异常，启动就失败，一个收件箱都
 不开：名字就是地址，名字有问题时不该带着其中一部分收件箱运行。失败的那一次里已经按名字声明
 的收件箱一并撤掉，声明本身留着：同一个进程再开始接收时整组重新调一遍，名字还有问题就照样失败，
@@ -240,7 +240,7 @@ def inbox(
     consume_while: ConsumeWhile | None = None,
     retry_without_limit: RetryWithoutLimit | None = None,
 ) -> None:
-    """声明本 App 拥有名为 ``name`` 的收件箱。在 App 的接线模块里调，进程启动时开设。
+    """声明本 App 拥有名为 ``name`` 的收件箱。插件 setup 时经宿主调（``ctx.inbox``），进程启动时开设。
 
     ``on_message`` 处理普通消息和 ``not_delivered`` 告知，抛异常即处理失败（会重试）。
     ``on_question`` 回答问题，返回回答正文；返回 ``None`` 表示没有回答。不给它的
@@ -282,7 +282,7 @@ INBOXES_AT_START: list[OpenAtStart] = []
 
 
 def inboxes_at_start(open_them: OpenAtStart) -> None:
-    """声明一组名字到进程启动时才知道的收件箱。在 App 的接线模块里调，见模块说明。
+    """声明一组名字到进程启动时才知道的收件箱。插件 setup 时经宿主调（``ctx.inboxes_at_start``），见模块说明。
 
     ``open_them`` 在 :func:`start_receiving` 开设任何收件箱之前调，在里面取名字、对每个
     名字调 :func:`inbox`。它抛异常，启动就失败，它这一次声明的收件箱撤掉，下一次开始接收时

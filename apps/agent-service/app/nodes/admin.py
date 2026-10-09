@@ -1,6 +1,6 @@
 """Admin / public API @nodes.
 
-Each node corresponds to one HTTP endpoint; wires in app/wiring/admin.py.
+Each node corresponds to one HTTP endpoint; the route is in app/plugins/ops.py.
 Return types are left un-annotated so the @node decorator skips Data-only
 validation — these nodes return dict / list[dict] for sync HTTP RPC.
 

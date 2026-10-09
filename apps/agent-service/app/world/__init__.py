@@ -2,8 +2,8 @@
 到一个变化由它判断并告知当事人，NPC 由临时 agent 扮演，别人问它某处什么样、谁在哪时它回答。
 
 它和三姐妹的 life 互不 import（CI 规则 ``scripts/check_world_life_imports.py``），运行时
-也不加载 life 的代码：它是同一个镜像上的另一个 App，进程只加载 :mod:`app.world.wiring`
-（``app.deployment.APP_WIRING``）。它和别的参与者之间唯一的连接是通信机制
+也不加载 life 的代码：它是同一个镜像上的另一个 App，进程只起 world 的插件
+（:mod:`app.plugins.world`，清单在 ``app.deployment.APPS``）。它和别的参与者之间唯一的连接是通信机制
 （:mod:`app.messaging`）。
 
 * :mod:`app.world.volume` —— 私有卷上按泳道分的那个目录；
@@ -19,6 +19,7 @@
 * :mod:`app.world.npc` —— NPC agent：扮演一个 NPC 完成一次互动；
 * :mod:`app.world.answer` —— 应答 agent：回答问 world 的问题，只读；
 * :mod:`app.world.unfinished` —— 没跑完的一轮里已经发生、收不回来的事；
-* :mod:`app.world.admin` —— 记录的人工读写接口；
-* :mod:`app.world.wiring` —— 这个 App 的接线：来源登记、收件箱和人工接口。
+* :mod:`app.world.admin` —— 记录的人工读写接口。
+
+来源登记、收件箱和人工接口由 world 的插件（:mod:`app.plugins.world`）登记。
 """

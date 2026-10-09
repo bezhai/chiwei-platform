@@ -4,9 +4,8 @@ Walks ``WIRING_REGISTRY`` and verifies that:
   * every consumer referenced by a wire is decorated with ``@node``;
   * every consumer's signature accepts exactly the data type the wire
     routes to it;
-  * a wire's consumers all run in one app, durable wires carry a Data
-    with a table, every ``Sink.mq`` names a known route, and an HTTP
-    source's consumer runs in this process's app.
+  * durable wires carry a Data with a table, and every ``Sink.mq`` names
+    a known route.
 
 Returns a ``CompiledGraph`` summarising the data types, nodes, and wires
 seen. Errors surface as ``GraphError`` at startup so mis-wired graphs
@@ -15,12 +14,10 @@ never reach traffic.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from app.runtime.data import Data
 from app.runtime.node import NODE_REGISTRY, inputs_of
-from app.runtime.placement import DEFAULT_APP, nodes_for_app
 from app.runtime.wire import WIRING_REGISTRY, WireSpec
 
 
@@ -35,16 +32,9 @@ class CompiledGraph:
     wires: list[WireSpec]
 
 
-def compile_graph(app_name: str | None = None) -> CompiledGraph:
-    """Validate the wired graph for the app this process runs as.
-
-    ``app_name`` is that app; ``None`` means ``APP_NAME`` from the
-    environment (``DEFAULT_APP`` when unset) — the same answer ``emit()``
-    uses when it picks which consumers run here. Boot passes it explicitly
-    (:func:`app.runtime.bootstrap.load_dataflow_graph`).
-    """
+def compile_graph() -> CompiledGraph:
+    """Validate the wired graph of this process (the wires its plugins registered)."""
     wires = list(WIRING_REGISTRY)
-    process_app = app_name or os.getenv("APP_NAME") or DEFAULT_APP
 
     # 1) every consumer in wires must be @node-registered
     for w in wires:
@@ -89,31 +79,6 @@ def compile_graph(app_name: str | None = None) -> CompiledGraph:
                     f"({'; '.join(hint)})"
                 )
 
-    # 4) placement consistency: a wire's consumers must all resolve to
-    # the same app. Unbound consumers run in DEFAULT_APP at runtime
-    # (``nodes_for_app`` treats ``NODE_REGISTRY - bound`` as belonging
-    # to DEFAULT_APP), so the compile-time check has to mirror that —
-    # otherwise "explicitly bound to agent-service + unbound" looks
-    # mixed here while runtime sees them as the same app, and a wire
-    # that's actually fine gets rejected at boot. Use the same default
-    # so the validation matches dispatch semantics exactly.
-    from app.runtime.placement import iter_bindings
-
-    bindings = dict(iter_bindings())
-    if bindings:
-        for w in wires:
-            apps = {bindings.get(c, DEFAULT_APP) for c in w.consumers}
-            if len(apps) > 1:
-                labels = sorted(
-                    f"{c.__name__}->{bindings.get(c, DEFAULT_APP)}"
-                    for c in w.consumers
-                )
-                raise GraphError(
-                    f"wire({w.data_type.__name__}): consumers span mixed apps "
-                    f"({', '.join(labels)}); split the wire or rebind "
-                    f"consumers so they share one app"
-                )
-
     # 4b) ``Meta.transient = True`` means "no pg table, in-process only"
     # (the migrator skips DDL for transient Data, see ``migrator.py``).
     # ``.durable()`` requires the data type to round-trip through a
@@ -139,7 +104,7 @@ def compile_graph(app_name: str | None = None) -> CompiledGraph:
             )
 
     # 5b) Phase 2 sink dispatch validation: every Sink.mq(name) must
-    # reference a queue declared in ALL_ROUTES, otherwise the engine
+    # reference a queue declared in ALL_ROUTES, otherwise sink dispatch
     # wouldn't know which routing key to use when publishing (lane
     # fan-out + queue->rk binding live there). Catching this at compile
     # time means a typo surfaces at boot, not at the first emit.
@@ -175,28 +140,6 @@ def compile_graph(app_name: str | None = None) -> CompiledGraph:
         raise GraphError(
             "sink dispatch validation failed:\n  - " + "\n  - ".join(sink_errors)
         )
-
-    # 6) HTTP source placement: ``register_http_sources`` mounts every
-    # loaded ``Source.http(...)`` wire on this process's FastAPI app, and
-    # a process loads only its own app's wiring
-    # (``app.deployment.APP_WIRING``). The consumer must therefore run in
-    # the app this process runs as — otherwise the route returns 202 to
-    # the client but emit() filters the consumer out by APP_NAME and
-    # nothing happens. This refuses the misplaced HTTP wire at compile
-    # time so the failure surfaces at boot, not as a silent 202.
-    own = nodes_for_app(process_app)
-    for w in wires:
-        if not any(s.kind == "http" for s in w.sources):
-            continue
-        misplaced = [c.__name__ for c in w.consumers if c not in own]
-        if misplaced:
-            raise GraphError(
-                f"wire({w.data_type.__name__}).from_(Source.http(...)) "
-                f"consumer(s) {sorted(misplaced)} are not nodes of "
-                f"{process_app!r}; HTTP sources are mounted only in the "
-                f"process of the app that runs their consumer. Bind the "
-                f"consumer to {process_app!r} in that app's wiring."
-            )
 
     data_types: set[type[Data]] = {w.data_type for w in wires}
     nodes = {c for w in wires for c in w.consumers}

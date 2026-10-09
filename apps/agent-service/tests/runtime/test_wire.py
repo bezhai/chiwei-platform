@@ -2,7 +2,6 @@ from typing import Annotated
 
 from app.runtime.data import Data, Key
 from app.runtime.node import node
-from app.runtime.source import Source
 from app.runtime.wire import WIRING_REGISTRY, clear_wiring, wire
 
 
@@ -29,8 +28,3 @@ def test_wire_to_registers():
 def test_wire_durable():
     wire(Msg).to(f).durable()
     assert WIRING_REGISTRY[0].durable is True
-
-
-def test_wire_from_source():
-    wire(Msg).from_(Source.interval(60))
-    assert WIRING_REGISTRY[0].sources[0].kind == "interval"

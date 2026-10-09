@@ -8,7 +8,6 @@ import pytest
 
 from app.runtime import Data, Key, Sink, node, wire
 from app.runtime.emit import emit, reset_emit_runtime
-from app.runtime.placement import bind, clear_bindings
 from app.runtime.wire import clear_wiring
 
 # Module-level Data classes so @node's get_type_hints() can resolve annotations.
@@ -44,12 +43,10 @@ async def _consume_mix(req: _MixData) -> None:
 @pytest.fixture(autouse=True)
 def _reset_runtime():
     clear_wiring()
-    clear_bindings()
     reset_emit_runtime()
     _mix_consumer_calls.clear()
     yield
     clear_wiring()
-    clear_bindings()
     reset_emit_runtime()
     _mix_consumer_calls.clear()
 
@@ -81,8 +78,6 @@ async def test_emit_dispatches_to_sink_alongside_consumer(monkeypatch):
     """同一 Data 上 wire 到 sink 和 consumer，两者都触发。"""
     wire(_MixData).to(_consume_mix)
     wire(_MixData).to(Sink.mq("recall"))
-    bind(_consume_mix).to_app("agent-service")
-    monkeypatch.setenv("APP_NAME", "agent-service")
 
     fake_publish = AsyncMock()
     with patch("app.runtime.sink_dispatch.mq.publish", fake_publish):
