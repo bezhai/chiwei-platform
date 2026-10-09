@@ -1,8 +1,7 @@
 """API routes — health only.
 
-All admin / API endpoints are now declared via Source.http in
-app/wiring/admin.py and registered automatically by
-register_http_sources(app) called from main.py.
+The admin endpoints are routes of the app's plugins (``app/plugins``); the plugin host puts
+them on the app when it starts (``app.main``'s lifespan).
 """
 
 from __future__ import annotations

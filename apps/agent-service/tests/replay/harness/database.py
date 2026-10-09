@@ -22,6 +22,7 @@ a predicate accepts fails at COMMIT with the error the driver would raise, and i
 
 from __future__ import annotations
 
+import importlib
 import json
 import re
 from collections import Counter
@@ -51,21 +52,24 @@ async def create_schema(engine) -> None:
     """Every table either app runs on, the way a coe lane builds them at startup.
 
     * the SQLAlchemy models (``ensure_business_schema``),
-    * every ``Data`` class defined under ``app`` (the runtime migrator; both apps' wiring is
-      imported so all of them are defined),
+    * every ``Data`` class defined under ``app`` (the runtime migrator; every plugin in both
+      apps' manifests is imported so all of them are defined),
     * the runtime's own tables (inflight, dlq audit),
     * the two tables channel-server owns that her phone reads (``bot_config``,
       ``common_bot_presence``; same DDL as ``tests/living``).
     """
-    import app.wiring  # noqa: F401  (defines agent-service's Data classes)
-    import app.world.wiring  # noqa: F401  (defines world's Data classes)
     from app.data.models import Base
+    from app.deployment import APPS
     from app.runtime.data import DATA_REGISTRY
     from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
     from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
     from app.runtime.migrator import plan_migration
     from tests.living.conftest import _BOT_CONFIG_DDL, _BOT_PRESENCE_DDL
 
+    # Importing a plugin module defines its Data classes; it registers nothing until its setup.
+    for modules in APPS.values():
+        for module in modules:
+            importlib.import_module(module)
     data_classes = sorted(
         (c for c in DATA_REGISTRY if c.__module__.startswith("app.")),
         key=lambda c: (c.__module__, c.__qualname__),

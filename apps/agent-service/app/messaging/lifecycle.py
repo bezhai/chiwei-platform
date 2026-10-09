@@ -1,4 +1,4 @@
-"""进程启停时通信机制要做的事。``app.main`` 的 lifespan 调这里。
+"""进程启停时通信机制要做的事。插件宿主（:mod:`app.host`）启停时调这里。
 
 启动：连 broker、确保主交换机在；声明本泳道的定时队列并开始消费；开设本 App 声明的
 全部收件箱（见 :func:`app.messaging.receiving.inbox`）。每个跑着通信机制的进程都消费

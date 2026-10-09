@@ -2,14 +2,17 @@
 parts the scenario drives itself.
 
 Start: fresh in-process state (registries, messaging's module state, residents, the volume
-lock), that app's wiring executed again (``app.deployment.APP_WIRING``), the graph compiled
-(``prepare_for_run``), then durable consumers and messaging (inboxes, question queues, scheduled
-delivery). Not started: the interval clocks, the HTTP routes, the
-skill reload loop. Rounds run when the scenario calls them, and the skill registry is empty
-(no guides on hand), as it is wherever ``SKILLS_DIR`` has none.
+lock), then the app's plugin host (``Host.for_app``, the manifest in ``app.deployment.APPS``)
+with the broker phases only: every plugin's setup, the graph compiled, the durable routes
+declared, durable consumers and messaging (inboxes, question queues, scheduled delivery). Not
+started: the schema step (the replay builds the schema once, :func:`create_schema`), the interval
+clocks, the HTTP routes, the skill reload task. Rounds run when the scenario calls them. The skills
+plugin loads ``SKILLS_DIR``, which the replay points at an empty directory, so the skill registry is
+empty (no guides on hand).
 
-Stop mirrors the lifespan's shutdown. A restart is stop + start with the database, the broker's
-queues and the volume left as they were, which is what a new process finds.
+Stop is the host's stop: messaging, durable consumers, then every registration taken back. A
+restart is stop + start with the database, the broker's queues and the volume left as they were,
+which is what a new process finds.
 
 The durable consumer names itself ``hostname:pid`` (``app.runtime.durable.WORKER_ID``) on the
 inflight rows it claims; a replayed process is named ``<app>#<n>`` (the n-th process the scenario
@@ -19,8 +22,6 @@ started) instead, so a claim a dead process left behind reads the same on every 
 from __future__ import annotations
 
 import asyncio
-import importlib
-from inspect import ismodule
 
 
 def _fresh_process_state(monkeypatch) -> None:
@@ -67,22 +68,6 @@ def _fresh_process_state(monkeypatch) -> None:
     monkeypatch.setattr(dynamic_config, "_lane_provider", dynamic_config._lane_provider)
 
 
-def _execute_wiring(app_name: str) -> None:
-    """Run the app's wiring modules' bodies again (their ``wire`` / ``inbox`` / ``register``
-    calls), submodules of a wiring package first, in the order the package imports them."""
-    from app.deployment import APP_WIRING
-
-    for module_name in APP_WIRING[app_name]:
-        module = importlib.import_module(module_name)
-        for sub in [
-            v
-            for v in vars(module).values()
-            if ismodule(v) and v.__name__.startswith(f"{module_name}.")
-        ]:
-            importlib.reload(sub)
-        importlib.reload(module)
-
-
 class AppProcess:
     def __init__(
         self, app_name: str, monkeypatch, broker, *, worker: str | None = None
@@ -91,15 +76,12 @@ class AppProcess:
         self._monkeypatch = monkeypatch
         self._broker = broker
         self._worker = worker
-        self.running = False
+        self._host = None
 
     async def start(self) -> None:
+        from app.host import Host
         from app.infra.rabbitmq import lane_queue
         from app.messaging.broker import inbox_route, lane
-        from app.messaging.lifecycle import start_messaging
-        from app.messaging.receiving import INBOX_REGISTRY
-        from app.runtime.bootstrap import prepare_for_run
-        from app.runtime.durable import start_consumers
 
         self._monkeypatch.setenv("APP_NAME", self.app_name)
         if self._worker is not None:
@@ -107,14 +89,16 @@ class AppProcess:
 
             self._monkeypatch.setattr(durable, "WORKER_ID", self._worker)
         _fresh_process_state(self._monkeypatch)
-        _execute_wiring(self.app_name)
-        await prepare_for_run(self.app_name)
-        await start_consumers(app_name=self.app_name)
-        held = [s.name for s in INBOX_REGISTRY.values() if s.consume_while is not None]
-        await start_messaging()
-        self.running = True
+        host = Host.for_app(self.app_name)
+        await host.start(http=None, schema=False, mq=True, clocks=False, tasks=False)
+        self._host = host
         # Inboxes that consume only while holding something (world's volume lock) open in the
         # background; the process is up once they consume.
+        held = [
+            r.name
+            for r in host.registered()
+            if r.kind == "inbox" and r.detail["consume_while"] is not None
+        ]
         for name in held:
             queue = lane_queue(inbox_route(name).queue, lane())
             async with asyncio.timeout(10):
@@ -125,11 +109,6 @@ class AppProcess:
                     await asyncio.sleep(0.01)
 
     async def stop(self) -> None:
-        if not self.running:
-            return
-        from app.messaging.lifecycle import stop_messaging
-        from app.runtime.durable import stop_consumers
-
-        self.running = False
-        await stop_messaging()
-        await stop_consumers()
+        host, self._host = self._host, None
+        if host is not None:
+            await host.stop()

@@ -81,6 +81,8 @@ class Replay:
         # unset (the code's own defaults apply).
         self.config: dict[str, str] = {}
         self.volume = root / "world-volume"
+        # The skills plugin loads ``SKILLS_DIR`` when it is set up: an empty one, no guides on hand.
+        self._skills = root / "no-skills"
         self._engine = engine
         self._monkeypatch = monkeypatch
         self._start = start
@@ -101,6 +103,7 @@ class Replay:
         mp = self._monkeypatch
         mp.setenv("LANE", self.lane)
         mp.setenv("WORLD_DATA_DIR", str(self.volume))
+        mp.setenv("SKILLS_DIR", str(self._skills))
         mp.delenv("RABBITMQ_DISABLE_DELAYED", raising=False)
         # The container's zone (Dockerfile ``ENV TZ``), so naive local time reads the same on
         # every machine the replay runs on.
@@ -108,6 +111,7 @@ class Replay:
         os.environ["TZ"] = CONTAINER_TZ
         time.tzset()
         self.volume.mkdir(parents=True, exist_ok=True)
+        self._skills.mkdir(parents=True, exist_ok=True)
 
         # time-machine, not freezegun: freezegun swaps ``datetime.date`` / ``datetime.datetime``
         # for its own subclasses, which changes code that compares types (the migrator and the

@@ -51,8 +51,7 @@ class _Runner:
 async def main() -> None:
     from inner_shared.dynamic_config import dynamic_config
 
-    from app.messaging.lifecycle import start_messaging, stop_messaging
-    from app.runtime.bootstrap import load_dataflow_graph
+    from app.host import Host
     from app.world import agents, main_agent, volume
 
     volume.WRITER_LOCK_POLL_SECONDS = 0.2
@@ -72,13 +71,14 @@ async def main() -> None:
     dynamic_config.get = lambda key, default="": default
     dynamic_config.get_int = lambda key, default=0: default
 
-    load_dataflow_graph("world")
+    # world 的进程怎么起就怎么起（``Host.for_app``），只是不建表、不挂 HTTP、不起钟和后台任务。
+    host = Host.for_app("world")
     stop = asyncio.Event()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stop.set)
-    await start_messaging()
+    await host.start(http=None, schema=False, mq=True, clocks=False, tasks=False)
     _append(EVENTS, "started")
     await stop.wait()
-    await stop_messaging()
+    await host.stop()
     _append(EVENTS, "stopped")
 
 

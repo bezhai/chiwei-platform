@@ -55,7 +55,7 @@ update its row, and re-record the baselines that render it.
 
 Everything between these boundaries runs for real: the agent loop, tool dispatch, retries,
 prompt compilation, transcript storage, the messaging layer's records, claims and retries, the
-wiring and the dataflow graph.
+plugins' setup and the dataflow graph.
 
 | Boundary | Where | What the replay does |
 |---|---|---|
@@ -70,7 +70,7 @@ wiring and the dataflow graph.
 | RabbitMQ | the methods of `app.infra.rabbitmq.mq` (`harness/broker.py`) | In-memory queues, bindings and consumers. Nothing is delivered unless the scenario delivers it (`replay.broker.deliver(queue)`), except replies to a process's own reply queue. Other processes' inboxes are declared with `broker.declare_inbox(name, answers=...)`. A rejected message moves to a dead-letter queue only for isolated routes (their lane's `isolated_dead_letters`); the broker-side dead-lettering of other queues (DLX, lane TTL fallback) is not modelled, so for a durable queue the record is the `reject` itself. A delivery whose consumer was killed is never settled; `replay.broker.requeue_unsettled()` puts it back at the front of its queue, marked redelivered, as RabbitMQ does when the dead consumer's channel closes. |
 | Database | real Postgres (`tests/runtime/conftest.py::test_db`); SQLAlchemy engine events (`harness/database.py`) | The full schema both apps run on. Write statements are recorded by transaction; every table is read before and after each step. |
 | Object storage and tool-service's image pipeline | `httpx.AsyncHTTPTransport.handle_async_request`, for two hosts only (`harness/objects.py`); requests to any other host go out as before | `tool-service` `POST /api/image-pipeline/get-url` signs a name into `https://object-store.replay/<file_name>?signed-until=<frozen clock + 1.5 h>` (signing is pure computation, as in tool-service: it signs names nothing was stored under). A `GET` on the store answers what the scenario put there (`replay.objects.put(file_name, bytes, content_type)`), `404` for anything else, `403` once the signature has run out. `image_client` (envelope, lane header, error handling), the reading round's byte fetch and the phone's reachability check all run for real above it. Any other tool-service path raises `UnservedRequest` (a `BaseException`, so `image_client`'s `except Exception` cannot hide it): add it to `harness/objects.py`. Every request to these hosts goes onto the effects timeline. |
-| Process | `harness/process.py` | Starts an app the way `app.main`'s lifespan does (wiring, graph, durable consumers, messaging), without the interval clocks, HTTP routes or skill reload. Rounds run when a scenario calls them. The durable consumer's worker name (`app.runtime.durable.WORKER_ID`, `hostname:pid` in production, written on the inflight rows it claims) is `<app>#<n>`, the n-th process the scenario started. |
+| Process | `harness/process.py` | Starts an app the way `app.main`'s lifespan does, through its plugin host (`Host.for_app`) with only the broker phases: every plugin's setup, the graph, durable consumers, messaging. No schema step (built once per scenario), interval clocks, HTTP routes or skill reload task; `SKILLS_DIR` is an empty directory. Rounds run when a scenario calls them. The durable consumer's worker name (`app.runtime.durable.WORKER_ID`, `hostname:pid` in production, written on the inflight rows it claims) is `<app>#<n>`, the n-th process the scenario started. |
 
 ## What a baseline holds
 
