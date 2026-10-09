@@ -44,13 +44,8 @@ def volume(bare_volume) -> Path:
     world_volume.release_writer_lock()
 
 
-def load_world_wiring() -> None:
-    """清空三张登记表，再执行一遍 ``app.world.wiring``。
-
-    先 import 再清：这个 worker 第一次 import 它时模块体已经跑过一遍（收件箱、节点绑定
-    都登记了），不清就 reload 会撞上"已经登记过"。
-    """
-    import app.world.wiring as wiring
+def _clear_registrations() -> None:
+    """清空 world 登记过东西的那几张表：接线、节点绑定、收件箱、知识来源。"""
     from app.messaging.receiving import clear_inboxes
     from app.runtime.placement import clear_bindings
     from app.runtime.wire import clear_wiring
@@ -60,7 +55,45 @@ def load_world_wiring() -> None:
     clear_bindings()
     clear_inboxes()
     clear_sources()
+
+
+def load_world_wiring() -> None:
+    """清空登记表，再执行一遍 ``app.world.wiring``。
+
+    先 import 再清：这个 worker 第一次 import 它时模块体已经跑过一遍（收件箱、节点绑定
+    都登记了），不清就 reload 会撞上"已经登记过"。
+    """
+    import app.world.wiring as wiring
+
+    _clear_registrations()
     importlib.reload(wiring)
+
+
+async def start_without_io(host) -> None:
+    """起宿主，只跑插件的 setup：不碰数据库、broker、HTTP，不起钟和后台任务。"""
+    await host.start(http=None, schema=False, mq=False, clocks=False, tasks=False)
+
+
+@pytest.fixture
+async def world_plugin():
+    """一个函数：清空登记表，用 world 的插件（:data:`app.plugins.world.PLUGIN`）起一个宿主（见
+    :func:`start_without_io`）并交回它。停了再 :func:`start_without_io` 一次，就是一个新进程里的
+    world。测试结束时停掉它起过的每个宿主，测试失败了也停：插件登记的来源不停就一直留在登记表里。"""
+    from app.host import Host
+    from app.plugins.world import PLUGIN
+
+    hosts = []
+
+    async def start():
+        _clear_registrations()
+        host = Host("world", [PLUGIN])
+        hosts.append(host)
+        await start_without_io(host)
+        return host
+
+    yield start
+    for host in hosts:
+        await host.stop()
 
 
 class FakeRunner:
