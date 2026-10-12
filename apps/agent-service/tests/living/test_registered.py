@@ -302,6 +302,7 @@ _COMMIT_ORDER: dict[type, tuple[str, tuple[str, ...]]] = {
     Happening: ("seq", ("lane",)),
     Whereabouts: ("seq", ("lane", "persona_id")),
     LifeMoment: ("seq", ("lane", "persona_id")),
+    OutgoingMessage: ("seq", ("lane", "persona_id")),
 }
 
 

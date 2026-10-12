@@ -351,6 +351,30 @@ async def test_the_same_round_run_again_says_the_same_line_once(started, in_a_mo
 
 
 @pytest.mark.integration
+async def test_her_messages_are_numbered_on_from_her_last_one_in_the_order_they_are_written(
+    started, in_a_moment
+):
+    """她要发的消息每人一条轴，一段接一段往后数；一段里按写下的先后，给 world 的那条在最后。
+
+    同一位收件人按这个号的先后发（:func:`app.living.outgoing.unsent`），所以下一段不能从头数：
+    从头数的话，上一段还没确认的那句和这一段的新话号码相同，谁先发就说不准了。
+    """
+    async with in_a_moment("akao", now=_at(21, 30), moment_id="m-1"):
+        await _do(say, {"what": "饭好了。", "to": ["绫奈", "千凪"]})
+    first = await outgoing_mod.compose(lane=LANE, persona_id="akao")
+    async with in_a_moment("akao", now=_at(21, 40), moment_id="m-2"):
+        await _do(say, {"what": "快下来。", "to": ["绫奈"]})
+        await _do(act, {"what": "把锅端上桌"})
+    second = await outgoing_mod.compose(lane=LANE, persona_id="akao")
+
+    assert [(m.seq, m.recipient) for m in first] == [(1, "绫奈"), (2, "千凪")]
+    assert [(m.seq, m.recipient) for m in second] == [(3, "绫奈"), (4, outgoing_mod.WORLD)]
+    assert [(m.seq, m.message_id) for m in await _composed()] == [
+        (m.seq, m.message_id) for m in (*first, *second)
+    ], "交回的不是落库的那几条"
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("unconfirmed", ["fails", "hangs"])
 async def test_what_she_said_to_one_sister_reaches_her_in_the_order_she_said_it(
     started, in_a_moment, monkeypatch, unconfirmed
@@ -487,19 +511,26 @@ async def test_a_process_that_dies_while_composing_composes_the_same_messages_ag
     async with in_a_moment("akao", now=_at(21, 30)):
         await _do(say, {"what": "许阿姨来了，开下门。", "to": ["绫奈", "许阿姨"]})
 
-    real = outgoing_mod.insert_append
+    real_message = outgoing_mod.insert_in_commit_order
+    real_mark = outgoing_mod.insert_append
     attempted: list = []
 
-    async def dies_at_the_mark(row, **kwargs):
+    async def writes_the_message(row):
+        stored = await real_message(row)
+        attempted.append(stored)
+        return stored
+
+    async def dies_at_the_mark(row):
         if isinstance(row, OutgoingUpTo):
             raise _Died()
-        await real(row, **kwargs)
-        attempted.append(row)
+        return await real_mark(row)
 
+    monkeypatch.setattr(outgoing_mod, "insert_in_commit_order", writes_the_message)
     monkeypatch.setattr(outgoing_mod, "insert_append", dies_at_the_mark)
     with pytest.raises(_Died):
         await _tell()
-    monkeypatch.setattr(outgoing_mod, "insert_append", real)
+    monkeypatch.setattr(outgoing_mod, "insert_in_commit_order", real_message)
+    monkeypatch.setattr(outgoing_mod, "insert_append", real_mark)
     assert len(attempted) == 2, "前提没造出来：两条消息要在进程没了之前写进那个事务"
     assert post.sent == []
     assert await outgoing_mod.unsent(lane=LANE, persona_id="akao") == [], (

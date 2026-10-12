@@ -61,8 +61,9 @@ from typing import Annotated, Any
 from pydantic import field_validator
 from sqlalchemy import text
 
+from app.data.ordered import insert_in_commit_order
 from app.data.persist import insert_append
-from app.data.schema import Data, Key, table_name
+from app.data.schema import CommitOrder, Data, Key, table_name
 from app.data.session import get_session
 from app.data.tx import tx
 from app.infra.cst_time import dated_clock
@@ -105,8 +106,9 @@ class OutgoingMessage(Data):
 
     自然键 ``(lane, message_id)``。纯 append：发没发出去是另一件事（:class:`OutgoingResult`）。
 
-    ``seq`` 是这条在她要发的消息里的先后（每人一条轴，在占用里取号）：同一位收件人的几条按它
-    的先后发。同一个事务里写下的几条 ``created_at`` 一样，分不出先后。
+    ``seq`` 是这条在她要发的消息里的先后（每人一条轴，按写下的先后取号，
+    :func:`app.data.ordered.insert_in_commit_order`）：同一位收件人的几条按它的先后发。同一个
+    事务里写下的几条 ``created_at`` 一样，分不出先后。
 
     ``message_time`` 是这条消息说的事发生在什么时候，发出去就是消息上的时间（见模块说明）。
     """
@@ -114,7 +116,7 @@ class OutgoingMessage(Data):
     lane: Annotated[str, Key]
     message_id: Annotated[str, Key]
     persona_id: str
-    seq: int
+    seq: Annotated[int, CommitOrder(within=("lane", "persona_id"))] = 0
     sender: str
     recipient: str
     body: str
@@ -185,7 +187,7 @@ async def send_what_she_did(*, lane: str, persona_id: str) -> None:
 
 
 async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
-    """她上次讲到的地方之后的经历，变成要发的消息；跟新的"讲到哪了"一个事务落地。交回新写下的。
+    """她上次讲到的地方之后的经历，变成要发的消息；跟新的"讲到哪了"一个事务落地。交回落库的那几条。
 
     还没讲过的话，只记下从她现在最新的经历讲起，什么都不生成（见模块说明最后一段）。
     """
@@ -204,7 +206,6 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
 
     known = residents()
     sender = known.by_persona[persona_id]
-    seq = await _her_last_message_seq(lane=lane, persona_id=persona_id)
     messages: list[OutgoingMessage] = []
     # (落库的先后, 同一刻时位置在前, 发生的时刻, 那一行)。两张表的 seq 不在一条轴上，跨表的
     # 先后只有落库时刻说得清：她的手是一只一只用的，每一只都是自己的事务。
@@ -225,13 +226,11 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
             continue
         sisters = known.sisters_in(deed.audience, speaker=persona_id)
         for name in sisters:
-            seq += 1
             messages.append(
                 OutgoingMessage(
                     lane=lane,
                     message_id=_derive(lane, deed.happening_id, name),
                     persona_id=persona_id,
-                    seq=seq,
                     sender=sender,
                     recipient=name,
                     body=_said_to_her(deed, name=name),
@@ -251,7 +250,6 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
         # 当面做的事都要先有位置（``say`` / ``act`` 没有位置就拒绝），所以有一行就有她在哪。
         assert where is not None, f"{persona_id} 当面做了事，却从没记下过自己在哪"
         ended_at = max(at for _, _, at, _ in lines)
-        seq += 1
         messages.append(
             OutgoingMessage(
                 lane=lane,
@@ -263,7 +261,6 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
                     f"{up_to.happening_seq}-{up_to.whereabouts_seq}",
                 ),
                 persona_id=persona_id,
-                seq=seq,
                 sender=sender,
                 recipient=WORLD,
                 body=_digest(lines, where=where, ended_at=ended_at),
@@ -271,11 +268,13 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
             )
         )
 
+    # 按写下的先后一条一条取号：同一个事务里，后一条取号时看得见前一条。
+    stored: list[OutgoingMessage] = []
     async with tx():
         for message in messages:
-            await insert_append(message)
+            stored.append(await insert_in_commit_order(message))
         await insert_append(up_to)
-    return messages
+    return stored
 
 
 async def send_unsent(*, lane: str, persona_id: str) -> None:
@@ -457,15 +456,6 @@ async def _her_whereabouts_after(
         [(row["created_at"], whereabouts(row)) for row in rows],
         whereabouts(earlier[0]) if earlier else None,
     )
-
-
-async def _her_last_message_seq(*, lane: str, persona_id: str) -> int:
-    sql = (
-        f"SELECT COALESCE(MAX(seq), 0) AS seq FROM {_MESSAGE_TABLE} "
-        f"WHERE lane = :lane AND persona_id = :persona_id"
-    )
-    (row,) = await _rows(sql, lane=lane, persona_id=persona_id)
-    return int(row["seq"])
 
 
 async def _rows(sql: str, **params: Any) -> list[Any]:
