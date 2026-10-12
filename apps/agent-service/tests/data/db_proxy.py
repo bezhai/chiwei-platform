@@ -25,6 +25,48 @@ _COMMIT_STATEMENT = b"COMMIT;\x00"
 _COMMIT = b"Q" + (4 + len(_COMMIT_STATEMENT)).to_bytes(4, "big") + _COMMIT_STATEMENT
 
 
+class _ProcessMessages:
+    """把进程发出的字节切成协议消息。一次读到的字节可能是半条消息，也可能是几条连在一起。
+
+    StartupMessage 之前的消息（SSLRequest、CancelRequest、StartupMessage 自己）没有类型字节：
+    4 字节长度（含自身）之后是 4 字节代码，代码高 16 位是 3 的就是 StartupMessage（协议 3.x）。
+    之后每条消息是 1 字节类型加 4 字节长度（含自身，不含类型）。
+
+    数据库接受了加密时，后面是 TLS 记录，切不开，原样交回。认得出来：启动阶段的消息不超过
+    10000 字节，长度的头一个字节总是 0，TLS 记录的头一个字节不是。
+    """
+
+    def __init__(self) -> None:
+        self._pending = bytearray()
+        self._typed = False
+        self._encrypted = False
+
+    def feed(self, data: bytes) -> list[bytes]:
+        """收下 ``data``，按发出的顺序交回现在完整了的消息；不完整的留着等后面的字节。"""
+        if self._encrypted:
+            return [data]
+        self._pending += data
+        messages: list[bytes] = []
+        while self._pending:
+            if not self._typed and self._pending[0] != 0:
+                self._encrypted = True
+                messages.append(bytes(self._pending))
+                self._pending.clear()
+                break
+            length_at = 1 if self._typed else 0
+            if len(self._pending) < length_at + 4:
+                break
+            end = length_at + int.from_bytes(self._pending[length_at : length_at + 4], "big")
+            if len(self._pending) < end:
+                break
+            message = bytes(self._pending[:end])
+            del self._pending[:end]
+            if not self._typed and int.from_bytes(message[4:8], "big") >> 16 == 3:
+                self._typed = True
+            messages.append(message)
+        return messages
+
+
 class HeldCommit:
     """进程发出、被代理扣下的那个 COMMIT（:meth:`CloseNeverReturns.hold_next_commit`）。
 
@@ -84,9 +126,9 @@ class CloseNeverReturns:
         self._holds.append(held)
         return held
 
-    def _to_hold(self, data: bytes) -> HeldCommit | None:
-        """``data`` 是一个 COMMIT、而且有一个还没扣到的 :class:`HeldCommit` 在等它时，交回那一个。"""
-        if data != _COMMIT:
+    def _to_hold(self, message: bytes) -> HeldCommit | None:
+        """``message`` 是一个 COMMIT、而且有一个还没扣到的 :class:`HeldCommit` 在等它时，交回那一个。"""
+        if message != _COMMIT:
             return None
         return next((held for held in self._holds if not held.caught.is_set()), None)
 
@@ -96,17 +138,22 @@ class CloseNeverReturns:
         held: HeldCommit | None = None
 
         async def process_to_db() -> None:
-            """转发到进程那头关掉为止；正常关掉的，数据库这头也关。"""
+            """一条一条消息转发，到进程那头关掉为止；正常关掉的，数据库这头也关。
+
+            扣下 COMMIT 时，它后面的消息排在它后面，跟着它一起转发或丢掉。
+            """
             nonlocal held
+            messages = _ProcessMessages()
             try:
                 while data := await from_process.read(65536):
-                    if held is None:
-                        held = self._to_hold(data)
-                        if held is not None and not await held._catch(to_process):
-                            to_db.close()
-                            return
-                    to_db.write(data)
-                    await to_db.drain()
+                    for message in messages.feed(data):
+                        if held is None:
+                            held = self._to_hold(message)
+                            if held is not None and not await held._catch(to_process):
+                                to_db.close()
+                                return
+                        to_db.write(message)
+                        await to_db.drain()
             except (ConnectionError, OSError):
                 return
             to_db.close()
