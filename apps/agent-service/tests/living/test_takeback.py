@@ -23,7 +23,7 @@ import pytest
 from sqlalchemy import text
 
 from app.data import session as session_mod
-from app.data.persist import insert_append, select_all_versions, select_latest
+from app.data.persist import insert_append, select_latest
 from app.living.happening import record_happening
 from app.living.mouth import (
     STATE_CLAIMED,
@@ -36,6 +36,7 @@ from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
 from app.living.snapshot import read_snapshot, recent_own_happenings
 from app.living.takeback import take_back_message
 from app.living.whereabouts import note_whereabouts
+from tests.data.read_back import all_versions
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -513,7 +514,7 @@ async def test_the_ledger_records_when_she_pressed_it_without_touching_the_other
     assert row.state == STATE_HANDED_OFF, (
         f"撤回把认领状态改了 —— 那是另一根轴。拿到：{row.state!r}"
     )
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": spoke.outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], (
@@ -553,7 +554,7 @@ async def test_a_recall_that_never_went_out_leaves_the_ledger_alone(
     )
     assert (
         len(
-            await select_all_versions(
+            await all_versions(
                 SpokenOutbound, {"lane": LANE, "outbound_id": spoke.outbound_id}
             )
         )
@@ -640,7 +641,7 @@ async def test_losing_the_version_race_merges_onto_the_latest_version(
         "把对账补上的落地标识抹回 NULL 了 —— 那一版记的是已知事实"
     )
     assert row.landed_at == _at(21, 1), "落地时刻被撤回顺手改了"
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": spoke.outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2, 3], (

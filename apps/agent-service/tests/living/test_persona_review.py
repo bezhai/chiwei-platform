@@ -28,7 +28,7 @@ import pytest
 
 import app.data.session as session_mod
 from app.agent.neutral import Message, Role
-from app.data.persist import insert_idempotent, select_all_versions
+from app.data.persist import insert_idempotent
 from app.living.day_page import LivingDayPage
 from app.living.persona import (
     PersonaVersion,
@@ -43,6 +43,7 @@ from app.living.persona_review import (
     review_persona,
     week_material,
 )
+from tests.data.read_back import all_versions
 from tests.living.conftest import clock_at
 
 LANE = "coe-living"
@@ -328,7 +329,7 @@ async def test_a_round_that_writes_nothing_leaves_no_version(review_db, stub_rev
 
     assert await review_persona(lane=LANE, persona_id="akao", clock=clock_at(_NOW)) is None
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         PersonaVersion, {"lane": LANE, "persona_id": "akao"}
     )
     assert [v.source for v in versions] == ["seed"], (
@@ -354,7 +355,7 @@ async def test_an_empty_chain_gets_her_starting_point_first(review_db, stub_revi
 
     await review_persona(lane=LANE, persona_id="akao", clock=clock_at(_NOW))
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         PersonaVersion, {"lane": LANE, "persona_id": "akao"}
     )
     assert [v.source for v in versions] == ["seed", "review"]
@@ -378,7 +379,7 @@ async def test_a_chain_that_already_has_versions_is_not_seeded(review_db, stub_r
 
     await review_persona(lane=LANE, persona_id="akao", clock=clock_at(_NOW))
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         PersonaVersion, {"lane": LANE, "persona_id": "akao"}
     )
     assert [v.source for v in versions] == ["review", "review"]

@@ -2,7 +2,7 @@ from typing import Annotated
 
 import pytest
 
-from app.data.schema import AdminOnly, Data, Key
+from app.data.schema import Data, Key
 from app.runtime.node import NODE_REGISTRY, inputs_of, node, output_of
 
 
@@ -14,11 +14,6 @@ class Msg(Data):
 class Frag(Data):
     fid: Annotated[str, Key]
     vec: list[float]
-
-
-class Cfg(Data, AdminOnly):
-    cid: Annotated[str, Key]
-    v: dict
 
 
 @node
@@ -36,14 +31,6 @@ def test_inputs_reflection():
 
 def test_output_reflection():
     assert output_of(vectorize) is Frag
-
-
-def test_admin_only_output_rejected():
-    with pytest.raises(TypeError, match="AdminOnly"):
-
-        @node
-        async def bad() -> Cfg:
-            return Cfg(cid="c1", v={})
 
 
 def test_non_data_input_rejected():
@@ -76,13 +63,6 @@ def test_returns_optional_data_allowed():
     assert maybe_emit in NODE_REGISTRY
     # Optional is unwrapped to the inner Data type for downstream wiring.
     assert output_of(maybe_emit) is Frag
-
-
-def test_returns_optional_admin_only_rejected():
-    with pytest.raises(TypeError, match="AdminOnly"):
-
-        @node
-        async def bad_optional(msg: Msg) -> Cfg | None: ...
 
 
 def test_sync_function_rejected_at_decorate_time():

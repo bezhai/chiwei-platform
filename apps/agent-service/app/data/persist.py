@@ -1,24 +1,19 @@
 """Append-only persistence primitives for Data rows.
 
-Four operations, deliberately minimal:
+Three operations, deliberately minimal:
 
   - :func:`insert_append` — durable write with runtime-maintained ``Version``
     auto-increment. Concurrency-safe via ``pg_advisory_xact_lock`` keyed on
     the natural-key tuple. Optional ``expected_current_ver`` turns the append
     into an optimistic CAS (write only if ``MAX(ver)`` is still the version
     the caller loaded; the check rides inside the INSERT statement itself).
-  - :func:`insert_idempotent` — ``INSERT ... ON CONFLICT (<target>) DO
-    NOTHING RETURNING 1``. Conflict target is ``Meta.dedup_column`` when
-    the Data class specifies one (adoption mode for pre-existing tables
-    whose own PK / unique index enforces dedup), else the runtime-managed
-    ``dedup_hash`` column. Returns the number of rows actually inserted
+  - :func:`insert_idempotent` — ``INSERT ... ON CONFLICT (dedup_hash) DO
+    NOTHING RETURNING 1``. Returns the number of rows actually inserted
     (0 on collision, 1 otherwise); see function docstring for the full
     contract.
   - :func:`select_latest` — newest version per key using ``DISTINCT ON``.
-  - :func:`select_all_versions` — full history for a key, ordered by version
-    (or ``created_at`` when the Data class declares no ``Version``).
 
-The dedup_hash is a sha256 over the ``DedupKey ∪ Key`` columns, serialized
+The dedup_hash is a sha256 over the ``Key`` columns, serialized
 via ``json.dumps(sort_keys=True, default=str)``. The class name is *not*
 included — each Data class lives in its own table, so cross-class
 collisions are impossible by construction.
@@ -36,7 +31,6 @@ from sqlalchemy import text
 
 from app.data.schema import (
     Data,
-    dedup_fields,
     is_jsonb_column,
     key_fields,
     table_name,
@@ -139,7 +133,7 @@ def dedup_hash(obj: Data) -> str:
     under the same natural key would collide — defeating versioning.
     """
     cls = type(obj)
-    cols = list(dedup_fields(cls))
+    cols = list(key_fields(cls))
     ver = version_field(cls)
     if ver and ver not in cols:
         cols.append(ver)
@@ -262,16 +256,8 @@ async def insert_append(
 async def insert_idempotent(obj: Data, *, session: Any = None) -> int:
     """Insert ``obj`` if its dedup key has not been seen; return rows inserted.
 
-    Uses ``ON CONFLICT (<dedup_target>) DO NOTHING RETURNING 1``. The dedup
-    target is either:
-
-      * ``Meta.dedup_column`` when the Data class specifies one (used when
-        adopting a pre-existing table whose PK / unique index already
-        enforces dedup — that table typically has no ``dedup_hash``
-        column, so we also omit it from the INSERT column list), or
-      * ``dedup_hash`` (the runtime-managed hash column) otherwise.
-
-    We count ``len(fetchall())`` because asyncpg does not reliably populate
+    Uses ``ON CONFLICT (dedup_hash) DO NOTHING RETURNING 1`` on the
+    runtime-managed hash column (:func:`dedup_hash`). We count ``len(fetchall())`` because asyncpg does not reliably populate
     ``rowcount`` for ``DO NOTHING``.
 
     ``session`` runs the INSERT on a caller-supplied ``AsyncSession`` instead
@@ -285,20 +271,15 @@ async def insert_idempotent(obj: Data, *, session: Any = None) -> int:
     cls = type(obj)
     table = table_name(cls)
 
-    meta = getattr(cls, "Meta", None)
-    dedup_col = getattr(meta, "dedup_column", None) if meta else None
-
     cols_map: dict[str, Any] = {c: getattr(obj, c) for c in cls.model_fields}
-    if not dedup_col:
-        cols_map["dedup_hash"] = dedup_hash(obj)
+    cols_map["dedup_hash"] = dedup_hash(obj)
 
     jsonb_cols = _jsonb_columns(cls)
     cols = list(cols_map.keys())
     placeholders = ", ".join(_bind_value_sql(c, jsonb_cols) for c in cols)
-    conflict_target = dedup_col or "dedup_hash"
     sql = (
         f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders}) "
-        f"ON CONFLICT ({conflict_target}) DO NOTHING RETURNING 1"
+        "ON CONFLICT (dedup_hash) DO NOTHING RETURNING 1"
     )
     params = _encode_params(obj, cols_map, jsonb_cols)
     if session is not None:
@@ -332,22 +313,3 @@ async def select_latest(
         if not row:
             return None
         return cls(**{k: row[k] for k in cls.model_fields})
-
-
-async def select_all_versions(
-    cls: type[Data], keys_values: dict[str, Any]
-) -> list[Data]:
-    """Return all rows matching ``keys_values``, ordered by version ASC.
-
-    Falls back to ``created_at`` ordering for Data classes without a
-    ``Version`` column.
-    """
-    table = table_name(cls)
-    keys = key_fields(cls)
-    ver = version_field(cls)
-    where = " AND ".join(f"{k} = :{k}" for k in keys)
-    order = ver if ver else "created_at"
-    sql = f"SELECT * FROM {table} WHERE {where} ORDER BY {order}"
-    async with get_session() as s:
-        r = await s.execute(text(sql), keys_values)
-        return [cls(**{k: row[k] for k in cls.model_fields}) for row in r.mappings().all()]

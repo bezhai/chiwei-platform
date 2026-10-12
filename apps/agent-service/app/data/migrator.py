@@ -7,13 +7,6 @@ Breaking changes (column drop, type change, table drop) are *not* supported
 and raise :class:`MigrationError`. Those require an explicit, human-written
 migration script — the automatic migrator refuses to emit destructive DDL.
 
-``AdminOnly`` Data classes are skipped entirely: their storage is owned by
-platform admin tooling, not business code.
-
-Data classes with ``Meta.existing_table`` are in *adoption mode*: the
-migrator does not own their schema and emits no DDL (no CREATE, no ALTER,
-no drop-check) regardless of what the existing schema looks like.
-
 Data classes with ``Meta.transient = True`` are never persisted to pg
 (they flow in-process to a non-durable Sink). The
 migrator skips them entirely: no CREATE, no ALTER, no drop-check.
@@ -41,7 +34,6 @@ from app.data.schema import (
     DATA_REGISTRY,
     Data,
     UnmappablePgType,
-    is_admin_only,
     key_fields,
     pg_type_for_annotation,
     table_name,
@@ -62,7 +54,6 @@ class MigrationError(Exception):
 @dataclass(frozen=True)
 class Stmt:
     sql: str
-    params: tuple = ()
 
 
 @dataclass
@@ -175,8 +166,7 @@ def plan_migration(
             as a fresh database.
 
     Returns:
-        A :class:`Plan` of ordered DDL statements. Apply via
-        :func:`apply_migration`.
+        A :class:`Plan` of ordered, parameterless DDL statements.
 
     Raises:
         MigrationError: if any Data class requires a destructive change
@@ -185,22 +175,12 @@ def plan_migration(
     stmts: list[Stmt] = []
 
     for cls in data_classes:
-        if is_admin_only(cls):
-            continue
-
         meta = getattr(cls, "Meta", None)
 
         # Transient Data never reaches pg — it flows in-process to a
         # non-durable Sink. No CREATE, no ALTER, no drop-check; the
         # class is invisible to the migrator.
         if meta and getattr(meta, "transient", False):
-            continue
-
-        # Adoption mode: the Data class declares it is backed by a
-        # pre-existing legacy table. The migrator does not own the
-        # schema of that table — emit no DDL at all, regardless of what
-        # columns ``existing_schema`` reports.
-        if meta and getattr(meta, "existing_table", None):
             continue
 
         table = table_name(cls)
@@ -281,15 +261,6 @@ def plan_migration(
     return Plan(stmts=stmts)
 
 
-async def apply_migration(plan: Plan, conn) -> None:
-    """Execute each statement in ``plan`` on an asyncpg-style connection.
-
-    Caller is responsible for wrapping in a transaction.
-    """
-    for s in plan.stmts:
-        await conn.execute(s.sql, *s.params)
-
-
 async def migrate_schema(*, also: Sequence[str]) -> None:
     """Read the live schema, diff it against every registered ``Data``, apply the additive DDL.
 
@@ -325,15 +296,9 @@ async def migrate_schema(*, also: Sequence[str]) -> None:
     plan = plan_migration(list(DATA_REGISTRY), existing)
 
     # plan_migration only emits parameterless DDL (CREATE TABLE / ALTER TABLE ADD COLUMN /
-    # CREATE INDEX), so each statement is text()-executed as is. If it ever emits
-    # parameterised statements, this loop has to map Stmt.params into a named bind dict.
+    # CREATE INDEX), so each statement is text()-executed as is.
     async with get_session() as s:
         for stmt in plan.stmts:
-            if stmt.params:
-                raise RuntimeError(
-                    "migrate_schema does not support parameterised DDL statements yet; got: "
-                    f"sql={stmt.sql!r} params={stmt.params!r}"
-                )
             await s.execute(text(stmt.sql))
         for sql in also:
             await s.execute(text(sql))

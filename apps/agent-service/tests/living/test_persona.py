@@ -166,7 +166,7 @@ async def test_write_then_read_latest_persona_version(chain_db):
 @pytest.mark.integration
 async def test_versions_append_and_owner_supersedes(chain_db):
     """seed → review → owner 三版递增；读 a 不分来源——owner 盖版即生效。"""
-    from app.data.persist import select_all_versions
+    from tests.data.read_back import all_versions
 
     keys = {"lane": "coe-t1", "persona_id": "akao"}
     await write_persona_version(
@@ -188,7 +188,7 @@ async def test_versions_append_and_owner_supersedes(chain_db):
         written_at="2026-06-08T12:00:00+08:00",
     )
 
-    versions = await select_all_versions(PersonaVersion, keys)
+    versions = await all_versions(PersonaVersion, keys)
     assert [v.version for v in versions] == [1, 2, 3], (
         "版本链 append-only：版本逐次递增、旧版保留"
     )
@@ -412,14 +412,14 @@ async def test_the_seeded_version_is_what_she_was_already_reading(seed_db):
 @pytest.mark.integration
 async def test_seed_persona_chain_is_idempotent(seed_db):
     """连跑两次只有一行：链非空零操作，重跑无害。"""
-    from app.data.persist import select_all_versions
+    from tests.data.read_back import all_versions
 
     await _seed_bot_persona("akao", "出厂身份正文。")
 
     assert await seed_persona_chain(lane="coe-t1", persona_id="akao") is True
     assert await seed_persona_chain(lane="coe-t1", persona_id="akao") is False
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         PersonaVersion, {"lane": "coe-t1", "persona_id": "akao"}
     )
     assert len(versions) == 1

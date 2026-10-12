@@ -6,12 +6,12 @@ from typing import Annotated
 import pytest
 
 from app.data.migrator import MigrationError, plan_migration
-from app.data.schema import AdminOnly, Data, DedupKey, Key, Version
+from app.data.schema import Data, Key, Version
 
 
 class Msg(Data):
-    mid: Annotated[str, Key, DedupKey]
-    gen: Annotated[int, DedupKey] = 0
+    mid: Annotated[str, Key]
+    gen: int = 0
     text: str
 
 
@@ -19,11 +19,6 @@ class State(Data):
     pid: Annotated[str, Key]
     ver: Annotated[int, Version] = 0
     mood: str
-
-
-class Cfg(Data, AdminOnly):
-    cid: Annotated[str, Key]
-    v: dict
 
 
 def test_plan_creates_table_for_new_data():
@@ -56,27 +51,6 @@ def test_plan_rejects_breaking_change():
         plan_migration([Msg], existing_schema=existing)
 
 
-def test_existing_table_mapping_skips_create():
-    class Legacy(Data):
-        mid: Annotated[str, Key]
-        text: str
-
-        class Meta:
-            existing_table = "conversation_messages"
-
-    existing = {"conversation_messages": {"mid": "text", "text": "text"}}
-    plan = plan_migration([Legacy], existing_schema=existing)
-    stmts = [s.sql for s in plan.stmts]
-    assert not any("CREATE TABLE" in s for s in stmts)
-
-
-def test_admin_only_not_migrated_by_business_code():
-    # AdminOnly tables are managed externally; business migrator skips them.
-    plan = plan_migration([Cfg], existing_schema={})
-    stmts = [s.sql for s in plan.stmts]
-    assert stmts == []  # skip entirely
-
-
 class Optional1(Data):
     oid: Annotated[str, Key]
     mood: str | None = None
@@ -100,37 +74,8 @@ def test_non_optional_union_rejected():
         plan_migration([BadUnion], existing_schema={})
 
 
-def test_existing_table_mapping_emits_no_alter():
-    class Legacy(Data):
-        mid: Annotated[str, Key]
-        text: str
-
-        class Meta:
-            existing_table = "conversation_messages"
-
-    # Existing table lacks dedup_hash/created_at: a managed table would
-    # emit ALTERs. Adoption mode must emit nothing.
-    existing = {"conversation_messages": {"mid": "text", "text": "text"}}
-    plan = plan_migration([Legacy], existing_schema=existing)
-    assert plan.stmts == []
-
-
-def test_existing_table_mapping_no_drop_check():
-    class Legacy(Data):
-        mid: Annotated[str, Key]
-
-        class Meta:
-            existing_table = "conversation_messages"
-
-    # Legacy table has columns not declared on the Data class. A managed
-    # table would raise ``dropped``; adoption mode skips the drop-check too.
-    existing = {"conversation_messages": {"mid": "text", "extra_col": "text"}}
-    plan = plan_migration([Legacy], existing_schema=existing)
-    assert plan.stmts == []
-
-
 def test_plan_rejects_type_change():
-    # existing has `gen` as TEXT, but Msg declares `gen: Annotated[int, DedupKey]`
+    # existing has `gen` as TEXT, but Msg declares `gen: int`
     # -> BIGINT. Silent type change would corrupt persistence.
     existing = {"data_msg": {"mid": "text", "gen": "text", "text": "text"}}
     with pytest.raises(MigrationError, match="type mismatch"):

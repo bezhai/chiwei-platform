@@ -285,12 +285,12 @@ async def test_leaving_the_hour_out_drops_the_hour_and_keeps_the_thing(ends_db):
 @pytest.mark.integration
 async def test_relisting_the_same_hour_does_not_pile_up_versions(ends_db):
     """她每十分钟重列一遍整份清单 —— 没变的那条不该每轮 append 一版。"""
-    from app.data.persist import select_all_versions
+    from tests.data.read_back import all_versions
 
     for minute in (0, 10, 20):
         await _rewrite("[2026-07-25 15:00] 家属谈话会", at=_at(12, minute))
 
-    rows = await select_all_versions(
+    rows = await all_versions(
         LooseEnd,
         {
             "lane": LANE,

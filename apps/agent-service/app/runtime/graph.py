@@ -83,11 +83,9 @@ def compile_graph() -> CompiledGraph:
     # (the migrator skips DDL for transient Data, see ``migrator.py``).
     # ``.durable()`` requires the data type to round-trip through a
     # RabbitMQ queue *and* the consumer-side ``insert_idempotent`` for
-    # at-least-once dedup — both demand a real pg table. The runtime
-    # already exempts adoption-mode Data from idempotent (the row exists
-    # by construction); transient is the opposite — there is no row and
-    # there never will be — so the only honest answer is to refuse the
-    # combination at boot rather than crash on first message with a
+    # at-least-once dedup — both demand a real pg table. A transient type
+    # has no row and never will, so the only honest answer is to refuse
+    # the combination at boot rather than crash on first message with a
     # ``relation does not exist``.
     for w in wires:
         if not w.durable:

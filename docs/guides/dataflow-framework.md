@@ -76,26 +76,6 @@ class SummaryFragment(Data):
 
 **关于"自动写表"**：runtime 只在存在 `wire(D).as_latest()` 时才把 emit 的 Data 落表（详见 §2.3 / §3 Cookbook），不是有 Data class 就自动建表 + 自动写入。
 
-**Adoption mode** —— 接管**已存在的老表**(不想让 migrator 碰它)。写 `Meta.existing_table` + `Meta.dedup_column`(指向老表里的真实唯一列),runtime 的 `dedup_hash` / `version` 机制**整体让位**给老表的唯一约束。典型例子:
-
-```python
-# app/domain/example.py（示意，非真实文件）
-class Message(Data):
-    message_id: Annotated[str, Key]
-    user_id: str
-    content: str
-    # ... 其他字段 mirror ConversationMessage ORM
-
-    class Meta:
-        existing_table = "conversation_messages"  # 跳过 migrator
-        dedup_column = "message_id"               # 老表的唯一列
-
-    @classmethod
-    def from_cm(cls, cm: "ConversationMessage") -> "Message":
-        # 类方法把 ORM 行映射成 Data 字段；纯字段映射，不碰 DB / MQ。
-        return cls(message_id=cm.message_id, ...)
-```
-
 **Transient mode** —— 进程内传递,根本不落 pg:
 
 ```python
@@ -110,17 +90,7 @@ class Fragment(Data):
 **Markers(字段级注解)**:
 
 - `Key` —— 自然主键,必须至少一个。多字段联合 Key 合法。
-- `DedupKey` —— 参与 `dedup_hash` 的额外字段(默认只有 Key 参与)。**Adoption mode 下不能用**,和 `Meta.dedup_column` 冲突。
-- `Version` —— append-only 版本列,runtime 自增。Adoption mode 下不能用。
-
-**AdminOnly(类级 mixin)** —— 极少用。标记这个 Data 只能由系统/人工产生,任何 `@node` 返回它都会在装饰器时报错:
-
-```python
-from app.data.schema import Data, AdminOnly, Key
-class ManualApproval(Data, AdminOnly):
-    approval_id: Annotated[str, Key]
-    ...
-```
+- `Version` —— append-only 版本列,runtime 自增。
 
 ### 2.2 `@node` —— 纯业务函数
 
@@ -154,9 +124,8 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 
 1. 校验 `fn` 是 `async def`(`inspect.iscoroutinefunction`)否则 import 时 `TypeError`。
 2. 读类型注解,校验所有参数 + 返回都是 `Data` 子类或 `Data | None`;否则 import 时 `TypeError`。
-3. 校验返回的 Data **不是** `AdminOnly`。
-4. 把函数包装成 wrapper:`return result` 时若 `isinstance(result, Data)`,自动 `await emit(result)` 把 Data 推进图;`None` 跳过。wrapper 仍会把 result 原样返回给调用者,方便单元测试直接 assert。
-5. 注册到 `NODE_REGISTRY` + `_NODE_META`(供 `inputs_of(fn)` / `output_of(fn)` 反射使用)。
+3. 把函数包装成 wrapper:`return result` 时若 `isinstance(result, Data)`,自动 `await emit(result)` 把 Data 推进图;`None` 跳过。wrapper 仍会把 result 原样返回给调用者,方便单元测试直接 assert。
+4. 注册到 `NODE_REGISTRY` + `_NODE_META`(供 `inputs_of(fn)` / `output_of(fn)` 反射使用)。
 
 **签名约束**:
 
@@ -690,7 +659,7 @@ from app.capabilities.redis import get_redis_capability
 from app.capabilities.http import HTTPClient
 ```
 
-从 ORM 行 lift 到 Data 用 `Data.from_cm(...)` 这类纯字段映射类方法（见 §2.1 Adoption mode 例子），不直接读/写 infra；写业务表 + 触发 Data 走 `transactional_emit`（见 §3-bis）。
+从 ORM 行 lift 到 Data 用 `Data.from_cm(...)` 这类纯字段映射类方法，不直接读/写 infra；写业务表 + 触发 Data 走 `transactional_emit`（见 §3-bis）。
 
 ### #3 Data 继承错基类
 
@@ -744,27 +713,6 @@ row = rows[0] if rows else None  # name='x2' version=2
 ```
 
 **只有 Versioned Data 能用 emit 追加新版本**。无 Version 字段的 Data 在 dataflow 里语义是"事件"或"transient"，不是"可更新的状态"；要 update 状态请用专门的 ORM 表 + `transactional_emit` 触发 EventData（详见 §3-bis Cookbook B）。
-
-### #5 Adoption mode 漏写 `dedup_column`
-
-接管老表没写 `dedup_column`,runtime 会尝试写 `dedup_hash` 列 —— 老表没这列,INSERT 直接炸。
-
-```python
-# ❌
-class Message(Data):
-    message_id: Annotated[str, Key]
-    class Meta:
-        existing_table = "conversation_messages"  # 少了 dedup_column
-
-# ✅
-class Message(Data):
-    message_id: Annotated[str, Key]
-    class Meta:
-        existing_table = "conversation_messages"
-        dedup_column = "message_id"  # 指向老表真实的唯一列
-```
-
-同时:adoption mode 下**禁止**给字段标 `DedupKey`、`Version`(__pydantic_init_subclass__ 会直接 `TypeError`)。
 
 ### #6 runtime_entry 的 import 顺序
 
@@ -975,11 +923,9 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 运行时会在启动 / import / 调用时强制的契约,遇到 `TypeError`/`RuntimeError` 先回来对这份清单:
 
 1. 每个 `Data` 子类至少一个 `Key` 字段(`__pydantic_init_subclass__`)。
-2. Adoption mode 的 Data **不能**带 `DedupKey` / `Version`(`__pydantic_init_subclass__`)。
-3. `@node` 必须 `async def`、参数 + 返回必须是 `Data / Data | None / None`(`node()` 装饰时)。
-4. `@node` 不能返回 `AdminOnly` Data(`node()` 装饰时)。
-5. durable 边的 consumer 必须**单 Data 参数**(MQSource 契约,`_source_loop_mq` 检查)。
-6. Runtime 启动时 `compile_graph()` 会检查 wire 一致性(生产者 Data 类型 ↔ 消费者签名)—— 启动报错看这里。
-7. `emit(data)` 不会匹配任何 wire 时静默 no-op(不是错),测试里的 wiring 清空是利用这一点。
-8. **mutation function（普通 async function 持有 session 写业务表 + 触发 EventData）必须用 `transactional_emit(s)` 在 session 块内 append**，不能在块外 `await emit(...)`。CI grep gate `Gap 8` 卡业务区 `await emit(` 计数。
-9. **durable consumer 内禁止 try/except 包整个 body** —— 让 framework 看到异常它才能按 `.on_error(...)` 分发。该 raise 就 raise。
+2. `@node` 必须 `async def`、参数 + 返回必须是 `Data / Data | None / None`(`node()` 装饰时)。
+3. durable 边的 consumer 必须**单 Data 参数**(MQSource 契约,`_source_loop_mq` 检查)。
+4. Runtime 启动时 `compile_graph()` 会检查 wire 一致性(生产者 Data 类型 ↔ 消费者签名)—— 启动报错看这里。
+5. `emit(data)` 不会匹配任何 wire 时静默 no-op(不是错),测试里的 wiring 清空是利用这一点。
+6. **mutation function（普通 async function 持有 session 写业务表 + 触发 EventData）必须用 `transactional_emit(s)` 在 session 块内 append**，不能在块外 `await emit(...)`。CI grep gate `Gap 8` 卡业务区 `await emit(` 计数。
+7. **durable consumer 内禁止 try/except 包整个 body** —— 让 framework 看到异常它才能按 `.on_error(...)` 分发。该 raise 就 raise。

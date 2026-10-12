@@ -143,7 +143,7 @@ jobs:
                     apps/agent-service/app/skills/ apps/agent-service/app/world/)
           # 拿 session 那三条只对**不拥有自己 Data 表**的业务包 exact-zero。
           # app/living/ 自己声明 Data 表、并且用裸 SQL 读它们
-          # （MAX(seq) 取号、DISTINCT ON 取最新一版这类 runtime 四个原语
+          # （MAX(seq) 取号、DISTINCT ON 取最新一版这类 app/data/persist 的原语
           # 没覆盖的形状），所以它在 gap_13_business_owns_data_tables
           # 这条 baseline 上计数、不在这里判零。**公共层怎么读仍然 exact-zero
           # 地由 queries 层管**：living 读 common_* 的那批查询已经全部收进
@@ -235,8 +235,8 @@ jobs:
           ]
           patterns = {
               # 业务不该自己做消息去重 —— 那是 wire 的 .durable() 边的事。但
-              # insert_idempotent 同时也是 app/data/persist.py 四个公开原语之一
-              # （insert_append / select_latest / select_all_versions 是另外三个，
+              # insert_idempotent 同时也是 app/data/persist.py 三个公开原语之一
+              # （insert_append / select_latest 是另外两个，
               # 谁都没被 gate 管），业务写自己那张 Data 表时调它是正当用法。
               # 现存 8 处（app/living/ 7 处 + app/domain/thinking_cost.py 1 处）
               # 全是后者，所以这条从 exact-zero 降成 baseline：加新调用点仍然会
@@ -250,7 +250,7 @@ jobs:
               # 业务包自己拿 session 读写**自己那几张 Data 表**的残留。读公共层
               # （common_*）已经全部收进 app/data/queries/，由 Gap 13 的 exact-zero
               # 那半边管；这里兜的是 MAX(seq) 取号、DISTINCT ON 取最新一版这类
-              # runtime 四个原语没覆盖的形状。数只准降不准升。
+              # app/data/persist 的原语没覆盖的形状。数只准降不准升。
               "gap_13_business_owns_data_tables": (
                   r"from app\.data\.session import|from app\.data import session|"
                   r"get_session\(|async_session\(|AsyncSessionLocal|current_session\(|"

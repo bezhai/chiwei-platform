@@ -183,7 +183,7 @@ and are safe to re-run. `api_version` is not in that script.
 ## What migrator covers
 
 `plan_migration` in `app/data/migrator.py` creates a table per declared `Data` subclass
-(skipping `AdminOnly`, `Meta.transient`, `Meta.existing_table`), appends `dedup_hash`
+(skipping `Meta.transient`), appends `dedup_hash`
 and `created_at`, and builds the dedup, version and `Meta.indexes` indexes.
 
 The one precondition is CREATE privilege on the prod role. If it is missing,

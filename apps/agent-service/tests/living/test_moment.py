@@ -997,14 +997,15 @@ async def test_replaying_the_same_moment_lands_one_row(moment_db, stub_moment):
     stub_moment(said="继续")
     first = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
-    from app.data.persist import insert_idempotent, select_all_versions
+    from app.data.persist import insert_idempotent
+    from tests.data.read_back import all_versions
 
     replayed = LifeMoment(
         **{**first.model_dump(), "said": "这一遍她说了别的", "recorded": 99}
     )
     assert await insert_idempotent(replayed) == 0
 
-    rows = await select_all_versions(
+    rows = await all_versions(
         LifeMoment,
         {"lane": LANE, "persona_id": "akao", "moment_id": first.moment_id},
     )
@@ -1524,8 +1525,8 @@ async def test_a_seam_records_what_it_spent_where_it_can_be_counted(
     包住 run、``record_round_cost`` 落库。这一刀一开始漏了，于是「一晚上花了多少」
     根本查不出来。
     """
-    from app.data.persist import select_all_versions
     from app.domain.thinking_cost import ThinkingTokensSpent
+    from tests.data.read_back import all_versions
     from tests.runtime.conftest import migrate
 
     await migrate(ThinkingTokensSpent, moment_db)
@@ -1534,7 +1535,7 @@ async def test_a_seam_records_what_it_spent_where_it_can_be_counted(
 
     await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
-    spent = await select_all_versions(
+    spent = await all_versions(
         ThinkingTokensSpent,
         {
             "lane": LANE,

@@ -16,7 +16,7 @@
 | N2 | 每个参数必须有类型标注 | 当前契约 | `node.py:67-71` |
 | N3 | 每个参数类型必须是 `Data` 子类 | 当前契约 | `node.py:73-77` |
 | N4 | 返回值必须是 `Data` / `Data \| None` / `None` | 当前契约 | `node.py:79-86` |
-| N5 | 返回值禁止是 `AdminOnly` 标记的 Data | 当前契约 | `node.py:87-90` |
+| N5 | （已删除）返回值禁止是 `AdminOnly` 标记的 Data：没有 Data 用过 `AdminOnly`，T2 删除了它 | 已删除 | — |
 | N6 | 返回 `Data` 实例自动 `await emit(...)` 到下游 | 当前契约 | `node.py:92-99`（commit 0ea263b） |
 | N7 | 返回 `None` 跳过 emit | 当前契约 | `node.py:95` isinstance 检查不命中 |
 | N8 | 多输出 / fan-out / per-chunk：允许手动 `await emit(...)`，但完成 plan 改造 9 / 改造 11 后必须改用 `emit_and_wait` / `.fan_out_per()` 声明式 | 未来目标 | 无断言，**手动 emit 全量 review 已挂 backlog L3**，跟改造 9/11 一起做 |

@@ -557,9 +557,9 @@ async def test_an_unsettled_send_is_never_handed_off_a_second_time(
     一条"照样成立 —— 这条用例要守的防重路径**一次都没被执行过**。所以下面断言的是
     第二次拿到「已经认领过、不再发」那句正常回话，不是一个被吞掉的异常。
     """
-    from app.data.persist import select_all_versions
     from app.living import mouth as mouth_mod
     from app.living.mouth import STATE_CLAIMED, SpokenOutbound, latest_outbound
+    from tests.data.read_back import all_versions
 
     async def boom(**_kw):
         raise RuntimeError("记这一步崩了")
@@ -593,7 +593,7 @@ async def test_an_unsettled_send_is_never_handed_off_a_second_time(
     assert row.state == STATE_CLAIMED, (
         f"第二次调用把这条记录往前推了 —— 它该在防重那一步就返回。拿到：{row}"
     )
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": row.outbound_id}
     )
     assert [v.ver for v in versions] == [1], (
@@ -626,7 +626,6 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
     所以这里把那一拍真的插进认领和收口之间 —— 造出真实的版本链，而不是让替身报一
     个假的 CAS 失败。
     """
-    from app.data.persist import select_all_versions
     from app.living import mouth as mouth_mod
     from app.living.landing import reconcile_landings
     from app.living.mouth import (
@@ -635,6 +634,7 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
         latest_outbound,
         unsettled_outbound,
     )
+    from tests.data.read_back import all_versions
 
     # 「投递方在公共层落下的那一行」只在 test_landing 里定义一次，这边照用。
     from tests.living.test_landing import _the_channel_wrote
@@ -681,7 +681,7 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
         "收口把对账补上的落地标识覆盖掉了 —— 那一版记的是已知事实，不能被抹回 NULL"
     )
     assert row.landed_at == _at(21, 31), "落地时刻被收口顺手改了"
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": row.outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2, 3], (
@@ -708,9 +708,9 @@ async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
     失败。
     """
     from app.capabilities.output_safety import OutputVerdict
-    from app.data.persist import select_all_versions
     from app.living import mouth as mouth_mod
     from app.living.mouth import SpokenOutbound, latest_outbound
+    from tests.data.read_back import all_versions
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
@@ -745,7 +745,7 @@ async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
         "同一句话落了两条记忆 —— 她下一轮会以为自己说了两遍"
     )
     row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": row.outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], (

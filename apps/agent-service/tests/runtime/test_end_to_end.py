@@ -7,7 +7,7 @@ Covers in one test:
   - emit() routing to publish_durable (NOT a direct publish_durable call)
   - real RabbitMQ publish + consume (testcontainer)
   - consumer-side insert_idempotent writing to real Postgres (testcontainer)
-  - select_all_versions(T, ...) reading back what the consumer just persisted
+  - reading back what the consumer just persisted
 
 Each unit test verifies one layer; this test verifies the seams.
 """
@@ -20,18 +20,18 @@ from typing import Annotated
 import pytest
 
 from app.api.middleware import trace_id_var
-from app.data.persist import select_all_versions
-from app.data.schema import Data, DedupKey, Key
+from app.data.schema import Data, Key
 from app.runtime.durable import start_consumers, stop_consumers
 from app.runtime.emit import emit, reset_emit_runtime
 from app.runtime.graph import compile_graph
 from app.runtime.node import node
 from app.runtime.wire import clear_wiring, wire
+from tests.data.read_back import all_versions
 from tests.runtime.conftest import migrate
 
 
 class SmokeMsg(Data):
-    smoke_id: Annotated[str, Key, DedupKey]
+    smoke_id: Annotated[str, Key]
     text: str
 
 
@@ -83,7 +83,7 @@ async def test_emit_to_durable_consumer_persists_and_reads_back(smoke_env):
     assert ok, f"consumer never fired within 5s; received={received!r}"
 
     # Consumer-side insert_idempotent committed the row; reading it back must find it.
-    rows = await select_all_versions(SmokeMsg, {"smoke_id": "sm-1"})
+    rows = await all_versions(SmokeMsg, {"smoke_id": "sm-1"})
     assert len(rows) == 1, f"read back {len(rows)} rows, expected 1"
     assert rows[0].smoke_id == "sm-1"
     assert rows[0].text == "hello from emit"

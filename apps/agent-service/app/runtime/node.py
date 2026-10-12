@@ -6,7 +6,6 @@ Reflects on the function's type hints to:
     a later ``await``);
   * validate all inputs are ``Data`` subclasses;
   * validate the return is ``Data``, ``Data | None``, or ``None``;
-  * reject any ``AdminOnly`` Data in the return position;
   * store reflection metadata accessible via ``inputs_of`` / ``output_of``;
   * register the function in ``NODE_REGISTRY``.
 
@@ -29,7 +28,7 @@ from collections.abc import Callable
 from types import UnionType
 from typing import Union, get_args, get_origin, get_type_hints
 
-from app.data.schema import Data, is_admin_only
+from app.data.schema import Data
 
 NODE_REGISTRY: set[Callable] = set()
 _NODE_META: dict[Callable, dict] = {}
@@ -85,10 +84,6 @@ def node(fn: Callable) -> Callable:
         if not (isinstance(unwrapped, type) and issubclass(unwrapped, Data)):
             raise TypeError(
                 f"{fn.__name__} return must be Data or Data | None"
-            )
-        if is_admin_only(unwrapped):
-            raise TypeError(
-                f"{fn.__name__} returns AdminOnly Data {unwrapped.__name__}: forbidden"
             )
         ret = unwrapped
     @functools.wraps(fn)

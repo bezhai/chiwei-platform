@@ -1,9 +1,8 @@
 """Data classes, and the names and column types derived from them.
 
 A Data class is an immutable pydantic model of one stored row. Fields are annotated with markers
-(``Key`` / ``DedupKey`` / ``Version``) to declare their role in persistence; classes may mix in
-``AdminOnly`` to declare that business code may not produce instances. Every subclass with
-fields is registered in ``DATA_REGISTRY`` when its module is imported, so the migrator
+(``Key`` / ``Version``) to declare their role in persistence. Every subclass with fields is
+registered in ``DATA_REGISTRY`` when its module is imported, so the migrator
 (:mod:`app.data.migrator`) and the write and read primitives (:mod:`app.data.persist`) can
 reflect on the full set of known data types.
 
@@ -37,16 +36,8 @@ class Key:
     """Marker: field is part of the natural key."""
 
 
-class DedupKey:
-    """Marker: field joins the dedup hash (Key ∪ DedupKey)."""
-
-
 class Version:
     """Marker: append-only version column (runtime-maintained)."""
-
-
-class AdminOnly:
-    """Class-level mixin: business code may not produce this Data."""
 
 
 DATA_REGISTRY: set[type[Data]] = set()
@@ -74,29 +65,6 @@ class Data(BaseModel):
             raise TypeError(
                 f"{cls.__name__} must declare at least one Key field"
             )
-        # Meta.dedup_column adopts an external unique constraint — the
-        # runtime's own dedup_hash / Version machinery is bypassed. Silent
-        # bypass leaves the declared intent ambiguous, so reject any
-        # class that tries to declare both.
-        meta = getattr(cls, "Meta", None)
-        dedup_column = getattr(meta, "dedup_column", None) if meta else None
-        if dedup_column:
-            keys = set(key_fields(cls))
-            for name, field in cls.model_fields.items():
-                if DedupKey in field.metadata and name not in keys:
-                    raise TypeError(
-                        f"{cls.__name__}: Meta.dedup_column="
-                        f"{dedup_column!r} adopts an external unique "
-                        f"constraint — remove the DedupKey marker on "
-                        f"field {name!r} (or remove Meta.dedup_column)."
-                    )
-                if Version in field.metadata:
-                    raise TypeError(
-                        f"{cls.__name__}: Meta.dedup_column="
-                        f"{dedup_column!r} adopts an external table; "
-                        f"runtime-managed Version on field {name!r} is "
-                        f"incompatible. Remove one of them."
-                    )
         DATA_REGISTRY.add(cls)
 
 
@@ -109,32 +77,12 @@ def key_fields(cls: type[Data]) -> tuple[str, ...]:
     )
 
 
-def dedup_fields(cls: type[Data]) -> tuple[str, ...]:
-    """Return the names of fields that form the dedup hash.
-
-    Defaults to ``key_fields`` when no ``DedupKey`` is declared; otherwise
-    returns ``key_fields`` followed by the extra ``DedupKey`` fields.
-    """
-    keys = key_fields(cls)
-    extras = tuple(
-        name
-        for name, field in cls.model_fields.items()
-        if DedupKey in field.metadata and name not in keys
-    )
-    return keys + extras if extras else keys
-
-
 def version_field(cls: type[Data]) -> str | None:
     """Return the name of the ``Version`` field, if declared."""
     for name, field in cls.model_fields.items():
         if Version in field.metadata:
             return name
     return None
-
-
-def is_admin_only(cls: type[Data]) -> bool:
-    """Return True when the class mixes in ``AdminOnly``."""
-    return issubclass(cls, AdminOnly)
 
 
 # ---------------------------------------------------------------------------
@@ -161,12 +109,7 @@ def to_snake(name: str) -> str:
 
 
 def table_name(cls: type[Data]) -> str:
-    """The table ``cls`` is stored in: ``Meta.existing_table`` when set, else ``data_`` plus the
-    class name in snake_case."""
-    meta = getattr(cls, "Meta", None)
-    existing = getattr(meta, "existing_table", None) if meta else None
-    if existing:
-        return existing
+    """The table ``cls`` is stored in: ``data_`` plus the class name in snake_case."""
     return f"data_{to_snake(cls.__name__)}"
 
 

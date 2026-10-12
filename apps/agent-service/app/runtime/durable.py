@@ -104,21 +104,6 @@ async def publish_durable(w: WireSpec, consumer: Callable, data: Data) -> None:
     await mq.publish(route, body, headers=headers, lane=effective_lane or None)
 
 
-def _idempotent_key_for(obj: Data) -> str:
-    """Compute the inflight idempotent_key for ``obj``.
-
-    Uses ``Meta.dedup_column`` value when declared (adoption mode),
-    otherwise the runtime-managed ``dedup_hash``. Mirrors
-    ``insert_idempotent``'s conflict-target rule.
-    """
-    cls = type(obj)
-    meta = getattr(cls, "Meta", None)
-    dedup_col = getattr(meta, "dedup_column", None) if meta else None
-    if dedup_col:
-        return str(getattr(obj, dedup_col))
-    return dedup_hash(obj)
-
-
 def _build_handler(w: WireSpec, consumer: Callable):
     """Build an aio-pika message handler for ``(wire, consumer)``.
 
@@ -131,13 +116,11 @@ def _build_handler(w: WireSpec, consumer: Callable):
          - succeeded → ack + return  (dedup terminal)
          - processing-with-live-lease → ack + return  (peer worker)
          - processing-expired / failed → take over, attempts++ — fresh=False
-      4. On fresh claim (non-adoption Data only), call insert_idempotent:
+      4. On fresh claim, call insert_idempotent:
          - n == 0 → Data row pre-existed (pre-7a or concurrent writer).
            Mark inflight succeeded + ack without invoking the consumer
            (history compatibility, Gap 7.1.1).
          - n == 1 → Data row newly written; continue to consumer.
-         Adoption-mode Data skips this step (its consumer-side dedup
-         carries the original guarantee).
       5. Invoke consumer; mark succeeded on success. On exception, mark
          the inflight row failed with the error and re-raise, so
          ``message.process(requeue=False)`` rejects the message and the
@@ -147,8 +130,6 @@ def _build_handler(w: WireSpec, consumer: Callable):
     param_name = next(iter(inputs_of(consumer)))
     edge_id = edge_id_for(data_cls.__qualname__, consumer.__qualname__)
     data_table = table_name(data_cls)
-    meta = getattr(data_cls, "Meta", None)
-    is_adoption = meta is not None and getattr(meta, "existing_table", None) is not None
 
     async def handler(message: AbstractIncomingMessage) -> None:
         # requeue=False: a bad payload (can't parse / duplicated) never
@@ -159,7 +140,9 @@ def _build_handler(w: WireSpec, consumer: Callable):
             async with bind_context(ctx):
                 payload = json.loads(message.body)
                 obj = data_cls(**payload)
-                idem_key = _idempotent_key_for(obj)
+                # The inflight key is the Data row's own dedup hash, the same key
+                # insert_idempotent dedupes on.
+                idem_key = dedup_hash(obj)
 
                 outcome = await claim_inflight(
                     edge_id=edge_id,
@@ -179,10 +162,8 @@ def _build_handler(w: WireSpec, consumer: Callable):
                     return
 
                 # Fresh claim → write the Data row (event persistence) +
-                # history backfill detection. Adoption-mode Data skips
-                # this step (its existing_table is owned by another
-                # writer; consumer-side dedup carries idempotency).
-                if outcome.fresh and not is_adoption:
+                # history backfill detection.
+                if outcome.fresh:
                     n = await insert_idempotent(obj)
                     if n == 0:
                         # Data row pre-existed → history backfill. Mark

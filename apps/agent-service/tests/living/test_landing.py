@@ -32,10 +32,11 @@ import pytest
 from sqlalchemy import text
 
 from app.data import session as session_mod
-from app.data.persist import insert_append, select_all_versions, select_latest
+from app.data.persist import insert_append, select_latest
 from app.infra.cst_time import CST
 from app.living.landing import LandingTick, reconcile_landings, reconcile_recalls
 from app.living.mouth import STATE_CLAIMED, STATE_HANDED_OFF, SpokenOutbound
+from tests.data.read_back import all_versions
 
 LANE = "coe-living"
 _CONV = uuid.uuid5(uuid.NAMESPACE_OID, "conv-dm-bezhai-akao")
@@ -260,7 +261,7 @@ async def test_the_claim_row_is_kept_as_history_not_rewritten(living_db):
 
     assert await reconcile_landings(lane=LANE) == 1
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], versions
@@ -285,7 +286,7 @@ async def test_a_send_that_has_not_landed_yet_waits_for_the_next_tick(living_db)
     await _she_spoke(outbound_id=outbound_id)
 
     assert await reconcile_landings(lane=LANE) == 0
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1], "对不上账却写了一版"
@@ -309,7 +310,7 @@ async def test_reconciling_again_changes_nothing(living_db):
     assert await reconcile_landings(lane=LANE) == 1
     assert await reconcile_landings(lane=LANE) == 0, "补过的又补了一遍"
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], (
@@ -363,7 +364,7 @@ async def test_a_lost_race_is_left_for_the_next_tick_not_forced_through(
     assert await reconcile_landings(lane=LANE) == 0, (
         "CAS 输了却报成补上了 —— 返回值没被看，或者版本号根本没挡住"
     )
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [(v.ver, v.state) for v in versions] == [
@@ -547,7 +548,7 @@ async def test_a_recall_the_channel_has_not_done_yet_waits_for_the_next_tick(
     await _she_spoke(outbound_id=outbound_id, took_back_at=_at(21, 33))
 
     assert await reconcile_recalls(lane=LANE) == 0
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1], "渠道还没撤掉却写了一版"
@@ -581,7 +582,7 @@ async def test_taking_back_one_row_of_several_is_not_the_whole_thing(living_db):
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert row.recalled_at is None
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1], "只撤掉一半却往版本链上写了一版"
@@ -654,7 +655,7 @@ async def test_confirming_a_recall_leaves_every_other_axis_alone(living_db):
 
     assert await reconcile_recalls(lane=LANE) == 1
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], versions
@@ -682,7 +683,7 @@ async def test_reconciling_recalls_again_changes_nothing(living_db):
     assert await reconcile_recalls(lane=LANE) == 1
     assert await reconcile_recalls(lane=LANE) == 0, "确认过的又补了一遍"
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], (
@@ -748,7 +749,7 @@ async def test_a_lost_recall_race_is_left_for_the_next_tick(living_db, monkeypat
     assert await reconcile_recalls(lane=LANE) == 0, (
         "CAS 输了却报成补上了 —— 返回值没被看，或者版本号根本没挡住"
     )
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [(v.ver, v.recalled_at) for v in versions] == [(1, None), (2, None)], (

@@ -4,7 +4,7 @@ from typing import Annotated
 
 import pytest
 
-from app.data.schema import AdminOnly, Data, Key
+from app.data.schema import Data, Key
 from app.runtime.graph import GraphError, compile_graph
 from app.runtime.node import node
 from app.runtime.sink import Sink
@@ -15,7 +15,7 @@ class M(Data):
     mid: Annotated[str, Key]
 
 
-class Cfg(Data, AdminOnly):
+class Cfg(Data):
     cid: Annotated[str, Key]
     v: dict
 
@@ -61,15 +61,6 @@ def test_consumer_signature_mismatch_rejected():
     # Wire declares M -> takes_m, consumer accepts M. Should pass.
     wire(M).to(takes_m)
     compile_graph()  # no error
-
-
-def test_admin_only_consumer_ok():
-    # AdminOnly can be consumed (read-only), just not produced.
-    @node
-    async def reads_cfg(c: Cfg) -> None: ...
-
-    wire(Cfg).to(reads_cfg)
-    compile_graph()  # ok
 
 
 def test_wire_to_unknown_node_rejected():

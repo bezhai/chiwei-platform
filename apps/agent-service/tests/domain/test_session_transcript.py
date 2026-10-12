@@ -31,8 +31,9 @@ from app.agent.neutral import (
     TurnPart,
 )
 from app.agent.session import load_session, replace_session
-from app.data.persist import insert_append, select_all_versions, select_latest
+from app.data.persist import insert_append, select_latest
 from app.domain.session_transcript import SessionTranscript
+from tests.data.read_back import all_versions
 from tests.runtime.conftest import migrate
 
 pytestmark = pytest.mark.integration
@@ -87,7 +88,7 @@ async def test_each_write_is_a_new_version_and_latest_is_the_whole_transcript(
     third = [*second, Message(role=Role.USER, content="c")]
     await replace_session(sid, third, expected_ver=2)
 
-    versions = await select_all_versions(SessionTranscript, {"session_id": sid})
+    versions = await all_versions(SessionTranscript, {"session_id": sid})
     assert [v.ver for v in versions] == [1, 2, 3]
 
     latest = await select_latest(SessionTranscript, {"session_id": sid})

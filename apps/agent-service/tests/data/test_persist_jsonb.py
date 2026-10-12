@@ -9,7 +9,7 @@ framework 的两个 durable 写库函数 ``insert_idempotent`` / ``insert_append
 两条写入路径必须各测一遍——``insert_append`` 多 Version 自增 + 重算 dedup hash，
 和 ``insert_idempotent`` 是不同代码路径。
 
-设计约束（来自 spec）：结构化 JSONB 字段不进 Key / DedupKey（payload 是内容不是
+设计约束（来自 spec）：结构化 JSONB 字段不进 Key（payload 是内容不是
 身份）；去重键只用标量身份字段。故下面两个测试专用 Data 的 dict / list 字段都是
 非 Key 的 payload，自然键 / 版本键全是标量。
 """
@@ -26,10 +26,10 @@ from app.data.persist import (
     _jsonb_columns,
     insert_append,
     insert_idempotent,
-    select_all_versions,
     select_latest,
 )
 from app.data.schema import Data, Key, Version
+from tests.data.read_back import all_versions
 from tests.runtime.conftest import migrate
 
 # 嵌套 + 空 dict + 空 list + None 的混合负载，钉死「深度相等、不丢结构」。
@@ -181,7 +181,7 @@ async def test_insert_append_roundtrips_jsonb_fields(test_db):
         )
     )
 
-    rows = await select_all_versions(JAppend, {"pid": "p1"})
+    rows = await all_versions(JAppend, {"pid": "p1"})
     assert [r.ver for r in rows] == [1, 2]
     # 第一版：嵌套 / 空容器全保真
     assert rows[0].payload == _NESTED_PAYLOAD
