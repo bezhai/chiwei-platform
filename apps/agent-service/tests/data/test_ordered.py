@@ -10,7 +10,8 @@ keeps three promises, each pinned here on a real Postgres:
 2. **Replay.** Writing the same record again (same Key) stores nothing and returns the record
    that is stored.
 3. **No half-written record.** A failure or a cancellation leaves nothing visible and does not hold
-   up the next writer on the axis.
+   up the next writer on the axis, also when it comes after the COMMIT was sent and the reply was
+   lost: the transaction then lands whole or not at all, and the next writer numbers after it.
 
 ``python -m tests.data.test_ordered <lane> <count>`` is the second process of
 :func:`test_numbers_follow_commit_order_across_processes`.
@@ -24,19 +25,24 @@ import random
 import sys
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 import pytest
 from sqlalchemy import event, text
 from sqlalchemy.exc import OperationalError
 
+from app.data import dialect
+from app.data import session as session_mod
 from app.data.ordered import insert_in_commit_order
 from app.data.persist import insert_idempotent
 from app.data.schema import CommitOrder, Data, Key, table_name
 from app.data.tx import current_session, tx
+from tests.data.db_proxy import process_db_behind
 from tests.runtime.conftest import migrate
 
 pytestmark = pytest.mark.integration
+
+T = TypeVar("T")
 
 # How soon the next writer on an axis must get through after the previous one failed or was
 # cancelled. A lock left behind would hold it until the connection goes away: for ever, on the
@@ -105,16 +111,17 @@ class CursorReader:
             self.got.extend(rows)
 
 
-async def _read_while(work: Awaitable[object], readers: list[CursorReader]) -> None:
-    """Keep every reader reading until ``work`` is done, then read once more."""
+async def _read_while(work: Awaitable[T], readers: list[CursorReader]) -> T:
+    """Keep every reader reading until ``work`` is done, then read once more; return its result."""
     work = asyncio.ensure_future(work)
     while not work.done():
         for reader in readers:
             await reader.read()
         await asyncio.sleep(0.001)
-    await work
+    result = await work
     for reader in readers:
         await reader.read()
+    return result
 
 
 async def _assert_each_row_read_once(reader: CursorReader, *, rows: int) -> list[tuple[int, str]]:
@@ -400,6 +407,89 @@ async def test_a_cancelled_writer_leaves_nothing_and_does_not_block_the_next(pro
 
     assert await _visible(probes) == []
     await _the_axis_is_free()
+
+
+async def _write_together() -> None:
+    """Two appends on axis ``L`` and a row of another table, in one transaction."""
+    async with tx():
+        await insert_in_commit_order(_probe("a1"))
+        await insert_in_commit_order(_probe("a2"))
+        await insert_idempotent(ProbeNote(note_id="a"))
+
+
+async def _until_visible(engine, probe_id: str) -> None:
+    async with asyncio.timeout(5):
+        while probe_id not in {p for _, p in await _visible(engine)}:
+            await asyncio.sleep(0.01)
+
+
+# The COMMIT whose reply is lost. The two tests above fail before the COMMIT leaves the process
+# (the ``commit`` event fires first) or cancel while the transaction body waits. Here the COMMIT has
+# left the process and no reply comes back (:class:`tests.data.db_proxy.HeldCommit`): the process
+# gives up, its connection dropped or the writer cancelled while it waits, without knowing whether
+# the transaction committed. The database decides on its own: it committed before the process gave
+# up, it gets the COMMIT only after, or it never gets it and rolls back. Any of the three is
+# acceptable; what must hold is the numbering. A lock the process gives back when it gives up lets
+# the next writer read the largest number while the database may still commit a larger one, so both
+# take the same number and a cursor reader skips one of them.
+GIVING_UP = ("connection dropped", "cancelled")
+FATES = ("committed before", "committed after", "rolled back")
+
+
+@pytest.mark.parametrize("fate", FATES)
+@pytest.mark.parametrize("giving_up", GIVING_UP)
+async def test_a_commit_whose_reply_is_lost_keeps_the_numbering(
+    probes, test_db_dsn, monkeypatch, giving_up, fate
+):
+    # Terminating the cancelled writer's connection waits for a close the proxy never passes on
+    # (:mod:`app.data.dialect`), and nothing comes back on the held connection: keep both waits short.
+    monkeypatch.setattr(dialect, "TERMINATE_GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(session_mod, "COMMAND_TIMEOUT_SECONDS", 5)
+    reader = CursorReader(probes, "L")
+
+    async def everything(proxy) -> Probe:
+        await insert_in_commit_order(_probe("before"))
+        held = proxy.hold_next_commit()
+        writer = asyncio.create_task(_write_together())
+        async with asyncio.timeout(5):
+            await held.caught.wait()
+        if fate == "committed before":
+            held.deliver()
+            await _until_visible(probes, "a2")
+        if giving_up == "connection dropped":
+            held.cut_process_side()
+        else:
+            writer.cancel()
+        await asyncio.wait({writer}, timeout=10)
+        assert writer.done(), "the writer did not give up"
+        if giving_up == "cancelled":
+            assert writer.cancelled()
+        else:
+            assert writer.exception() is not None, "the writer learned how its COMMIT ended"
+
+        nxt = asyncio.create_task(insert_in_commit_order(_probe("next")))
+        await _until_blocked_or_done(probes, nxt)
+        if fate == "committed after":
+            held.deliver()
+        elif fate == "rolled back":
+            held.lose()
+        async with asyncio.timeout(10):
+            return await nxt
+
+    async with process_db_behind(test_db_dsn, monkeypatch) as (proxy, _engine):
+        nxt = await _read_while(everything(proxy), [reader])
+
+    stored = await _visible(probes)
+    landed = [probe_id for _, probe_id in stored if probe_id in ("a1", "a2")]
+    assert landed in ([], ["a1", "a2"]), f"part of the writer's transaction landed: {stored}"
+    assert await _notes(probes) == (1 if landed else 0), "the other table disagrees: " + str(stored)
+    assert bool(landed) == (fate != "rolled back"), (
+        f"the database did not end the writer's transaction the way this case sets up: {stored}"
+    )
+    await _assert_each_row_read_once(reader, rows=len(stored))
+    assert stored[-1] == (nxt.seq, "next") and nxt.seq == len(stored), (
+        f"the next append did not get the next number after what is stored: {nxt.seq}, {stored}"
+    )
 
 
 async def test_records_written_together_land_together(probes):
