@@ -131,6 +131,7 @@ from app.capabilities.agent import AgentRunner
 from app.data.persist import insert_idempotent
 from app.data.schema import Data, Key, table_name
 from app.data.session import get_session
+from app.data.tx import tx
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import now_cst
 from app.living.anchor import anchor_on_grid
@@ -1122,10 +1123,7 @@ async def _remember_this_round(
     "你刚做过、说过"那段里，读的是刚才已经提交的 ``Happening``。
     """
     try:
-        async with get_session() as s:
-            await commit_transcript(
-                transcript_id, messages, expected_ver=expected_ver, session=s
-            )
+        await commit_transcript(transcript_id, messages, expected_ver=expected_ver)
     except Exception:
         CONTEXT_WRITE_FAILED.labels(lane=lane, persona_id=persona_id).inc()
         logger.error(
@@ -1437,12 +1435,10 @@ async def run_moment_held(
     remembered = next_transcript(
         history, [stimulus, *produced], policy=MOMENT_TRIM_POLICY
     )
-    async with get_session() as s:
-        await insert_idempotent(moment, session=s)
-        await commit_glances(
-            glances=context.features[FEATURE_GLANCES], session=s
-        )
-        await mark_read(received, moment_id=moment_id, session=s)
+    async with tx():
+        await insert_idempotent(moment)
+        await commit_glances(glances=context.features[FEATURE_GLANCES])
+        await mark_read(received, moment_id=moment_id)
     await _remember_this_round(
         transcript_id,
         remembered,

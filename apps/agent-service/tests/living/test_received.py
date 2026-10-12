@@ -366,10 +366,10 @@ async def test_a_landing_that_fails_halfway_through_the_read_marks_keeps_none_of
     real = received_mod.insert_idempotent
     marked: list[str] = []
 
-    async def fails_on_the_second_mark(obj, *, session=None):
+    async def fails_on_the_second_mark(obj):
         if marked:
             raise _Crash("记到第二条时库断了")
-        await real(obj, session=session)
+        await real(obj)
         marked.append(obj.message_id)
 
     monkeypatch.setattr(received_mod, "insert_idempotent", fails_on_the_second_mark)

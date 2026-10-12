@@ -13,6 +13,11 @@ Three operations, deliberately minimal:
     contract.
   - :func:`select_latest` — newest version per key using ``DISTINCT ON``.
 
+Each of them runs in the caller's open :func:`app.data.tx.tx` when there is one, so several writes
+land together by running inside one ``async with tx():``, and in a transaction of its own
+otherwise. Joining goes through :func:`app.data.tx.auto_tx`, which adds no SAVEPOINT: a storage
+call inside a caller's transaction is part of that transaction, nothing more.
+
 The dedup_hash is a sha256 over the ``Key`` columns, serialized
 via ``json.dumps(sort_keys=True, default=str)``. The class name is *not*
 included — each Data class lives in its own table, so cross-class
@@ -36,7 +41,7 @@ from app.data.schema import (
     table_name,
     version_field,
 )
-from app.data.session import get_session
+from app.data.tx import auto_tx, current_session
 
 
 def _jsonb_columns(cls: type[Data]) -> frozenset[str]:
@@ -149,7 +154,6 @@ async def insert_append(
     obj: Data,
     *,
     expected_current_ver: int | None = None,
-    session: Any = None,
 ) -> int:
     """Append ``obj`` as a new row; auto-assign ``Version`` if declared.
 
@@ -176,13 +180,9 @@ async def insert_append(
     hash, a collision means two writers slipped past the advisory lock — an
     upstream bug worth surfacing loudly.
 
-    ``session`` runs the whole append on a caller-supplied ``AsyncSession``
-    instead of opening a private one, so the new version commits **atomically
-    with whatever else the caller did on that session** (same reason
-    :func:`insert_idempotent` takes one). The advisory lock is
-    transaction-scoped, so on the caller's session it is held until the
-    caller's transaction ends — keep such transactions short. Default ``None``
-    keeps every existing caller on the private-session path unchanged.
+    Inside a caller's ``tx()`` the append commits or rolls back with it. The
+    advisory lock is transaction-scoped, so there it is held until the
+    caller's transaction ends — keep such transactions short.
     """
     cls = type(obj)
     table = table_name(cls)
@@ -197,7 +197,8 @@ async def insert_append(
     key_tuple = tuple(getattr(obj, k) for k in keys)
     lock_key = int(hashlib.md5(str(key_tuple).encode()).hexdigest()[:15], 16) % (2**31)
 
-    async def _append_on(s: Any) -> int:
+    async with auto_tx():
+        s = current_session()
         await s.execute(
             text("SELECT pg_advisory_xact_lock(:k)"),
             {"k": lock_key},
@@ -247,26 +248,17 @@ async def insert_append(
         await s.execute(text(sql), _encode_params(obj, cols_map, jsonb_cols))
         return 1
 
-    if session is not None:
-        return await _append_on(session)
-    async with get_session() as s:
-        return await _append_on(s)
 
-
-async def insert_idempotent(obj: Data, *, session: Any = None) -> int:
+async def insert_idempotent(obj: Data) -> int:
     """Insert ``obj`` if its dedup key has not been seen; return rows inserted.
 
     Uses ``ON CONFLICT (dedup_hash) DO NOTHING RETURNING 1`` on the
     runtime-managed hash column (:func:`dedup_hash`). We count ``len(fetchall())`` because asyncpg does not reliably populate
     ``rowcount`` for ``DO NOTHING``.
 
-    ``session`` runs the INSERT on a caller-supplied ``AsyncSession`` instead
-    of opening a private one, so the write commits **atomically with whatever
-    else the caller did on that session**. The one case that needs it: a
-    persistent read cursor whose advance must be in the same transaction as
-    the read it is a cursor for — advancing in a separate transaction lets a
-    crash in between skip messages nobody ever saw. Default ``None`` keeps
-    every existing caller on the private-session path unchanged.
+    Inside a caller's ``tx()`` the insert commits or rolls back with it. A
+    collision returns ``0`` without aborting that transaction (``DO NOTHING``
+    raises nothing), so the caller's later writes still land.
     """
     cls = type(obj)
     table = table_name(cls)
@@ -282,18 +274,19 @@ async def insert_idempotent(obj: Data, *, session: Any = None) -> int:
         "ON CONFLICT (dedup_hash) DO NOTHING RETURNING 1"
     )
     params = _encode_params(obj, cols_map, jsonb_cols)
-    if session is not None:
-        r = await session.execute(text(sql), params)
-        return len(r.fetchall())
-    async with get_session() as s:
-        r = await s.execute(text(sql), params)
+    async with auto_tx():
+        r = await current_session().execute(text(sql), params)
         return len(r.fetchall())
 
 
 async def select_latest(
     cls: type[Data], keys_values: dict[str, Any]
 ) -> Data | None:
-    """Return the highest-version row matching ``keys_values``, or ``None``."""
+    """Return the highest-version row matching ``keys_values``, or ``None``.
+
+    Inside a caller's ``tx()`` it reads on that transaction, so it sees the
+    transaction's own writes.
+    """
     table = table_name(cls)
     keys = key_fields(cls)
     ver = version_field(cls)
@@ -307,8 +300,8 @@ async def select_latest(
         f"SELECT DISTINCT ON ({', '.join(keys)}) * FROM {table} "
         f"WHERE {where} ORDER BY {order}"
     )
-    async with get_session() as s:
-        r = await s.execute(text(sql), keys_values)
+    async with auto_tx():
+        r = await current_session().execute(text(sql), keys_values)
         row = r.mappings().first()
         if not row:
             return None

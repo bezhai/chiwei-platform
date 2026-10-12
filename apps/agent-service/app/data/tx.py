@@ -3,9 +3,10 @@
 业务永远不直接拿 session。两个对外 API：
 
   - ``async with tx():``  — 表达「这几行原子」
-  - ``current_session()``  — query 函数（``app.data.queries``）内部用；业务区禁止 import
+  - ``current_session()``  — ``app.data`` 内部（``persist`` 的读写原语、``queries`` 层）用；业务区禁止 import
 
-``auto_tx()`` 是 query 函数自己用的：不在 tx 里就为这一次调用开一个。
+``auto_tx()`` 是这些存储函数自己用的：在调用方的 tx 里就加入它（不开 SAVEPOINT），
+不在 tx 里就为这一次调用开一个。
 
 session 走 contextvar。**AsyncSession 单 session 单 connection 不支持并发使用，
 所以同一 tx 内 DB 操作只能顺序 await — 在 tx 内塞 ``asyncio.gather`` 跑多条
@@ -68,10 +69,11 @@ async def tx() -> AsyncIterator[None]:
 
 @asynccontextmanager
 async def auto_tx() -> AsyncIterator[None]:
-    """Internal helper for query functions: if not in tx, open one for
-    this single call. Allows business code to call a single query
-    without an explicit `with tx():` while still working inside an
-    explicit tx block.
+    """Internal helper for storage functions (``app.data.persist``, the
+    queries layer): if not in tx, open one for this single call; inside a
+    tx, join it with no SAVEPOINT. Allows business code to call a single
+    storage function without an explicit `with tx():` while still working
+    inside an explicit tx block.
     """
     if _session_var.get() is not None:
         yield

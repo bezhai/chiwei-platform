@@ -326,13 +326,11 @@ def in_a_moment():
         with agent_context(ctx):
             yield ctx
         if finishes:
-            from app.data.session import get_session
+            from app.data.tx import tx
             from app.living.phone import commit_glances
 
-            async with get_session() as s:
-                await commit_glances(
-                    glances=ctx.features[FEATURE_GLANCES], session=s
-                )
+            async with tx():
+                await commit_glances(glances=ctx.features[FEATURE_GLANCES])
 
     return bind
 

@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated
 
 from pydantic import field_validator
 from sqlalchemy import text
@@ -262,9 +262,7 @@ def received_line(item: ReceivedMessage) -> str:
     return f"{esc(item.sender)}：{esc(item.body)}"
 
 
-async def mark_read(
-    items: list[ReceivedMessage], *, moment_id: str, session: Any
-) -> None:
+async def mark_read(items: list[ReceivedMessage], *, moment_id: str) -> None:
     """把这一轮放进她输入的那几条记成看过。**由这一轮的收尾调用，跟 ``LifeMoment`` 同一个事务。**"""
     for item in items:
         await insert_idempotent(
@@ -273,6 +271,5 @@ async def mark_read(
                 persona_id=item.persona_id,
                 message_id=item.message_id,
                 moment_id=moment_id,
-            ),
-            session=session,
+            )
         )

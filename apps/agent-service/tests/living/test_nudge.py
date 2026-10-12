@@ -27,6 +27,7 @@ from sqlalchemy import text
 from app.agent.neutral import Message, Role
 from app.agent.runtime_context import agent_context
 from app.data import session as session_mod
+from app.data.tx import tx
 from app.living.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
     LifeMoment,
@@ -1036,8 +1037,8 @@ async def test_a_tick_that_waited_decides_on_what_is_true_when_it_gets_her(
         )
         await queued_behind(key)
         seen = await unread_received(lane=LANE, persona_id="akao")
-        async with session_mod.get_session() as s:  # 那一轮落地，把它记成看过
-            await mark_read(seen, moment_id="2026-07-25T21:30+08:00", session=s)
+        async with tx():  # 那一轮落地，把它记成看过
+            await mark_read(seen, moment_id="2026-07-25T21:30+08:00")
 
     assert await tick is None
     async with session_mod.get_session() as s:

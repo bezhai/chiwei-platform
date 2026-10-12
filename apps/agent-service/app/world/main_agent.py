@@ -222,7 +222,6 @@ async def run_round(messages: Sequence[Message]) -> None:
         key,
         next_transcript(history, [round_input, *produced], policy=TRIM_POLICY),
         expected_ver=ver,
-        session=None,
     )
     unfinished.clear()
     chosen = await set_next_wake(

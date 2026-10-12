@@ -169,7 +169,7 @@ async def world(volume, monkeypatch, app_host):
         h.loaded_key = key
         return list(h.history), h.ver
 
-    async def commit_transcript(key, messages, *, expected_ver, session):
+    async def commit_transcript(key, messages, *, expected_ver):
         """跟真的一样按版本做 CAS，写下的就是下一轮 ``load_session`` 读回来的那一版。"""
         from app.agent.continuity import TranscriptConflict
 

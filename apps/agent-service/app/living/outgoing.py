@@ -64,6 +64,7 @@ from sqlalchemy import text
 from app.data.persist import insert_append
 from app.data.schema import Data, Key, table_name
 from app.data.session import get_session
+from app.data.tx import tx
 from app.infra.cst_time import dated_clock
 from app.living.participants import WORLD, residents
 from app.living.records import (
@@ -270,10 +271,10 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
             )
         )
 
-    async with get_session() as s:
+    async with tx():
         for message in messages:
-            await insert_append(message, session=s)
-        await insert_append(up_to, session=s)
+            await insert_append(message)
+        await insert_append(up_to)
     return messages
 
 

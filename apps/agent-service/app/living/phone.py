@@ -540,14 +540,14 @@ async def effective_cursor(
     return max(landed, pending) if pending is not None else landed
 
 
-async def commit_glances(*, glances: list[dict], session: Any) -> int:
+async def commit_glances(*, glances: list[dict]) -> int:
     """把本轮看过的手机落库。**由这一轮的收尾调用，跟 ``LifeMoment`` 同一个事务。**
 
     只有这一步提交了，那些消息才算她看过。这一轮没跑到这里就一条都不算已读。
     """
     written = 0
     for g in glances:
-        written += await insert_idempotent(PhoneRead(**g), session=session)
+        written += await insert_idempotent(PhoneRead(**g))
     return written
 
 

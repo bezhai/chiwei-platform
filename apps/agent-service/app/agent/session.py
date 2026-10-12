@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 
 from app.agent.neutral import Message
 from app.data.persist import insert_append, select_latest
@@ -75,7 +74,6 @@ async def replace_session(
     messages: list[Message],
     *,
     expected_ver: int,
-    session: Any = None,
 ) -> bool:
     """Write ``messages`` as the next version; report whether it landed.
 
@@ -85,8 +83,8 @@ async def replace_session(
     judged inside the INSERT itself. ``False`` means somebody wrote in between —
     nothing was written, and what that means is the caller's call.
 
-    ``session`` runs the write on the caller's open database session so it
-    commits atomically with whatever else that transaction did.
+    Inside the caller's open ``tx()`` the write commits atomically with whatever
+    else that transaction did; outside one it commits on its own.
 
     Empty ``messages`` is rejected: it would store an empty transcript, i.e. wipe
     her context, and no caller ever means that.
@@ -102,6 +100,5 @@ async def replace_session(
     written = await insert_append(
         SessionTranscript(session_id=session_id, transcript_json=transcript_json),
         expected_current_ver=expected_ver,
-        session=session,
     )
     return written == 1

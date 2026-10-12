@@ -1234,31 +1234,28 @@ async def test_a_picture_is_gone_before_she_is_fed_again(moment_db, stub_moment)
     每一轮都炸在同一个地方，收尾轮不上。所以裁必须在喂之前。
     """
     from app.agent.continuity import commit_transcript
-    from app.data.session import get_session
 
     # 先塞一段带图片的历史，模拟上一个进程 13:00 那一轮画过一张
     tid = transcript_key(lane=LANE, persona_id="akao")
 
-    async with get_session() as s:
-        await commit_transcript(
-            tid,
-            [
-                _stim("现在 13:00。"),
-                _call("draw_a_picture", "c1"),
-                _result(
-                    "c1",
-                    [
-                        ContentBlock.from_text("你画出来了：「晚霞」 pic=abc123"),
-                        ContentBlock.from_image_url(
-                            {"url": "https://tos.example/signed?expires=1"}
-                        ),
-                    ],
-                ),
-                _said("画完了"),
-            ],
-            expected_ver=0,
-            session=s,
-        )
+    await commit_transcript(
+        tid,
+        [
+            _stim("现在 13:00。"),
+            _call("draw_a_picture", "c1"),
+            _result(
+                "c1",
+                [
+                    ContentBlock.from_text("你画出来了：「晚霞」 pic=abc123"),
+                    ContentBlock.from_image_url(
+                        {"url": "https://tos.example/signed?expires=1"}
+                    ),
+                ],
+            ),
+            _said("画完了"),
+        ],
+        expected_ver=0,
+    )
 
     runner = stub_moment(said="继续")
     await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(15, 10)))

@@ -217,10 +217,7 @@ async def transcript_db(test_db):  # noqa: F811
 
 @pytest.mark.integration
 async def test_a_write_lands_as_the_next_version(transcript_db):
-    from app.data.session import get_session
-
-    async with get_session() as s:
-        await commit_transcript("coe-x:someone", [_said("第一版")], expected_ver=0, session=s)
+    await commit_transcript("coe-x:someone", [_said("第一版")], expected_ver=0)
 
     loaded, ver = await load_session("coe-x:someone")
     assert ([m.text() for m in loaded], ver) == (["第一版"], 1)
@@ -229,16 +226,10 @@ async def test_a_write_lands_as_the_next_version(transcript_db):
 @pytest.mark.integration
 async def test_writing_from_a_stale_version_is_refused_and_writes_nothing(transcript_db):
     """别人在中间写过：抛出来，而不是把别人刚写下的那一整段盖掉。"""
-    from app.data.session import get_session
-
-    async with get_session() as s:
-        await commit_transcript("coe-x:someone", [_said("别人写的")], expected_ver=0, session=s)
+    await commit_transcript("coe-x:someone", [_said("别人写的")], expected_ver=0)
 
     with pytest.raises(TranscriptConflict):
-        async with get_session() as s:
-            await commit_transcript(
-                "coe-x:someone", [_said("我这一版")], expected_ver=0, session=s
-            )
+        await commit_transcript("coe-x:someone", [_said("我这一版")], expected_ver=0)
 
     loaded, ver = await load_session("coe-x:someone")
     assert ([m.text() for m in loaded], ver) == (["别人写的"], 1)
@@ -247,13 +238,11 @@ async def test_writing_from_a_stale_version_is_refused_and_writes_nothing(transc
 @pytest.mark.integration
 async def test_the_write_rides_the_callers_transaction(transcript_db):
     """调用方的事务回滚，这次写入也跟着没了 —— 它跟调用方的其他写入一起提交或一起不提交。"""
-    from app.data.session import get_session
+    from app.data.tx import tx
 
     with pytest.raises(RuntimeError, match="调用方后面出错"):
-        async with get_session() as s:
-            await commit_transcript(
-                "coe-x:someone", [_said("没提交的一版")], expected_ver=0, session=s
-            )
+        async with tx():
+            await commit_transcript("coe-x:someone", [_said("没提交的一版")], expected_ver=0)
             raise RuntimeError("调用方后面出错")
 
     assert await load_session("coe-x:someone") == ([], 0)

@@ -116,10 +116,7 @@ async def _write_transcript(
     transcript_id: str, messages: list[Message], *, expected_ver: int = 0
 ) -> None:
     """用例侧直接落一条上下文（模拟"上一个进程写下的"）。"""
-    async with get_session() as s:
-        await commit_transcript(
-            transcript_id, messages, expected_ver=expected_ver, session=s
-        )
+    await commit_transcript(transcript_id, messages, expected_ver=expected_ver)
 
 
 # ---------------------------------------------------------------------------

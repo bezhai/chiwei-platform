@@ -34,8 +34,9 @@
 是这个保证破了之后的检查，把"看不见的互相覆盖"变成一行看得见的错误。它不是多副本并发
 写的许可证。
 
-**写入跑在调用方给的事务里**（``session`` 必须显式给）。它跟调用方的哪些写入一起提交，
-由调用方决定；给 ``None`` 就是它单独开一个事务提交，跟别的写入都不绑。
+**写入跟调用方打开的事务一起提交。** 它跟调用方的哪些写入一起提交，由调用方决定：
+在 ``async with tx():`` 里调用就随那个事务提交或回滚；不在事务里调用就单独开一个事务提交，
+跟别的写入都不绑。
 
 裁剪规则
 --------
@@ -99,7 +100,6 @@ import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from app.agent.neutral import ContentBlock, Message, Role
 from app.agent.session import replace_session
@@ -121,19 +121,16 @@ async def commit_transcript(
     messages: list[Message],
     *,
     expected_ver: int,
-    session: Any,
 ) -> None:
-    """把这一轮结束后的完整上下文写成下一版，落在调用方的事务里。
+    """把这一轮结束后的完整上下文写成下一版。
 
     ``messages`` 是**完整的新上下文**（:func:`next_transcript` 的结果），不是增量。
     ``expected_ver`` 是 :func:`app.agent.session.load_session` 读到的那一版；库里已经
     不是它了就抛 :class:`TranscriptConflict`，一行都不写。写失败（CAS 没写成、或者 PG
-    抛错）一律往外抛，怎么处理由调用方定。``session`` 是调用方的事务；``None`` 表示单独
-    提交。
+    抛错）一律往外抛，怎么处理由调用方定。在调用方的 ``tx()`` 里调用就随那个事务提交，
+    否则单独提交。
     """
-    landed = await replace_session(
-        key, messages, expected_ver=expected_ver, session=session
-    )
+    landed = await replace_session(key, messages, expected_ver=expected_ver)
     if not landed:
         raise TranscriptConflict(
             f"上下文 {key} 在这一轮跑的时候被别人写过了（读到的是 ver={expected_ver}）"
