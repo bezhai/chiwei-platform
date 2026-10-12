@@ -1024,10 +1024,7 @@ async def _next_moment_seq(*, lane: str, persona_id: str) -> int:
 
     **只能在 moment 的排他占用里调**（:func:`life_moment_lock_key`）：取号和落库之间不放开
     占用，所以号的先后就是提交的先后，可见的号永远是一段连续前缀，"最后落地的那个 moment"
-    不会是一条还在飞的记录后面那一个。这和
-    :func:`app.living.serial.append_in_commit_order` 是同一条论证——不复用它，是因为
-    它自己要 ``hold`` 一次，而这个 moment 已经占着同一条 key，``asyncio.Lock`` 不可重入，
-    嵌套等于永久自锁死。
+    不会是一条还在飞的记录后面那一个。
 
     旧行的 ``seq`` 是 NULL，``MAX`` 直接忽略 NULL，所以加列后的第一个 moment 拿到 1 —— 比任何
     旧行（读出来是 0）都大。

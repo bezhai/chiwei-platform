@@ -14,17 +14,12 @@ from datetime import datetime
 
 from sqlalchemy import text
 
+from app.data.ordered import insert_in_commit_order
 from app.data.schema import table_name
 from app.data.session import get_session
 from app.living.records import Whereabouts
-from app.living.serial import append_in_commit_order
 
 _TABLE = table_name(Whereabouts)
-
-
-def whereabouts_seq_lock_key(lane: str, persona_id: str) -> str:
-    """这个人在这个 lane 上的 seq 轴的占用 key（每人一条轴，互不阻塞）。"""
-    return f"living:seq:whereabouts:{lane}:{persona_id}"
 
 
 async def note_whereabouts(
@@ -36,15 +31,19 @@ async def note_whereabouts(
     doing: str,
     noted_at: datetime,
 ) -> Whereabouts:
-    """记下她这一轮在哪、在做什么。同一 ``moment_id`` 重放只落一行。"""
-    return await append_in_commit_order(
-        Whereabouts,
-        stream=whereabouts_seq_lock_key(lane, persona_id),
-        scope={"lane": lane, "persona_id": persona_id},
-        moment_id=moment_id,
-        place=place,
-        doing=doing,
-        noted_at=noted_at,
+    """记下她这一轮在哪、在做什么，拿到它在她自己那条轴上的号。
+
+    同一 ``moment_id`` 重放只落一行，返回库里已有的那一行。
+    """
+    return await insert_in_commit_order(
+        Whereabouts(
+            lane=lane,
+            persona_id=persona_id,
+            moment_id=moment_id,
+            place=place,
+            doing=doing,
+            noted_at=noted_at,
+        )
     )
 
 

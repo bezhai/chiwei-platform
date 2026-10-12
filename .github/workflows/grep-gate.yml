@@ -238,8 +238,9 @@ jobs:
               # insert_idempotent 同时也是 app/data/persist.py 三个公开原语之一
               # （insert_append / select_latest 是另外两个，
               # 谁都没被 gate 管），业务写自己那张 Data 表时调它是正当用法。
-              # 现存 8 处（app/living/ 7 处 + app/domain/thinking_cost.py 1 处）
-              # 全是后者，所以这条从 exact-zero 降成 baseline：加新调用点仍然会
+              # 现存的调用点（app/living/ 和 app/domain/thinking_cost.py，数在
+              # .github/grep-baselines.json）全是后者，所以这条从 exact-zero
+              # 降成 baseline：加新调用点仍然会
               # 被挡下、需要显式抬基线 + reviewer 签字，但不再断言一个代码库本身
               # 就不成立的零。存储自己的实现（data/persist.py，以及建在它上面的
               # data/ordered.py）和 runtime/durable.py 排除在外。

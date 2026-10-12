@@ -1,8 +1,6 @@
-"""并发纪律：进程内排他占用，以及按提交顺序 append。
+"""并发纪律：进程内排他占用。
 
-两件事共用一个原语。
-
-**一、同一个 persona 的醒来必须串行。** 会有两条路把同一个 life 带到下一刻（固定
+**同一个 persona 的醒来必须串行。** 会有两条路把同一个 life 带到下一刻（固定
 循环 + 强提醒提前的那一次），它们一定并发。后到的那次要**排队等前一次做完**，
 不是被丢弃——丢弃会让她漏掉事情。所以这里是一把会阻塞的互斥锁，不是撞上就 raise 的
 单飞闸（那种语义是"丢掉"）。
@@ -13,12 +11,6 @@
 排队（或者正在跑）时，后面的拍直接过去：排着的那一拍轮到她时按那一刻的样子判该做什么，
 后面那几拍要判的它都会判到；它跑完之后新冒出来的，下一拍接着判。两条钟之间仍然排队，
 一条不会把另一条顶掉。
-
-**二、共享记录要有稳定的消费顺序。** 三个 life 并发写同一份记录。若按
-"发生时间"开时间窗，一条提交晚于窗口推进的记录会被永久越过；自然键幂等只防重复
-行，防不了这个。:func:`append_in_commit_order` 在占用里分配 ``seq``、占用放开前
-记录已经落库提交，所以 **seq 的先后 == 提交的先后**，任一时刻可见的 seq 集合都是
-一段连续前缀。读侧游标推到"本次读到的最大 seq"就绝不会跳过任何东西。
 
 前提：agent-service 单副本
 --------------------------
@@ -74,18 +66,9 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, TypeVar
 from weakref import WeakKeyDictionary
 
-from sqlalchemy import text
-
-from app.data.persist import insert_idempotent, select_latest
-from app.data.schema import Data, key_fields, table_name
-from app.data.session import get_session
-
 logger = logging.getLogger(__name__)
-
-T = TypeVar("T", bound=Data)
 
 # 一次占用最长持有多久。见模块 docstring：这是死锁兜底，不是轮次预算。
 #
@@ -154,9 +137,7 @@ async def at_most_one(line: str) -> AsyncIterator[bool]:
 async def hold(key: str, *, seconds: float | None = None) -> AsyncIterator[None]:
     """占住 ``key``；已被别人占着就**排队等**，等到为止。
 
-    ``asyncio.Lock`` 的等待是 FIFO 的：先来的先拿到。这条是
-    :func:`append_in_commit_order` 那个"下一个拿到占用的人一定看得见上一个人写的
-    行"论证的一半——另一半是那边的 commit 落在放开占用之前。
+    ``asyncio.Lock`` 的等待是 FIFO 的：先来的先拿到。
 
     拿到之后最多持有 ``seconds`` 秒（不传就用 :data:`HELD_SECONDS`），到点把这一轮
     掐断并抛 ``TimeoutError``，占用随之放开。为什么要有这个顶见模块 docstring。
@@ -179,48 +160,3 @@ async def hold(key: str, *, seconds: float | None = None) -> AsyncIterator[None]
                     cap,
                 )
             raise
-
-
-async def append_in_commit_order(
-    cls: type[T], *, stream: str, scope: dict[str, Any], **fields: Any
-) -> T:
-    """给 ``cls`` 分配 ``stream`` 上的下一个 ``seq`` 并落库，返回落库的那一行。
-
-    ``scope`` 是这条 seq 轴的范围（比如 ``{"lane": ...}``，或者 whereabouts 的
-    ``{"lane": ..., "persona_id": ...}``）：既是 ``MAX(seq)`` 的过滤条件，也直接
-    进这一行——轴的范围就是行上的那几个字段，让调用方写两遍必然写歪。
-
-    撞上同一自然键（重放）时不插入，返回库里已有的那一行——刚取的号作废，在 seq
-    轴上留一个**永远为空的洞**。洞不影响读：读侧问的是"seq 比游标大的行"，一个
-    从来没出现过的号不会让任何人被跳过。
-
-    **"锁放开前该行已可见"在进程内锁下仍然成立**，依据是这两句都在 ``hold`` 里：
-    取号的 ``MAX(seq)`` 和落库的 ``insert_idempotent``。后者用 ``get_session()``，
-    退出即 commit，而这个退出发生在 ``hold`` 退出之前。加上 ``asyncio.Lock`` 的
-    FIFO 等待，下一个拿到占用的人一定在那次 commit 之后才开始跑。所以任一时刻
-    可见的 seq 集合都是一段连续前缀，不会出现"seq 7 可见、seq 6 还在飞"。
-    """
-    table = table_name(cls)
-    where = " AND ".join(f"{col} = :{col}" for col in scope)
-    async with hold(stream):
-        async with get_session() as s:
-            result = await s.execute(
-                text(
-                    f"SELECT COALESCE(MAX(seq), 0) + 1 FROM {table} "
-                    f"WHERE {where}"
-                ),
-                scope,
-            )
-            seq = int(result.scalar_one())
-        row = cls(seq=seq, **scope, **fields)
-        if await insert_idempotent(row):
-            return row
-
-    existing = await select_latest(
-        cls, {k: getattr(row, k) for k in key_fields(cls)}
-    )
-    assert existing is not None, (
-        f"{cls.__name__} 插入被 ON CONFLICT 挡下，却查不到已存在的行 —— "
-        f"自然键 {key_fields(cls)} 和 dedup 口径对不上"
-    )
-    return existing  # type: ignore[return-value]

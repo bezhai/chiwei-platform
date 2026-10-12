@@ -15,8 +15,11 @@
   * 嵌进 SQL 的那一处，表名后面紧跟（可选的别名和）``WHERE``；``WHERE`` 顶层没有 ``OR``，
     并且有一条顶层 ``AND`` 条件恰好是"这一行属于谁的那一列 = 一个绑定参数"。``WHERE`` 里
     夹着别的 f-string 值、注释、引号，算认不出来。
-  * 类本身只能当类型注解、构造一行、取 ``model_fields``，或者交给 :data:`_WRITERS` 里
-    列出来的写入口；交给别的函数（比如 :func:`app.runtime.query.query`）算认不出来。
+  * 类本身只能当类型注解、构造一行、取 ``model_fields``；交给任何函数（比如
+    :func:`app.runtime.query.query`）都算认不出来。写一行是把构造好的那一行交出去
+    （:func:`app.data.ordered.insert_in_commit_order`），类不经手。那里面的读只有两处：取号的
+    ``MAX(seq)``，拿到的是一个号，不是谁的内容；重放撞上自然键时取回自然键相同的那一行，
+    也就是她这一行早先落下的那份。
 
 名字按 import 解析到它定义在哪个模块，所以 ``app.world`` 自己的 ``Happening`` 不算，从别的
 模块 import 进来的表名照样跟着查。``type(x)``、``getattr(m, "...")`` 这类动态写法扫描跟不到，
@@ -35,7 +38,6 @@ import pytest
 
 from app.data.schema import table_name
 from app.living.records import Happening, Whereabouts
-from app.living.serial import append_in_commit_order
 
 _APP = Path(__file__).resolve().parents[2] / "app"
 
@@ -51,14 +53,6 @@ _LITERAL_TABLE = re.compile(
     "|".join(rf"\b{re.escape(table_name(cls))}\b" for cls in (Happening, Whereabouts)),
     re.IGNORECASE,
 )
-
-# 把类交给这些函数是写一行，不是读。只有列在这里的才放行，每一项写明理由。
-_WRITERS = {
-    _qualified(append_in_commit_order): (
-        "落她自己的一行。里面的读只有两处：按 scope 取 MAX(seq)，拿到的是一个号，"
-        "不是谁的内容；重放撞上自然键时取回自然键相同的那一行，也就是她这一行早先落下的那份"
-    ),
-}
 
 # 这几处一定在读这两张表；一处都扫不到说明扫描本身失效了（比如表名换了绑定方式），
 # 那时候这条门禁绿着等于没有。
@@ -275,12 +269,14 @@ def _class_use(
         return  # 构造一行
     if isinstance(parent, ast.Attribute) and parent.attr == "model_fields":
         return
-    if isinstance(parent, ast.Call) and parent.args and parent.args[0] is node:
-        if _table_of(parent, module) is not None:
-            yield from _table_use(parent, cls, module, parents, tables)
-            return
-        if module.resolve(parent.func) in _WRITERS:
-            return
+    if (
+        isinstance(parent, ast.Call)
+        and parent.args
+        and parent.args[0] is node
+        and _table_of(parent, module) is not None
+    ):
+        yield from _table_use(parent, cls, module, parents, tables)
+        return
     shown = ast.unparse(parent if isinstance(parent, ast.expr) else node)
     yield node.lineno, False, f"{cls} 用在扫描认不出来的地方：{shown}"
 
@@ -437,7 +433,7 @@ _PRELUDE = """\
 from app.living import records
 from app.living.records import Happening, Whereabouts
 from app.living.records import Happening as Deed
-from app.living.serial import append_in_commit_order
+from app.data.ordered import insert_in_commit_order
 from app.data.schema import table_name
 from app.runtime.query import query
 
@@ -517,6 +513,12 @@ def _violations(body: str, **others: str) -> list[str]:
             "async def everyone(lane):\n"
             "    return await query(Happening).where(lane=lane).all()\n",
             id="query-builder",
+        ),
+        pytest.param(
+            # 写入口收的是构造好的一行；类本身交给它，扫描不替它担保
+            "async def keep(lane):\n"
+            "    await insert_in_commit_order(Happening)\n",
+            id="class-handed-to-the-writer",
         ),
         pytest.param(
             'SQL = f"SELECT * FROM {_TABLE} WHERE actor = :me OR lane = :lane"\n',
@@ -615,7 +617,7 @@ def test_the_scan_follows_a_table_binding_imported_from_another_module():
         pytest.param(
             '"""data_happening 只给她自己读。"""\n'
             "async def keep(lane: str, rows: list[dict]) -> list[Happening]:\n"
-            '    await append_in_commit_order(Happening, stream="s", scope={"lane": lane})\n'
+            '    await insert_in_commit_order(Happening(lane=lane, happening_id="h"))\n'
             "    return [Happening(**{k: r[k] for k in Happening.model_fields}) for r in rows]\n",
             id="type-constructor-fields-write",
         ),

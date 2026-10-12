@@ -188,17 +188,14 @@ async def test_a_timeout_from_inside_is_not_blamed_on_the_lock(caplog):
 
 
 async def test_an_inner_lock_timing_out_is_not_blamed_on_the_outer(caplog):
-    """嵌套时内层到点，记的必须是内层那把 —— 外层刚进来，不该背这个账。
-
-    ``append_in_commit_order`` 就在别的 key 的占用里再占一把。
-    """
+    """嵌套时内层到点，记的必须是内层那把 —— 外层刚进来，不该背这个账。"""
     with caplog.at_level(logging.WARNING, logger="app.living.serial"):
         with pytest.raises(TimeoutError):
             async with hold("living:turn:coe-x:akao", seconds=60.0):
-                async with hold("living:happening:coe-x", seconds=0.05):
+                async with hold("living:inner:coe-x", seconds=0.05):
                     await asyncio.Event().wait()
 
-    assert "living:happening:coe-x 占住超过" in caplog.text, caplog.text
+    assert "living:inner:coe-x 占住超过" in caplog.text, caplog.text
     assert "living:turn:coe-x:akao 占住超过" not in caplog.text, caplog.text
 
 

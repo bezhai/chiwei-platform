@@ -255,8 +255,8 @@ async def recent_own_happenings(
     """她自己最近做过 / 说过的若干条，按发生先后升序（最近的在最后）。
 
     按 ``seq`` 取最近的一段再翻过来：``occurred_at`` 跨 persona 并发时跟落库顺序
-    无关，按它排会让同一刻的几条随机换位（见 :func:`app.living.serial.
-    append_in_commit_order`）。
+    无关，按它排会让同一刻的几条随机换位（见 :class:`app.living.records.Happening`
+    的 ``seq``）。
     """
     sql = (
         f"SELECT * FROM {_HAPPENING_TABLE} "

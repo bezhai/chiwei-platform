@@ -27,7 +27,7 @@ from typing import Annotated
 
 from pydantic import field_validator
 
-from app.data.schema import Data, Key
+from app.data.schema import CommitOrder, Data, Key
 from app.runtime.lane_policy import current_deployment_lane
 
 
@@ -180,10 +180,11 @@ class Happening(Data):
 
     自然键 ``(lane, happening_id)``——重放同一个 ``happening_id`` 只落一行。
 
-    ``seq`` 是**本 lane 内的提交序**，由 :func:`app.living.serial.append_in_commit_order`
-    在排他占用下分配：拿号和落库之间占用不放开，所以 seq 的先后 == 提交的先后，
-    可见的 seq 集合永远是一段连续前缀。读侧的游标因此可以放心推到"本次读到的最大
-    seq"，不会把一条还在飞的记录永久越过去（:class:`app.living.outgoing.OutgoingUpTo`）。
+    ``seq`` 是**本 lane 内的提交序**，三个人共用一条轴，由
+    :func:`app.data.ordered.insert_in_commit_order` 分配：号的先后 == 提交的先后，哪个进程
+    写的都一样，可见的 seq 集合永远是一段连续前缀。读侧的游标因此可以放心推到"本次读到的
+    最大 seq"，不会把一条还在飞的记录永久越过去（:class:`app.living.outgoing.OutgoingUpTo`）。
+    读的一侧只读她自己的那几行，按这条轴排先后。
     **不要用 ``occurred_at`` 当游标**——同一轮里的几件钟点都一样，而常规那一轮还记着格子的
     旧记录里，提前来的那一轮和钟点上该来的那一轮落地的先后可以跟钟点反过来。
 
@@ -200,7 +201,7 @@ class Happening(Data):
 
     lane: Annotated[str, Key]
     happening_id: Annotated[str, Key]
-    seq: int
+    seq: Annotated[int, CommitOrder(within=("lane",))] = 0
     actor: str           # 谁的经历（persona_id）
     kind: str            # KIND_SPEECH | KIND_ACT
     medium: str          # MEDIUM_IN_PERSON | MEDIUM_PHONE | MEDIUM_GROUP_CHAT
@@ -263,7 +264,7 @@ class Whereabouts(Data):
     lane: Annotated[str, Key]
     persona_id: Annotated[str, Key]
     moment_id: Annotated[str, Key]
-    seq: int
+    seq: Annotated[int, CommitOrder(within=("lane", "persona_id"))] = 0
     place: str
     doing: str
     noted_at: datetime   # 记下这条的时刻

@@ -19,7 +19,7 @@ import re
 import pytest
 from pydantic import ValidationError
 
-from app.data.schema import pg_type
+from app.data.schema import commit_order, pg_type
 from app.living.day_page import LivingDayPage
 from app.living.nudge import NudgeBegun
 from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
@@ -292,6 +292,26 @@ _PINNED: dict[type, dict[str, str]] = {
         "whereabouts_seq": "BIGINT",
     },
 }
+
+
+# 按提交顺序取号的那几张表：哪一列是号，哪几列定一条轴
+# （:func:`app.data.ordered.insert_in_commit_order`）。经历是全 lane 一条轴，三个人共用；
+# 位置每人一条。
+_COMMIT_ORDER: dict[type, tuple[str, tuple[str, ...]]] = {
+    Happening: ("seq", ("lane",)),
+    Whereabouts: ("seq", ("lane", "persona_id")),
+}
+
+
+def test_each_numbered_record_declares_its_axis():
+    """轴钉死：库里已有的号是按这几条轴数出来的，改一条轴，之后写下的每一个号都跟着变。
+
+    按 ``seq`` 读的那几处（讲到哪了的游标、最新一条、按先后排）每一处都只读一个人的行，
+    所以轴只能是"一个人"或者更宽。比这窄的话，同一个人的几行各在各的轴上数，号的先后就
+    不再是她落库的先后。
+    """
+    for cls, expected in _COMMIT_ORDER.items():
+        assert commit_order(cls) == expected, cls.__name__
 
 
 def test_living_data_reaches_the_registry_when_agent_service_starts():

@@ -12,8 +12,8 @@ life 判断：当面做的事一轮一条汇总发给 world，只对姐妹说的
 **渠道是客观事实**（``medium``）：当面说的、当面做的进 world 的汇总；手机和群聊隔着设备，
 只在她自己的记录里。
 
-游标是 ``seq``（提交序），不是 ``occurred_at``。理由见
-:func:`app.living.serial.append_in_commit_order`。
+游标是 ``seq``（提交序），不是 ``occurred_at``。理由见 :class:`app.living.records.Happening`，
+号由 :func:`app.data.ordered.insert_in_commit_order` 分配。
 
 **一条记录长什么样也归这里**（:func:`own_line`）：同一条记录在她每一轮里和在日记材料里必须
 长得一样，两份各写各的必然漂移。放在这里而不是 :mod:`app.living.snapshot`，是因为 snapshot
@@ -27,6 +27,7 @@ from datetime import datetime
 
 from sqlalchemy import text
 
+from app.data.ordered import insert_in_commit_order
 from app.data.schema import table_name
 from app.data.session import get_session
 from app.living.participants import residents
@@ -36,18 +37,8 @@ from app.living.records import (
     OUTBOUND_HAPPENING_PREFIX,
     Happening,
 )
-from app.living.serial import append_in_commit_order
 
 _TABLE = table_name(Happening)
-
-
-def happening_seq_lock_key(lane: str) -> str:
-    """本 lane 上 happening 提交序轴的占用 key（全 lane 一条轴）。
-
-    三个人写同一张表，取号在这一把占用里排队。读的一侧只读她自己的那几行，按这条轴排先后
-    （:mod:`app.living.outgoing` 讲到哪了、日记里她的几件谁先谁后）。
-    """
-    return f"living:seq:happening:{lane}"
 
 
 async def record_happening(
@@ -68,18 +59,18 @@ async def record_happening(
 
     重放同一个 ``happening_id`` 只落一行，返回库里已有的那一行。
     """
-    return await append_in_commit_order(
-        Happening,
-        stream=happening_seq_lock_key(lane),
-        scope={"lane": lane},
-        happening_id=happening_id,
-        actor=actor,
-        kind=kind,
-        medium=medium,
-        content=content,
-        occurred_at=occurred_at,
-        audience=list(audience),
-        channel_id=channel_id,
+    return await insert_in_commit_order(
+        Happening(
+            lane=lane,
+            happening_id=happening_id,
+            actor=actor,
+            kind=kind,
+            medium=medium,
+            content=content,
+            occurred_at=occurred_at,
+            audience=list(audience),
+            channel_id=channel_id,
+        )
     )
 
 
