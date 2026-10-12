@@ -128,8 +128,8 @@ from app.agent.tooling import tool
 from app.agent.tools._common import get_or_create_counter, tool_error
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
-from app.data.persist import insert_idempotent
-from app.data.schema import Data, Key, table_name
+from app.data.ordered import insert_in_commit_order
+from app.data.schema import CommitOrder, Data, Key, table_name
 from app.data.session import get_session
 from app.data.tx import tx
 from app.domain.thinking_cost import record_round_cost
@@ -248,8 +248,9 @@ class LifeMoment(Data):
       * ``began_at`` = **她这个 moment 的『现在』**：喂给快照、手机信封和 ``FEATURE_NOW``
         的那个时刻，也是她这一轮记下的事、发出去的消息上的时刻。两种 moment 都取拿到占用
         那一刻的钟（:func:`run_moment`）；常规 moment 的身份是它落在的那一格，不是这个时刻。
-      * ``seq`` = **这个 moment 在这条轴上第几个落地**，(lane, persona) 各一条轴，在 moment 的
-        排他占用里取号、取完到落库中间不放开占用，所以它的先后就是提交的先后。
+      * ``seq`` = **这个 moment 在这条轴上第几个落地**，(lane, persona) 各一条轴，在落地那次
+        提交里取号（:func:`app.data.ordered.insert_in_commit_order`），所以它的先后就是提交的
+        先后。
 
     每一轮都在拿到占用时读钟，所以新写下的几轮两者先后一致；常规 moment 的 ``began_at`` 还记着
     格子的那些旧行没有这个保证（排在提前来的 moment 后面落地的常规 moment，钟点反而更早）。
@@ -281,7 +282,8 @@ class LifeMoment(Data):
     lane: Annotated[str, Key]
     persona_id: Annotated[str, Key]
     moment_id: Annotated[str, Key]
-    seq: int             # 这个 moment 第几个落地（本 lane + 本人一条轴）
+    # 这个 moment 第几个落地（本 lane + 本人一条轴）
+    seq: Annotated[int, CommitOrder(within=("lane", "persona_id"))] = 0
     began_at: datetime   # 她这个 moment 的『现在』：拿到占用那一刻的钟
     switched: bool       # 换事情了吗（False = 「继续」）
     pulled_by: str       # 什么把她带走的（她自己那句）；没换 = ""
@@ -309,15 +311,14 @@ class LifeMoment(Data):
     )
     # 加列之前的行统一当成 0 号：新写的 moment 从 1 起，所以任何一条新 moment 都排在它们后面，
     # 而旧行之间的先后退回加列之前唯一有过的那个口径（``began_at``，见
-    # :func:`latest_moment` 的第二排序键）。``seq`` 本身**没有** pydantic 默认值：
-    # 漏传一个提交序是 bug，该当场炸，不该悄悄写成 0。
+    # :func:`latest_moment` 的第二排序键）。新写的 moment 不带号，号由落地那次提交给。
     _legacy_seq = field_validator("seq", mode="before")(
         classmethod(legacy_null_is(0))
     )
     # 加列之前的行没有这个数，读出来当 0 —— 而 0 是"这一行说不出上下文该是第几版"，
     # :func:`lost_last_round` 据此不判。判了就是拿一个没人写过的数去说"上下文丢了"，
     # 于是她每一轮都在重铺状态。**pydantic 那侧不给默认值**：新写的 moment 漏传它是
-    # bug，该当场炸，不该悄悄写成 0 把这条检查关掉（同 ``seq``）。
+    # bug，该当场炸，不该悄悄写成 0 把这条检查关掉。
     _legacy_context_ver = field_validator("context_ver", mode="before")(
         classmethod(legacy_null_is(0))
     )
@@ -1019,27 +1020,6 @@ async def latest_regular_moment(
     return await _one_moment(sql, {"lane": lane, "persona_id": persona_id})
 
 
-async def _next_moment_seq(*, lane: str, persona_id: str) -> int:
-    """这个 moment 在 (lane, persona) 轴上的落地号。
-
-    **只能在 moment 的排他占用里调**（:func:`life_moment_lock_key`）：取号和落库之间不放开
-    占用，所以号的先后就是提交的先后，可见的号永远是一段连续前缀，"最后落地的那个 moment"
-    不会是一条还在飞的记录后面那一个。
-
-    旧行的 ``seq`` 是 NULL，``MAX`` 直接忽略 NULL，所以加列后的第一个 moment 拿到 1 —— 比任何
-    旧行（读出来是 0）都大。
-    """
-    sql = (
-        f"SELECT COALESCE(MAX(seq), 0) + 1 FROM {_MOMENT_TABLE} "
-        f"WHERE lane = :lane AND persona_id = :persona_id"
-    )
-    async with get_session() as s:
-        result = await s.execute(
-            text(sql), {"lane": lane, "persona_id": persona_id}
-        )
-        return int(result.scalar_one())
-
-
 async def moment_ran(*, lane: str, persona_id: str, moment_id: str) -> bool:
     """这个 moment 跑过了吗（按身份问，不按时间）。"""
     sql = (
@@ -1398,15 +1378,10 @@ async def run_moment_held(
 
     switches = context.features[FEATURE_SWITCHES]
     where = await current_whereabouts(lane=lane, persona_id=persona_id)
-    # 落地号在收尾这一步才取：占用还没放开，所以取号到 commit 之间没有别人插进来，
-    # 号的先后 == 提交的先后。崩在这之后的话这个号作废，在轴上留一个永远为空的洞
-    # ——读侧问的是"号最大的那一行"，一个从没出现过的号不会让任何人被跳过。
-    seq = await _next_moment_seq(lane=lane, persona_id=persona_id)
     moment = LifeMoment(
         lane=lane,
         persona_id=persona_id,
         moment_id=moment_id,
-        seq=seq,
         began_at=now,
         switched=bool(switches),
         pulled_by=switches[-1]["because"] if switches else "",
@@ -1425,6 +1400,10 @@ async def run_moment_held(
     # 之后崩掉的代价只是她下一个 moment 原样再来一遍：宁可重看，不可漏看。传到她这里的
     # 消息同理：只把这一轮摆进去的那几条记成看过，也在这个事务里。
     #
+    # 落地号也在这个事务里取（:func:`app.data.ordered.insert_in_commit_order`），所以号的
+    # 先后就是提交的先后。这一格已经在别处落了地的话（两个进程跑同一格），不再写一行，交回
+    # 库里那一行。
+    #
     # **她记住的这一段在这次提交之后单独写**（:func:`_remember_this_round`）：两种
     # 代价不对称，理由见 :func:`_remember_this_round`。下一版上下文在提交
     # 之前就算好：算它是纯函数，但放在提交和写入之间的任何一步出错都会变成"记录落了
@@ -1433,7 +1412,7 @@ async def run_moment_held(
         history, [stimulus, *produced], policy=MOMENT_TRIM_POLICY
     )
     async with tx():
-        await insert_idempotent(moment)
+        moment = await insert_in_commit_order(moment)
         await commit_glances(glances=context.features[FEATURE_GLANCES])
         await mark_read(received, moment_id=moment_id)
     await _remember_this_round(

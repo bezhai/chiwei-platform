@@ -21,6 +21,7 @@ from pydantic import ValidationError
 
 from app.data.schema import commit_order, pg_type
 from app.living.day_page import LivingDayPage
+from app.living.moment import LifeMoment
 from app.living.nudge import NudgeBegun
 from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
 from app.living.persona import PersonaVersion
@@ -296,10 +297,11 @@ _PINNED: dict[type, dict[str, str]] = {
 
 # 按提交顺序取号的那几张表：哪一列是号，哪几列定一条轴
 # （:func:`app.data.ordered.insert_in_commit_order`）。经历是全 lane 一条轴，三个人共用；
-# 位置每人一条。
+# 其余每人一条。
 _COMMIT_ORDER: dict[type, tuple[str, tuple[str, ...]]] = {
     Happening: ("seq", ("lane",)),
     Whereabouts: ("seq", ("lane", "persona_id")),
+    LifeMoment: ("seq", ("lane", "persona_id")),
 }
 
 

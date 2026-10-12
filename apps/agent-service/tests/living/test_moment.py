@@ -1014,6 +1014,58 @@ async def test_replaying_the_same_moment_lands_one_row(moment_db, stub_moment):
 
 
 @pytest.mark.integration
+async def test_a_moment_that_landed_elsewhere_meanwhile_comes_back_as_stored(
+    moment_db, stub_moment, monkeypatch
+):
+    """这一轮跑着的时候，同一个 moment 已经在别处落了地：交回的是库里那一行，不是这一轮算出来的。
+
+    同一个进程里走不到这一步，开跑前 :func:`moment_ran` / :func:`latest_regular_moment` 已经
+    挡住了跑过的那一格；两个进程跑同一格（滚动部署时新旧两个 Pod 会重叠一段）才会。交回的
+    那一行要说的是真落了地的那个 moment。
+    """
+    from app.data.persist import insert_idempotent
+    from app.living import moment as moment_mod
+    from tests.data.read_back import all_versions
+
+    stub_moment(said="这一遍她说了别的")
+    at = _at(14)
+    elsewhere = LifeMoment(
+        lane=LANE,
+        persona_id="akao",
+        moment_id=at.isoformat(timespec="minutes"),
+        seq=1,
+        began_at=at,
+        switched=False,
+        pulled_by="",
+        recorded=0,
+        doing="",
+        open_ends=0,
+        said="继续",
+        context_ver=1,
+    )
+    counted = moment_mod.list_open_loose_ends
+
+    async def lands_elsewhere_first(**kwargs):
+        # 模型那一步之后、这一轮落地之前
+        assert await insert_idempotent(elsewhere) == 1
+        return await counted(**kwargs)
+
+    monkeypatch.setattr(moment_mod, "list_open_loose_ends", lands_elsewhere_first)
+
+    got = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(at))
+
+    assert got is not None
+    assert (got.moment_id, got.seq, got.said) == (elsewhere.moment_id, 1, "继续"), (
+        "交回的是这一轮算出来的那份，库里落下的是另一份"
+    )
+    rows = await all_versions(
+        LifeMoment,
+        {"lane": LANE, "persona_id": "akao", "moment_id": elsewhere.moment_id},
+    )
+    assert [r.said for r in rows] == ["继续"]
+
+
+@pytest.mark.integration
 async def test_the_tick_walks_all_three_sisters(moment_db, monkeypatch):
     from app.living import moment as moment_mod
 
@@ -1110,16 +1162,16 @@ async def test_a_crash_before_the_record_lands_does_not_redo_her_actions(
         said="去煮了",
     )
 
-    real_insert = moment_mod.insert_idempotent
+    real_insert = moment_mod.insert_in_commit_order
 
     async def crash(row, **_kw):
         raise RuntimeError("落一个 moment 记录时崩了")
 
-    monkeypatch.setattr(moment_mod, "insert_idempotent", crash)
+    monkeypatch.setattr(moment_mod, "insert_in_commit_order", crash)
     with pytest.raises(RuntimeError):
         await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 0)))
 
-    monkeypatch.setattr(moment_mod, "insert_idempotent", real_insert)
+    monkeypatch.setattr(moment_mod, "insert_in_commit_order", real_insert)
     again = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 1)))
 
     assert again is not None, "上一个 moment 没留下记录，这一拍该重跑"

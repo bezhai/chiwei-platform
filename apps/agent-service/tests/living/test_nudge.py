@@ -419,13 +419,13 @@ async def test_a_moment_that_blew_up_did_not_read_her_phone(nudge_db, stub_life)
 
     import app.living.moment as moment_mod
 
-    original = moment_mod.insert_idempotent
-    moment_mod.insert_idempotent = blow_up
+    original = moment_mod.insert_in_commit_order
+    moment_mod.insert_in_commit_order = blow_up
     try:
         with pytest.raises(RuntimeError):
             await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
     finally:
-        moment_mod.insert_idempotent = original
+        moment_mod.insert_in_commit_order = original
 
     assert await read_through(
         lane=LANE, persona_id="akao", channel_id=str(_DM)

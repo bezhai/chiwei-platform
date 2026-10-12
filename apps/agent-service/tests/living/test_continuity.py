@@ -598,17 +598,17 @@ async def test_the_replay_after_a_failed_close_stores_the_round_once(
 
     from app.living import moment as moment_mod
 
-    real_insert = moment_mod.insert_idempotent
+    real_insert = moment_mod.insert_in_commit_order
 
     async def crash(_row, **_kw):
         raise RuntimeError("崩")
 
     runner = stub_moment(said="继续")
-    monkeypatch.setattr(moment_mod, "insert_idempotent", crash)
+    monkeypatch.setattr(moment_mod, "insert_in_commit_order", crash)
     with pytest.raises(RuntimeError):
         await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 0)))
 
-    monkeypatch.setattr(moment_mod, "insert_idempotent", real_insert)
+    monkeypatch.setattr(moment_mod, "insert_in_commit_order", real_insert)
     again = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 1)))
 
     assert again is not None
