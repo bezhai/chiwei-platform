@@ -13,6 +13,10 @@ Three operations, deliberately minimal:
     contract.
   - :func:`select_latest` — newest version per key using ``DISTINCT ON``.
 
+:func:`serialise_writers` is the lock both :func:`insert_append` and
+:func:`app.data.ordered.insert_in_commit_order` take, so "writers on this key take turns" has
+one definition.
+
 Each of them runs in the caller's open :func:`app.data.tx.tx` when there is one, so several writes
 land together by running inside one ``async with tx():``, and in a transaction of its own
 otherwise. Joining goes through :func:`app.data.tx.auto_tx`, which adds no SAVEPOINT: a storage
@@ -129,6 +133,26 @@ def _encode_params(
     return out
 
 
+async def serialise_writers(table: str, values: tuple[Any, ...]) -> None:
+    """Make the writers of ``values`` in ``table`` take turns, until the current transaction ends.
+
+    Waits for, then holds, a Postgres transaction-scoped advisory lock keyed on
+    ``(table, *values)``. The server releases it when the transaction ends, however it ends:
+    commit, rollback, or the connection going away. So it must run inside a transaction (an open
+    ``tx()`` or ``auto_tx()``); outside one :func:`app.data.tx.current_session` raises. A wait is
+    bounded by the server's ``statement_timeout``.
+
+    The key is the first 8 bytes of an MD5 over ``(table, *values)``, as a signed 64-bit int.
+    MD5 is only a stable bucket here: unrelated keys that share a bucket take turns more than
+    they need to, and never miss the lock.
+    """
+    digest = hashlib.md5(str((table, *values)).encode()).digest()
+    await current_session().execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": int.from_bytes(digest[:8], "big", signed=True)},
+    )
+
+
 def dedup_hash(obj: Data) -> str:
     """SHA-256 of the obj's dedup columns, deterministic across processes.
 
@@ -157,13 +181,9 @@ async def insert_append(
 ) -> int:
     """Append ``obj`` as a new row; auto-assign ``Version`` if declared.
 
-    Holds a per-key ``pg_advisory_xact_lock`` during ``MAX(ver)`` read and
-    the subsequent ``INSERT`` so that concurrent writers against the same
-    key produce monotonic, gapless versions. The lock key is an MD5 of the
-    natural-key tuple, truncated into a 31-bit int (fits pg int4); MD5 is
-    not cryptographic here — only a stable bucket. Collisions between
-    unrelated keys are benign (they serialize more than strictly necessary,
-    never miss a lock).
+    Holds the per-key lock (:func:`serialise_writers`) during the
+    ``MAX(ver)`` read and the subsequent ``INSERT`` so that concurrent
+    writers against the same key produce monotonic, gapless versions.
 
     ``expected_current_ver`` (optimistic concurrency, requires a ``Version``
     column): append only if the key's current ``MAX(ver)`` still equals this
@@ -194,15 +214,10 @@ async def insert_append(
         )
 
     cols_map: dict[str, Any] = {c: getattr(obj, c) for c in cls.model_fields}
-    key_tuple = tuple(getattr(obj, k) for k in keys)
-    lock_key = int(hashlib.md5(str(key_tuple).encode()).hexdigest()[:15], 16) % (2**31)
 
     async with auto_tx():
         s = current_session()
-        await s.execute(
-            text("SELECT pg_advisory_xact_lock(:k)"),
-            {"k": lock_key},
-        )
+        await serialise_writers(table, tuple(getattr(obj, k) for k in keys))
         where = " AND ".join(f"{k} = :{k}" for k in keys)
         if expected_current_ver is not None:
             # CAS path: the version to write is pinned to expected+1; whether

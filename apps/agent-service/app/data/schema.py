@@ -1,7 +1,7 @@
 """Data classes, and the names and column types derived from them.
 
 A Data class is an immutable pydantic model of one stored row. Fields are annotated with markers
-(``Key`` / ``Version``) to declare their role in persistence. Every subclass with fields is
+(``Key`` / ``Version`` / ``CommitOrder``) to declare their role in persistence. Every subclass with fields is
 registered in ``DATA_REGISTRY`` when its module is imported, so the migrator
 (:mod:`app.data.migrator`) and the write and read primitives (:mod:`app.data.persist`) can
 reflect on the full set of known data types.
@@ -26,6 +26,7 @@ import datetime
 import re
 import types
 import typing
+from dataclasses import dataclass
 from typing import get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict
@@ -38,6 +39,19 @@ class Key:
 
 class Version:
     """Marker: append-only version column (runtime-maintained)."""
+
+
+@dataclass(frozen=True)
+class CommitOrder:
+    """Marker: the field is numbered in commit order along the axis ``within`` names.
+
+    ``within`` lists the fields whose values pick the axis: records that agree on them share one
+    run of numbers (``seq: Annotated[int, CommitOrder(within=("lane",))] = 0``).
+    :func:`app.data.ordered.insert_in_commit_order` assigns the number; the default ``0`` is
+    replaced, as ``Version``'s is.
+    """
+
+    within: tuple[str, ...]
 
 
 DATA_REGISTRY: set[type[Data]] = set()
@@ -65,6 +79,7 @@ class Data(BaseModel):
             raise TypeError(
                 f"{cls.__name__} must declare at least one Key field"
             )
+        _check_commit_order(cls)
         DATA_REGISTRY.add(cls)
 
 
@@ -83,6 +98,57 @@ def version_field(cls: type[Data]) -> str | None:
         if Version in field.metadata:
             return name
     return None
+
+
+def _commit_order_fields(cls: type[Data]) -> list[tuple[str, CommitOrder]]:
+    return [
+        (name, marker)
+        for name, field in cls.model_fields.items()
+        for marker in field.metadata
+        if isinstance(marker, CommitOrder)
+    ]
+
+
+def commit_order(cls: type[Data]) -> tuple[str, tuple[str, ...]] | None:
+    """The field ``cls`` numbers in commit order and the fields naming its axis, if declared."""
+    declared = _commit_order_fields(cls)
+    if not declared:
+        return None
+    name, marker = declared[0]
+    return name, marker.within
+
+
+def _check_commit_order(cls: type[Data]) -> None:
+    """Refuse, at class creation, a ``CommitOrder`` declaration that does not name one axis."""
+    declared = _commit_order_fields(cls)
+    if not declared:
+        return
+    if len(declared) > 1:
+        raise TypeError(
+            f"{cls.__name__} declares more than one CommitOrder field: "
+            f"{[name for name, _ in declared]}"
+        )
+    name, marker = declared[0]
+    if name in key_fields(cls):
+        raise TypeError(
+            f"{cls.__name__}.{name} is numbered in CommitOrder and is also a Key: a replay must "
+            f"find the stored record by its Key before it has a number"
+        )
+    if version_field(cls) is not None:
+        raise TypeError(
+            f"{cls.__name__} declares both CommitOrder and Version: one is a run of numbers per "
+            f"axis, the other a run of versions per Key"
+        )
+    if not marker.within:
+        raise TypeError(f"{cls.__name__}.{name}: CommitOrder(within=...) names no field")
+    if name in marker.within:
+        raise TypeError(f"{cls.__name__}.{name} cannot be numbered along itself")
+    unknown = [f for f in marker.within if f not in cls.model_fields]
+    if unknown:
+        raise TypeError(
+            f"{cls.__name__}.{name}: CommitOrder(within=...) names {unknown}, which is not a "
+            f"field of {cls.__name__}"
+        )
 
 
 # ---------------------------------------------------------------------------
