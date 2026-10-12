@@ -24,6 +24,7 @@ import pytest
 from app.agent.core import _normalise_tool_result
 from app.agent.neutral import Message, Role, ToolCall, ToolResult
 from app.agent.runtime_context import agent_context
+from app.data.schema import pg_type
 from app.living.loose_ends import LooseEnd, list_open_loose_ends
 from app.living.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
@@ -45,7 +46,6 @@ from app.living.moment import (
 from app.living.persona import LIVING_PERSONAS
 from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON
 from app.living.whereabouts import current_whereabouts, note_whereabouts
-from app.runtime.schema_types import pg_type
 from tests.hosting import in_a_fresh_process
 from tests.living.conftest import clock_at
 
@@ -60,12 +60,12 @@ async def _wipe_transcripts() -> None:
     """把连续上下文整条清掉 —— 模拟刚重启、或者刚清过库的那一轮。"""
     from sqlalchemy import text as _text
 
+    from app.data.schema import table_name
     from app.data.session import get_session
     from app.domain.session_transcript import SessionTranscript
-    from app.runtime.migrator import _table_name
 
     async with get_session() as s:
-        await s.execute(_text(f"DELETE FROM {_table_name(SessionTranscript)}"))
+        await s.execute(_text(f"DELETE FROM {table_name(SessionTranscript)}"))
 
 
 def _at(hour: int, minute: int = 0) -> dt.datetime:
@@ -176,8 +176,8 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
 
 async def _reaches_her(persona: str, sender: str, body: str, at: dt.datetime) -> None:
     """一条传到她这里的消息，跟收件箱存下的一样（:func:`app.living.received.receive`）。"""
+    from app.data.persist import insert_idempotent
     from app.living.received import ReceivedMessage
-    from app.runtime.persist import insert_idempotent
 
     await insert_idempotent(
         ReceivedMessage(
@@ -997,7 +997,7 @@ async def test_replaying_the_same_moment_lands_one_row(moment_db, stub_moment):
     stub_moment(said="继续")
     first = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
-    from app.runtime.persist import insert_idempotent, select_all_versions
+    from app.data.persist import insert_idempotent, select_all_versions
 
     replayed = LifeMoment(
         **{**first.model_dump(), "said": "这一遍她说了别的", "recorded": 99}
@@ -1315,7 +1315,7 @@ async def test_ticks_while_her_round_is_stuck_do_not_pile_up_behind_it(
 def test_the_life_tables_reach_the_registry_when_agent_service_starts():
     out = in_a_fresh_process(
         "agent-service",
-        "from app.runtime.data import DATA_REGISTRY;"
+        "from app.data.schema import DATA_REGISTRY;"
         "print(sorted(c.__name__ for c in DATA_REGISTRY))",
         lane="coe-living",
         timeout=120,
@@ -1524,8 +1524,8 @@ async def test_a_seam_records_what_it_spent_where_it_can_be_counted(
     包住 run、``record_round_cost`` 落库。这一刀一开始漏了，于是「一晚上花了多少」
     根本查不出来。
     """
+    from app.data.persist import select_all_versions
     from app.domain.thinking_cost import ThinkingTokensSpent
-    from app.runtime.persist import select_all_versions
     from tests.runtime.conftest import migrate
 
     await migrate(ThinkingTokensSpent, moment_db)

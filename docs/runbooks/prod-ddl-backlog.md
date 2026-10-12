@@ -6,8 +6,8 @@ leaving it in a commit message or a conversation, and clear it at ship time.
 
 Two things do not belong here:
 
-- **dataflow `Data` tables.** `Runtime.migrate_schema()` runs unconditionally on
-  startup (`apps/agent-service/app/main.py:55`, `app/workers/runtime_entry.py:38`),
+- **dataflow `Data` tables.** `migrate_schema()` (`app/data/migrator.py`) runs
+  unconditionally on startup, in the plugin host's schema phase (`app/host/host.py`),
   on every lane including prod. New `data_*` tables and new columns on tables that
   are still declared get created automatically. See "What migrator covers" below for
   the one precondition.
@@ -182,7 +182,7 @@ and are safe to re-run. `api_version` is not in that script.
 
 ## What migrator covers
 
-`app/runtime/migrator.py:167-280` creates a table per declared `Data` subclass
+`plan_migration` in `app/data/migrator.py` creates a table per declared `Data` subclass
 (skipping `AdminOnly`, `Meta.transient`, `Meta.existing_table`), appends `dedup_hash`
 and `created_at`, and builds the dedup, version and `Meta.indexes` indexes.
 

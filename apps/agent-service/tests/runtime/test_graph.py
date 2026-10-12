@@ -4,7 +4,7 @@ from typing import Annotated
 
 import pytest
 
-from app.runtime.data import AdminOnly, Data, Key
+from app.data.schema import AdminOnly, Data, Key
 from app.runtime.graph import GraphError, compile_graph
 from app.runtime.node import node
 from app.runtime.sink import Sink

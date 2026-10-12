@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from app.runtime.data import Data
+from app.data.schema import Data
 from app.runtime.sink import SinkSpec
 
 

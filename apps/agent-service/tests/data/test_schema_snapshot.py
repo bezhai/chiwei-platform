@@ -31,9 +31,9 @@ _GOLDEN = Path(__file__).parent / "schema"
 
 _PLAN = """
 import json
-from app.runtime.data import DATA_REGISTRY
-from app.runtime.migrator import _table_name, plan_migration
-plan = plan_migration(sorted(DATA_REGISTRY, key=_table_name), existing_schema={})
+from app.data.schema import DATA_REGISTRY, table_name
+from app.data.migrator import plan_migration
+plan = plan_migration(sorted(DATA_REGISTRY, key=table_name), existing_schema={})
 print(json.dumps([stmt.sql for stmt in plan.stmts]))
 """
 

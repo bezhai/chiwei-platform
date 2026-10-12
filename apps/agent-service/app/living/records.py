@@ -27,7 +27,7 @@ from typing import Annotated
 
 from pydantic import field_validator
 
-from app.runtime.data import Data, Key
+from app.data.schema import Data, Key
 from app.runtime.lane_policy import current_deployment_lane
 
 

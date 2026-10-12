@@ -493,7 +493,7 @@ def test_nothing_she_looks_up_survives_past_this_moment():
     回事。这里长出一张表就意味着有个东西替她把「看过的东西」留了下来，而留什么该由
     她自己记（``keep_in_mind``）。
     """
-    from app.runtime.data import Data
+    from app.data.schema import Data
 
     tables = [
         name

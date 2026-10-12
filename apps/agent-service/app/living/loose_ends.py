@@ -63,12 +63,11 @@ from typing import Annotated
 from pydantic import field_validator
 from sqlalchemy import text
 
+from app.data.persist import insert_append, select_latest
+from app.data.schema import Data, Key, Version, table_name
 from app.data.session import get_session
 from app.infra.cst_time import CST
 from app.living.records import _require_aware
-from app.runtime.data import Data, Key, Version
-from app.runtime.migrator import _table_name
-from app.runtime.persist import insert_append, select_latest
 
 # 派生 thread_id 的命名空间。换掉它 == 历史线头全部对不上、每条的出处一起重置。
 _THREAD_ID_NS = uuid.UUID("2b7f9c14-6d8a-4f31-9e05-7c3a1d4b8e62")
@@ -124,7 +123,7 @@ class LooseEnd(Data):
         return _require_aware("opened_at / closed_at / due_at", v)
 
 
-_TABLE = _table_name(LooseEnd)
+_TABLE = table_name(LooseEnd)
 
 
 def derive_thread_id(what: str) -> str:

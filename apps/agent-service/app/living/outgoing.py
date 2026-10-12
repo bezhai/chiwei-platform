@@ -61,6 +61,8 @@ from typing import Annotated, Any
 from pydantic import field_validator
 from sqlalchemy import text
 
+from app.data.persist import insert_append
+from app.data.schema import Data, Key, table_name
 from app.data.session import get_session
 from app.infra.cst_time import dated_clock
 from app.living.participants import WORLD, residents
@@ -72,9 +74,6 @@ from app.living.records import (
     _require_aware,
 )
 from app.messaging.sending import send
-from app.runtime.data import Data, Key
-from app.runtime.migrator import _table_name
-from app.runtime.persist import insert_append
 
 logger = logging.getLogger(__name__)
 
@@ -163,11 +162,11 @@ class OutgoingUpTo(Data):
         indexes = (("lane", "persona_id", "happening_seq", "whereabouts_seq"),)
 
 
-_MESSAGE_TABLE = _table_name(OutgoingMessage)
-_RESULT_TABLE = _table_name(OutgoingResult)
-_UP_TO_TABLE = _table_name(OutgoingUpTo)
-_HAPPENING_TABLE = _table_name(Happening)
-_WHEREABOUTS_TABLE = _table_name(Whereabouts)
+_MESSAGE_TABLE = table_name(OutgoingMessage)
+_RESULT_TABLE = table_name(OutgoingResult)
+_UP_TO_TABLE = table_name(OutgoingUpTo)
+_HAPPENING_TABLE = table_name(Happening)
+_WHEREABOUTS_TABLE = table_name(Whereabouts)
 
 
 def _derive(*parts: str) -> str:

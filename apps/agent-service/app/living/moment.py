@@ -128,6 +128,8 @@ from app.agent.tooling import tool
 from app.agent.tools._common import get_or_create_counter, tool_error
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
+from app.data.persist import insert_idempotent
+from app.data.schema import Data, Key, table_name
 from app.data.session import get_session
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import now_cst
@@ -191,10 +193,7 @@ from app.living.takeback import TAKEBACK_TOOLS
 from app.living.web import WEB_TOOLS
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from app.messaging.sending import ask
-from app.runtime.data import Data, Key
-from app.runtime.migrator import _table_name
 from app.runtime.node import node
-from app.runtime.persist import insert_idempotent
 
 logger = logging.getLogger(__name__)
 
@@ -338,7 +337,7 @@ class LifeMomentTick(Data):
         transient = True
 
 
-_MOMENT_TABLE = _table_name(LifeMoment)
+_MOMENT_TABLE = table_name(LifeMoment)
 
 
 def life_moment_lock_key(lane: str, persona_id: str) -> str:

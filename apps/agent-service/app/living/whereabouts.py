@@ -14,12 +14,12 @@ from datetime import datetime
 
 from sqlalchemy import text
 
+from app.data.schema import table_name
 from app.data.session import get_session
 from app.living.records import Whereabouts
 from app.living.serial import append_in_commit_order
-from app.runtime.migrator import _table_name
 
-_TABLE = _table_name(Whereabouts)
+_TABLE = table_name(Whereabouts)
 
 
 def whereabouts_seq_lock_key(lane: str, persona_id: str) -> str:

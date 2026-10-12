@@ -19,6 +19,7 @@ import re
 import pytest
 from pydantic import ValidationError
 
+from app.data.schema import pg_type
 from app.living.day_page import LivingDayPage
 from app.living.nudge import NudgeBegun
 from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
@@ -32,7 +33,6 @@ from app.living.records import (
     Happening,
     Whereabouts,
 )
-from app.runtime.schema_types import pg_type
 from tests.hosting import in_a_fresh_process
 
 _AWARE = dt.datetime(2026, 7, 25, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
@@ -297,7 +297,7 @@ _PINNED: dict[type, dict[str, str]] = {
 def test_living_data_reaches_the_registry_when_agent_service_starts():
     registered = in_a_fresh_process(
         "agent-service",
-        "from app.runtime.data import DATA_REGISTRY;"
+        "from app.data.schema import DATA_REGISTRY;"
         "print(sorted(c.__name__ for c in DATA_REGISTRY))",
         timeout=120,
     )
@@ -470,9 +470,9 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
     from sqlalchemy import text as _text
 
     from app.data import session as session_mod
+    from app.data.persist import insert_idempotent
     from app.living.loose_ends import LooseEnd
     from app.living.moment import LifeMoment, latest_moment
-    from app.runtime.persist import insert_idempotent
     from tests.runtime.conftest import migrate
 
     cst = dt.timezone(dt.timedelta(hours=8))

@@ -470,7 +470,7 @@ def test_nothing_she_reads_or_runs_survives_past_this_moment():
     这里长出一张表就意味着有个东西替她把「读过什么」留了下来，而留什么该由她自己记
     （``keep_in_mind``）。
     """
-    from app.runtime.data import Data
+    from app.data.schema import Data
 
     tables = [
         name

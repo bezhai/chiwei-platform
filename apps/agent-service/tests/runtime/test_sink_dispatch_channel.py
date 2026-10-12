@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.runtime import Data, Key, Sink, wire
+from app.data.schema import Data, Key
+from app.runtime import Sink, wire
 from app.runtime.emit import emit, reset_emit_runtime
 from app.runtime.wire import clear_wiring
 

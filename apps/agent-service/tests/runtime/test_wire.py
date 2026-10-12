@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from app.runtime.data import Data, Key
+from app.data.schema import Data, Key
 from app.runtime.node import node
 from app.runtime.wire import WIRING_REGISTRY, clear_wiring, wire
 

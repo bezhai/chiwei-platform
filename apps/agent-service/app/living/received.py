@@ -47,15 +47,14 @@ from typing import Annotated, Any
 from pydantic import field_validator
 from sqlalchemy import text
 
+from app.data.persist import insert_idempotent
+from app.data.schema import Data, Key, table_name
 from app.data.session import get_session
 from app.infra.cst_time import dated_clock
 from app.living.participants import WORLD, load_residents, residents
 from app.living.records import _require_aware, esc, legacy_null_is, living_lane
 from app.messaging.message import Kind, Message
 from app.messaging.receiving import inbox
-from app.runtime.data import Data, Key
-from app.runtime.migrator import _table_name
-from app.runtime.persist import insert_idempotent
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +122,8 @@ class ReceivedRead(Data):
         indexes = (("lane", "persona_id", "message_id"),)
 
 
-_RECEIVED_TABLE = _table_name(ReceivedMessage)
-_READ_TABLE = _table_name(ReceivedRead)
+_RECEIVED_TABLE = table_name(ReceivedMessage)
+_READ_TABLE = table_name(ReceivedRead)
 
 
 async def open_inboxes() -> None:

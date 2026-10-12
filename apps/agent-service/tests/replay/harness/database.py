@@ -58,12 +58,12 @@ async def create_schema(engine) -> None:
     * the two tables channel-server owns that her phone reads (``bot_config``,
       ``common_bot_presence``; same DDL as ``tests/living``).
     """
+    from app.data.migrator import plan_migration
     from app.data.models import Base
+    from app.data.schema import DATA_REGISTRY
     from app.deployment import APPS
-    from app.runtime.data import DATA_REGISTRY
     from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
     from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
-    from app.runtime.migrator import plan_migration
     from tests.living.conftest import _BOT_CONFIG_DDL, _BOT_PRESENCE_DDL
 
     # Importing a plugin module defines its Data classes; it registers nothing until its setup.

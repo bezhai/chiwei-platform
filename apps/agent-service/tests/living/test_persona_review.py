@@ -28,6 +28,7 @@ import pytest
 
 import app.data.session as session_mod
 from app.agent.neutral import Message, Role
+from app.data.persist import insert_idempotent, select_all_versions
 from app.living.day_page import LivingDayPage
 from app.living.persona import (
     PersonaVersion,
@@ -42,7 +43,6 @@ from app.living.persona_review import (
     review_persona,
     week_material,
 )
-from app.runtime.persist import insert_idempotent, select_all_versions
 from tests.living.conftest import clock_at
 
 LANE = "coe-living"
@@ -565,8 +565,8 @@ async def test_one_sister_blowing_up_does_not_take_the_others_down(
 @pytest.mark.integration
 async def test_the_tick_payload_is_a_single_ts_field():
     """挂时间源的 Data 多一个必填字段 = 每一拍 ValidationError 直接杀 Pod。"""
+    from app.data.schema import key_fields
     from app.living.persona_review import PersonaReviewTick
-    from app.runtime.data import key_fields
 
     assert set(PersonaReviewTick.model_fields) == {"ts"}
     assert set(key_fields(PersonaReviewTick)) == {"ts"}

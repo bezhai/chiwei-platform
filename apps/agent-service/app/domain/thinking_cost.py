@@ -40,9 +40,10 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
+from app.data.persist import insert_idempotent
+
 # insert_idempotent imported module-level so tests can monkeypatch it.
-from app.runtime.data import Data, Key
-from app.runtime.persist import insert_idempotent
+from app.data.schema import Data, Key
 
 logger = logging.getLogger(__name__)
 

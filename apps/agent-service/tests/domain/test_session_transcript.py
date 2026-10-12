@@ -31,8 +31,8 @@ from app.agent.neutral import (
     TurnPart,
 )
 from app.agent.session import load_session, replace_session
+from app.data.persist import insert_append, select_all_versions, select_latest
 from app.domain.session_transcript import SessionTranscript
-from app.runtime.persist import insert_append, select_all_versions, select_latest
 from tests.runtime.conftest import migrate
 
 pytestmark = pytest.mark.integration

@@ -142,7 +142,7 @@ async def _received(
     persona: str, sender: str, body: str, at: dt.datetime, *, wakes_her: bool = True
 ) -> None:
     """一条传到她这里的消息，跟收件箱存下的一样（:func:`app.living.received.receive`）。"""
-    from app.runtime.persist import insert_idempotent
+    from app.data.persist import insert_idempotent
 
     await insert_idempotent(
         ReceivedMessage(
@@ -181,15 +181,15 @@ def test_the_page_table_is_not_the_old_engines_day_page_table():
     整批迁移回滚、Pod 起不来。**这一条在测试里看不见** —— 测试是在一张空库里建新表，
     只有真的部署到已经有那张旧表的库上才炸。所以把类名派生出来的表名钉在这里。
     """
+    from app.data.schema import table_name
     from app.living.day_page import _TABLE
-    from app.runtime.migrator import _table_name
 
-    assert _table_name(LivingDayPage) != _OLD_ENGINE_TABLE, (
+    assert table_name(LivingDayPage) != _OLD_ENGINE_TABLE, (
         f"这个 Data 类派生出来的表名是 {_OLD_ENGINE_TABLE} —— 那是已删掉的旧引擎"
         "（睡前回顾）的表，列的形状不一样，而且 prod 上还在被写。用这个类名 = "
         "下次部署 MigrationError、Pod crash loop。"
     )
-    assert _TABLE == _table_name(LivingDayPage), (
+    assert _TABLE == table_name(LivingDayPage), (
         "模块里真正拼进 SQL 的表名跟类名派生出来的不是同一个 —— 迁移建的那张表和"
         "读写打的那张表会是两张。"
     )
@@ -575,7 +575,7 @@ async def test_a_page_older_than_yesterday_is_labelled_by_its_date(page_db, stub
 
 
 async def _drop_a_page(persona_id: str, day: dt.date, text: str) -> None:
-    from app.runtime.persist import insert_idempotent
+    from app.data.persist import insert_idempotent
 
     await insert_idempotent(
         LivingDayPage(

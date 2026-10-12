@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.runtime.data import Data
+from app.data.schema import Data
 from app.runtime.node import NODE_REGISTRY, inputs_of
 from app.runtime.wire import WIRING_REGISTRY, WireSpec
 

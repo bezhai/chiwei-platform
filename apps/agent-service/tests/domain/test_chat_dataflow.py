@@ -7,7 +7,7 @@ ChatTrigger / ChatRequest 随 chat_request 队列一起删了：她不从队列�
 import pytest
 from pydantic import ValidationError
 
-from app.runtime.data import key_fields
+from app.data.schema import key_fields
 
 
 def test_chat_response_segment_dedup_keys_and_lane():

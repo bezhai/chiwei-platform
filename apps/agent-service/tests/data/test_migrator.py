@@ -5,8 +5,8 @@ from typing import Annotated
 
 import pytest
 
-from app.runtime.data import AdminOnly, Data, DedupKey, Key, Version
-from app.runtime.migrator import MigrationError, plan_migration
+from app.data.migrator import MigrationError, plan_migration
+from app.data.schema import AdminOnly, Data, DedupKey, Key, Version
 
 
 class Msg(Data):

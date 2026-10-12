@@ -22,10 +22,10 @@ from datetime import date, datetime, time, timedelta
 import pytest
 
 from app.capabilities._errors import CapabilityTimeout
+from app.data.persist import insert_idempotent
 from app.infra.cst_time import CST, now_cst
 from app.living.day_page import LivingDayPage
 from app.living.persona_review import PersonaReviewTick, persona_review_tick
-from app.runtime.persist import insert_idempotent
 from tests.replay import seeds
 from tests.replay.harness import Fail, Reply
 

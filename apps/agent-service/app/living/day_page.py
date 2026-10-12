@@ -50,6 +50,8 @@ from app.agent.core import AgentConfig
 from app.agent.neutral import Message, Role
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
+from app.data.persist import insert_idempotent
+from app.data.schema import Data, Key, table_name
 from app.data.session import get_session
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST, dated_clock, now_cst
@@ -58,10 +60,7 @@ from app.living.persona import LIVING_PERSONAS, persona_prompt_vars
 from app.living.received import read_received_between, received_line
 from app.living.records import _require_aware, living_lane
 from app.living.serial import hold
-from app.runtime.data import Data, Key
-from app.runtime.migrator import _table_name
 from app.runtime.node import node
-from app.runtime.persist import insert_idempotent
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +99,7 @@ class LivingDayPage(Data):
     """她给某一个生活日写下的那一页。
 
     **为什么不叫 ``DayPage``。** 表名是从类名派生的
-    （:func:`app.runtime.migrator._table_name` 对类名做 snake_case、前面加
+    （:func:`app.data.schema.table_name` 对类名做 snake_case、前面加
     ``data_``），所以叫 ``DayPage`` 就会落到
     ``data_day_page`` 这张表上。那张表是已经删掉的旧引擎（睡前回顾）的，列是
     ``lane / persona_id / date / narrative / written_at / version / dedup_hash /
@@ -151,7 +150,7 @@ class LivingDayPage(Data):
         return _require_aware("written_at", v)
 
 
-_TABLE = _table_name(LivingDayPage)
+_TABLE = table_name(LivingDayPage)
 
 
 def day_page_lock_key(lane: str, persona_id: str) -> str:

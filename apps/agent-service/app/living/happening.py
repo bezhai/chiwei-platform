@@ -27,6 +27,7 @@ from datetime import datetime
 
 from sqlalchemy import text
 
+from app.data.schema import table_name
 from app.data.session import get_session
 from app.living.participants import residents
 from app.living.records import (
@@ -36,9 +37,8 @@ from app.living.records import (
     Happening,
 )
 from app.living.serial import append_in_commit_order
-from app.runtime.migrator import _table_name
 
-_TABLE = _table_name(Happening)
+_TABLE = table_name(Happening)
 
 
 def happening_seq_lock_key(lane: str) -> str:

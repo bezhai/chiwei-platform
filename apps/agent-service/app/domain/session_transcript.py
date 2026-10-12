@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from app.runtime.data import Data, Key, Version
+from app.data.schema import Data, Key, Version
 
 
 class SessionTranscript(Data):

@@ -18,7 +18,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 
-from app.runtime.data import Data
+from app.data.schema import Data
 
 
 async def migrate(cls: type[Data], test_db: object) -> None:
@@ -29,7 +29,7 @@ async def migrate(cls: type[Data], test_db: object) -> None:
     """
     from sqlalchemy import text
 
-    from app.runtime.migrator import plan_migration
+    from app.data.migrator import plan_migration
 
     plan = plan_migration([cls], existing_schema={})
     async with test_db.begin() as conn:

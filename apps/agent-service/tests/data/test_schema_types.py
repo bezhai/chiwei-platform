@@ -17,7 +17,7 @@ from typing import Annotated
 import pytest
 from pydantic import BaseModel
 
-from app.runtime.schema_types import (
+from app.data.schema import (
     UnmappablePgType,
     is_jsonb_column,
     pg_type,

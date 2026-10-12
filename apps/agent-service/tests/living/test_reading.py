@@ -691,7 +691,7 @@ async def test_a_stale_round_never_overwrites_a_newer_impression(
     reading_db, one_round
 ):
     """拿着过时印象的那一程（并发 / 重放）提交会被拒，新的那版原样留着。"""
-    from app.runtime.persist import insert_append
+    from app.data.persist import insert_append
 
     async def someone_else_got_there_first():
         await insert_append(

@@ -28,7 +28,7 @@ from typing import Annotated
 
 import pytest
 
-from app.runtime.data import Data, Key
+from app.data.schema import Data, Key
 from app.runtime.emit import emit, reset_emit_runtime
 from app.runtime.graph import compile_graph
 from app.runtime.node import NODE_REGISTRY, node

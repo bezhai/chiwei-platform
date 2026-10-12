@@ -40,6 +40,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 
+from app.data.schema import Data
 from app.domain.chat_dataflow import ChatResponseSegment
 from app.domain.safety import Recall
 from app.host import Context, Plugin, Tick
@@ -55,7 +56,6 @@ from app.living.persona_review import (
 )
 from app.living.reading import FilePickedUp, read_a_round
 from app.living.received import open_inboxes
-from app.runtime.data import Data
 
 # (tick Data, seconds, node). The clock is named after its tick Data.
 CLOCKS: tuple[tuple[type[Data], float, Callable[[Data], Awaitable[None]]], ...] = (

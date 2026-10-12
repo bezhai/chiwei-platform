@@ -20,12 +20,12 @@ from typing import Annotated
 import pytest
 
 from app.api.middleware import trace_id_var
-from app.runtime.data import Data, DedupKey, Key
+from app.data.persist import select_all_versions
+from app.data.schema import Data, DedupKey, Key
 from app.runtime.durable import start_consumers, stop_consumers
 from app.runtime.emit import emit, reset_emit_runtime
 from app.runtime.graph import compile_graph
 from app.runtime.node import node
-from app.runtime.persist import select_all_versions
 from app.runtime.wire import clear_wiring, wire
 from tests.runtime.conftest import migrate
 

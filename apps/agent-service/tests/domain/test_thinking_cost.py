@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import pytest
 
+from app.data.persist import select_all_versions
+from app.data.schema import key_fields
 from app.domain.thinking_cost import (
     ThinkingTokensSpent,
     record_round_cost,
     record_thinking_tokens,
 )
-from app.runtime.data import key_fields
-from app.runtime.persist import select_all_versions
 from tests.runtime.conftest import migrate
 
 # collect_usage 累计 dict 的形态（input/output/total/cache_read_input_tokens/calls）。

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from app.runtime import Data, Key
+from app.data.schema import Data, Key
 
 # 主动发（life send_message → 真人飞书私聊）出站段 message_id 的命名空间前缀。
 # 主动发没有来源消息，message_id 不能是指向真实来源消息的 id（worker 会反查炸）。

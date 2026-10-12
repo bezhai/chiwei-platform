@@ -24,8 +24,9 @@ from typing import Annotated
 
 import pytest
 
+from app.data.schema import Data, Key
 from app.infra.rabbitmq import Route
-from app.runtime import Data, Key, Sink, emit, wire
+from app.runtime import Sink, emit, wire
 from app.runtime.propagation import Context, bind_context
 from app.runtime.wire import clear_wiring
 

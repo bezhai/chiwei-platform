@@ -198,6 +198,7 @@ from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities.concurrency import fan_out_wait
+from app.data.persist import insert_idempotent
 from app.data.queries.messages import (
     find_conversation_page,
     find_conversations_by_last_message,
@@ -211,6 +212,7 @@ from app.data.queries.persona import (
     find_bot_user_ids_for_persona,
     find_conversations_with_persona_bot,
 )
+from app.data.schema import Data, Key, table_name
 from app.data.session import get_session
 from app.infra.cst_time import CST, to_cst_dated
 from app.infra.image import image_client, image_is_reachable
@@ -224,9 +226,6 @@ from app.living.records import (
 )
 from app.living.scope import FEATURE_GLANCES, moment_scope
 from app.living.whitelist import channels_in_sight
-from app.runtime.data import Data, Key
-from app.runtime.migrator import _table_name
-from app.runtime.persist import insert_idempotent
 
 logger = logging.getLogger(__name__)
 
@@ -309,8 +308,8 @@ class PhoneRead(Data):
         return _require_aware("read_at", v)
 
 
-_READ_TABLE = _table_name(PhoneRead)
-_HAPPENING_TABLE = _table_name(Happening)
+_READ_TABLE = table_name(PhoneRead)
+_HAPPENING_TABLE = table_name(Happening)
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from app.runtime.data import (
+from app.data.schema import (
     AdminOnly,
     Data,
     DedupKey,
@@ -46,7 +46,7 @@ def test_admin_only_detected():
 
 
 def test_registry_populated():
-    from app.runtime.data import DATA_REGISTRY
+    from app.data.schema import DATA_REGISTRY
 
     assert Sample in DATA_REGISTRY
     assert Cfg in DATA_REGISTRY

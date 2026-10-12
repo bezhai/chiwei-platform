@@ -44,13 +44,12 @@ from typing import Annotated
 
 from sqlalchemy import text
 
+from app.data.persist import insert_append, select_latest
 from app.data.queries import find_persona
+from app.data.schema import Data, Key, Version, table_name
 from app.data.session import get_session
 from app.infra.cst_time import CST, now_cst, now_cst_iso
 from app.infra.cst_time import parse as parse_time
-from app.runtime.data import Data, Key, Version
-from app.runtime.migrator import _table_name
-from app.runtime.persist import insert_append, select_latest
 
 # 这个家里的三姐妹。写死而不是查 ``bot_persona``：这是世界设定（谁住在这儿），不是
 # 可调参数；而库里还有 ``npc:*`` 这类行，全量拉进来就是每一拍白烧三份以上的钱。
@@ -121,7 +120,7 @@ async def read_latest_review_written_at(
     返回 None = 窗口取全部现存页。
     """
     sql = (
-        f"SELECT written_at FROM {_table_name(PersonaVersion)} "
+        f"SELECT written_at FROM {table_name(PersonaVersion)} "
         f"WHERE lane = :lane AND persona_id = :persona_id "
         f"AND source = 'review' ORDER BY version DESC LIMIT 1"
     )

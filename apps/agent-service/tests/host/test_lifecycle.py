@@ -13,9 +13,10 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from app.data.schema import Data, Key
 from app.host import Host, HostError
 from app.messaging import receiving
-from app.runtime import Data, Key, node
+from app.runtime import node
 from app.runtime.wire import WIRING_REGISTRY
 from tests.hosting import start_without_io
 

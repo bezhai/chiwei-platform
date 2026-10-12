@@ -63,7 +63,9 @@ from sqlalchemy import text
 from app.agent.reading import run_reading_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
+from app.data.persist import insert_append, select_latest
 from app.data.queries.messages import find_file_items_in_conversations
+from app.data.schema import Data, Key, Version, table_name
 from app.data.session import get_session
 from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
@@ -71,11 +73,8 @@ from app.infra.cst_time import CST, to_cst_dated
 from app.living.phone import Sender, _who_tag, reachable_conversations
 from app.living.records import _require_aware, esc
 from app.living.scope import moment_scope
-from app.runtime.data import Data, Key, Version
 from app.runtime.emit import emit
-from app.runtime.migrator import _table_name
 from app.runtime.node import node
-from app.runtime.persist import insert_append, select_latest
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +158,7 @@ class FilePickedUp(Data):
     tos_file: str
 
 
-_READ_TABLE = _table_name(FileRead)
+_READ_TABLE = table_name(FileRead)
 
 
 # ---------------------------------------------------------------------------

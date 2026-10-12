@@ -74,14 +74,13 @@ from app.agent.image_gen import generate_image
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error, upload_image
 from app.capabilities.image_search import image_search
+from app.data.persist import insert_idempotent, select_latest
+from app.data.schema import Data, Key, table_name
 from app.data.session import get_session
 from app.infra.cst_time import to_cst_dated
 from app.infra.image import image_client
 from app.living.records import _require_aware, esc
 from app.living.scope import moment_scope
-from app.runtime.data import Data, Key
-from app.runtime.migrator import _table_name
-from app.runtime.persist import insert_idempotent, select_latest
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +153,7 @@ class Picture(Data):
         return _require_aware("made_at", v)
 
 
-_TABLE = _table_name(Picture)
+_TABLE = table_name(Picture)
 
 
 def handle_for(file_name: str) -> str:

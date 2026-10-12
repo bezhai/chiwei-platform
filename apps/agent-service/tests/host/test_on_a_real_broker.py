@@ -13,11 +13,12 @@ from typing import Annotated
 import aio_pika
 import pytest
 
+from app.data.schema import Data, Key
 from app.host import Host
 from app.infra.rabbitmq import lane_queue, mq
 from app.messaging import receiving
 from app.messaging.broker import SCHEDULED, inbox_route, question_route
-from app.runtime import Data, Key, durable, node
+from app.runtime import durable, node
 from app.runtime.wire import WIRING_REGISTRY, WireSpec
 from tests.messaging.conftest import LANE
 from tests.messaging.helpers import eventually

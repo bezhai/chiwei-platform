@@ -38,8 +38,8 @@ import logging
 from typing import Any
 
 from app.agent.neutral import Message
+from app.data.persist import insert_append, select_latest
 from app.domain.session_transcript import SessionTranscript
-from app.runtime.persist import insert_append, select_latest
 
 logger = logging.getLogger(__name__)
 

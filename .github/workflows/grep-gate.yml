@@ -47,7 +47,7 @@ jobs:
           [ "$c" -eq 0 ] || { echo "Gap 7 violation: $c business retry loops"; exit 1; }
           # The insert_idempotent half of Gap 7 moved to the open-gap baseline
           # (gap_7_insert_idempotent). Reason recorded there: the check as
-          # written contradicts app/runtime/persist.py's own public API.
+          # written contradicts app/data/persist.py's own public API.
       - name: Gap 11 — no direct contextvar / header reads in dataflow business code
         shell: bash
         run: |
@@ -235,7 +235,7 @@ jobs:
           ]
           patterns = {
               # 业务不该自己做消息去重 —— 那是 wire 的 .durable() 边的事。但
-              # insert_idempotent 同时也是 app/runtime/persist.py 四个公开原语之一
+              # insert_idempotent 同时也是 app/data/persist.py 四个公开原语之一
               # （insert_append / select_latest / select_all_versions 是另外三个，
               # 谁都没被 gate 管），业务写自己那张 Data 表时调它是正当用法。
               # 现存 8 处（app/living/ 7 处 + app/domain/thinking_cost.py 1 处）
@@ -245,7 +245,7 @@ jobs:
               "gap_7_insert_idempotent": (
                   r"\binsert_idempotent\(",
                   ["apps/agent-service/app/"],
-                  ["runtime/persist.py", "runtime/durable.py"],
+                  ["data/persist.py", "runtime/durable.py"],
               ),
               # 业务包自己拿 session 读写**自己那几张 Data 表**的残留。读公共层
               # （common_*）已经全部收进 app/data/queries/，由 Gap 13 的 exact-zero

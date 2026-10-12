@@ -41,8 +41,9 @@ from typing import Any
 from aio_pika.abc import AbstractIncomingMessage
 
 from app.api.middleware import lane_var, trace_id_var
+from app.data.persist import dedup_hash, insert_idempotent
+from app.data.schema import Data, table_name, to_snake
 from app.infra.rabbitmq import Route, current_lane, lane_queue, mq
-from app.runtime.data import Data
 from app.runtime.inflight import (
     claim_inflight,
     edge_id_for,
@@ -50,10 +51,7 @@ from app.runtime.inflight import (
     mark_history_backfill,
     mark_succeeded,
 )
-from app.runtime.migrator import _table_name
-from app.runtime.naming import to_snake
 from app.runtime.node import inputs_of
-from app.runtime.persist import _dedup_hash, insert_idempotent
 from app.runtime.propagation import (
     Context,
     bind_context,
@@ -118,7 +116,7 @@ def _idempotent_key_for(obj: Data) -> str:
     dedup_col = getattr(meta, "dedup_column", None) if meta else None
     if dedup_col:
         return str(getattr(obj, dedup_col))
-    return _dedup_hash(obj)
+    return dedup_hash(obj)
 
 
 def _build_handler(w: WireSpec, consumer: Callable):
@@ -148,7 +146,7 @@ def _build_handler(w: WireSpec, consumer: Callable):
     data_cls = w.data_type
     param_name = next(iter(inputs_of(consumer)))
     edge_id = edge_id_for(data_cls.__qualname__, consumer.__qualname__)
-    data_table = _table_name(data_cls)
+    data_table = table_name(data_cls)
     meta = getattr(data_cls, "Meta", None)
     is_adoption = meta is not None and getattr(meta, "existing_table", None) is not None
 

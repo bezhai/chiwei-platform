@@ -79,10 +79,9 @@ from weakref import WeakKeyDictionary
 
 from sqlalchemy import text
 
+from app.data.persist import insert_idempotent, select_latest
+from app.data.schema import Data, key_fields, table_name
 from app.data.session import get_session
-from app.runtime.data import Data, key_fields
-from app.runtime.migrator import _table_name
-from app.runtime.persist import insert_idempotent, select_latest
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +200,7 @@ async def append_in_commit_order(
     FIFO 等待，下一个拿到占用的人一定在那次 commit 之后才开始跑。所以任一时刻
     可见的 seq 集合都是一段连续前缀，不会出现"seq 7 可见、seq 6 还在飞"。
     """
-    table = _table_name(cls)
+    table = table_name(cls)
     where = " AND ".join(f"{col} = :{col}" for col in scope)
     async with hold(stream):
         async with get_session() as s:

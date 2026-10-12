@@ -100,6 +100,8 @@ from sqlalchemy import text
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities.output_safety import audit_output
+from app.data.persist import insert_append, select_latest
+from app.data.schema import Data, Key, Version, table_name
 from app.data.session import get_session
 from app.domain.chat_dataflow import (
     PROACTIVE_MESSAGE_ID_PREFIX,
@@ -114,10 +116,7 @@ from app.living.records import (
     _require_aware,
 )
 from app.living.scope import moment_scope, note_recorded
-from app.runtime.data import Data, Key, Version
 from app.runtime.emit import emit
-from app.runtime.migrator import _table_name
-from app.runtime.persist import insert_append, select_latest
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +219,7 @@ class SpokenOutbound(Data):
         )
 
 
-_OUTBOUND_TABLE = _table_name(SpokenOutbound)
+_OUTBOUND_TABLE = table_name(SpokenOutbound)
 
 
 async def latest_outbound(

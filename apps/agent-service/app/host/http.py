@@ -13,13 +13,13 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.routing import APIRoute
 
+from app.data.schema import Data
 from app.host.http_auth import (
     refusal_detail,
     request_data,
     request_fields,
     route_guards,
 )
-from app.runtime.data import Data
 
 METHODS = ("GET", "POST", "PUT", "DELETE")
 

@@ -14,9 +14,9 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from app.data.schema import Data, Key
 from app.host import Host
 from app.infra import config
-from app.runtime import Data, Key
 
 from .conftest import plugin
 

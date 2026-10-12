@@ -14,7 +14,7 @@ from typing import Annotated
 import pytest
 
 from app.api.middleware import lane_var, trace_id_var
-from app.runtime.data import Data, Key
+from app.data.schema import Data, Key
 from app.runtime.durable import publish_durable, start_consumers, stop_consumers
 from app.runtime.emit import reset_emit_runtime
 from app.runtime.graph import compile_graph

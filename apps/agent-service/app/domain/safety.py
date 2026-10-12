@@ -10,7 +10,7 @@ from typing import Annotated
 
 from pydantic import model_validator
 
-from app.runtime import Data, Key
+from app.data.schema import Data, Key
 
 
 class PreSafetyRequest(Data):

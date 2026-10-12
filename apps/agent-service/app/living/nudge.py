@@ -80,6 +80,8 @@ from typing import Annotated
 
 from sqlalchemy import text
 
+from app.data.persist import insert_append
+from app.data.schema import Data, Key, table_name
 from app.data.session import get_session
 from app.infra.cst_time import now_cst
 from app.living.moment import (
@@ -94,10 +96,7 @@ from app.living.phone import newest_unread_summons
 from app.living.received import unread_received
 from app.living.records import living_lane
 from app.living.serial import at_most_one, hold
-from app.runtime.data import Data, Key
-from app.runtime.migrator import _table_name
 from app.runtime.node import node
-from app.runtime.persist import insert_append
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +140,7 @@ class NudgeBegun(Data):
         indexes = (("lane", "persona_id", "created_at"),)
 
 
-_BEGUN_TABLE = _table_name(NudgeBegun)
+_BEGUN_TABLE = table_name(NudgeBegun)
 
 
 async def nudge_once(

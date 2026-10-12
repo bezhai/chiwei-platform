@@ -42,7 +42,7 @@ def pod(monkeypatch, tmp_path) -> list[str]:
     calls: list[str] = []
 
     def note(name: str):
-        async def call() -> None:
+        async def call(*_args, **_kwargs) -> None:
             calls.append(name)
 
         return call

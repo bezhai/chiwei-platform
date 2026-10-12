@@ -17,7 +17,8 @@ outside setup is refused: the host has nothing that would start a late registrat
    before any IO.
 4. ``schema``: the business tables of coe lanes (:func:`app.data.bootstrap.ensure_business_schema`).
 5. ``mq``: the durable routes are declared, so this process can publish before their consumer runs.
-6. ``schema``: the Data tables and the runtime's own (:func:`app.runtime.migrator.migrate_schema`).
+6. ``schema``: the Data tables (:func:`app.data.migrator.migrate_schema`), and the runtime's own
+   tables, whose DDL the host passes in.
 7. ``tasks``: every task starts.
 8. ``mq``: the durable consumers, then messaging (inboxes, the at-start openers, scheduled delivery).
 9. ``http``: the routes go onto the app.
@@ -36,8 +37,9 @@ reached to the next stop; the piece it interrupted is not run again.
 messaging and the durable layer (:mod:`app.messaging`, :mod:`app.runtime.durable`): their
 disposers remove the registration, the consumers stop at the host's stop. There is no API that
 stops one plugin while the others keep running; plugins are not started or stopped at runtime.
-Data classes register themselves when they are imported (``DATA_REGISTRY``) and cannot be taken
-back until storage becomes a host service (T2).
+Data classes register themselves when they are imported (``DATA_REGISTRY`` in
+:mod:`app.data.schema`), so the tables an app builds are those of the code it loads; tables are
+never dropped, so there is nothing to take back.
 """
 from __future__ import annotations
 
@@ -56,6 +58,8 @@ from inner_shared.dynamic_config import dynamic_config
 
 from app import deployment
 from app.data.bootstrap import ensure_business_schema
+from app.data.migrator import migrate_schema
+from app.data.schema import Data
 from app.host.clock import Clock, Clocks, Tick
 from app.host.errors import (
     DuplicateService,
@@ -70,7 +74,7 @@ from app.host.plugin import Disposer, Plugin, Registration
 from app.infra.rabbitmq import mq
 from app.messaging import receiving
 from app.messaging.lifecycle import start_messaging, stop_messaging
-from app.runtime.data import Data
+from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
 from app.runtime.durable import (
     declare_durable_topology,
     start_consumers,
@@ -78,11 +82,11 @@ from app.runtime.durable import (
 )
 from app.runtime.emit import reset_emit_runtime
 from app.runtime.graph import compile_graph
+from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
 from app.runtime.lane_policy import (
     current_deployment_lane,
     time_sources_enabled_by_default,
 )
-from app.runtime.migrator import migrate_schema
 from app.runtime.sink import Sink
 from app.runtime.wire import WIRING_REGISTRY, WireSpec
 
@@ -472,7 +476,7 @@ class Host:
             self._phases.update(("messaging", "durable consumers", "the broker connection"))
             await declare_durable_topology()
         if schema:
-            await migrate_schema()
+            await migrate_schema(also=(*RUNTIME_INFLIGHT_DDL, *RUNTIME_DLQ_AUDIT_DDL))
         if tasks:
             self._phases.add("tasks")
             for name, run in self._task_runs.items():

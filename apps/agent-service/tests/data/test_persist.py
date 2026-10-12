@@ -22,13 +22,13 @@ from typing import Annotated
 import pytest
 from sqlalchemy import text
 
-from app.runtime.data import Data, DedupKey, Key, Version
-from app.runtime.persist import (
+from app.data.persist import (
     insert_append,
     insert_idempotent,
     select_all_versions,
     select_latest,
 )
+from app.data.schema import Data, DedupKey, Key, Version
 from tests.runtime.conftest import migrate
 
 

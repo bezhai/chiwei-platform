@@ -12,13 +12,17 @@ Owns runtime semantics and must be changed only with a spec reference.
 - the plugin host: `apps/agent-service/app/host/**`
 - the plugins each app is made of: `apps/agent-service/app/plugins/**`
 - `apps/agent-service/app/runtime/**`
+- storage: `apps/agent-service/app/data/{schema,migrator,persist,ordered,tx,session}.py`
+  (Data classes and table names, the migrator, the write and read primitives, record
+  numbering, transactions, the engine). `app/data/queries/` is not part of this layer.
 - the app manifests: `apps/agent-service/app/deployment.py`
 - runtime entrypoint: `apps/agent-service/app/main.py`
 - framework contracts, governance docs, and CI gates under `docs/guides/`,
   `docs/governance/`, and `.github/workflows/`
 
 Framework changes define what plugins, clocks, admin routes, inboxes, nodes,
-wires, durable routing, startup and shutdown, retries and error routing mean.
+wires, durable routing, startup and shutdown, retries and error routing, and
+storage mean.
 They must not be hidden inside a business node as a local workaround.
 
 ### [B] Capability Layer

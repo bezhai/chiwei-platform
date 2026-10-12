@@ -6,7 +6,7 @@ names and durable-edge queue names never drift apart again.
 
 from __future__ import annotations
 
-from app.runtime.naming import to_snake
+from app.data.schema import to_snake
 
 
 def test_single_word():

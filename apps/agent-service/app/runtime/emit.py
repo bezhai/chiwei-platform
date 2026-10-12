@@ -16,7 +16,7 @@ independent isolation between consumers is required.
 
 from __future__ import annotations
 
-from app.runtime.data import Data
+from app.data.schema import Data
 from app.runtime.graph import CompiledGraph, compile_graph
 
 _graph: CompiledGraph | None = None

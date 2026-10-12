@@ -29,7 +29,7 @@ from collections.abc import Callable
 from types import UnionType
 from typing import Union, get_args, get_origin, get_type_hints
 
-from app.runtime.data import Data, is_admin_only
+from app.data.schema import Data, is_admin_only
 
 NODE_REGISTRY: set[Callable] = set()
 _NODE_META: dict[Callable, dict] = {}

@@ -34,10 +34,15 @@ from typing import Any
 from pydantic import TypeAdapter
 from sqlalchemy import text
 
+from app.data.schema import (
+    Data,
+    dedup_fields,
+    is_jsonb_column,
+    key_fields,
+    table_name,
+    version_field,
+)
 from app.data.session import get_session
-from app.runtime.data import Data, dedup_fields, key_fields, version_field
-from app.runtime.migrator import _table_name
-from app.runtime.schema_types import is_jsonb_column
 
 
 def _jsonb_columns(cls: type[Data]) -> frozenset[str]:
@@ -125,7 +130,7 @@ def _encode_params(
     return out
 
 
-def _dedup_hash(obj: Data) -> str:
+def dedup_hash(obj: Data) -> str:
     """SHA-256 of the obj's dedup columns, deterministic across processes.
 
     For append-only Data (those declaring a ``Version`` field), the version
@@ -186,7 +191,7 @@ async def insert_append(
     keeps every existing caller on the private-session path unchanged.
     """
     cls = type(obj)
-    table = _table_name(cls)
+    table = table_name(cls)
     ver_col = version_field(cls)
     keys = key_fields(cls)
     if expected_current_ver is not None and not ver_col:
@@ -223,7 +228,7 @@ async def insert_append(
         # same class carrying the final values so the hash is consistent
         # with the row we actually insert.
         hashed = cls.model_construct(**cols_map)
-        cols_map["dedup_hash"] = _dedup_hash(hashed)
+        cols_map["dedup_hash"] = dedup_hash(hashed)
 
         jsonb_cols = _jsonb_columns(cls)
         cols = list(cols_map.keys())
@@ -278,14 +283,14 @@ async def insert_idempotent(obj: Data, *, session: Any = None) -> int:
     every existing caller on the private-session path unchanged.
     """
     cls = type(obj)
-    table = _table_name(cls)
+    table = table_name(cls)
 
     meta = getattr(cls, "Meta", None)
     dedup_col = getattr(meta, "dedup_column", None) if meta else None
 
     cols_map: dict[str, Any] = {c: getattr(obj, c) for c in cls.model_fields}
     if not dedup_col:
-        cols_map["dedup_hash"] = _dedup_hash(obj)
+        cols_map["dedup_hash"] = dedup_hash(obj)
 
     jsonb_cols = _jsonb_columns(cls)
     cols = list(cols_map.keys())
@@ -308,7 +313,7 @@ async def select_latest(
     cls: type[Data], keys_values: dict[str, Any]
 ) -> Data | None:
     """Return the highest-version row matching ``keys_values``, or ``None``."""
-    table = _table_name(cls)
+    table = table_name(cls)
     keys = key_fields(cls)
     ver = version_field(cls)
     where = " AND ".join(f"{k} = :{k}" for k in keys)
@@ -337,7 +342,7 @@ async def select_all_versions(
     Falls back to ``created_at`` ordering for Data classes without a
     ``Version`` column.
     """
-    table = _table_name(cls)
+    table = table_name(cls)
     keys = key_fields(cls)
     ver = version_field(cls)
     where = " AND ".join(f"{k} = :{k}" for k in keys)

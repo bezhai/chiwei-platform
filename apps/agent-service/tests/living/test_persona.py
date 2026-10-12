@@ -91,7 +91,7 @@ async def _seed_bot_persona(
 
 def test_persona_version_key_is_lane_persona():
     """版本链自然键 = (lane, persona_id)：泳道隔离 + 每个角色一条链。"""
-    from app.runtime.data import key_fields
+    from app.data.schema import key_fields
 
     assert set(key_fields(PersonaVersion)) == {"lane", "persona_id"}
 
@@ -166,7 +166,7 @@ async def test_write_then_read_latest_persona_version(chain_db):
 @pytest.mark.integration
 async def test_versions_append_and_owner_supersedes(chain_db):
     """seed → review → owner 三版递增；读 a 不分来源——owner 盖版即生效。"""
-    from app.runtime.persist import select_all_versions
+    from app.data.persist import select_all_versions
 
     keys = {"lane": "coe-t1", "persona_id": "akao"}
     await write_persona_version(
@@ -412,7 +412,7 @@ async def test_the_seeded_version_is_what_she_was_already_reading(seed_db):
 @pytest.mark.integration
 async def test_seed_persona_chain_is_idempotent(seed_db):
     """连跑两次只有一行：链非空零操作，重跑无害。"""
-    from app.runtime.persist import select_all_versions
+    from app.data.persist import select_all_versions
 
     await _seed_bot_persona("akao", "出厂身份正文。")
 

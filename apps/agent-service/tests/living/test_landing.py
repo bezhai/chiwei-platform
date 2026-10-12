@@ -32,10 +32,10 @@ import pytest
 from sqlalchemy import text
 
 from app.data import session as session_mod
+from app.data.persist import insert_append, select_all_versions, select_latest
 from app.infra.cst_time import CST
 from app.living.landing import LandingTick, reconcile_landings, reconcile_recalls
 from app.living.mouth import STATE_CLAIMED, STATE_HANDED_OFF, SpokenOutbound
-from app.runtime.persist import insert_append, select_all_versions, select_latest
 
 LANE = "coe-living"
 _CONV = uuid.uuid5(uuid.NAMESPACE_OID, "conv-dm-bezhai-akao")

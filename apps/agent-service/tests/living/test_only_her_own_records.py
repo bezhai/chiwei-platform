@@ -8,7 +8,7 @@
 这条用源码扫描守住。``app`` 下凡是碰到这两张表的地方，扫描都得认得出它是哪一种写法，
 认不出来的一律算违规，而不是跳过——跳过的写法就是一条没人看着的路：
 
-  * 表名只能用 :func:`~app.runtime.migrator._table_name` 从类上取。取到的要么直接赋给一个
+  * 表名只能用 :func:`~app.data.schema.table_name` 从类上取。取到的要么直接赋给一个
     名字，要么直接嵌进 f-string 写的 SQL；那个名字之后也只能嵌进 f-string 写的 SQL，
     不能再被改写。拼接、``.format()``、``%``、换个名字再用、源码里直接写表名，
     都算认不出来。
@@ -33,9 +33,9 @@ from typing import NamedTuple
 
 import pytest
 
+from app.data.schema import table_name
 from app.living.records import Happening, Whereabouts
 from app.living.serial import append_in_commit_order
-from app.runtime.migrator import _table_name
 
 _APP = Path(__file__).resolve().parents[2] / "app"
 
@@ -46,9 +46,9 @@ def _qualified(obj: Callable | type) -> str:
 
 # 每张表里，哪一列说的是"这一行是谁的"。键是类定义所在的全名。
 _OWNER_COLUMN = {_qualified(Happening): "actor", _qualified(Whereabouts): "persona_id"}
-_TABLE_NAME_FN = _qualified(_table_name)
+_TABLE_NAME_FN = _qualified(table_name)
 _LITERAL_TABLE = re.compile(
-    "|".join(rf"\b{re.escape(_table_name(cls))}\b" for cls in (Happening, Whereabouts)),
+    "|".join(rf"\b{re.escape(table_name(cls))}\b" for cls in (Happening, Whereabouts)),
     re.IGNORECASE,
 )
 
@@ -151,7 +151,7 @@ def _parse(where: str, source: str) -> _Module:
 
 
 def _table_of(expr: ast.AST, module: _Module) -> str | None:
-    """``_table_name(<两个类之一>)`` 这样的调用，返回是哪个类；别的返回 ``None``。"""
+    """``table_name(<两个类之一>)`` 这样的调用，返回是哪个类；别的返回 ``None``。"""
     if not (
         isinstance(expr, ast.Call)
         and module.resolve(expr.func) == _TABLE_NAME_FN
@@ -166,7 +166,7 @@ def _table_of(expr: ast.AST, module: _Module) -> str | None:
 def _binding_targets(
     stmt: ast.AST, module: _Module
 ) -> tuple[list[ast.Name], str] | None:
-    """``X = _table_name(Happening)``：(被赋值的名字, 类)。别的赋值形状返回 ``None``。"""
+    """``X = table_name(Happening)``：(被赋值的名字, 类)。别的赋值形状返回 ``None``。"""
     if isinstance(stmt, ast.Assign):
         targets = stmt.targets
     elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
@@ -219,7 +219,7 @@ def _accesses(
             yield (
                 node.lineno,
                 False,
-                f"源码里直接写了表名：{text!r}，表名要用 _table_name 从类上取",
+                f"源码里直接写了表名：{text!r}，表名要用 table_name 从类上取",
             )
 
         if not isinstance(node, (ast.Name, ast.Attribute)):
@@ -438,11 +438,11 @@ from app.living import records
 from app.living.records import Happening, Whereabouts
 from app.living.records import Happening as Deed
 from app.living.serial import append_in_commit_order
-from app.runtime.migrator import _table_name
+from app.data.schema import table_name
 from app.runtime.query import query
 
-_TABLE = _table_name(Happening)
-_PLACES = _table_name(Whereabouts)
+_TABLE = table_name(Happening)
+_PLACES = table_name(Whereabouts)
 """
 
 
@@ -466,16 +466,16 @@ def _violations(body: str, **others: str) -> list[str]:
             id="literal-table-concatenated",
         ),
         pytest.param(
-            'SQL = f"SELECT * FROM {_table_name(Happening)} WHERE lane = :lane"\n',
+            'SQL = f"SELECT * FROM {table_name(Happening)} WHERE lane = :lane"\n',
             id="inline-table-name-call",
         ),
         pytest.param(
-            "T = _table_name(records.Happening)\n"
+            "T = table_name(records.Happening)\n"
             'SQL = f"SELECT * FROM {T} WHERE lane = :lane"\n',
             id="class-through-its-module",
         ),
         pytest.param(
-            'T = _table_name(Deed)\nSQL = f"SELECT * FROM {T} WHERE lane = :lane"\n',
+            'T = table_name(Deed)\nSQL = f"SELECT * FROM {T} WHERE lane = :lane"\n',
             id="class-under-an-alias",
         ),
         pytest.param(
@@ -484,12 +484,12 @@ def _violations(body: str, **others: str) -> list[str]:
         ),
         pytest.param(
             "from .records import Happening as Mine\n"
-            'SQL = f"SELECT * FROM {_table_name(Mine)} WHERE lane = :lane"\n',
+            'SQL = f"SELECT * FROM {table_name(Mine)} WHERE lane = :lane"\n',
             id="class-through-a-relative-import",
         ),
         pytest.param(
             "from app.living.records import *\n"
-            'SQL = f"SELECT * FROM {_table_name(Whereabouts)} WHERE persona_id = :me"\n',
+            'SQL = f"SELECT * FROM {table_name(Whereabouts)} WHERE persona_id = :me"\n',
             id="star-import-from-records",
         ),
         pytest.param(
@@ -570,7 +570,7 @@ def test_the_scan_flags_every_access_it_cannot_show_is_narrowed(body):
     assert _violations(body) != []
 
 
-def test_the_scan_follows_a_table_name_imported_from_another_module():
+def test_the_scan_follows_a_table_binding_imported_from_another_module():
     assert (
         _violations(
             "",
@@ -598,7 +598,7 @@ def test_the_scan_follows_a_table_name_imported_from_another_module():
             id="aliased",
         ),
         pytest.param(
-            'SQL = f"SELECT * FROM {_table_name(Whereabouts)} '
+            'SQL = f"SELECT * FROM {table_name(Whereabouts)} '
             'WHERE lane = :lane AND persona_id = :p"\n',
             id="inline-table-name-call",
         ),
@@ -625,7 +625,7 @@ def test_the_scan_accepts_what_is_narrowed_to_one_person(body):
     assert _violations(body) == []
 
 
-def test_the_scan_follows_a_narrowed_table_name_imported_from_another_module():
+def test_the_scan_follows_a_narrowed_table_binding_imported_from_another_module():
     assert (
         _violations(
             "",

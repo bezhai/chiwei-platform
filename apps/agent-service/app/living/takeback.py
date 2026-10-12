@@ -89,6 +89,8 @@ from sqlalchemy import text
 
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
+from app.data.persist import insert_append, select_latest
+from app.data.schema import table_name
 from app.data.session import get_session
 from app.domain.safety import Recall
 from app.living.happening import record_happening
@@ -97,8 +99,6 @@ from app.living.phone import conversation_her_bot_is_in, medium_for
 from app.living.records import KIND_ACT
 from app.living.scope import moment_scope, note_recorded
 from app.runtime.emit import emit
-from app.runtime.migrator import _table_name
-from app.runtime.persist import insert_append, select_latest
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ logger = logging.getLogger(__name__)
 # 不解释）。写清楚是谁按的：跟事后审计判下来的那些 reason 混在一起时分得开。
 TAKE_BACK_REASON = "she_took_it_back"
 
-_OUTBOUND_TABLE = _table_name(SpokenOutbound)
+_OUTBOUND_TABLE = table_name(SpokenOutbound)
 
 # 她自己那条链的最新一版。``outbound_id`` 是自然键的另一半，所以等值至多命中一条链，
 # ``ORDER BY ver DESC LIMIT 1`` 取的就是它此刻的样子。

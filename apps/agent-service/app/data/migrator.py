@@ -32,19 +32,21 @@ declaration).
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from pydantic.fields import FieldInfo
 
-from app.runtime.data import (
+from app.data.schema import (
     DATA_REGISTRY,
     Data,
+    UnmappablePgType,
     is_admin_only,
     key_fields,
+    pg_type_for_annotation,
+    table_name,
     version_field,
 )
-from app.runtime.naming import to_snake
-from app.runtime.schema_types import UnmappablePgType, pg_type_for_annotation
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +68,6 @@ class Stmt:
 @dataclass
 class Plan:
     stmts: list[Stmt] = field(default_factory=list)
-
-
-def _table_name(cls: type[Data]) -> str:
-    meta = getattr(cls, "Meta", None)
-    existing = getattr(meta, "existing_table", None) if meta else None
-    if existing:
-        return existing
-    return f"data_{to_snake(cls.__name__)}"
 
 
 def _pg_type(fi: FieldInfo) -> str:
@@ -209,7 +203,7 @@ def plan_migration(
         if meta and getattr(meta, "existing_table", None):
             continue
 
-        table = _table_name(cls)
+        table = table_name(cls)
         desired_cols: dict[str, str] = {
             name: _pg_type(fi) for name, fi in cls.model_fields.items()
         }
@@ -296,12 +290,14 @@ async def apply_migration(plan: Plan, conn) -> None:
         await conn.execute(s.sql, *s.params)
 
 
-async def migrate_schema() -> None:
+async def migrate_schema(*, also: Sequence[str]) -> None:
     """Read the live schema, diff it against every registered ``Data``, apply the additive DDL.
 
-    Also applies the runtime's own tables (``runtime_inflight``, ``runtime_dlq_audit``): they
-    are framework state, not Data, so :func:`plan_migration` does not track them; their DDL is
-    idempotent (``IF NOT EXISTS``) and always runs.
+    ``also`` is DDL for tables that are not Data, applied after the plan in the same
+    transaction. The host passes the runtime's own tables (``runtime_inflight``,
+    ``runtime_dlq_audit``): they are framework state, so :func:`plan_migration` does not track
+    them, and their DDL is idempotent (``IF NOT EXISTS``) and always runs. They come in as an
+    argument so that :mod:`app.data` does not import the packages that define them.
 
     The whole plan is applied in one transaction (``get_session()`` commits on a clean exit,
     rolls back on an exception): if any statement fails, the database stays as it was and the
@@ -313,8 +309,6 @@ async def migrate_schema() -> None:
     from sqlalchemy import text
 
     from app.data.session import get_session
-    from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
-    from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
 
     existing: dict[str, dict[str, str]] = {}
     async with get_session() as s:
@@ -325,11 +319,10 @@ async def migrate_schema() -> None:
                 "WHERE table_schema = 'public'"
             )
         )
-        for table_name, column_name, data_type in result.all():
-            existing.setdefault(table_name, {})[column_name] = data_type
+        for table, column_name, data_type in result.all():
+            existing.setdefault(table, {})[column_name] = data_type
 
     plan = plan_migration(list(DATA_REGISTRY), existing)
-    runtime_internal_stmts = list(RUNTIME_INFLIGHT_DDL) + list(RUNTIME_DLQ_AUDIT_DDL)
 
     # plan_migration only emits parameterless DDL (CREATE TABLE / ALTER TABLE ADD COLUMN /
     # CREATE INDEX), so each statement is text()-executed as is. If it ever emits
@@ -342,10 +335,10 @@ async def migrate_schema() -> None:
                     f"sql={stmt.sql!r} params={stmt.params!r}"
                 )
             await s.execute(text(stmt.sql))
-        for sql in runtime_internal_stmts:
+        for sql in also:
             await s.execute(text(sql))
     logger.info(
         "runtime: applied %d Data + %d runtime-internal migration statement(s)",
         len(plan.stmts),
-        len(runtime_internal_stmts),
+        len(also),
     )

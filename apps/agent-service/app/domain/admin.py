@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from app.runtime import Data, Key
+from app.data.schema import Data, Key
 
 
 class AdminSearchRequest(Data):

@@ -25,13 +25,13 @@ from app.agent.continuity import (
 )
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.agent.session import load_session
+from app.data.persist import insert_idempotent
 from app.data.session import get_session
 from app.living.happening import record_happening
 from app.living.moment import LifeMoment, latest_moment, run_moment, transcript_key
 from app.living.received import ReceivedMessage, ReceivedRead
 from app.living.records import KIND_SPEECH
 from app.living.whereabouts import note_whereabouts
-from app.runtime.persist import insert_idempotent
 from tests.living.conftest import clock_at
 
 # 真 pg + 替身 life 这两样跟逐个 moment 的用例是同一份，不在这里再抄一遍。
@@ -104,11 +104,11 @@ async def _rows(data_cls) -> int:
     """这张表现在有几行。"""
     from sqlalchemy import text
 
-    from app.runtime.migrator import _table_name
+    from app.data.schema import table_name
 
     async with get_session() as s:
         return (
-            await s.execute(text(f"SELECT count(*) FROM {_table_name(data_cls)}"))
+            await s.execute(text(f"SELECT count(*) FROM {table_name(data_cls)}"))
         ).scalar_one()
 
 
@@ -657,11 +657,11 @@ async def test_the_moment_record_and_the_context_land_together(
     async with get_session() as s:
         from sqlalchemy import text
 
-        from app.runtime.migrator import _table_name
+        from app.data.schema import table_name
 
         rows = (
             await s.execute(
-                text(f"SELECT count(*) FROM {_table_name(LifeMoment)}")
+                text(f"SELECT count(*) FROM {table_name(LifeMoment)}")
             )
         ).scalar_one()
     assert rows == 1

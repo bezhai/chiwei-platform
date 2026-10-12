@@ -732,10 +732,11 @@ async def test_a_message_stored_before_the_attribute_existed_wakes_her(
     走一遍真的迁移：先把表退回没有这一列的样子、按旧版本的写法存一行，再按线上启动时的做法
     读现有表结构、加列。
     """
+    from app.data.migrator import plan_migration
+    from app.data.schema import table_name
     from app.living.received import ReceivedMessage
-    from app.runtime.migrator import _table_name, plan_migration
 
-    table = _table_name(ReceivedMessage)
+    table = table_name(ReceivedMessage)
     async with session_mod.get_session() as s:
         await s.execute(text(f"ALTER TABLE {table} DROP COLUMN wakes_recipient"))
         await s.execute(
@@ -1019,11 +1020,11 @@ async def test_a_tick_that_waited_decides_on_what_is_true_when_it_gets_her(
 ):
     """这一拍排在她正在跑的那一轮后面；那一轮把叫她的那条看掉了。轮到这一拍时已经没有什么在叫
     她，它不跑、也不记"开始了"。判在占用外面的话，它会拿排队之前判的那条再跑一轮。"""
+    from app.data.schema import table_name
     from app.living.moment import life_moment_lock_key
     from app.living.nudge import NudgeBegun
     from app.living.received import mark_read, receive, unread_received
     from app.living.serial import hold
-    from app.runtime.migrator import _table_name
 
     await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
     await receive(_to_her("窗外下起了雨。", at=_at(21, 31)))
@@ -1041,7 +1042,7 @@ async def test_a_tick_that_waited_decides_on_what_is_true_when_it_gets_her(
     assert await tick is None
     async with session_mod.get_session() as s:
         begun = (
-            await s.execute(text(f"SELECT count(*) FROM {_table_name(NudgeBegun)}"))
+            await s.execute(text(f"SELECT count(*) FROM {table_name(NudgeBegun)}"))
         ).scalar_one()
     assert begun == 0
 

@@ -65,6 +65,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
+from app.data.schema import table_name
 from app.data.session import get_session
 from app.infra.cst_time import dated_clock, to_cst_full
 from app.living.day_page import LivingDayPage, living_day_of, read_day_page_before
@@ -72,7 +73,6 @@ from app.living.happening import own_line
 from app.living.loose_ends import LooseEnd, format_entry, list_open_loose_ends
 from app.living.records import Happening, Whereabouts
 from app.living.whereabouts import current_whereabouts
-from app.runtime.migrator import _table_name
 
 # 她自己最近做过 / 说过的多少条。按**条数**而不是按时间窗：安静一整天的时候，她
 # 上一次开口仍然读得到；而热闹的时候也不会把半天的行为一次全灌进来。
@@ -86,7 +86,7 @@ from app.runtime.migrator import _table_name
 # 什么。
 OWN_RECENT_LIMIT = 12
 
-_HAPPENING_TABLE = _table_name(Happening)
+_HAPPENING_TABLE = table_name(Happening)
 
 
 @dataclass(frozen=True)

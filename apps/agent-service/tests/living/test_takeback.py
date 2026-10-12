@@ -23,6 +23,7 @@ import pytest
 from sqlalchemy import text
 
 from app.data import session as session_mod
+from app.data.persist import insert_append, select_all_versions, select_latest
 from app.living.happening import record_happening
 from app.living.mouth import (
     STATE_CLAIMED,
@@ -35,7 +36,6 @@ from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
 from app.living.snapshot import read_snapshot, recent_own_happenings
 from app.living.takeback import take_back_message
 from app.living.whereabouts import note_whereabouts
-from app.runtime.persist import insert_append, select_all_versions, select_latest
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))

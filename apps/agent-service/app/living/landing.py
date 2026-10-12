@@ -56,18 +56,17 @@ from typing import Annotated
 
 from sqlalchemy import text
 
+from app.data.persist import insert_append
 from app.data.queries.messages import (
     find_messages_by_outbound_ids,
     find_recall_state_by_outbound_ids,
 )
+from app.data.schema import Data, Key, table_name
 from app.data.session import get_session
 from app.infra.cst_time import CST
 from app.living.mouth import SpokenOutbound
 from app.living.records import living_lane
-from app.runtime.data import Data, Key
-from app.runtime.migrator import _table_name
 from app.runtime.node import node
-from app.runtime.persist import insert_append
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +80,7 @@ logger = logging.getLogger(__name__)
 # 一次常规醒来（十分钟）之前一定已经对上账。
 LANDING_TICK_SECONDS = 300
 
-_OUTBOUND_TABLE = _table_name(SpokenOutbound)
+_OUTBOUND_TABLE = table_name(SpokenOutbound)
 
 # 这条泳道上还没对上账的每一条（每个 outbound_id 只看版本链最新那一版）。
 #

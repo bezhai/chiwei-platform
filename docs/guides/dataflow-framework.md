@@ -51,13 +51,13 @@ Source (外部触发)
 
 ### 2.1 Data —— 不可变数据载体
 
-所有业务数据定义都继承 `app.runtime.Data`(基于 Pydantic v2,`frozen=True, extra="forbid"`)。`app.runtime` 包是框架的公开入口 —— 业务侧的 import 都走它,不进 `app.runtime.*` 子模块。
+所有业务数据定义都继承 `app.data.schema.Data`(基于 Pydantic v2,`frozen=True, extra="forbid"`),字段标记 `Key` / `Version` 也从 `app.data.schema` import。`app.runtime` 包是框架的公开入口 —— 业务侧的其余 import 都走它,不进 `app.runtime.*` 子模块。
 
 ```python
 # app/domain/summary.py
 from __future__ import annotations
 from typing import Annotated
-from app.runtime import Data, Key, Version
+from app.data.schema import Data, Key, Version
 
 
 class SummaryFragment(Data):
@@ -72,7 +72,7 @@ class SummaryFragment(Data):
 
 **Native mode(默认)** —— runtime 自动为你建表（`data_summary_fragment` —— 表名是 `data_<to_snake(ClassName)>`，PascalCase 会拆词），表结构 append-only，写入自动算 `dedup_hash`。无需写 `class Meta`。
 
-**关于 `version` 列**：**不是 native mode 自动列**，必须在 Data 上显式声明 `Annotated[int, Version]` 字段才生效（见 `app/runtime/persist.py::insert_append` 的 `ver_col = version_field(cls)` 分支）。声明了 Version 后 runtime 才会按 Key 自增版本 + 建 `ix_<table>_key_ver` 索引；没声明就只是普通 append（`dedup_hash` 唯一约束兜底）。
+**关于 `version` 列**：**不是 native mode 自动列**，必须在 Data 上显式声明 `Annotated[int, Version]` 字段才生效（见 `app/data/persist.py::insert_append` 的 `ver_col = version_field(cls)` 分支）。声明了 Version 后 runtime 才会按 Key 自增版本 + 建 `ix_<table>_key_ver` 索引；没声明就只是普通 append（`dedup_hash` 唯一约束兜底）。
 
 **关于"自动写表"**：runtime 只在存在 `wire(D).as_latest()` 时才把 emit 的 Data 落表（详见 §2.3 / §3 Cookbook），不是有 Data class 就自动建表 + 自动写入。
 
@@ -116,7 +116,7 @@ class Fragment(Data):
 **AdminOnly(类级 mixin)** —— 极少用。标记这个 Data 只能由系统/人工产生,任何 `@node` 返回它都会在装饰器时报错:
 
 ```python
-from app.runtime import Data, AdminOnly, Key
+from app.data.schema import Data, AdminOnly, Key
 class ManualApproval(Data, AdminOnly):
     approval_id: Annotated[str, Key]
     ...
@@ -338,7 +338,7 @@ review： 整条 wire 的失败默认假设是"每条要单独看" → 运营逐
 # app/domain/summary.py
 from __future__ import annotations
 from typing import Annotated
-from app.runtime import Data, Key, Version
+from app.data.schema import Data, Key, Version
 
 
 class SummaryFragment(Data):
@@ -701,7 +701,7 @@ class SummaryFragment(BaseModel):        # 不会注册,不会参与 wire,migrat
     ...
 
 # ✅
-from app.runtime import Data
+from app.data.schema import Data
 class SummaryFragment(Data):
     ...
 ```
@@ -722,7 +722,8 @@ await emit(UserProfile(user_id="u1", name="x"))
 # ↑ 第二次 emit 同 user_id 会撞 dedup_hash UNIQUE 约束（一个 Key 一行），不是"更新成新版本"
 
 # ✅ 完整三件套：Version 字段 + .as_latest() wire + emit
-from app.runtime import Data, Key, Version, wire
+from app.data.schema import Data, Key, Version
+from app.runtime import wire
 
 class UserProfile(Data):
     user_id: Annotated[str, Key]
@@ -955,7 +956,7 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 | 想了解 | 看哪里 |
 |---|---|
 | @node 装饰器做什么 | `app/runtime/node.py` |
-| Data 校验规则 | `app/runtime/data.py::__pydantic_init_subclass__` |
+| Data 校验规则 | `app/data/schema.py::__pydantic_init_subclass__` |
 | wire DSL 全部方法（含 `.retry` / `.on_error`） | `app/runtime/wire.py::WireBuilder` |
 | emit 分派逻辑 | `app/runtime/emit.py::emit` |
 | durable 边实现 + 错误路由 helper | `app/runtime/durable.py::_route_consumer_exception` |

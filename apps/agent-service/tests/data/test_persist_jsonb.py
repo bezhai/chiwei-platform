@@ -21,8 +21,7 @@ from typing import Annotated
 
 import pytest
 
-from app.runtime.data import Data, Key, Version
-from app.runtime.persist import (
+from app.data.persist import (
     _encode_params,
     _jsonb_columns,
     insert_append,
@@ -30,6 +29,7 @@ from app.runtime.persist import (
     select_all_versions,
     select_latest,
 )
+from app.data.schema import Data, Key, Version
 from tests.runtime.conftest import migrate
 
 # 嵌套 + 空 dict + 空 list + None 的混合负载，钉死「深度相等、不丢结构」。

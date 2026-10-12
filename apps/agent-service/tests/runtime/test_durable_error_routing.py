@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.runtime.data import Data, Key
+from app.data.schema import Data, Key
 from app.runtime.durable import _build_handler
 from app.runtime.inflight import ClaimOutcome
 from app.runtime.node import node
