@@ -5,6 +5,7 @@ Verifies the DB capability that keeps sessions inside ``app.data``:
   - ``current_session()`` outside ``tx()`` raises (no implicit session).
   - Nested ``tx()`` uses SAVEPOINT — inner rollback leaves outer alive.
   - ``auto_tx()`` opens a one-shot tx, but reuses the existing one if any.
+  - ``in_tx()`` says whether a ``tx()`` is open on this task.
   - Concurrent branches each get their own session when they each enter ``tx()``
     from outside any tx (ContextVar isolation per asyncio task).
   - The storage functions (``app.data.persist``) join an open ``tx()`` without a
@@ -22,7 +23,7 @@ from sqlalchemy import event, text
 
 from app.data.persist import insert_append, insert_idempotent, select_latest
 from app.data.schema import Data, Key, Version, table_name
-from app.data.tx import auto_tx, current_session, tx
+from app.data.tx import auto_tx, current_session, in_tx, tx
 from tests.runtime.conftest import migrate
 
 pytestmark = pytest.mark.integration
@@ -86,6 +87,16 @@ async def test_auto_tx_inside_reuses_existing_session(test_db: object) -> None:
         async with auto_tx():
             inner_s = current_session()
             assert inner_s is outer_s
+
+
+async def test_in_tx_says_whether_a_transaction_is_open_on_this_task(test_db: object) -> None:
+    assert not in_tx()
+    async with tx():
+        assert in_tx()
+    assert not in_tx()
+    async with auto_tx():
+        assert in_tx()
+    assert not in_tx()
 
 
 async def test_concurrent_branches_each_open_own_tx(test_db: object) -> None:

@@ -1,10 +1,12 @@
 """Transactions over the business database — Phase 7d Gap 13.
 
-``app.data`` 之外没有谁自己开 session。两个对外 API：
+``app.data`` 之外没有谁自己开 session。三个对外 API：
 
   - ``async with tx():``  — 表达「这几行原子」
   - ``current_session()``  — ``app.data`` 内部（``persist`` 的读写原语、``queries`` 层）和框架
     （``runtime`` 的 inflight / 死信审计、``messaging`` 的记录者）用；业务区禁止 import
+  - ``in_tx()``  — 这个 task 上有没有开着的 ``tx()``。给必须自己提交、不能并进调用方事务的写入
+    用：在调用方的事务里就拒绝，而不是晚于它声称的时刻才提交
 
 ``auto_tx()`` 是这些存储函数自己用的：在调用方的 tx 里就加入它（不开 SAVEPOINT），
 不在 tx 里就为这一次调用开一个。
@@ -32,6 +34,11 @@ logger = logging.getLogger(__name__)
 _session_var: ContextVar[AsyncSession | None] = ContextVar("_session", default=None)
 
 _TX_SLOW_THRESHOLD_S = 5.0
+
+
+def in_tx() -> bool:
+    """Whether a ``tx()`` is open on this task: the transaction ``auto_tx()`` would join."""
+    return _session_var.get() is not None
 
 
 def current_session() -> AsyncSession:
@@ -76,7 +83,7 @@ async def auto_tx() -> AsyncIterator[None]:
     storage function without an explicit `with tx():` while still working
     inside an explicit tx block.
     """
-    if _session_var.get() is not None:
+    if in_tx():
         yield
         return
     async with tx():

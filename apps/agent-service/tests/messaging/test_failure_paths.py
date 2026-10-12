@@ -62,7 +62,7 @@ def broker_accepts(monkeypatch):
 def commits_fail_after_accept(monkeypatch, broker_accepts):
     """broker 收下任何一条之后，记录者的每一次提交都失败。``state['on']=False`` 恢复。"""
     state = {"on": True}
-    real = record_mod.auto_tx
+    real = record_mod.tx
 
     @asynccontextmanager
     async def flaky():
@@ -71,7 +71,7 @@ def commits_fail_after_accept(monkeypatch, broker_accepts):
             if state["on"] and broker_accepts["accepted"]:
                 raise RuntimeError("COMMIT failed")
 
-    monkeypatch.setattr(record_mod, "auto_tx", flaky)
+    monkeypatch.setattr(record_mod, "tx", flaky)
     return state
 
 

@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import text
 
+from app.data.tx import tx
 from app.infra.rabbitmq import DLQ_NAME, ISOLATED_DEAD_LETTERS, Route, mq
 from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.message import Kind, Message, SendFailed, new_message
@@ -634,6 +635,54 @@ async def test_when_the_broker_does_not_confirm_the_send_fails_and_the_record_sa
     rows = await read_record(participant="world")
     assert outcomes(rows) == ["sending", "unconfirmed"]
     assert {r["message_id"] for r in rows} == {failed.value.message_id}
+
+
+class _CallerFailsAfterSending(Exception):
+    """调用方发完之后自己出错，它的事务回滚。"""
+
+
+SENDS = {
+    "send": lambda: send(sender="operator", recipient="world", body="事务里发的。"),
+    "send_at": lambda: send_at(
+        sender="operator",
+        recipient="world",
+        body="事务里排的。",
+        at=datetime.now(UTC) + timedelta(seconds=1),
+    ),
+    "ask": lambda: ask(
+        sender="operator", recipient="world", body="事务里问的？", timeout_seconds=2
+    ),
+}
+
+
+@pytest.mark.parametrize("operation", SENDS.values(), ids=SENDS.keys())
+async def test_a_send_inside_the_callers_transaction_is_refused_before_anything_happens(
+    broker, monkeypatch, operation
+):
+    """在调用方的 ``tx()`` 里发送是用法错误：记录要随调用方的事务提交，调用方回滚，记录就没了，
+    broker 却已经收下了消息。所以在记下任何一行、发出任何一条之前就拒绝，抛的不是
+    ``SendFailed``——沿用同一个 id 重试解决不了它。"""
+    world = Inbox(answer="在。")
+    inbox("world", on_message=world.on_message, on_question=world.on_question)
+    await start_messaging()
+    published: list[str] = []
+    real = mq.publish_with_confirm
+
+    async def counted(route, *a, **kw):
+        published.append(route.queue)
+        return await real(route, *a, **kw)
+
+    monkeypatch.setattr(mq, "publish_with_confirm", counted)
+
+    with pytest.raises((RuntimeError, _CallerFailsAfterSending)) as raised:
+        async with tx():
+            await operation()
+            raise _CallerFailsAfterSending
+
+    assert published == [], "broker 收下了消息，它的记录却随调用方的事务回滚了"
+    assert await read_record() == []
+    assert raised.type is RuntimeError, repr(raised.value)
+    assert "tx()" in str(raised.value)
 
 
 # ---------------------------------------------------------------------------

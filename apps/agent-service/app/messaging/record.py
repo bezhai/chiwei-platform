@@ -15,6 +15,11 @@
 结果没来得及记下"。三种 ``SendFailed`` 都带着消息 id，调用方沿用同一个 id 重试，接收
 方按 id 去重，不会处理两遍。
 
+每一行写完就提交，上面这些才成立。所以调用方开着 ``tx()`` 时 :func:`record` 拒绝写、抛
+``RuntimeError``：在那里面这一行要随调用方的事务提交或回滚，broker 却已经收下了消息。发送、
+提问、定时送达每条路都先经过 :func:`record` 才交给 broker，所以在事务里发消息，记下任何一行、
+发出任何一条之前就被拒绝。
+
 表是追加写的：同一条消息的每一次状态变化各占一行，不回头改旧行。一行里带着那条消息
 的全部外层字段和正文，单看一行就能读懂。
 ``message_time`` 是消息自己的时间（定时送达时就是指定的时刻），``recorded_at`` 是
@@ -34,7 +39,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from app.data.tx import auto_tx, current_session
+from app.data.tx import auto_tx, current_session, in_tx, tx
 from app.messaging.broker import lane_label
 from app.messaging.message import Message, SendFailed
 
@@ -62,11 +67,19 @@ async def record(
 ) -> None:
     """追加一行并提交。写不进去抛 ``SendFailed``（带消息 id）。
 
-    不在调用方的 ``tx()`` 里调用：在那里面这一行随调用方的事务提交，"交给 broker 之前表里已经
-    有这一行"就不成立了。
+    调用方开着 ``tx()`` 时抛 ``RuntimeError``，什么都不写：在那里面这一行要随调用方的事务提交，
+    "交给 broker 之前表里已经有这一行"就不成立了，调用方回滚的话这一行就没了。这是用法错误，
+    不是 ``SendFailed``：沿用同一个 id 重试解决不了它，要等调用方的事务结束了再发。
     """
+    if in_tx():
+        raise RuntimeError(
+            f"message {message.message_id} ({outcome}): refusing to send or record a message "
+            "inside an open tx(). Its record would commit or roll back with the caller's "
+            "transaction while the broker already has the message; send after the "
+            "transaction has ended"
+        )
     try:
-        async with auto_tx():
+        async with tx():
             await current_session().execute(
                 text(
                     "INSERT INTO message_record (lane, message_id, kind, sender, "

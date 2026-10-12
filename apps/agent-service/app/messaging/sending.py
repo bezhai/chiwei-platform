@@ -20,6 +20,9 @@
 记录是发送的一部分（:func:`publish_recorded`）：先记 ``sending``、再发、再记结果，三步
 各自提交。任何一步失败都抛带消息 id 的 :class:`SendFailed`；调用方要重试就把这个 id
 传回来（三个操作都收 ``message_id``），接收方按 id 去重。
+
+三个操作都不能在调用方的 ``tx()`` 里调用：消息会跟还没提交的业务状态绑在一起。在那里调用，
+记下任何一行、发出任何一条之前就抛 ``RuntimeError``（:func:`app.messaging.record.record`）。
 """
 from __future__ import annotations
 
