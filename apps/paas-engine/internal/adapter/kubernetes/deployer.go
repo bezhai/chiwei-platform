@@ -168,8 +168,9 @@ func (d *K8sDeployer) GetDeploymentStatus(ctx context.Context, name string) (*do
 		}
 
 		// 计算 ready 状态和 restarts
-		allReady := len(pod.Status.ContainerStatuses) > 0
-		for _, cs := range pod.Status.ContainerStatuses {
+		statuses := longRunningContainerStatuses(&pod)
+		allReady := len(statuses) > 0
+		for _, cs := range statuses {
 			ps.Restarts += cs.RestartCount
 			if !cs.Ready {
 				allReady = false
@@ -184,6 +185,30 @@ func (d *K8sDeployer) GetDeploymentStatus(ctx context.Context, name string) (*do
 	}
 
 	return status, nil
+}
+
+// longRunningContainerStatuses 返回 Pod 运行期间一直在跑的容器的状态：普通容器，
+// 加上原生 sidecar（restartPolicy=Always 的 init 容器，状态在 InitContainerStatuses 里）。
+// 跑完即退出的 init 容器不在其中：它结束后 Ready 恒为 false，算进来 Pod 就永远不就绪。
+//
+// 原生 sidecar 排在普通容器后面，调用方按"后写覆盖"取 Waiting 原因时取到的是它的：
+// sidecar 没在跑时，应用要么卡在它后面没创建（只会报 PodInitializing），要么没有出站网络，
+// sidecar 的原因才是要看的那个。
+func longRunningContainerStatuses(pod *corev1.Pod) []corev1.ContainerStatus {
+	sidecars := make(map[string]bool)
+	for _, c := range pod.Spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			sidecars[c.Name] = true
+		}
+	}
+
+	statuses := append([]corev1.ContainerStatus{}, pod.Status.ContainerStatuses...)
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if sidecars[cs.Name] {
+			statuses = append(statuses, cs)
+		}
+	}
+	return statuses
 }
 
 func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Release, app *domain.App, bundleEnvs map[string]string) error {
@@ -242,12 +267,23 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 	container.VolumeMounts = pvcMounts
 
 	var initContainers []corev1.Container
-	var sidecarContainers []corev1.Container
 
+	// lane-sidecar 以原生 sidecar 注入（init 容器 + restartPolicy=Always），由 kubelet
+	// 保证启停顺序：启动探针通过后才启动应用，应用全部退出后才给它发 SIGTERM。iptables
+	// 把应用的出站 TCP 全转给它，它晚于应用起来或早于应用停下，应用的出站连接就会被拒。
 	if app.SidecarEnabled {
 		sidecarImage := d.sidecarImage
 		proxyUID := int64(1337)
 		rootUID := int64(0)
+		sidecarRestart := corev1.ContainerRestartPolicyAlways
+		// 探针打 15021 的 /healthz，不打代理端口 15001：kubelet 打进来的连接没经过
+		// iptables 重定向，SO_ORIGINAL_DST 取到的是 15001 自己，透传会连回自己。
+		healthz := corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/healthz",
+				Port: intstr.FromInt(15021),
+			},
+		}
 
 		initContainers = append(initContainers, corev1.Container{
 			Name:    "lane-sidecar-init",
@@ -261,10 +297,11 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 			},
 		})
 
-		sidecarContainers = append(sidecarContainers, corev1.Container{
+		initContainers = append(initContainers, corev1.Container{
 			Name:            "lane-sidecar",
 			Image:           sidecarImage,
 			ImagePullPolicy: corev1.PullAlways,
+			RestartPolicy:   &sidecarRestart,
 			Env: []corev1.EnvVar{
 				{Name: "REGISTRY_URL", Value: "http://lite-registry:8080"},
 				{Name: "LANE", Value: release.Lane},
@@ -273,13 +310,13 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 				{Name: "sidecar", ContainerPort: 15001},
 				{Name: "sidecar-health", ContainerPort: 15021},
 			},
+			StartupProbe: &corev1.Probe{
+				ProbeHandler:     healthz,
+				PeriodSeconds:    1,
+				FailureThreshold: 30,
+			},
 			LivenessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/healthz",
-						Port: intstr.FromInt(15021),
-					},
-				},
+				ProbeHandler:        healthz,
 				InitialDelaySeconds: 2,
 				PeriodSeconds:       10,
 			},
@@ -306,7 +343,7 @@ func (d *K8sDeployer) applyDeployment(ctx context.Context, release *domain.Relea
 					ServiceAccountName: app.ServiceAccount,
 					NodeSelector:       map[string]string{"node-role": "app"},
 					InitContainers:     initContainers,
-					Containers:         append([]corev1.Container{container}, sidecarContainers...),
+					Containers:         []corev1.Container{container},
 					Volumes:            pvcVolumes,
 				},
 			},
@@ -585,10 +622,16 @@ func (d *K8sDeployer) detectPodFailure(ctx context.Context, deploy *appsv1.Deplo
 			}
 		}
 
+		// 原生 sidecar（lane-sidecar）也是 init 容器，它拉不到镜像时应用卡在 PodInitializing，
+		// 只有这里看得到
 		for _, cs := range pod.Status.InitContainerStatuses {
 			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
-				return fmt.Sprintf("pod %s init container is in CrashLoopBackOff: %s",
-					pod.Name, cs.State.Waiting.Message), true
+				return fmt.Sprintf("pod %s init container %s is in CrashLoopBackOff: %s",
+					pod.Name, cs.Name, cs.State.Waiting.Message), true
+			}
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "ImagePullBackOff" {
+				return fmt.Sprintf("pod %s init container %s failed to pull image: %s",
+					pod.Name, cs.Name, cs.State.Waiting.Message), true
 			}
 		}
 	}

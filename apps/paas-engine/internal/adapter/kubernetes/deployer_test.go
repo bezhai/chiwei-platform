@@ -46,12 +46,66 @@ func TestDetectPodFailure(t *testing.T) {
 		},
 	}
 
+	// 原生 sidecar 的 Pod：lane-sidecar-init 已跑完，lane-sidecar 的状态在 InitContainerStatuses 里
+	latestLabels := map[string]string{"app": "myapp", "lane": "prod", "pod-template-hash": latestHash}
+	started, notStarted := true, false
+	initDone := corev1.ContainerStatus{
+		Name:  "lane-sidecar-init",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+	}
+	appRunning := corev1.ContainerStatus{
+		Name: "myapp", Ready: true, Started: &started,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}
+	appWaitingForInit := corev1.ContainerStatus{
+		Name:  "myapp",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+	}
+	sidecarWaiting := func(reason, message string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			Name: "lane-sidecar", Started: &notStarted,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: message}},
+		}
+	}
+
 	tests := []struct {
 		name       string
 		objects    []runtime.Object
 		wantFail   bool
 		wantReason string
 	}{
+		{
+			name: "native sidecar running",
+			objects: []runtime.Object{latestRS, makeNativeSidecarPod("myapp-prod-abc", latestLabels, corev1.PodRunning,
+				[]corev1.ContainerStatus{initDone, {Name: "lane-sidecar", Ready: true, Started: &started,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+				[]corev1.ContainerStatus{appRunning})},
+			wantFail: false,
+		},
+		{
+			name: "native sidecar waiting for its startup probe",
+			objects: []runtime.Object{latestRS, makeNativeSidecarPod("myapp-prod-abc", latestLabels, corev1.PodPending,
+				[]corev1.ContainerStatus{initDone, {Name: "lane-sidecar", Started: &notStarted,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+				[]corev1.ContainerStatus{appWaitingForInit})},
+			wantFail: false,
+		},
+		{
+			name: "native sidecar CrashLoopBackOff",
+			objects: []runtime.Object{latestRS, makeNativeSidecarPod("myapp-prod-abc", latestLabels, corev1.PodRunning,
+				[]corev1.ContainerStatus{initDone, sidecarWaiting("CrashLoopBackOff", "back-off 40s")},
+				[]corev1.ContainerStatus{appRunning})},
+			wantFail:   true,
+			wantReason: "init container lane-sidecar is in CrashLoopBackOff",
+		},
+		{
+			name: "native sidecar ImagePullBackOff",
+			objects: []runtime.Object{latestRS, makeNativeSidecarPod("myapp-prod-abc", latestLabels, corev1.PodPending,
+				[]corev1.ContainerStatus{initDone, sidecarWaiting("ImagePullBackOff", "manifest unknown")},
+				[]corev1.ContainerStatus{appWaitingForInit})},
+			wantFail:   true,
+			wantReason: "init container lane-sidecar failed to pull image",
+		},
 		{
 			name:     "healthy pods",
 			objects:  []runtime.Object{latestRS, oldRS, makePod("myapp-prod-abc", labels, latestHash, nil)},
@@ -386,6 +440,117 @@ func TestApplyDeploymentInjectsAppName(t *testing.T) {
 	}
 }
 
+// TestApplyDeploymentInjectsNativeSidecar 验证开了 sidecar 的 App，lane-sidecar 以原生
+// sidecar 注入：排在设置 iptables 的 lane-sidecar-init 之后、restartPolicy=Always、
+// 带启动探针，kubelet 才会等它就绪再启动应用、等应用退出后才停它。普通容器里只剩应用。
+func TestApplyDeploymentInjectsNativeSidecar(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	const sidecarImage = "harbor.local:30002/inner-bot/lane-sidecar:1.0.0.13"
+	deployer := NewK8sDeployer(client, "default", sidecarImage)
+
+	app := &domain.App{Name: "agent-service", Port: 8000, SidecarEnabled: true}
+	release := &domain.Release{
+		ID:       "r-sidecar",
+		AppName:  "agent-service",
+		Lane:     "coe-world",
+		Image:    "harbor.local/inner-bot/agent-service:abc123",
+		Replicas: 1,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "agent-service-coe-world", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+	spec := deploy.Spec.Template.Spec
+
+	if len(spec.Containers) != 1 || spec.Containers[0].Name != "agent-service" {
+		names := []string{}
+		for _, c := range spec.Containers {
+			names = append(names, c.Name)
+		}
+		t.Fatalf("containers = %v, want only the app container", names)
+	}
+
+	if len(spec.InitContainers) != 2 {
+		t.Fatalf("expected 2 init containers, got %d", len(spec.InitContainers))
+	}
+	initC, sidecar := spec.InitContainers[0], spec.InitContainers[1]
+	if initC.Name != "lane-sidecar-init" || sidecar.Name != "lane-sidecar" {
+		t.Fatalf("init containers = [%s %s], want [lane-sidecar-init lane-sidecar]", initC.Name, sidecar.Name)
+	}
+	if initC.RestartPolicy != nil {
+		t.Errorf("lane-sidecar-init RestartPolicy = %v, want unset (runs once)", *initC.RestartPolicy)
+	}
+
+	if sidecar.RestartPolicy == nil || *sidecar.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Errorf("lane-sidecar RestartPolicy = %v, want Always", sidecar.RestartPolicy)
+	}
+	if sidecar.Image != sidecarImage {
+		t.Errorf("lane-sidecar image = %q, want %q", sidecar.Image, sidecarImage)
+	}
+	if sidecar.SecurityContext == nil || sidecar.SecurityContext.RunAsUser == nil || *sidecar.SecurityContext.RunAsUser != 1337 {
+		t.Errorf("lane-sidecar must run as UID 1337 (iptables exempts it), got %+v", sidecar.SecurityContext)
+	}
+	envs := map[string]string{}
+	for _, e := range sidecar.Env {
+		envs[e.Name] = e.Value
+	}
+	if envs["LANE"] != "coe-world" {
+		t.Errorf("lane-sidecar LANE = %q, want coe-world", envs["LANE"])
+	}
+
+	assertHealthzProbe := func(kind string, p *corev1.Probe) {
+		t.Helper()
+		if p == nil || p.HTTPGet == nil {
+			t.Fatalf("lane-sidecar %s probe = %+v, want HTTP GET /healthz on 15021", kind, p)
+		}
+		if p.HTTPGet.Path != "/healthz" || p.HTTPGet.Port.IntValue() != 15021 {
+			t.Errorf("lane-sidecar %s probe = GET %s on %s, want GET /healthz on 15021", kind, p.HTTPGet.Path, p.HTTPGet.Port.String())
+		}
+	}
+	assertHealthzProbe("startup", sidecar.StartupProbe)
+	assertHealthzProbe("liveness", sidecar.LivenessProbe)
+}
+
+// TestApplyDeploymentWithoutSidecar 验证没开 sidecar 的 App，PodSpec 里没有任何
+// init 容器，普通容器只有应用自己。
+func TestApplyDeploymentWithoutSidecar(t *testing.T) {
+	client := fakeclient.NewSimpleClientset()
+	deployer := NewK8sDeployer(client, "default", "")
+
+	app := &domain.App{Name: "lark-service", Port: 3000}
+	release := &domain.Release{
+		ID:       "r-no-sidecar",
+		AppName:  "lark-service",
+		Lane:     "prod",
+		Image:    "harbor.local/inner-bot/lark-service:abc123",
+		Replicas: 1,
+	}
+
+	if err := deployer.applyDeployment(context.Background(), release, app, nil); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+	deploy, err := client.AppsV1().Deployments("default").Get(context.Background(), "lark-service-prod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Deployment error = %v", err)
+	}
+	spec := deploy.Spec.Template.Spec
+
+	if len(spec.InitContainers) != 0 {
+		t.Errorf("expected no init containers, got %d", len(spec.InitContainers))
+	}
+	if len(spec.Containers) != 1 || spec.Containers[0].Name != "lark-service" {
+		t.Fatalf("expected only the app container, got %d containers", len(spec.Containers))
+	}
+	c := spec.Containers[0]
+	if c.RestartPolicy != nil || c.StartupProbe != nil || c.LivenessProbe != nil {
+		t.Errorf("app container got restartPolicy/probes it did not ask for: %+v", c)
+	}
+}
+
 // TestBuildEnvFrom 验证 buildEnvFrom 函数的各种组合。
 func TestGetDeploymentStatus(t *testing.T) {
 	labels := map[string]string{"app": "myapp", "lane": "prod"}
@@ -506,6 +671,148 @@ func TestGetDeploymentStatus(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestGetDeploymentStatusCountsNativeSidecar 验证 lane-sidecar 以原生 sidecar
+// （restartPolicy=Always 的 init 容器）运行时，Pod 的就绪、重启次数和原因都把它算进去，
+// 而跑完就退出的 lane-sidecar-init 不拖住就绪（它结束后 Ready 恒为 false）。
+func TestGetDeploymentStatusCountsNativeSidecar(t *testing.T) {
+	labels := map[string]string{"app": "myapp", "lane": "prod"}
+	replicas := int32(1)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "myapp-prod", Namespace: "default", Labels: labels},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+		},
+	}
+
+	started, notStarted := true, false
+	initDone := corev1.ContainerStatus{
+		Name:  "lane-sidecar-init",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+	}
+	sidecarCrashing := func(restarts int32) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			Name:         "lane-sidecar",
+			Started:      &notStarted,
+			RestartCount: restarts,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+				Reason:  "CrashLoopBackOff",
+				Message: "back-off 40s restarting failed container=lane-sidecar",
+			}},
+		}
+	}
+	appWaitingForInit := corev1.ContainerStatus{
+		Name:  "myapp",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+	}
+
+	tests := []struct {
+		name         string
+		phase        corev1.PodPhase
+		initStatuses []corev1.ContainerStatus
+		statuses     []corev1.ContainerStatus
+		wantReady    bool
+		wantRestarts int32
+		wantReason   string
+	}{
+		{
+			name:  "sidecar 和应用都在跑",
+			phase: corev1.PodRunning,
+			initStatuses: []corev1.ContainerStatus{
+				initDone,
+				{Name: "lane-sidecar", Ready: true, Started: &started, RestartCount: 1,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+			statuses: []corev1.ContainerStatus{
+				{Name: "myapp", Ready: true, Started: &started, RestartCount: 2,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+			wantReady:    true,
+			wantRestarts: 3,
+		},
+		{
+			name:  "sidecar 已启动但启动探针未通过，应用还没创建",
+			phase: corev1.PodPending,
+			initStatuses: []corev1.ContainerStatus{
+				initDone,
+				{Name: "lane-sidecar", Started: &notStarted,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+			statuses:   []corev1.ContainerStatus{appWaitingForInit},
+			wantReady:  false,
+			wantReason: "PodInitializing: ",
+		},
+		{
+			name:         "应用跑起来之后 sidecar 崩溃重启",
+			phase:        corev1.PodRunning,
+			initStatuses: []corev1.ContainerStatus{initDone, sidecarCrashing(4)},
+			statuses: []corev1.ContainerStatus{
+				{Name: "myapp", Ready: true, Started: &started,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+			wantReady:    false,
+			wantRestarts: 4,
+			wantReason:   "CrashLoopBackOff: back-off 40s restarting failed container=lane-sidecar",
+		},
+		{
+			name:         "启动阶段 sidecar 就崩溃，应用卡在它后面",
+			phase:        corev1.PodPending,
+			initStatuses: []corev1.ContainerStatus{initDone, sidecarCrashing(3)},
+			statuses:     []corev1.ContainerStatus{appWaitingForInit},
+			wantReady:    false,
+			wantRestarts: 3,
+			wantReason:   "CrashLoopBackOff: back-off 40s restarting failed container=lane-sidecar",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := makeNativeSidecarPod("myapp-prod-abc-1", labels, tt.phase, tt.initStatuses, tt.statuses)
+			client := fakeclient.NewSimpleClientset(deploy, pod)
+			deployer := NewK8sDeployer(client, "default", "")
+
+			status, err := deployer.GetDeploymentStatus(context.Background(), "myapp-prod")
+			if err != nil {
+				t.Fatalf("GetDeploymentStatus() error = %v", err)
+			}
+			if len(status.Pods) != 1 {
+				t.Fatalf("Pods count = %d, want 1", len(status.Pods))
+			}
+			got := status.Pods[0]
+			if got.Ready != tt.wantReady {
+				t.Errorf("Ready = %v, want %v", got.Ready, tt.wantReady)
+			}
+			if got.Restarts != tt.wantRestarts {
+				t.Errorf("Restarts = %d, want %d", got.Restarts, tt.wantRestarts)
+			}
+			if got.Reason != tt.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// makeNativeSidecarPod 构造 paas-engine 注入 lane-sidecar 后的 Pod：spec 里
+// lane-sidecar-init 是一次性 init 容器，lane-sidecar 是 restartPolicy=Always 的 init 容器。
+func makeNativeSidecarPod(name string, labels map[string]string, phase corev1.PodPhase, initStatuses, statuses []corev1.ContainerStatus) *corev1.Pod {
+	always := corev1.ContainerRestartPolicyAlways
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels},
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{
+				{Name: "lane-sidecar-init"},
+				{Name: "lane-sidecar", RestartPolicy: &always},
+			},
+			Containers: []corev1.Container{{Name: labels["app"]}},
+		},
+		Status: corev1.PodStatus{
+			Phase:                 phase,
+			InitContainerStatuses: initStatuses,
+			ContainerStatuses:     statuses,
+		},
 	}
 }
 
