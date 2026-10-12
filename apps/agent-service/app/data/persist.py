@@ -155,6 +155,13 @@ async def serialise_writers(table: str, values: tuple[Any, ...]) -> None:
     The key is the first 8 bytes of an MD5 over ``(table, *values)``, as a signed 64-bit int.
     MD5 is only a stable bucket here: unrelated keys that share a bucket take turns more than
     they need to, and never miss the lock.
+
+    A transaction that takes this lock on several keys (it appends to several axes or tables, or
+    mixes :func:`insert_append` and :func:`app.data.ordered.insert_in_commit_order`) holds them
+    all until it ends, so every such transaction must take them in one consistent order.
+    Otherwise two of them can each hold the lock the other waits for, and Postgres aborts one of
+    the two. The transactions that do this today, and their order, are listed under "Lock order"
+    in :mod:`app.data.ordered`.
     """
     digest = hashlib.md5(str((table, *values)).encode()).digest()
     await current_session().execute(

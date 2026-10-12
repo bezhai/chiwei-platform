@@ -20,6 +20,26 @@ It keeps three promises:
 3. **No half-written record.** The number is taken and the record inserted in one transaction:
    the caller's open ``tx()``, or one of its own. A failure or a cancellation before the commit
    rolls all of it back; the number was never visible and is handed out again.
+
+**Lock order.** The axis lock is held until the transaction ends, not until this call returns:
+inside a caller's ``tx()``, until that transaction commits or rolls back.
+:func:`app.data.persist.insert_append` takes the same kind of lock, on its record's Key. A
+transaction that appends to several axes or tables, or mixes ``insert_in_commit_order`` and
+``insert_append``, holds all those locks at once, and every such transaction must take them in one
+consistent order. Two transactions that take the same two locks in opposite orders wait for each
+other; Postgres detects the deadlock and aborts one of them, whose whole transaction rolls back with
+an error. Two transactions hold more than one lock today:
+
+* The round's commit in :mod:`app.living.moment`: the ``LifeMoment`` axis ``(lane, persona_id)``,
+  then the ``PhoneRead`` rows, then the ``ReceivedRead`` rows. Those rows are written with
+  ``insert_idempotent``, which takes no advisory lock, but inserting a Key that another open
+  transaction has inserted waits for that transaction to end.
+* ``compose`` in :mod:`app.living.outgoing`: the ``OutgoingMessage`` axis ``(lane, persona_id)``
+  (the same lock for every message it writes), then ``OutgoingUpTo``'s Key
+  ``(lane, persona_id, happening_seq, whereabouts_seq)`` through ``insert_append``.
+
+The two share no lock. A new transaction that takes one of these locks together with another keeps
+the order listed here.
 """
 
 from __future__ import annotations
