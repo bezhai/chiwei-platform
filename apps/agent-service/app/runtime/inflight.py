@@ -45,7 +45,7 @@ from typing import Literal
 
 from sqlalchemy import text
 
-from app.data.session import get_session
+from app.data.tx import auto_tx, current_session
 from app.runtime.errors import AlreadySucceededError
 
 RUNTIME_INFLIGHT_DDL: list[str] = [
@@ -127,7 +127,8 @@ async def claim_inflight(
     """
     lock = _lock_key(edge_id, idempotent_key)
     lease_until = datetime.now(UTC) + timedelta(milliseconds=lease_ms)
-    async with get_session() as s:
+    async with auto_tx():
+        s = current_session()
         await s.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock})
         r = await s.execute(text(
             "SELECT state, attempts, locked_until "
@@ -177,8 +178,8 @@ async def succeeded_keys(*, edge_id: str, idempotent_keys: Collection[str]) -> s
     """
     if not idempotent_keys:
         return set()
-    async with get_session() as s:
-        rows = await s.execute(text(
+    async with auto_tx():
+        rows = await current_session().execute(text(
             "SELECT idempotent_key FROM runtime_inflight "
             "WHERE edge_id=:e AND idempotent_key = ANY(:ks) AND state='succeeded'"
         ), {"e": edge_id, "ks": list(idempotent_keys)})
@@ -198,8 +199,8 @@ async def mark_history_backfill(
     Idempotent (ON CONFLICT DO NOTHING) so concurrent backfill paths
     don't fight; whichever wins, both end up at ``succeeded``.
     """
-    async with get_session() as s:
-        await s.execute(text(
+    async with auto_tx():
+        await current_session().execute(text(
             "UPDATE runtime_inflight "
             "SET state='succeeded', attempts=0, locked_until=NULL, "
             "    worker_id=NULL, trace_id='backfill', updated_at=now() "
@@ -219,8 +220,8 @@ async def mark_succeeded(
     *, edge_id: str, idempotent_key: str, worker_id: str | None = None
 ) -> bool:
     params = {"e": edge_id, "k": idempotent_key, "w": worker_id}
-    async with get_session() as s:
-        result = await s.execute(text(
+    async with auto_tx():
+        result = await current_session().execute(text(
             "UPDATE runtime_inflight "
             "SET state='succeeded', locked_until=NULL, worker_id=NULL, "
             "    updated_at=now() "
@@ -240,8 +241,8 @@ async def mark_failed(
     params = {
         "err": last_error[:8000], "e": edge_id, "k": idempotent_key, "w": worker_id,
     }
-    async with get_session() as s:
-        result = await s.execute(text(
+    async with auto_tx():
+        result = await current_session().execute(text(
             "UPDATE runtime_inflight "
             "SET state='failed', locked_until=NULL, worker_id=NULL, "
             "    last_error=:err, updated_at=now() "
@@ -278,7 +279,8 @@ async def delete_inflight(
             raise ValueError(
                 "edge_idempotent mode requires both edge_id and idempotent_key"
             )
-        async with get_session() as s:
+        async with auto_tx():
+            s = current_session()
             row = (await s.execute(text(
                 "SELECT state FROM runtime_inflight "
                 "WHERE edge_id=:e AND idempotent_key=:k"
@@ -293,13 +295,13 @@ async def delete_inflight(
                 "DELETE FROM runtime_inflight "
                 "WHERE edge_id=:e AND idempotent_key=:k AND state != 'succeeded'"
             ), {"e": edge_id, "k": idempotent_key})
-            await s.commit()
         return DeleteOutcome(deleted=1, skipped_succeeded=0)
 
     # by == "trace_id"
     if not trace_id:
         raise ValueError("trace_id mode requires trace_id")
-    async with get_session() as s:
+    async with auto_tx():
+        s = current_session()
         skipped = (await s.execute(text(
             "SELECT count(*) FROM runtime_inflight "
             "WHERE trace_id=:t AND state='succeeded'"
@@ -308,6 +310,5 @@ async def delete_inflight(
             "DELETE FROM runtime_inflight "
             "WHERE trace_id=:t AND state != 'succeeded'"
         ), {"t": trace_id})
-        await s.commit()
         deleted = result.rowcount or 0
     return DeleteOutcome(deleted=deleted, skipped_succeeded=int(skipped or 0))

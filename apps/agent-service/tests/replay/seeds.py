@@ -12,7 +12,7 @@ from datetime import datetime
 
 from sqlalchemy import text
 
-from app.data.session import get_session
+from app.data.tx import current_session, tx
 
 _NS = uuid.UUID("2f4c8e10-6a3b-4d59-9c7e-81b0a5d3e6f2")
 
@@ -36,7 +36,8 @@ DM_WITH_BEZHAI = fixed_id("conversation:dm-bezhai-akao")
 
 async def seed_household() -> None:
     """The three sisters' persona rows: their names in the world and who they are."""
-    async with get_session() as s:
+    async with tx():
+        s = current_session()
         for persona_id, (name, core) in SISTERS.items():
             await s.execute(
                 text(
@@ -50,7 +51,8 @@ async def seed_household() -> None:
 
 async def seed_akaos_phone() -> None:
     """Her bot, one private chat with bezhai, the bot present in it."""
-    async with get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_user (common_user_id, channel, display_name) VALUES "
@@ -96,7 +98,8 @@ async def bezhai_sends(
     with its store ``object``, ``file`` with ``key`` and ``meta.file_name``) in the private
     chat. ``summary`` is the ``content_text`` the projection would have written (text
     items verbatim, every other item as ``[kind]``)."""
-    async with get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message (common_message_id, channel, "

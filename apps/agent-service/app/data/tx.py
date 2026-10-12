@@ -1,9 +1,10 @@
 """Transactions over the business database — Phase 7d Gap 13.
 
-业务永远不直接拿 session。两个对外 API：
+``app.data`` 之外没有谁自己开 session。两个对外 API：
 
   - ``async with tx():``  — 表达「这几行原子」
-  - ``current_session()``  — ``app.data`` 内部（``persist`` 的读写原语、``queries`` 层）用；业务区禁止 import
+  - ``current_session()``  — ``app.data`` 内部（``persist`` 的读写原语、``queries`` 层）和框架
+    （``runtime`` 的 inflight / 死信审计、``messaging`` 的记录者）用；业务区禁止 import
 
 ``auto_tx()`` 是这些存储函数自己用的：在调用方的 tx 里就加入它（不开 SAVEPOINT），
 不在 tx 里就为这一次调用开一个。

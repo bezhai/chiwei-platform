@@ -42,12 +42,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Annotated
 
-from sqlalchemy import text
-
-from app.data.persist import insert_append, select_latest
+from app.data.persist import fetch_value, insert_append, select_latest
 from app.data.queries import find_persona
 from app.data.schema import Data, Key, Version, table_name
-from app.data.session import get_session
 from app.infra.cst_time import CST, now_cst, now_cst_iso
 from app.infra.cst_time import parse as parse_time
 
@@ -124,11 +121,7 @@ async def read_latest_review_written_at(
         f"WHERE lane = :lane AND persona_id = :persona_id "
         f"AND source = 'review' ORDER BY version DESC LIMIT 1"
     )
-    async with get_session() as s:
-        r = await s.execute(
-            text(sql), {"lane": lane, "persona_id": persona_id}
-        )
-        return r.scalar_one_or_none()
+    return await fetch_value(sql, lane=lane, persona_id=persona_id)
 
 
 def week_start_cst(now: datetime) -> datetime:

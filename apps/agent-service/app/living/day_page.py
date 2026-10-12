@@ -43,16 +43,14 @@ from datetime import date, datetime, time, timedelta
 from typing import Annotated
 
 from pydantic import field_validator
-from sqlalchemy import text
 
 from app.agent.context import AgentContext
 from app.agent.core import AgentConfig
 from app.agent.neutral import Message, Role
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
-from app.data.persist import insert_idempotent
+from app.data.persist import fetch_all, fetch_one, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
-from app.data.session import get_session
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST, dated_clock, now_cst
 from app.living.happening import own_line, read_her_happenings_between
@@ -229,14 +227,8 @@ async def read_day_page(
         f"SELECT * FROM {_TABLE} WHERE lane = :lane "
         f"AND persona_id = :persona_id AND day = :day LIMIT 1"
     )
-    async with get_session() as s:
-        result = await s.execute(
-            text(sql), {"lane": lane, "persona_id": persona_id, "day": day}
-        )
-        row = result.mappings().first()
-    if row is None:
-        return None
-    return LivingDayPage(**{k: row[k] for k in LivingDayPage.model_fields})
+    row = await fetch_one(sql, lane=lane, persona_id=persona_id, day=day)
+    return None if row is None else from_row(LivingDayPage, row)
 
 
 async def read_day_page_before(
@@ -257,14 +249,8 @@ async def read_day_page_before(
         f"AND persona_id = :persona_id AND day < :day "
         f"ORDER BY day DESC LIMIT 1"
     )
-    async with get_session() as s:
-        result = await s.execute(
-            text(sql), {"lane": lane, "persona_id": persona_id, "day": day}
-        )
-        row = result.mappings().first()
-    if row is None:
-        return None
-    return LivingDayPage(**{k: row[k] for k in LivingDayPage.model_fields})
+    row = await fetch_one(sql, lane=lane, persona_id=persona_id, day=day)
+    return None if row is None else from_row(LivingDayPage, row)
 
 
 async def read_day_pages_between(
@@ -290,21 +276,8 @@ async def read_day_pages_between(
         f"AND persona_id = :persona_id AND day >= :since AND day < :until "
         f"ORDER BY day ASC"
     )
-    async with get_session() as s:
-        result = await s.execute(
-            text(sql),
-            {
-                "lane": lane,
-                "persona_id": persona_id,
-                "since": since,
-                "until": until,
-            },
-        )
-        rows = result.mappings().all()
-    return [
-        LivingDayPage(**{k: row[k] for k in LivingDayPage.model_fields})
-        for row in rows
-    ]
+    rows = await fetch_all(sql, lane=lane, persona_id=persona_id, since=since, until=until)
+    return [from_row(LivingDayPage, row) for row in rows]
 
 
 def build_day_page_runner() -> AgentRunner:

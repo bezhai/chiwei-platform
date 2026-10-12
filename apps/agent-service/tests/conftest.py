@@ -5,6 +5,7 @@
 - 缓存清理（autouse）
 - Langfuse mock
 - model_info 工厂
+- ``real_pg_required``：没有 docker 时让要真 Postgres 的用例红，不跳过
 """
 
 import sys
@@ -102,6 +103,43 @@ async def app_host(monkeypatch):
     yield start
     for host in reversed(hosts):
         await host.stop()
+
+
+# ---------------------------------------------------------------------------
+# real_pg_required — 没有真 Postgres 就红，不跳过
+# ---------------------------------------------------------------------------
+# ``test_db_dsn``（tests/runtime/conftest.py）在 docker 不可用时统一 ``pytest.skip``，对大多数
+# 套件是对的。但有些用例验的东西只在真库上成立：她的记录的读写契约（提交序、收件去重、到期
+# 消费，tests/living）、存储的事务边界和按提交序取号（tests/data）、行为回放
+# （tests/replay）、App 启动后建出来的表（tests/apps）。这些静默跳过之后套件绿着过去，等于
+# 没有门禁，所以它们的 fixture 先要这一个，把"跳过"翻译成"炸"。
+def _docker_unavailable_reason() -> str | None:
+    """docker 不可用时给出原因；可用返回 ``None``。"""
+    try:
+        import docker as _docker
+    except Exception as exc:  # pragma: no cover - 依赖缺失路径
+        return f"docker SDK 装不上：{exc!r}"
+    try:
+        _docker.from_env().ping()
+    except Exception as exc:
+        return f"连不上 docker daemon：{exc!r}"
+    return None
+
+
+@pytest.fixture(scope="session")
+def real_pg_required() -> None:
+    """没有真 pg 就让要它的用例红，而不是绿着跳过。"""
+    reason = _docker_unavailable_reason()
+    if reason is not None:
+        pytest.fail(
+            "这个用例需要真实 Postgres（testcontainers），但 "
+            f"{reason}\n"
+            "它验的是只在真库上成立的契约（提交序、事务边界、收件去重、到期消费），"
+            "静默 skip 会让整个套件绿着过去 —— 等于没有门禁。\n"
+            "起 docker 后重跑；确实要在无 docker 的机器上只跑纯函数部分，"
+            "显式点名：pytest tests/living/test_serial.py tests/living/test_only_her_own_records.py",
+            pytrace=False,
+        )
 
 
 # ---------------------------------------------------------------------------

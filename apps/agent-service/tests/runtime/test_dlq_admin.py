@@ -12,7 +12,8 @@ import pytest
 from sqlalchemy import text
 
 from app.capabilities.dlq import ClearInflightResult
-from app.data.session import get_session
+from app.data.persist import fetch_one
+from app.data.tx import current_session, tx
 
 pytestmark = pytest.mark.integration
 
@@ -46,13 +47,13 @@ async def test_inspect_returns_peeked_rows(dlq_admin_db: object) -> None:
 
 async def test_clear_idempotent_edge_succeeded_returns_409(dlq_admin_db: object) -> None:
     from app.nodes.dlq_admin import dlq_clear_idempotent_impl
-    async with get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(text(
             "INSERT INTO runtime_inflight (edge_id, idempotent_key, "
             "data_table, state, attempts) "
             "VALUES ('e1', 'k1', 't', 'succeeded', 1)"
         ))
-        await s.commit()
     body = {"by": "edge_idempotent", "edge_id": "e1", "idempotent_key": "k1"}
     resp = await dlq_clear_idempotent_impl(body, operator="op-x")
     assert resp["status_code"] == 409
@@ -61,14 +62,14 @@ async def test_clear_idempotent_edge_succeeded_returns_409(dlq_admin_db: object)
 
 async def test_clear_idempotent_trace_skips_succeeded(dlq_admin_db: object) -> None:
     from app.nodes.dlq_admin import dlq_clear_idempotent_impl
-    async with get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(text(
             "INSERT INTO runtime_inflight (edge_id, idempotent_key, "
             "data_table, state, attempts, trace_id) "
             "VALUES ('e1', 'k1', 't', 'succeeded', 1, 'trA'),"
             "       ('e2', 'k2', 't', 'failed', 1, 'trA')"
         ))
-        await s.commit()
     body = {"by": "trace_id", "trace_id": "trA"}
     resp = await dlq_clear_idempotent_impl(body, operator="op-x")
     assert resp["deleted"] == 1
@@ -175,11 +176,12 @@ def _dlq_msg(payload: str, origin_queue: str) -> object:
 
 
 async def _last_audit_row() -> dict:
-    async with get_session() as s:
-        return dict((await s.execute(text(
-            "SELECT status, recovery_hint, requeued_count FROM runtime_dlq_audit "
-            "ORDER BY id DESC LIMIT 1"
-        ))).mappings().first())
+    row = await fetch_one(
+        "SELECT status, recovery_hint, requeued_count FROM runtime_dlq_audit "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    assert row is not None, "runtime_dlq_audit has no row"
+    return dict(row)
 
 
 async def test_requeue_resolves_the_channel_queue_for_a_partitioned_base(

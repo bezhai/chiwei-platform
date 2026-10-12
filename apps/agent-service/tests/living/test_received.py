@@ -12,11 +12,11 @@ import logging
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import text
 
 from app.agent.neutral import Message as Said
 from app.agent.neutral import Role
-from app.data import session as session_mod
+from app.data.persist import fetch_all, fetch_value, from_row
+from app.data.tx import current_session, tx
 from app.living import participants as participants_mod
 from app.living import received as received_mod
 from app.living.received import (
@@ -86,17 +86,13 @@ def _from(
 
 
 async def _stored(persona_id: str = "ayana", *, lane: str = LANE) -> list[ReceivedMessage]:
-    async with session_mod.get_session() as s:
-        rows = (
-            await s.execute(
-                text(
-                    "SELECT * FROM data_received_message "
-                    "WHERE lane = :l AND persona_id = :p ORDER BY created_at"
-                ),
-                {"l": lane, "p": persona_id},
-            )
-        ).mappings().all()
-    return [ReceivedMessage(**{k: r[k] for k in ReceivedMessage.model_fields}) for r in rows]
+    rows = await fetch_all(
+        "SELECT * FROM data_received_message "
+        "WHERE lane = :l AND persona_id = :p ORDER BY created_at",
+        l=lane,
+        p=persona_id,
+    )
+    return [from_row(ReceivedMessage, r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -378,19 +374,14 @@ async def test_a_landing_that_fails_halfway_through_the_read_marks_keeps_none_of
     monkeypatch.setattr(received_mod, "insert_idempotent", real)
     assert marked == [messages[0].message_id], "前提没造出来：第一条要在失败之前写进那个事务"
 
-    async with session_mod.get_session() as s:
-        moments = (
-            await s.execute(
-                text("SELECT count(*) FROM data_life_moment WHERE lane = :l AND persona_id = :p"),
-                {"l": LANE, "p": "ayana"},
-            )
-        ).scalar_one()
-        reads = (
-            await s.execute(
-                text(f"SELECT count(*) FROM {received_mod._READ_TABLE} WHERE lane = :l"),
-                {"l": LANE},
-            )
-        ).scalar_one()
+    moments = await fetch_value(
+        "SELECT count(*) FROM data_life_moment WHERE lane = :l AND persona_id = :p",
+        l=LANE,
+        p="ayana",
+    )
+    reads = await fetch_value(
+        f"SELECT count(*) FROM {received_mod._READ_TABLE} WHERE lane = :l", l=LANE
+    )
     assert (moments, reads) == (0, 0), "这一轮没落地，可它的记录或者看过的记录留下了"
 
     await _her_round(_at(21, 31))
@@ -437,7 +428,8 @@ async def _named_in_the_persona_table(living_db, monkeypatch) -> None:
         await conn.run_sync(
             lambda c: Base.metadata.create_all(c, tables=[BotPersona.__table__])
         )
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         for persona_id, name in _NAMES.items():
             s.add(
                 BotPersona(
@@ -476,18 +468,13 @@ async def test_world_reaches_her_by_name_and_a_resend_is_stored_once(
     ]
 
     async def stored() -> list[str]:
-        async with session_mod.get_session() as s:
-            return list(
-                (
-                    await s.execute(
-                        text(
-                            "SELECT persona_id FROM data_received_message "
-                            "WHERE lane = :l AND message_id = :m"
-                        ),
-                        {"l": living_lane(), "m": delivery.message_id},
-                    )
-                ).scalars()
-            )
+        rows = await fetch_all(
+            "SELECT persona_id FROM data_received_message "
+            "WHERE lane = :l AND message_id = :m",
+            l=living_lane(),
+            m=delivery.message_id,
+        )
+        return [r["persona_id"] for r in rows]
 
     await eventually(stored)
     resent = await send(

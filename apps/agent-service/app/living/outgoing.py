@@ -56,15 +56,13 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated
 
 from pydantic import field_validator
-from sqlalchemy import text
 
 from app.data.ordered import insert_in_commit_order
-from app.data.persist import insert_append
+from app.data.persist import fetch_all, fetch_one, from_row, insert_append
 from app.data.schema import CommitOrder, Data, Key, table_name
-from app.data.session import get_session
 from app.data.tx import tx
 from app.infra.cst_time import dated_clock
 from app.living.participants import WORLD, residents
@@ -337,8 +335,8 @@ async def unsent(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
         f"ORDER BY m.seq"
     )
     return [
-        OutgoingMessage(**{k: row[k] for k in OutgoingMessage.model_fields})
-        for row in await _rows(sql, lane=lane, persona_id=persona_id)
+        from_row(OutgoingMessage, row)
+        for row in await fetch_all(sql, lane=lane, persona_id=persona_id)
     ]
 
 
@@ -400,10 +398,8 @@ async def _latest_mark(*, lane: str, persona_id: str) -> OutgoingUpTo | None:
         f"SELECT * FROM {_UP_TO_TABLE} WHERE lane = :lane AND persona_id = :persona_id "
         f"ORDER BY happening_seq DESC, whereabouts_seq DESC LIMIT 1"
     )
-    rows = await _rows(sql, lane=lane, persona_id=persona_id)
-    if not rows:
-        return None
-    return OutgoingUpTo(**{k: rows[0][k] for k in OutgoingUpTo.model_fields})
+    row = await fetch_one(sql, lane=lane, persona_id=persona_id)
+    return None if row is None else from_row(OutgoingUpTo, row)
 
 
 async def _starting_mark(*, lane: str, persona_id: str) -> OutgoingUpTo:
@@ -414,7 +410,7 @@ async def _starting_mark(*, lane: str, persona_id: str) -> OutgoingUpTo:
         f"(SELECT COALESCE(MAX(seq), 0) FROM {_WHEREABOUTS_TABLE} "
         f"WHERE lane = :lane AND persona_id = :persona_id) AS whereabouts_seq"
     )
-    (row,) = await _rows(sql, lane=lane, persona_id=persona_id)
+    (row,) = await fetch_all(sql, lane=lane, persona_id=persona_id)
     return OutgoingUpTo(lane=lane, persona_id=persona_id, **row)
 
 
@@ -426,11 +422,8 @@ async def _her_happenings_after(
         f"SELECT * FROM {_HAPPENING_TABLE} "
         f"WHERE lane = :lane AND actor = :persona_id AND seq > :after ORDER BY seq"
     )
-    rows = await _rows(sql, lane=lane, persona_id=persona_id, after=after)
-    return [
-        (row["created_at"], Happening(**{k: row[k] for k in Happening.model_fields}))
-        for row in rows
-    ]
+    rows = await fetch_all(sql, lane=lane, persona_id=persona_id, after=after)
+    return [(row["created_at"], from_row(Happening, row)) for row in rows]
 
 
 async def _her_whereabouts_after(
@@ -446,18 +439,9 @@ async def _her_whereabouts_after(
         f"WHERE lane = :lane AND persona_id = :persona_id AND seq <= :after "
         f"ORDER BY seq DESC LIMIT 1"
     )
-    rows = await _rows(after_sql, lane=lane, persona_id=persona_id, after=after)
-    earlier = await _rows(before_sql, lane=lane, persona_id=persona_id, after=after)
-
-    def whereabouts(row: Any) -> Whereabouts:
-        return Whereabouts(**{k: row[k] for k in Whereabouts.model_fields})
-
+    rows = await fetch_all(after_sql, lane=lane, persona_id=persona_id, after=after)
+    earlier = await fetch_one(before_sql, lane=lane, persona_id=persona_id, after=after)
     return (
-        [(row["created_at"], whereabouts(row)) for row in rows],
-        whereabouts(earlier[0]) if earlier else None,
+        [(row["created_at"], from_row(Whereabouts, row)) for row in rows],
+        None if earlier is None else from_row(Whereabouts, earlier),
     )
-
-
-async def _rows(sql: str, **params: Any) -> list[Any]:
-    async with get_session() as s:
-        return list((await s.execute(text(sql), params)).mappings().all())

@@ -37,7 +37,7 @@ import pytest
 from sqlalchemy import text
 
 from app.capabilities._errors import CapabilityTimeout
-from app.data.session import get_session
+from app.data.tx import current_session, tx
 from app.infra.cst_time import CST, now_cst
 from app.living.nudge import nudge_once
 from tests.replay import seeds
@@ -71,7 +71,8 @@ async def _her_household_is_up(replay) -> None:
 
 async def _film_club_group() -> None:
     """A group her bot is in, with 小林 in it. Not in ``seeds``: only the group scenario reads it."""
-    async with get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_user (common_user_id, channel, display_name) VALUES "
@@ -100,7 +101,8 @@ async def _kobayashi_says_in_group(
     words: str, *, at: datetime, name: str, names_her: bool
 ) -> None:
     """小林 writes in the group, naming her bot or not (what lark-service would have stored)."""
-    async with get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message (common_message_id, channel, "

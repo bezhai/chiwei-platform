@@ -11,9 +11,8 @@ import datetime as dt
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import text
 
-from app.data import session as session_mod
+from app.data.persist import fetch_all, from_row
 from app.living import moment as moment_mod
 from app.living import outgoing as outgoing_mod
 from app.living.happening import record_happening
@@ -96,14 +95,10 @@ async def started(moment_db, post):  # noqa: F811 — 形参名就是 fixture �
 
 
 async def _results() -> list[OutgoingResult]:
-    async with session_mod.get_session() as s:
-        rows = (
-            await s.execute(
-                text(f"SELECT * FROM {outgoing_mod._RESULT_TABLE} WHERE lane = :l"),
-                {"l": LANE},
-            )
-        ).mappings().all()
-    return [OutgoingResult(**{k: r[k] for k in OutgoingResult.model_fields}) for r in rows]
+    rows = await fetch_all(
+        f"SELECT * FROM {outgoing_mod._RESULT_TABLE} WHERE lane = :l", l=LANE
+    )
+    return [from_row(OutgoingResult, r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -825,22 +820,12 @@ async def _delivered_to() -> list[str]:
 
 async def _composed() -> list:
     """她要发的消息，全部（有没有结果都算），按先后。"""
-    async with session_mod.get_session() as s:
-        rows = (
-            await s.execute(
-                text(
-                    f"SELECT * FROM {outgoing_mod._MESSAGE_TABLE} "
-                    f"WHERE lane = :l ORDER BY persona_id, seq"
-                ),
-                {"l": LANE},
-            )
-        ).mappings().all()
-    return [
-        outgoing_mod.OutgoingMessage(
-            **{k: r[k] for k in outgoing_mod.OutgoingMessage.model_fields}
-        )
-        for r in rows
-    ]
+    rows = await fetch_all(
+        f"SELECT * FROM {outgoing_mod._MESSAGE_TABLE} "
+        f"WHERE lane = :l ORDER BY persona_id, seq",
+        l=LANE,
+    )
+    return [from_row(outgoing_mod.OutgoingMessage, r) for r in rows]
 
 
 @pytest.mark.integration
@@ -904,33 +889,24 @@ async def test_a_round_cancelled_while_a_send_is_in_flight_loses_nothing_and_dou
 
 async def _marks(persona: str = "akao") -> list[tuple[int, int]]:
     """她每一次"讲到哪了"，按先后。"""
-    async with session_mod.get_session() as s:
-        rows = (
-            await s.execute(
-                text(
-                    f"SELECT happening_seq, whereabouts_seq FROM {outgoing_mod._UP_TO_TABLE} "
-                    f"WHERE lane = :l AND persona_id = :p "
-                    f"ORDER BY happening_seq, whereabouts_seq"
-                ),
-                {"l": LANE, "p": persona},
-            )
-        ).all()
-    return [tuple(r) for r in rows]
+    rows = await fetch_all(
+        f"SELECT happening_seq, whereabouts_seq FROM {outgoing_mod._UP_TO_TABLE} "
+        f"WHERE lane = :l AND persona_id = :p "
+        f"ORDER BY happening_seq, whereabouts_seq",
+        l=LANE,
+        p=persona,
+    )
+    return [(r["happening_seq"], r["whereabouts_seq"]) for r in rows]
 
 
 async def _her_seqs(table: str, persona_column: str, persona: str = "akao") -> list[int]:
-    async with session_mod.get_session() as s:
-        return list(
-            (
-                await s.execute(
-                    text(
-                        f"SELECT seq FROM {table} "
-                        f"WHERE lane = :l AND {persona_column} = :p ORDER BY seq"
-                    ),
-                    {"l": LANE, "p": persona},
-                )
-            ).scalars()
-        )
+    rows = await fetch_all(
+        f"SELECT seq FROM {table} "
+        f"WHERE lane = :l AND {persona_column} = :p ORDER BY seq",
+        l=LANE,
+        p=persona,
+    )
+    return [r["seq"] for r in rows]
 
 
 @pytest.mark.integration

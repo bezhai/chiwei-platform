@@ -30,7 +30,7 @@ from datetime import datetime
 
 import pytest
 
-import app.data.session as session_mod
+from app.data.tx import current_session, tx
 from app.infra.cst_time import CST
 from app.living.persona import (
     PersonaVersion,
@@ -70,7 +70,8 @@ async def _seed_bot_persona(
 ) -> None:
     from app.data.models import BotPersona
 
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         s.add(
             BotPersona(
                 persona_id=persona_id,

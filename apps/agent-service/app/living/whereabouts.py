@@ -12,11 +12,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import text
-
 from app.data.ordered import insert_in_commit_order
+from app.data.persist import fetch_one, from_row
 from app.data.schema import table_name
-from app.data.session import get_session
 from app.living.records import Whereabouts
 
 _TABLE = table_name(Whereabouts)
@@ -61,11 +59,5 @@ async def current_whereabouts(
         f"WHERE lane = :lane AND persona_id = :persona_id "
         f"ORDER BY seq DESC LIMIT 1"
     )
-    async with get_session() as s:
-        result = await s.execute(
-            text(sql), {"lane": lane, "persona_id": persona_id}
-        )
-        row = result.mappings().first()
-    if row is None:
-        return None
-    return Whereabouts(**{k: row[k] for k in Whereabouts.model_fields})
+    row = await fetch_one(sql, lane=lane, persona_id=persona_id)
+    return None if row is None else from_row(Whereabouts, row)

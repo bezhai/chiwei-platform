@@ -54,15 +54,12 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from sqlalchemy import text
-
-from app.data.persist import insert_append
+from app.data.persist import fetch_all, from_row, insert_append
 from app.data.queries.messages import (
     find_messages_by_outbound_ids,
     find_recall_state_by_outbound_ids,
 )
 from app.data.schema import Data, Key, table_name
-from app.data.session import get_session
 from app.infra.cst_time import CST
 from app.living.mouth import SpokenOutbound
 from app.living.records import living_lane
@@ -125,11 +122,7 @@ class LandingTick(Data):
 
 async def _pending(sql: str, *, lane: str) -> list[SpokenOutbound]:
     """这条泳道上某一份待办（两条 SELECT 的形状一样，只有 WHERE 不同）。"""
-    async with get_session() as s:
-        rows = (await s.execute(text(sql), {"lane": lane})).mappings().all()
-    return [
-        SpokenOutbound(**{k: r[k] for k in SpokenOutbound.model_fields}) for r in rows
-    ]
+    return [from_row(SpokenOutbound, r) for r in await fetch_all(sql, lane=lane)]
 
 
 def _by_outbound_uuid(

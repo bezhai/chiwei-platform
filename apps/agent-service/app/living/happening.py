@@ -25,11 +25,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import text
-
 from app.data.ordered import insert_in_commit_order
+from app.data.persist import fetch_all, from_row
 from app.data.schema import table_name
-from app.data.session import get_session
 from app.living.participants import residents
 from app.living.records import (
     KIND_SPEECH,
@@ -93,15 +91,8 @@ async def read_her_happenings_between(
         f"AND occurred_at >= :since AND occurred_at < :until "
         f"ORDER BY seq ASC"
     )
-    async with get_session() as s:
-        result = await s.execute(
-            text(sql),
-            {"lane": lane, "actor": persona_id, "since": since, "until": until},
-        )
-        rows = result.mappings().all()
-    return [
-        Happening(**{k: row[k] for k in Happening.model_fields}) for row in rows
-    ]
+    rows = await fetch_all(sql, lane=lane, actor=persona_id, since=since, until=until)
+    return [from_row(Happening, row) for row in rows]
 
 
 # ---------------------------------------------------------------------------

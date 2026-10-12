@@ -1,4 +1,4 @@
-"""Append-only persistence primitives for Data rows.
+"""Append-only persistence primitives for Data rows, and the reads everyone else runs.
 
 Three operations, deliberately minimal:
 
@@ -13,6 +13,12 @@ Three operations, deliberately minimal:
     contract.
   - :func:`select_latest` — newest version per key using ``DISTINCT ON``.
 
+Reads whose shape those do not cover (``MAX(seq)``, ``ORDER BY … LIMIT``, time windows,
+``NOT EXISTS`` joins) keep their own SQL and run it through :func:`fetch_all`,
+:func:`fetch_one` or :func:`fetch_value`; :func:`from_row` turns a row read that way into its
+record. Code outside :mod:`app.data` never opens a session: what it decides is the SQL and,
+with ``async with tx():``, which statements share a transaction.
+
 :func:`serialise_writers` is the lock both :func:`insert_append` and
 :func:`app.data.ordered.insert_in_commit_order` take, so "writers on this key take turns" has
 one definition.
@@ -20,7 +26,8 @@ one definition.
 Each of them runs in the caller's open :func:`app.data.tx.tx` when there is one, so several writes
 land together by running inside one ``async with tx():``, and in a transaction of its own
 otherwise. Joining goes through :func:`app.data.tx.auto_tx`, which adds no SAVEPOINT: a storage
-call inside a caller's transaction is part of that transaction, nothing more.
+call inside a caller's transaction is part of that transaction, nothing more. A read inside the
+caller's transaction sees that transaction's own writes.
 
 The dedup_hash is a sha256 over the ``Key`` columns, serialized
 via ``json.dumps(sort_keys=True, default=str)``. The class name is *not*
@@ -32,11 +39,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from functools import cache
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic import TypeAdapter
-from sqlalchemy import text
+from sqlalchemy import RowMapping, text
 
 from app.data.schema import (
     Data,
@@ -46,6 +54,8 @@ from app.data.schema import (
     version_field,
 )
 from app.data.tx import auto_tx, current_session
+
+_Record = TypeVar("_Record", bound=Data)
 
 
 def _jsonb_columns(cls: type[Data]) -> frozenset[str]:
@@ -315,9 +325,43 @@ async def select_latest(
         f"SELECT DISTINCT ON ({', '.join(keys)}) * FROM {table} "
         f"WHERE {where} ORDER BY {order}"
     )
+    row = await fetch_one(sql, **keys_values)
+    return None if row is None else from_row(cls, row)
+
+
+async def fetch_all(sql: str, /, **params: Any) -> list[RowMapping]:
+    """Every row ``sql`` returns, with ``params`` bound by name (``:name`` in the SQL).
+
+    Runs in the caller's open ``tx()`` when there is one (no SAVEPOINT), else in a transaction
+    of its own, as the writes do.
+    """
     async with auto_tx():
-        r = await current_session().execute(text(sql), keys_values)
-        row = r.mappings().first()
-        if not row:
-            return None
-        return cls(**{k: row[k] for k in cls.model_fields})
+        return list((await current_session().execute(text(sql), params)).mappings().all())
+
+
+async def fetch_one(sql: str, /, **params: Any) -> RowMapping | None:
+    """The first row ``sql`` returns, or ``None`` when it returns none. Further rows are
+    ignored, so a query that means "the latest" says so with ``ORDER BY … LIMIT 1``.
+
+    Transaction as :func:`fetch_all`.
+    """
+    async with auto_tx():
+        return (await current_session().execute(text(sql), params)).mappings().first()
+
+
+async def fetch_value(sql: str, /, **params: Any) -> Any:
+    """The first column of the first row ``sql`` returns (``MAX(…)``, ``count(*)``, one
+    column of the latest row), or ``None`` when it returns no row.
+
+    Transaction as :func:`fetch_all`.
+    """
+    async with auto_tx():
+        return (await current_session().execute(text(sql), params)).scalar()
+
+
+def from_row(cls: type[_Record], row: Mapping[str, Any]) -> _Record:
+    """The ``cls`` record a row read from its table holds: each of the record's fields from the
+    column of the same name. Columns the record does not declare (``dedup_hash``,
+    ``created_at``, the extra columns of a join) are left out; a field with no column raises
+    ``KeyError``. Reads nothing itself."""
+    return cls(**{k: row[k] for k in cls.model_fields})

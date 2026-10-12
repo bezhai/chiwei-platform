@@ -78,11 +78,8 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated
 
-from sqlalchemy import text
-
-from app.data.persist import insert_append
+from app.data.persist import fetch_value, insert_append
 from app.data.schema import Data, Key, table_name
-from app.data.session import get_session
 from app.infra.cst_time import now_cst
 from app.living.moment import (
     LifeMoment,
@@ -201,10 +198,7 @@ async def _begun_not_landed(*, lane: str, persona_id: str) -> str | None:
         f"WHERE lane = :lane AND persona_id = :persona_id "
         f"ORDER BY created_at DESC LIMIT 1"
     )
-    async with get_session() as s:
-        nudged_by = (
-            await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
-        ).scalar_one_or_none()
+    nudged_by = await fetch_value(sql, lane=lane, persona_id=persona_id)
     if nudged_by is None or await _woke_her(
         lane=lane, persona_id=persona_id, nudged_by=nudged_by
     ):

@@ -18,7 +18,6 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-import app.data.session as session_mod
 from app.data.models import Base, CommonConversation, CommonMessage, CommonUser
 from app.data.queries.messages import (
     count_summons_since,
@@ -38,6 +37,7 @@ from app.data.queries.persona import (
     find_bot_user_ids_for_persona,
     find_conversations_with_persona_bot,
 )
+from app.data.tx import current_session, tx
 
 _CST = dt.timezone(dt.timedelta(hours=8))
 
@@ -113,7 +113,8 @@ async def bot_db(test_db):
 async def _conversation(
     conv: uuid.UUID, *, scope: str, title: str | None, is_active: bool = True
 ) -> None:
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_conversation "
@@ -131,7 +132,8 @@ async def _bot(
     common_user_id: uuid.UUID | None = None,
     is_active: bool = True,
 ) -> None:
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO bot_config "
@@ -148,7 +150,8 @@ async def _bot(
 
 
 async def _present(conv: uuid.UUID, bot_name: str, *, is_active: bool = True) -> None:
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_bot_presence "
@@ -162,7 +165,8 @@ async def _present(conv: uuid.UUID, bot_name: str, *, is_active: bool = True) ->
 async def _user(
     uid: uuid.UUID, *, display_name: str, is_owner: bool = False
 ) -> None:
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_user "
@@ -197,7 +201,8 @@ async def _message(
     else:
         sender_id = str(sender) if sender is not None else None
 
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message "
@@ -315,7 +320,8 @@ async def test_missing_conversation_title_reads_as_empty_not_null(bot_db):
 
 async def test_a_bot_removed_from_the_group_takes_the_conversation_away(bot_db):
     await _seed_her_phone()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_bot_presence SET is_active = false "
@@ -329,7 +335,8 @@ async def test_a_bot_removed_from_the_group_takes_the_conversation_away(bot_db):
 
 async def test_an_archived_conversation_is_not_on_her_phone(bot_db):
     await _seed_her_phone()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_conversation SET is_active = false "

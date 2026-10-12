@@ -15,8 +15,8 @@
   * 嵌进 SQL 的那一处，表名后面紧跟（可选的别名和）``WHERE``；``WHERE`` 顶层没有 ``OR``，
     并且有一条顶层 ``AND`` 条件恰好是"这一行属于谁的那一列 = 一个绑定参数"。``WHERE`` 里
     夹着别的 f-string 值、注释、引号，算认不出来。
-  * 类本身只能当类型注解、构造一行、取 ``model_fields``；交给任何函数（比如
-    :func:`app.runtime.query.query`）都算认不出来。写一行是把构造好的那一行交出去
+  * 类本身只能当类型注解、构造一行，或者交给 :data:`_ROW_TO_RECORD` 里列出来的函数；交给别的
+    函数（比如 :func:`app.runtime.query.query`）都算认不出来。写一行是把构造好的那一行交出去
     （:func:`app.data.ordered.insert_in_commit_order`），类不经手。那里面的读只有两处：取号的
     ``MAX(seq)``，拿到的是一个号，不是谁的内容；重放撞上自然键时取回自然键相同的那一行，
     也就是她这一行早先落下的那份。
@@ -36,6 +36,7 @@ from typing import NamedTuple
 
 import pytest
 
+from app.data.persist import from_row
 from app.data.schema import table_name
 from app.living.records import Happening, Whereabouts
 
@@ -53,6 +54,13 @@ _LITERAL_TABLE = re.compile(
     "|".join(rf"\b{re.escape(table_name(cls))}\b" for cls in (Happening, Whereabouts)),
     re.IGNORECASE,
 )
+
+# 把类交给这些函数不是读：只有列在这里的才放行，每一项写明理由。
+_ROW_TO_RECORD = {
+    _qualified(from_row): (
+        "把一条已经由筛到一个人的查询读出来的行变成一条记录；它自己什么都不读"
+    ),
+}
 
 # 这几处一定在读这两张表；一处都扫不到说明扫描本身失效了（比如表名换了绑定方式），
 # 那时候这条门禁绿着等于没有。
@@ -267,16 +275,12 @@ def _class_use(
     parent = parents.get(node)
     if isinstance(parent, ast.Call) and parent.func is node:
         return  # 构造一行
-    if isinstance(parent, ast.Attribute) and parent.attr == "model_fields":
-        return
-    if (
-        isinstance(parent, ast.Call)
-        and parent.args
-        and parent.args[0] is node
-        and _table_of(parent, module) is not None
-    ):
-        yield from _table_use(parent, cls, module, parents, tables)
-        return
+    if isinstance(parent, ast.Call) and parent.args and parent.args[0] is node:
+        if _table_of(parent, module) is not None:
+            yield from _table_use(parent, cls, module, parents, tables)
+            return
+        if module.resolve(parent.func) in _ROW_TO_RECORD:
+            return
     shown = ast.unparse(parent if isinstance(parent, ast.expr) else node)
     yield node.lineno, False, f"{cls} 用在扫描认不出来的地方：{shown}"
 
@@ -434,6 +438,7 @@ from app.living import records
 from app.living.records import Happening, Whereabouts
 from app.living.records import Happening as Deed
 from app.data.ordered import insert_in_commit_order
+from app.data.persist import from_row
 from app.data.schema import table_name
 from app.runtime.query import query
 
@@ -521,6 +526,18 @@ def _violations(body: str, **others: str) -> list[str]:
             id="class-handed-to-the-writer",
         ),
         pytest.param(
+            # 行变记录只认 from_row 那一种写法；照着它的样子自己拼，扫描不替它担保
+            "def mine(rows):\n"
+            "    return [Happening(**{k: r[k] for k in Happening.model_fields}) for r in rows]\n",
+            id="row-to-record-by-hand",
+        ),
+        pytest.param(
+            # 类只能是第一个参数：那是 from_row 要变成的那种记录
+            "def mine(row):\n"
+            "    return from_row(row, Happening)\n",
+            id="class-as-another-argument-of-from-row",
+        ),
+        pytest.param(
             'SQL = f"SELECT * FROM {_TABLE} WHERE actor = :me OR lane = :lane"\n',
             id="or-beside-the-owner-filter",
         ),
@@ -572,6 +589,22 @@ def test_the_scan_flags_every_access_it_cannot_show_is_narrowed(body):
     assert _violations(body) != []
 
 
+def test_the_scan_lets_through_only_the_storage_from_row_not_its_name():
+    assert (
+        _scan(
+            {
+                "app/living/reader.py": (
+                    "from app.living.records import Happening\n"
+                    "from app.living.mine import from_row\n"
+                    "def mine(row):\n"
+                    "    return from_row(Happening, row)\n"
+                )
+            }
+        ).violations
+        != []
+    )
+
+
 def test_the_scan_follows_a_table_binding_imported_from_another_module():
     assert (
         _violations(
@@ -618,8 +651,8 @@ def test_the_scan_follows_a_table_binding_imported_from_another_module():
             '"""data_happening 只给她自己读。"""\n'
             "async def keep(lane: str, rows: list[dict]) -> list[Happening]:\n"
             '    await insert_in_commit_order(Happening(lane=lane, happening_id="h"))\n'
-            "    return [Happening(**{k: r[k] for k in Happening.model_fields}) for r in rows]\n",
-            id="type-constructor-fields-write",
+            "    return [from_row(Happening, r) for r in rows]\n",
+            id="type-constructor-row-to-record-write",
         ),
     ],
 )

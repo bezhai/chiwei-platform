@@ -292,10 +292,8 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
     """跑一遍她的收件处理：落一行，一次模型都不调，也不推进她的任何一轮。"""
     from types import SimpleNamespace
 
-    from sqlalchemy import text
-
     from app.capabilities.agent import AgentRunner
-    from app.data.session import get_session
+    from app.data.persist import fetch_all
     from app.living import moment as moment_mod
     from app.living import participants as participants_mod
     from app.living.received import open_inboxes
@@ -324,12 +322,12 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
             new_message(sender="world", recipient=name, body="窗外下起了雨。", kind=Kind.MESSAGE)
         )
 
-    async with get_session() as s:
-        stored = (
-            await s.execute(
-                text("SELECT persona_id FROM data_received_message ORDER BY persona_id")
-            )
-        ).scalars().all()
+    stored = [
+        r["persona_id"]
+        for r in await fetch_all(
+            "SELECT persona_id FROM data_received_message ORDER BY persona_id"
+        )
+    ]
     assert stored == sorted(names)
 
 

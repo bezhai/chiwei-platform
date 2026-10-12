@@ -20,7 +20,7 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from app.data import session as session_mod
+from app.data.tx import current_session, tx
 from app.domain.chat_dataflow import PROACTIVE_MESSAGE_ID_PREFIX
 from app.living.mouth import _SEND_CHECK_TIMEOUT_S, send_message
 from app.living.records import MEDIUM_GROUP_CHAT, MEDIUM_PHONE
@@ -55,7 +55,8 @@ async def _somebody_called_her(
 
     判据跟 nudge 那条钟同一份，见 :mod:`app.living.whitelist`。
     """
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message (common_message_id, channel,"
@@ -88,7 +89,8 @@ async def mouth_db(living_db):
     出去。这几条消息不改变下面任何一条用例要验的东西 —— 她没看过它们，所以既不进她
     开口前读的那段上下文，也不影响出站的任何一样。
     """
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_user (common_user_id, channel, display_name) "
@@ -1128,7 +1130,8 @@ async def test_a_conversation_out_of_sight_is_refused_even_though_her_bot_is_in_
     （:func:`app.living.phone.reachable_conversations`），而不是"bot 还在的那些"。
     """
     quiet = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-nobody-calls-her")
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_conversation"
@@ -1173,7 +1176,8 @@ async def test_sending_checks_where_her_bot_is_right_now_not_the_settled_list(
         }
         assert str(_DM) in settled, "用例前提没成立：这条私聊本该在名单里"
 
-        async with session_mod.get_session() as s:
+        async with tx():
+            s = current_session()
             await s.execute(
                 text(
                     "DELETE FROM common_bot_presence"
@@ -1213,7 +1217,8 @@ async def test_she_can_still_answer_a_line_that_slid_out_of_the_window_mid_momen
         assert str(_DM) in settled, "用例前提没成立：这条私聊本该在名单里"
 
         # 把让它进名单的那条消息删掉 —— 现在重算的话它一档都够不着。
-        async with session_mod.get_session() as s:
+        async with tx():
+            s = current_session()
             await s.execute(
                 text(
                     "DELETE FROM common_message"

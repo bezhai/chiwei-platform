@@ -57,16 +57,14 @@ from datetime import datetime
 from typing import Annotated
 
 from pydantic import Field, field_validator
-from sqlalchemy import text
 
 # module-level 引入，测试从这里换替身（一程真跑起来要取字节 + 几轮模型调用）
 from app.agent.reading import run_reading_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
-from app.data.persist import insert_append, select_latest
+from app.data.persist import fetch_all, from_row, insert_append, select_latest
 from app.data.queries.messages import find_file_items_in_conversations
 from app.data.schema import Data, Key, Version, table_name
-from app.data.session import get_session
 from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
 from app.infra.cst_time import CST, to_cst_dated
@@ -274,11 +272,8 @@ async def everything_read_so_far(
         f"WHERE lane = :lane AND persona_id = :persona_id "
         f"ORDER BY attachment_id, ver DESC"
     )
-    async with get_session() as s:
-        rows = (
-            await s.execute(text(sql), {"lane": lane, "persona_id": persona_id})
-        ).mappings().all()
-    marks = [FileRead(**{k: r[k] for k in FileRead.model_fields}) for r in rows]
+    rows = await fetch_all(sql, lane=lane, persona_id=persona_id)
+    marks = [from_row(FileRead, r) for r in rows]
     return {m.attachment_id: m for m in marks}
 
 

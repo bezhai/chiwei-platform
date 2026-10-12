@@ -15,9 +15,8 @@ import datetime as dt
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import text
 
-from app.data.session import get_session
+from app.data.persist import fetch_all
 from app.living.happening import record_happening
 from app.living.records import MEDIUM_IN_PERSON
 
@@ -47,15 +46,12 @@ async def _say(
 
 async def _visible() -> list[str]:
     """此刻库里看得见的那几条，按提交序。"""
-    async with get_session() as s:
-        result = await s.execute(
-            text(
-                "SELECT happening_id FROM data_happening WHERE lane = :lane "
-                "ORDER BY seq"
-            ),
-            {"lane": LANE},
-        )
-        return [row[0] for row in result.all()]
+    rows = await fetch_all(
+        "SELECT happening_id FROM data_happening WHERE lane = :lane "
+        "ORDER BY seq",
+        lane=LANE,
+    )
+    return [row["happening_id"] for row in rows]
 
 
 # --------------------------------------------------------------------------

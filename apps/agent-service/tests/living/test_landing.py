@@ -31,8 +31,8 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from app.data import session as session_mod
 from app.data.persist import insert_append, select_latest
+from app.data.tx import current_session, tx
 from app.infra.cst_time import CST
 from app.living.landing import LandingTick, reconcile_landings, reconcile_recalls
 from app.living.mouth import STATE_CLAIMED, STATE_HANDED_OFF, SpokenOutbound
@@ -105,7 +105,8 @@ async def _the_channel_wrote(
     QQ 的行、加列之前的存量行都长这样）。
     """
     message_id = uuid.uuid4()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message "
@@ -132,7 +133,8 @@ async def _the_channel_wrote(
 
 async def _the_channel_recalled_it(message_id: uuid.UUID, *, at: dt.datetime) -> None:
     """投递方真把那一行撤掉之后填上 ``recalled_at``。**撤失败不填。**"""
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_message SET recalled_at = :at "

@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import text
 
-from app.data.session import get_session
+from app.data.persist import fetch_one
 from app.runtime.dlq_audit import (
     AuditAction,
     AuditStatus,
@@ -25,9 +24,9 @@ async def test_insert_and_update_status_round_trip(dlq_audit_db: object) -> None
     )
     assert audit_id > 0
     await update_audit_status(audit_id, AuditStatus.REQUEUED, requeued_count=1)
-    async with get_session() as s:
-        row = (await s.execute(text(
-            "SELECT status, requeued_count FROM runtime_dlq_audit WHERE id=:i"
-        ), {"i": audit_id})).mappings().first()
+    row = await fetch_one(
+        "SELECT status, requeued_count FROM runtime_dlq_audit WHERE id=:i",
+        i=audit_id,
+    )
     assert row["status"] == "requeued"
     assert row["requeued_count"] == 1

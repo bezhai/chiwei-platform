@@ -61,11 +61,9 @@ from datetime import datetime
 from typing import Annotated
 
 from pydantic import field_validator
-from sqlalchemy import text
 
-from app.data.persist import insert_append, select_latest
+from app.data.persist import fetch_all, from_row, insert_append, select_latest
 from app.data.schema import Data, Key, Version, table_name
-from app.data.session import get_session
 from app.infra.cst_time import CST
 from app.living.records import _require_aware
 
@@ -217,12 +215,8 @@ async def list_open_loose_ends(*, lane: str, persona_id: str) -> list[LooseEnd]:
         f"WHERE closed_at IS NULL "
         f"ORDER BY opened_at ASC, thread_id ASC"
     )
-    async with get_session() as s:
-        result = await s.execute(
-            text(sql), {"lane": lane, "persona_id": persona_id}
-        )
-        rows = result.mappings().all()
-    return [LooseEnd(**{k: row[k] for k in LooseEnd.model_fields}) for row in rows]
+    rows = await fetch_all(sql, lane=lane, persona_id=persona_id)
+    return [from_row(LooseEnd, row) for row in rows]
 
 
 async def rewrite_loose_ends(

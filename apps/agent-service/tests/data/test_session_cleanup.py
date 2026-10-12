@@ -20,12 +20,12 @@ import asyncio
 import time
 
 import pytest
-from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from app.data import dialect
 from app.data import session as session_mod
-from app.data.session import get_session
+from app.data.persist import fetch_value
+from app.data.tx import tx
 from tests.data.db_proxy import process_db_behind
 
 GRACE = 0.5
@@ -59,8 +59,7 @@ async def test_a_query_cut_by_an_outer_timeout_ends_within_the_grace_as_that_tim
 
     async def query_under_a_timeout():
         async with asyncio.timeout(0.3):
-            async with get_session() as s:
-                await s.execute(text("SELECT pg_sleep(5)"))
+            await fetch_value("SELECT pg_sleep(5)")
 
     task = asyncio.create_task(query_under_a_timeout())
     await _finished_within(task, 0.3 + GRACE + SLACK)
@@ -73,8 +72,7 @@ async def test_a_cancelled_query_ends_within_the_grace_as_cancelled(db):
     _proxy, engine = db
 
     async def query():
-        async with get_session() as s:
-            await s.execute(text("SELECT pg_sleep(5)"))
+        await fetch_value("SELECT pg_sleep(5)")
 
     task = asyncio.create_task(query())
     await asyncio.sleep(0.3)
@@ -94,8 +92,7 @@ async def test_a_statement_over_its_limit_is_stopped_by_the_database_itself(
     monkeypatch.setattr(session_mod, "STATEMENT_TIMEOUT_SECONDS", 0.3)
 
     async def slow_query():
-        async with get_session() as s:
-            await s.execute(text("SELECT pg_sleep(5)"))
+        await fetch_value("SELECT pg_sleep(5)")
 
     async with process_db_behind(test_db_dsn, monkeypatch) as (_proxy, engine):
         task = asyncio.create_task(slow_query())
@@ -110,10 +107,10 @@ async def test_when_replies_stop_coming_the_connection_limit_ends_it_as_a_timeou
     proxy, engine = db
 
     async def query_whose_reply_never_comes():
-        async with get_session() as s:
-            await s.execute(text("SELECT 1"))
+        async with tx():  # both statements on one connection: the second one's reply is lost
+            await fetch_value("SELECT 1")
             proxy.stall()
-            await s.execute(text("SELECT 2"))
+            await fetch_value("SELECT 2")
 
     task = asyncio.create_task(query_whose_reply_never_comes())
     await _finished_within(task, session_mod.COMMAND_TIMEOUT_SECONDS + GRACE + SLACK)

@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import text
 
 from app.data import dialect
-from app.data.session import get_session
+from app.data.persist import fetch_value
 from app.messaging import receiving
 from app.messaging.lifecycle import start_messaging
 from app.messaging.receiving import inbox
@@ -75,8 +75,7 @@ async def test_a_delivery_held_up_in_the_database_is_handed_back_at_its_deadline
         try:
             if message.body == HELD_UP and attempts[HELD_UP] == 1:
                 entered.set()
-                async with get_session() as s:
-                    await s.execute(text(f"SELECT pg_advisory_xact_lock({LOCK_KEY})"))
+                await fetch_value(f"SELECT pg_advisory_xact_lock({LOCK_KEY})")
             elif message.body == SLOW:
                 await asyncio.sleep(2.0)
         except asyncio.CancelledError:

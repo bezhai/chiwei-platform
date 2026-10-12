@@ -29,7 +29,7 @@ import re
 import pytest
 from sqlalchemy import text
 
-from app.data import session as session_mod
+from app.data.tx import current_session, tx
 from app.living.phone import (
     look_at_phone,
     look_through_your_phone,
@@ -194,7 +194,8 @@ async def test_a_group_name_cannot_carry_markup_into_the_conversation_list(
 ):
     """群名同理 —— 它在列表上待在 ``「」`` 里，不转义就能自己起一行。"""
     await _seed_world()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_conversation SET display_name = :t "
@@ -244,7 +245,8 @@ async def test_a_group_name_cannot_carry_markup_into_anything_she_reads(
     living_db, in_a_moment, pinned
 ):
     await _seed_world()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_conversation SET display_name = :t "
@@ -308,7 +310,8 @@ async def test_a_sender_name_and_a_group_name_stay_out_of_her_reading_list(
     from app.living.reading import look_for_something_to_read
 
     await _seed_world()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_conversation SET display_name = :t "

@@ -7,7 +7,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import text
 
-from app.data.session import get_session
+from app.data.persist import fetch_one
+from app.data.tx import current_session, tx
 from app.runtime.inflight import (
     claim_inflight,
     edge_id_for,
@@ -20,12 +21,13 @@ pytestmark = pytest.mark.integration
 
 
 async def _row(edge_id: str, idem_key: str) -> dict:
-    async with get_session() as s:
-        r = await s.execute(text(
-            "SELECT state, attempts, locked_until, worker_id, last_error, trace_id "
-            "FROM runtime_inflight WHERE edge_id=:e AND idempotent_key=:k"
-        ), {"e": edge_id, "k": idem_key})
-        return dict(r.mappings().one())
+    row = await fetch_one(
+        "SELECT state, attempts, locked_until, worker_id, last_error, trace_id "
+        "FROM runtime_inflight WHERE edge_id=:e AND idempotent_key=:k",
+        e=edge_id, k=idem_key,
+    )
+    assert row is not None, f"no runtime_inflight row for ({edge_id}, {idem_key})"
+    return dict(row)
 
 
 class TestEdgeIdHelper:
@@ -56,7 +58,8 @@ class TestClaimInflightFresh:
 
 class TestClaimInflightSucceededSkip:
     async def test_succeeded_returns_skip(self, inflight_db: object) -> None:
-        async with get_session() as s:
+        async with tx():
+            s = current_session()
             await s.execute(text(
                 "INSERT INTO runtime_inflight "
                 "(edge_id, idempotent_key, data_table, state, attempts) "
@@ -76,7 +79,8 @@ class TestClaimInflightLeaseLive:
         self, inflight_db: object
     ) -> None:
         future = datetime.now(UTC) + timedelta(minutes=5)
-        async with get_session() as s:
+        async with tx():
+            s = current_session()
             await s.execute(text(
                 "INSERT INTO runtime_inflight "
                 "(edge_id, idempotent_key, data_table, state, attempts, "
@@ -102,7 +106,8 @@ class TestClaimInflightLeaseExpired:
         self, inflight_db: object
     ) -> None:
         past = datetime.now(UTC) - timedelta(minutes=1)
-        async with get_session() as s:
+        async with tx():
+            s = current_session()
             await s.execute(text(
                 "INSERT INTO runtime_inflight "
                 "(edge_id, idempotent_key, data_table, state, attempts, "
@@ -125,7 +130,8 @@ class TestClaimInflightLeaseExpired:
 
 class TestClaimInflightFailedResume:
     async def test_failed_resumes_as_processing(self, inflight_db: object) -> None:
-        async with get_session() as s:
+        async with tx():
+            s = current_session()
             await s.execute(text(
                 "INSERT INTO runtime_inflight "
                 "(edge_id, idempotent_key, data_table, state, attempts, last_error) "
@@ -219,7 +225,8 @@ class TestMarkOnlyByTheHolder:
     async def test_a_stale_holder_cannot_mark_failed_over_a_success(
         self, inflight_db: object
     ) -> None:
-        async with get_session() as s:
+        async with tx():
+            s = current_session()
             await s.execute(text(
                 "INSERT INTO runtime_inflight "
                 "(edge_id, idempotent_key, data_table, state, attempts, worker_id) "

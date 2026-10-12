@@ -34,7 +34,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from app.data.session import get_session
+from app.data.tx import auto_tx, current_session
 from app.messaging.broker import lane_label
 from app.messaging.message import Message, SendFailed
 
@@ -60,10 +60,14 @@ async def record(
     reason: str | None = None,
     in_reply_to: str | None = None,
 ) -> None:
-    """追加一行并提交。写不进去抛 ``SendFailed``（带消息 id）。"""
+    """追加一行并提交。写不进去抛 ``SendFailed``（带消息 id）。
+
+    不在调用方的 ``tx()`` 里调用：在那里面这一行随调用方的事务提交，"交给 broker 之前表里已经
+    有这一行"就不成立了。
+    """
     try:
-        async with get_session() as session:
-            await session.execute(
+        async with auto_tx():
+            await current_session().execute(
                 text(
                     "INSERT INTO message_record (lane, message_id, kind, sender, "
                     "recipient, body, message_time, in_reply_to, outcome, reason) "
@@ -111,6 +115,6 @@ async def read_record(
         "FROM message_record WHERE " + " AND ".join(clauses) + " "
         "ORDER BY id DESC LIMIT :limit) latest ORDER BY id"
     )
-    async with get_session() as s:
-        rows = (await s.execute(text(sql), params)).mappings().all()
+    async with auto_tx():
+        rows = (await current_session().execute(text(sql), params)).mappings().all()
     return [{k: v for k, v in row.items() if k != "id"} for row in rows]

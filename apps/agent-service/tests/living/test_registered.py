@@ -438,7 +438,7 @@ async def test_a_row_written_before_the_column_existed_still_reads_back(living_d
 
     from sqlalchemy import text as _text
 
-    from app.data import session as session_mod
+    from app.data.tx import current_session, tx
     from app.living.loose_ends import LooseEnd
     from app.living.moment import (
         LifeMoment,
@@ -450,7 +450,8 @@ async def test_a_row_written_before_the_column_existed_still_reads_back(living_d
     for cls in (LooseEnd, LifeMoment):
         await migrate(cls, living_db)
 
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         # 模拟"这一行是加列之前写下的"：显式把新列写成 NULL。
         await s.execute(
             _text(
@@ -492,8 +493,8 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
 
     from sqlalchemy import text as _text
 
-    from app.data import session as session_mod
     from app.data.persist import insert_idempotent
+    from app.data.tx import current_session, tx
     from app.living.loose_ends import LooseEnd
     from app.living.moment import LifeMoment, latest_moment
     from tests.runtime.conftest import migrate
@@ -502,7 +503,8 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
     for cls in (LooseEnd, LifeMoment):
         await migrate(cls, living_db)
 
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         for hour, tag in ((14, "old-a"), (15, "old-b")):
             await s.execute(
                 _text(
@@ -554,10 +556,11 @@ async def test_a_happening_written_before_channel_id_existed_still_reads_back(
     """
     from sqlalchemy import text as _text
 
-    from app.data import session as session_mod
+    from app.data.tx import current_session, tx
     from app.living.snapshot import recent_own_happenings
 
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             _text(
                 "INSERT INTO data_happening "

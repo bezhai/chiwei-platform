@@ -95,14 +95,18 @@ from datetime import datetime
 from typing import Annotated
 
 from pydantic import Field, field_validator
-from sqlalchemy import text
 
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities.output_safety import audit_output
-from app.data.persist import insert_append, select_latest
+from app.data.persist import (
+    fetch_all,
+    fetch_one,
+    from_row,
+    insert_append,
+    select_latest,
+)
 from app.data.schema import Data, Key, Version, table_name
-from app.data.session import get_session
 from app.domain.chat_dataflow import (
     PROACTIVE_MESSAGE_ID_PREFIX,
     ChatResponseSegment,
@@ -233,13 +237,8 @@ async def latest_outbound(
         f"  ORDER BY lane, outbound_id, ver DESC"
         f") latest ORDER BY claimed_at DESC LIMIT 1"
     )
-    async with get_session() as s:
-        row = (
-            await s.execute(text(sql), {"lane": lane, "moment_id": moment_id})
-        ).mappings().first()
-    if row is None:
-        return None
-    return SpokenOutbound(**{k: row[k] for k in SpokenOutbound.model_fields})
+    row = await fetch_one(sql, lane=lane, moment_id=moment_id)
+    return None if row is None else from_row(SpokenOutbound, row)
 
 
 async def unsettled_outbound(
@@ -257,17 +256,8 @@ async def unsettled_outbound(
         f"  ORDER BY lane, outbound_id, ver DESC"
         f") latest WHERE state = :state ORDER BY claimed_at ASC"
     )
-    async with get_session() as s:
-        rows = (
-            await s.execute(
-                text(sql),
-                {"lane": lane, "persona_id": persona_id, "state": STATE_CLAIMED},
-            )
-        ).mappings().all()
-    return [
-        SpokenOutbound(**{k: r[k] for k in SpokenOutbound.model_fields})
-        for r in rows
-    ]
+    rows = await fetch_all(sql, lane=lane, persona_id=persona_id, state=STATE_CLAIMED)
+    return [from_row(SpokenOutbound, r) for r in rows]
 
 
 def _happening_id(outbound_id: str) -> str:

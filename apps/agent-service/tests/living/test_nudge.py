@@ -26,8 +26,8 @@ from sqlalchemy import text
 
 from app.agent.neutral import Message, Role
 from app.agent.runtime_context import agent_context
-from app.data import session as session_mod
-from app.data.tx import tx
+from app.data.persist import fetch_all, fetch_value, from_row
+from app.data.tx import current_session, tx
 from app.living.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
     LifeMoment,
@@ -63,7 +63,8 @@ async def nudge_db(living_db):
 
     for cls in (LooseEnd, LifeMoment, NudgeBegun):
         await migrate(cls, living_db)
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_user (common_user_id, channel, display_name) "
@@ -119,7 +120,8 @@ async def _incoming(
     """
     items = [{"kind": "text", "text": body}]
     mid = uuid.uuid4()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message "
@@ -200,17 +202,13 @@ def stub_life(monkeypatch):
 
 
 async def _all_moments(persona_id: str = "akao") -> list[LifeMoment]:
-    async with session_mod.get_session() as s:
-        rows = (
-            await s.execute(
-                text(
-                    "SELECT * FROM data_life_moment WHERE lane = :l "
-                    "AND persona_id = :p ORDER BY began_at ASC"
-                ),
-                {"l": LANE, "p": persona_id},
-            )
-        ).mappings().all()
-    return [LifeMoment(**{k: r[k] for k in LifeMoment.model_fields}) for r in rows]
+    rows = await fetch_all(
+        "SELECT * FROM data_life_moment WHERE lane = :l "
+        "AND persona_id = :p ORDER BY began_at ASC",
+        l=LANE,
+        p=persona_id,
+    )
+    return [from_row(LifeMoment, r) for r in rows]
 
 
 # --------------------------------------------------------------------------
@@ -738,7 +736,8 @@ async def test_a_message_stored_before_the_attribute_existed_wakes_her(
     from app.living.received import ReceivedMessage
 
     table = table_name(ReceivedMessage)
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(text(f"ALTER TABLE {table} DROP COLUMN wakes_recipient"))
         await s.execute(
             text(
@@ -748,18 +747,16 @@ async def test_a_message_stored_before_the_attribute_existed_wakes_her(
             ),
             {"l": LANE, "t": _at(21, 31)},
         )
-    async with session_mod.get_session() as s:
-        columns = (
-            await s.execute(
-                text(
-                    "SELECT column_name, data_type FROM information_schema.columns "
-                    "WHERE table_schema = 'public' AND table_name = :t"
-                ),
-                {"t": table},
-            )
-        ).all()
-    plan = plan_migration([ReceivedMessage], {table: dict(columns)})
-    async with session_mod.get_session() as s:
+    columns = await fetch_all(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = :t",
+        t=table,
+    )
+    plan = plan_migration(
+        [ReceivedMessage], {table: {r["column_name"]: r["data_type"] for r in columns}}
+    )
+    async with tx():
+        s = current_session()
         for stmt in plan.stmts:
             await s.execute(text(stmt.sql))
         stored = (
@@ -792,16 +789,12 @@ async def test_a_message_stored_before_the_attribute_existed_wakes_her(
 
 
 async def _acts(persona_id: str = "akao") -> int:
-    async with session_mod.get_session() as s:
-        return (
-            await s.execute(
-                text(
-                    "SELECT count(*) FROM data_happening "
-                    "WHERE lane = :l AND actor = :p AND kind = 'act'"
-                ),
-                {"l": LANE, "p": persona_id},
-            )
-        ).scalar_one()
+    return await fetch_value(
+        "SELECT count(*) FROM data_happening "
+        "WHERE lane = :l AND actor = :p AND kind = 'act'",
+        l=LANE,
+        p=persona_id,
+    )
 
 
 async def _unread_ids(persona_id: str = "akao") -> set[str]:
@@ -899,16 +892,13 @@ async def test_a_nudge_that_waited_behind_a_stuck_round_happens_when_it_gets_her
 
     (woken,) = [m for m in await _all_moments() if m.nudged]
     assert woken.began_at == _at(21, 47)
-    async with session_mod.get_session() as s:
-        acted_at = (
-            await s.execute(
-                text(
-                    "SELECT occurred_at FROM data_happening "
-                    "WHERE lane = :l AND actor = 'akao' AND kind = 'act'"
-                ),
-                {"l": LANE},
-            )
-        ).scalar_one()
+    # 恰好一行：一行都没有、或者落了两行，用例都要失败。
+    (acted,) = await fetch_all(
+        "SELECT occurred_at FROM data_happening "
+        "WHERE lane = :l AND actor = 'akao' AND kind = 'act'",
+        l=LANE,
+    )
+    acted_at = acted["occurred_at"]
     assert acted_at == _at(21, 47)
     assert [(s.recipient, s.time) for s in post.sent] == [("world", _at(21, 47))]
 
@@ -1041,10 +1031,7 @@ async def test_a_tick_that_waited_decides_on_what_is_true_when_it_gets_her(
             await mark_read(seen, moment_id="2026-07-25T21:30+08:00")
 
     assert await tick is None
-    async with session_mod.get_session() as s:
-        begun = (
-            await s.execute(text(f"SELECT count(*) FROM {table_name(NudgeBegun)}"))
-        ).scalar_one()
+    begun = await fetch_value(f"SELECT count(*) FROM {table_name(NudgeBegun)}")
     assert begun == 0
 
 

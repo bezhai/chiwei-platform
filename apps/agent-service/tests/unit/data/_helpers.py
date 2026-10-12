@@ -1,4 +1,4 @@
-"""Shared test fakes for unit tests that mock AsyncSession.execute results."""
+"""Shared test fakes for unit tests that stand in for the results of a session's ``execute``."""
 
 from __future__ import annotations
 

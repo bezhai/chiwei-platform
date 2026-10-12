@@ -1,6 +1,6 @@
 """Phase 7d Gap 13: tx() / current_session() / auto_tx().
 
-Verifies the DB capability that hides ``AsyncSession`` from business code:
+Verifies the DB capability that keeps sessions inside ``app.data``:
 
   - ``current_session()`` outside ``tx()`` raises (no implicit session).
   - Nested ``tx()`` uses SAVEPOINT — inner rollback leaves outer alive.

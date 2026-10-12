@@ -22,8 +22,8 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from app.data import session as session_mod
 from app.data.persist import insert_append, select_latest
+from app.data.tx import current_session, tx
 from app.living.happening import record_happening
 from app.living.mouth import (
     STATE_CLAIMED,
@@ -67,7 +67,8 @@ async def takeback_db(living_db):
     from tests.runtime.conftest import migrate
 
     await migrate(LooseEnd, living_db)
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_user (common_user_id, channel, display_name) "
@@ -208,7 +209,8 @@ async def _somebody_said_something(*, at: dt.datetime) -> None:
     的那几条用例用，别塞进 ``takeback_db``：本文件其余用例正好跑在"这条会话不在名单里"
     的状态上，那是撤回不跟随白名单的实证。
     """
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message (common_message_id, channel,"
@@ -835,7 +837,8 @@ async def test_she_cannot_take_back_a_line_from_a_conversation_her_bot_left(
     """
     line = await _she_spoke()
     await _she_is_home()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "DELETE FROM common_bot_presence"

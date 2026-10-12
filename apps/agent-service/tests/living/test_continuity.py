@@ -25,8 +25,7 @@ from app.agent.continuity import (
 )
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.agent.session import load_session
-from app.data.persist import insert_idempotent
-from app.data.session import get_session
+from app.data.persist import fetch_value, insert_idempotent
 from app.living.happening import record_happening
 from app.living.moment import LifeMoment, latest_moment, run_moment, transcript_key
 from app.living.received import ReceivedMessage, ReceivedRead
@@ -102,14 +101,9 @@ def _stimuli(messages: list[Message]) -> list[Message]:
 
 async def _rows(data_cls) -> int:
     """这张表现在有几行。"""
-    from sqlalchemy import text
-
     from app.data.schema import table_name
 
-    async with get_session() as s:
-        return (
-            await s.execute(text(f"SELECT count(*) FROM {table_name(data_cls)}"))
-        ).scalar_one()
+    return await fetch_value(f"SELECT count(*) FROM {table_name(data_cls)}")
 
 
 async def _write_transcript(
@@ -651,16 +645,9 @@ async def test_the_moment_record_and_the_context_land_together(
     stub_moment(said="继续")
     await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
 
-    async with get_session() as s:
-        from sqlalchemy import text
+    from app.data.schema import table_name
 
-        from app.data.schema import table_name
-
-        rows = (
-            await s.execute(
-                text(f"SELECT count(*) FROM {table_name(LifeMoment)}")
-            )
-        ).scalar_one()
+    rows = await fetch_value(f"SELECT count(*) FROM {table_name(LifeMoment)}")
     assert rows == 1
 
     tid = transcript_key(lane=LANE, persona_id="akao")

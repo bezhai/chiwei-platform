@@ -61,10 +61,11 @@ async def _wipe_transcripts() -> None:
     from sqlalchemy import text as _text
 
     from app.data.schema import table_name
-    from app.data.session import get_session
+    from app.data.tx import current_session, tx
     from app.domain.session_transcript import SessionTranscript
 
-    async with get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(_text(f"DELETE FROM {table_name(SessionTranscript)}"))
 
 

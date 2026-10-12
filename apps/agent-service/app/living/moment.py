@@ -110,7 +110,6 @@ from typing import Annotated
 
 from inner_shared.dynamic_config import dynamic_config
 from pydantic import Field, field_validator
-from sqlalchemy import text
 
 from app.agent.context import AgentContext
 from app.agent.continuity import (
@@ -129,8 +128,8 @@ from app.agent.tools._common import get_or_create_counter, tool_error
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
 from app.data.ordered import insert_in_commit_order
+from app.data.persist import fetch_one, from_row
 from app.data.schema import CommitOrder, Data, Key, table_name
-from app.data.session import get_session
 from app.data.tx import tx
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import now_cst
@@ -965,14 +964,6 @@ async def life_moment_minutes() -> int:
     return minutes
 
 
-async def _one_moment(sql: str, params: dict) -> LifeMoment | None:
-    async with get_session() as s:
-        row = (await s.execute(text(sql), params)).mappings().first()
-    if row is None:
-        return None
-    return LifeMoment(**{k: row[k] for k in LifeMoment.model_fields})
-
-
 async def latest_moment(*, lane: str, persona_id: str) -> LifeMoment | None:
     """这个人**最后落地**的那个 moment，两种 moment 都算；一个 moment 都没跑过返回 ``None``。
 
@@ -994,7 +985,8 @@ async def latest_moment(*, lane: str, persona_id: str) -> LifeMoment | None:
         f"WHERE lane = :lane AND persona_id = :persona_id "
         f"ORDER BY COALESCE(seq, 0) DESC, began_at DESC LIMIT 1"
     )
-    return await _one_moment(sql, {"lane": lane, "persona_id": persona_id})
+    row = await fetch_one(sql, lane=lane, persona_id=persona_id)
+    return None if row is None else from_row(LifeMoment, row)
 
 
 async def latest_regular_moment(
@@ -1017,7 +1009,8 @@ async def latest_regular_moment(
         f"AND COALESCE(nudged, false) = false "
         f"ORDER BY began_at DESC LIMIT 1"
     )
-    return await _one_moment(sql, {"lane": lane, "persona_id": persona_id})
+    row = await fetch_one(sql, lane=lane, persona_id=persona_id)
+    return None if row is None else from_row(LifeMoment, row)
 
 
 async def moment_ran(*, lane: str, persona_id: str, moment_id: str) -> bool:
@@ -1026,13 +1019,7 @@ async def moment_ran(*, lane: str, persona_id: str, moment_id: str) -> bool:
         f"SELECT 1 FROM {_MOMENT_TABLE} WHERE lane = :lane "
         f"AND persona_id = :persona_id AND moment_id = :moment_id LIMIT 1"
     )
-    async with get_session() as s:
-        row = (
-            await s.execute(
-                text(sql),
-                {"lane": lane, "persona_id": persona_id, "moment_id": moment_id},
-            )
-        ).first()
+    row = await fetch_one(sql, lane=lane, persona_id=persona_id, moment_id=moment_id)
     return row is not None
 
 

@@ -67,16 +67,14 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from pydantic import Field, field_validator
-from sqlalchemy import text
 
 # module-level 引入，测试从这里换替身（真跑起来要调生图模型、搜图服务和对象存储）。
 from app.agent.image_gen import generate_image
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error, upload_image
 from app.capabilities.image_search import image_search
-from app.data.persist import insert_idempotent, select_latest
+from app.data.persist import fetch_all, from_row, insert_idempotent, select_latest
 from app.data.schema import Data, Key, table_name
-from app.data.session import get_session
 from app.infra.cst_time import to_cst_dated
 from app.infra.image import image_client
 from app.living.records import _require_aware, esc
@@ -243,9 +241,7 @@ async def pictures_she_made(
         params["limit"] = limit
     if before is not None:
         params["before"] = before
-    async with get_session() as s:
-        rows = (await s.execute(text(sql), params)).mappings().all()
-    return [Picture(**{k: r[k] for k in Picture.model_fields}) for r in rows]
+    return [from_row(Picture, r) for r in await fetch_all(sql, **params)]
 
 
 # ---------------------------------------------------------------------------
@@ -326,22 +322,14 @@ async def hers_among(
     wanted = {name: handle_for(name) for name in file_names if name}
     if not wanted:
         return set()
-    sql = text(
+    sql = (
         f"SELECT picture_id FROM {_TABLE} "
         f"WHERE lane = :lane AND persona_id = :persona_id "
         f"AND picture_id = ANY(CAST(:ids AS text[]))"
     )
-    async with get_session() as s:
-        rows = (
-            await s.execute(
-                sql,
-                {
-                    "lane": lane,
-                    "persona_id": persona_id,
-                    "ids": list(wanted.values()),
-                },
-            )
-        ).mappings().all()
+    rows = await fetch_all(
+        sql, lane=lane, persona_id=persona_id, ids=list(wanted.values())
+    )
     found = {r["picture_id"] for r in rows}
     return {name for name, picture_id in wanted.items() if picture_id in found}
 

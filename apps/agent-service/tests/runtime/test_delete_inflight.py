@@ -6,7 +6,8 @@ import asyncio
 import pytest
 from sqlalchemy import text
 
-from app.data.session import get_session
+from app.data.persist import fetch_value
+from app.data.tx import current_session, tx
 from app.runtime.errors import AlreadySucceededError
 from app.runtime.inflight import delete_inflight
 
@@ -14,13 +15,13 @@ pytestmark = pytest.mark.integration
 
 
 async def _insert(state: str, *, edge: str = "e", key: str = "k", trace: str = "t") -> None:
-    async with get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(text(
             "INSERT INTO runtime_inflight (edge_id, idempotent_key, "
             "data_table, state, attempts, trace_id) "
             "VALUES (:e, :k, 'tbl', :s, 1, :t)"
         ), {"e": edge, "k": key, "s": state, "t": trace})
-        await s.commit()
 
 
 async def test_edge_idempotent_deletes_failed_row(inflight_db: object) -> None:
@@ -57,10 +58,9 @@ async def test_trace_id_deletes_only_non_succeeded(inflight_db: object) -> None:
     out = await delete_inflight(by="trace_id", trace_id="trace-a")
     assert out.deleted == 3
     assert out.skipped_succeeded == 1
-    async with get_session() as s:
-        n = (await s.execute(text(
-            "SELECT count(*) FROM runtime_inflight WHERE trace_id='trace-a'"
-        ))).scalar()
+    n = await fetch_value(
+        "SELECT count(*) FROM runtime_inflight WHERE trace_id='trace-a'"
+    )
     assert n == 1
 
 

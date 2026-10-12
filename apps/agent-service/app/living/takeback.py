@@ -85,13 +85,11 @@ from datetime import datetime
 from typing import Annotated
 
 from pydantic import Field
-from sqlalchemy import text
 
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
-from app.data.persist import insert_append, select_latest
+from app.data.persist import fetch_one, from_row, insert_append, select_latest
 from app.data.schema import table_name
-from app.data.session import get_session
 from app.domain.safety import Recall
 from app.living.happening import record_happening
 from app.living.mouth import SpokenOutbound
@@ -128,20 +126,10 @@ async def her_line(
     **不按状态筛。** ``claimed``（交出去了、没等到确认）那条的事实是"可能已经在真人
     眼前"——恰恰是最该能撤的一条。
     """
-    async with get_session() as s:
-        row = (
-            await s.execute(
-                text(_HER_LINE_SQL),
-                {
-                    "lane": lane,
-                    "persona_id": persona_id,
-                    "outbound_id": outbound_id,
-                },
-            )
-        ).mappings().first()
-    if row is None:
-        return None
-    return SpokenOutbound(**{k: row[k] for k in SpokenOutbound.model_fields})
+    row = await fetch_one(
+        _HER_LINE_SQL, lane=lane, persona_id=persona_id, outbound_id=outbound_id
+    )
+    return None if row is None else from_row(SpokenOutbound, row)
 
 
 async def _remember_she_took_it_back(

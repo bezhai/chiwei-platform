@@ -8,7 +8,6 @@ from datetime import datetime
 import pytest
 
 from app.infra.cst_time import CST
-from tests.living.conftest import real_pg_required  # noqa: F401
 from tests.replay.harness import Replay
 from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
 

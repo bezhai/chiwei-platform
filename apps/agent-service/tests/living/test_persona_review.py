@@ -26,9 +26,9 @@ import datetime as dt
 
 import pytest
 
-import app.data.session as session_mod
 from app.agent.neutral import Message, Role
 from app.data.persist import insert_idempotent
+from app.data.tx import current_session, tx
 from app.living.day_page import LivingDayPage
 from app.living.persona import (
     PersonaVersion,
@@ -78,7 +78,8 @@ async def review_db(living_db):
         await conn.run_sync(
             lambda c: Base.metadata.create_all(c, tables=[BotPersona.__table__])
         )
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         for persona_id, name in (
             ("akao", "赤尾"),
             ("ayana", "绫奈"),

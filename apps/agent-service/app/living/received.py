@@ -45,11 +45,9 @@ from datetime import datetime
 from typing import Annotated
 
 from pydantic import field_validator
-from sqlalchemy import text
 
-from app.data.persist import insert_idempotent
+from app.data.persist import fetch_all, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
-from app.data.session import get_session
 from app.infra.cst_time import dated_clock
 from app.living.participants import WORLD, load_residents, residents
 from app.living.records import _require_aware, esc, legacy_null_is, living_lane
@@ -203,12 +201,7 @@ async def unread_received(
         "limit": limit,
         "including": including,
     }
-    async with get_session() as s:
-        rows = (await s.execute(text(sql), params)).mappings().all()
-    return [
-        ReceivedMessage(**{k: row[k] for k in ReceivedMessage.model_fields})
-        for row in rows
-    ]
+    return [from_row(ReceivedMessage, row) for row in await fetch_all(sql, **params)]
 
 
 async def read_received_between(
@@ -229,12 +222,7 @@ async def read_received_between(
         f"ORDER BY message_time, message_id"
     )
     params = {"lane": lane, "persona_id": persona_id, "since": since, "until": until}
-    async with get_session() as s:
-        rows = (await s.execute(text(sql), params)).mappings().all()
-    return [
-        ReceivedMessage(**{k: row[k] for k in ReceivedMessage.model_fields})
-        for row in rows
-    ]
+    return [from_row(ReceivedMessage, row) for row in await fetch_all(sql, **params)]
 
 
 def render_received(items: list[ReceivedMessage], *, now: datetime) -> str:

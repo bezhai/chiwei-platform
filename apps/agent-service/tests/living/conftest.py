@@ -5,11 +5,9 @@ Same reason as ``tests/domain/conftest.py``: the session-scoped
 ``tests/runtime/conftest.py`` and pytest only auto-discovers conftest
 fixtures along the rootdir→test-file path.
 
-**``living_db`` 在 docker 不可用时红，不 skip。** ``test_db_dsn`` 那边统一
-``pytest.skip("docker unavailable")``——对大多数套件是对的，但 ``app.living``
-的读写契约（提交序、收件去重、到期消费）**全部**只在真 pg 上才有意义：静默跳过
-之后整个套件绿着过去，等于没有门禁。所以这里把"跳过"翻译成"炸"，且只影响
-``tests/living``——别人的 conftest 一个字不改。
+**``living_db`` 在 docker 不可用时红，不 skip。** ``app.living`` 的读写契约（提交序、收件
+去重、到期消费）**全部**只在真 pg 上才有意义，所以它先要 ``real_pg_required``
+（``tests/conftest.py``），把 ``test_db_dsn`` 那边的"跳过"翻译成"炸"。
 """
 from __future__ import annotations
 
@@ -125,35 +123,6 @@ def glance_text(shown) -> str:
     first = shown[0]
     assert first.get("type") == "text", f"第一项不是那段文本：{first!r}"
     return first["text"]
-
-
-def _docker_unavailable_reason() -> str | None:
-    """docker 不可用时给出原因；可用返回 ``None``。"""
-    try:
-        import docker as _docker
-    except Exception as exc:  # pragma: no cover - 依赖缺失路径
-        return f"docker SDK 装不上：{exc!r}"
-    try:
-        _docker.from_env().ping()
-    except Exception as exc:
-        return f"连不上 docker daemon：{exc!r}"
-    return None
-
-
-@pytest.fixture(scope="session")
-def real_pg_required() -> None:
-    """没有真 pg 就让 ``tests/living`` 红，而不是绿着跳过。"""
-    reason = _docker_unavailable_reason()
-    if reason is not None:
-        pytest.fail(
-            "tests/living 需要真实 Postgres（testcontainers），但 "
-            f"{reason}\n"
-            "这些用例验的是提交序、收件去重、到期消费这些只在真库上成立的"
-            "契约，静默 skip 会让整个套件绿着过去 —— 等于没有门禁。\n"
-            "起 docker 后重跑；确实要在无 docker 的机器上只跑纯函数部分，"
-            "显式点名：pytest tests/living/test_serial.py tests/living/test_only_her_own_records.py",
-            pytrace=False,
-        )
 
 
 # bot_config / common_bot_presence 由 channel-server 管理，agent-service 侧没有

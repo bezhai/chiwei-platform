@@ -63,10 +63,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import text
-
+from app.data.persist import fetch_all, from_row
 from app.data.schema import table_name
-from app.data.session import get_session
 from app.infra.cst_time import dated_clock, to_cst_full
 from app.living.day_page import LivingDayPage, living_day_of, read_day_page_before
 from app.living.happening import own_line
@@ -263,14 +261,8 @@ async def recent_own_happenings(
         f"WHERE lane = :lane AND actor = :actor "
         f"ORDER BY seq DESC LIMIT :limit"
     )
-    async with get_session() as s:
-        result = await s.execute(
-            text(sql), {"lane": lane, "actor": persona_id, "limit": limit}
-        )
-        rows = result.mappings().all()
-    items = [
-        Happening(**{k: row[k] for k in Happening.model_fields}) for row in rows
-    ]
+    rows = await fetch_all(sql, lane=lane, actor=persona_id, limit=limit)
+    items = [from_row(Happening, row) for row in rows]
     items.reverse()
     return items
 

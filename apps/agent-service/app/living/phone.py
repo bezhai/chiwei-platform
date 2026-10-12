@@ -192,13 +192,12 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from pydantic import Field, field_validator
-from sqlalchemy import text
 
 from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities.concurrency import fan_out_wait
-from app.data.persist import insert_idempotent
+from app.data.persist import fetch_one, fetch_value, insert_idempotent
 from app.data.queries.messages import (
     find_conversation_page,
     find_conversations_by_last_message,
@@ -213,7 +212,6 @@ from app.data.queries.persona import (
     find_conversations_with_persona_bot,
 )
 from app.data.schema import Data, Key, table_name
-from app.data.session import get_session
 from app.infra.cst_time import CST, to_cst_dated
 from app.infra.image import image_client, image_is_reachable
 from app.living.pictures import hers_among, printed_handle
@@ -489,20 +487,17 @@ async def read_through(
     **是复合的，不只是时刻。** 只存毫秒的话，跟水位同毫秒、晚一步落库的那条消息会被
     整段跳过（``event_time > 水位`` 把整个那一毫秒排除掉），而且一句报错都没有。
     """
-    async with get_session() as s:
-        row = (
-            await s.execute(
-                text(
-                    f"SELECT read_through_ms, read_through_message_id "
-                    f"FROM {_READ_TABLE} "
-                    f"WHERE lane = :lane AND persona_id = :persona_id "
-                    f"AND channel_id = :channel_id "
-                    f"ORDER BY read_through_ms DESC, read_through_message_id DESC "
-                    f"LIMIT 1"
-                ),
-                {"lane": lane, "persona_id": persona_id, "channel_id": channel_id},
-            )
-        ).mappings().first()
+    row = await fetch_one(
+        f"SELECT read_through_ms, read_through_message_id "
+        f"FROM {_READ_TABLE} "
+        f"WHERE lane = :lane AND persona_id = :persona_id "
+        f"AND channel_id = :channel_id "
+        f"ORDER BY read_through_ms DESC, read_through_message_id DESC "
+        f"LIMIT 1",
+        lane=lane,
+        persona_id=persona_id,
+        channel_id=channel_id,
+    )
     if row is None:
         return NEVER_LOOKED
     return int(row["read_through_ms"]), str(row["read_through_message_id"])
@@ -559,7 +554,7 @@ async def commit_glances(*, glances: list[dict]) -> int:
 # 不是 common_message —— 出站消息要等 chat-response-worker 异步落库，按它算会
 # 把刚说完的话算成"从没说过"。
 #
-# 这是本模块里唯一一条还自己拿 session 的查询，因为它读的是 living 自己那张表。
+# 读公共层的查询都在 :mod:`app.data.queries` 里；这一条读的是 living 自己那张表，SQL 留在这里。
 _LAST_SPOKE_SQL = f"""
 SELECT MAX(occurred_at) FROM {_HAPPENING_TABLE}
  WHERE lane = :lane AND actor = :persona_id AND channel_id = :channel_id
@@ -570,17 +565,9 @@ async def _last_spoke_at(
     *, lane: str, persona_id: str, channel_id: str
 ) -> datetime | None:
     """她上次在这条会话上开口的时刻；从没说过返回 ``None``。"""
-    async with get_session() as s:
-        return (
-            await s.execute(
-                text(_LAST_SPOKE_SQL),
-                {
-                    "lane": lane,
-                    "persona_id": persona_id,
-                    "channel_id": channel_id,
-                },
-            )
-        ).scalar()
+    return await fetch_value(
+        _LAST_SPOKE_SQL, lane=lane, persona_id=persona_id, channel_id=channel_id
+    )
 
 
 def _instant(ms: int) -> datetime:

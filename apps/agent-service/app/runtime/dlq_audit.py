@@ -10,7 +10,7 @@ from enum import StrEnum
 
 from sqlalchemy import text
 
-from app.data.session import get_session
+from app.data.tx import auto_tx, current_session
 
 
 class AuditAction(StrEnum):
@@ -67,8 +67,8 @@ async def insert_audit_row(
     # asyncpg requires explicit JSONB cast via cast() in the SQL; inline ::jsonb
     # in a parameterised query confuses the SQLAlchemy/asyncpg dialect.
     mids_json = json.dumps(message_ids) if message_ids else None
-    async with get_session() as s:
-        row = await s.execute(text(
+    async with auto_tx():
+        row = await current_session().execute(text(
             "INSERT INTO runtime_dlq_audit "
             "(action, status, queue, queue_kind, message_ids, "
             " recovery_token, recovery_hint, cleared_inflight_count, "
@@ -83,7 +83,6 @@ async def insert_audit_row(
             "cic": cleared_inflight_count, "rc": requeued_count,
             "op": operator, "tid": trace_id,
         })
-        await s.commit()
         return row.scalar()
 
 
@@ -92,8 +91,8 @@ async def update_audit_status(
     *, requeued_count: int | None = None,
     recovery_hint: str | None = None,
 ) -> None:
-    async with get_session() as s:
-        await s.execute(text(
+    async with auto_tx():
+        await current_session().execute(text(
             "UPDATE runtime_dlq_audit "
             "SET status=:s, updated_at=now(), "
             "    requeued_count=COALESCE(:rc, requeued_count), "
@@ -101,4 +100,3 @@ async def update_audit_status(
             "WHERE id=:i"
         ), {"s": str(status), "rc": requeued_count, "rh": recovery_hint,
             "i": audit_id})
-        await s.commit()

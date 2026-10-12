@@ -20,7 +20,7 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from app.data import session as session_mod
+from app.data.tx import current_session, tx
 from app.living.reading import (
     FILE_LIST_LIMIT,
     READING_TOOLS,
@@ -82,7 +82,8 @@ async def _someone_sent(
     content = json.dumps(
         [{"kind": "file", "key": file_key, "meta": {"file_name": file_name}}]
     )
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message (common_message_id, channel,"
@@ -114,7 +115,8 @@ async def reading_db(living_db, pinned):
 
     await migrate(FileRead, living_db)
 
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_user (common_user_id, channel, display_name)"
@@ -155,7 +157,8 @@ async def reading_db(living_db, pinned):
 
     pinned(str(_GROUP))
     # 有人在这条私聊里刚说过话 —— 私聊里真人的任意一条就算在叫她。
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message (common_message_id, channel,"
@@ -283,7 +286,8 @@ async def test_a_file_in_the_shape_lark_actually_writes_is_found(reading_db):
     from app.living.reading import files_sent_to
 
     message_id = uuid.uuid5(uuid.NAMESPACE_OID, "msg-real-shape")
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message (common_message_id, channel,"
@@ -313,7 +317,8 @@ async def _taken_back(message_id: uuid.UUID, *, at: dt.datetime) -> None:
     撤回**不删**公共层那一行（那是消息记录，删行会打断历史），只在 ``recalled_at``
     上留个时刻。所以"这份东西还拿不拿得到"由这一列说了算。
     """
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_message SET recalled_at = :at"
@@ -876,7 +881,8 @@ def test_both_hands_are_ones_she_actually_has():
 async def _a_quiet_group_with_a_file() -> uuid.UUID:
     """一个 bot 还在、但没人叫过她的群，里面有人发了个文件。"""
     quiet = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-nobody-calls-her")
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_conversation"

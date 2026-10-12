@@ -23,7 +23,6 @@ from pathlib import Path
 import pytest
 
 from tests.apps.surface_probe import LANE, SECRET
-from tests.living.conftest import real_pg_required  # noqa: F401
 from tests.runtime.conftest import test_db_dsn  # noqa: F401
 
 SERVICE_ROOT = Path(__file__).resolve().parents[2]
@@ -191,7 +190,7 @@ def _run_probe(app_name: str, db_url, world_data_dir: Path) -> dict:
 @pytest.mark.parametrize("app_name", ["agent-service", "world"])
 async def test_what_the_app_exposes_after_start(
     app_name,
-    real_pg_required,  # noqa: F811
+    real_pg_required,
     test_db_dsn,  # noqa: F811
     tmp_path,
 ):
