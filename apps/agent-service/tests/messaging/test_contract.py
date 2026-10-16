@@ -451,25 +451,13 @@ async def test_a_message_held_by_a_crashed_peer_is_processed_after_its_lease(
     assert len(world.got) == 1
 
 
-async def test_a_copy_that_finds_a_live_claim_looks_again_after_1_2_4_seconds_until_the_lease_ends(
-    broker, test_db, monkeypatch
+async def test_a_copy_that_finds_a_live_claim_is_handled_once_after_the_lease_ends(
+    broker, test_db
 ):
-    """别的进程拿着它（租约还剩 6 秒）：这一份不一次推迟到租约结束，而是隔 1 秒、2 秒……再看，
-    最后一次不晚于租约到期后 1 秒。租约前不处理，过期后接管、处理一次。
-
-    对方要是正在放开占位（被取消的投递），这样几秒内就有人接，不用白等一个租约。
+    """别的进程拿着它（租约还剩几秒）：这一份不丢，在租约里隔一阵再看、可能看好几次，租约到期之前
+    不处理，到期之后接管、只处理一次。每次隔多久见 ``test_held_checks.py``；这里只验结果，不验看了
+    几次、哪一刻看的——那取决于库和 broker 有多快。
     """
-    from app.messaging import receiving
-
-    looks: list[tuple[datetime, int | None, object]] = []
-    real_publish = receiving.publish
-
-    async def recorded(route, body, *, headers, delay_ms=None):
-        if route.queue == "inbox_world":
-            looks.append((datetime.now(UTC), delay_ms, headers.get("x-held-checks")))
-        await real_publish(route, body, headers=headers, delay_ms=delay_ms)
-
-    monkeypatch.setattr(receiving, "publish", recorded)
     world = Inbox()
     inbox("world", on_message=world.on_message)
     await start_messaging()
@@ -477,7 +465,7 @@ async def test_a_copy_that_finds_a_live_claim_looks_again_after_1_2_4_seconds_un
     message = new_message(
         sender="operator", recipient="world", body="对端拿着。", kind=Kind.MESSAGE
     )
-    lease_ends = datetime.now(UTC) + timedelta(seconds=6)
+    lease_ends = datetime.now(UTC) + timedelta(seconds=4)
     async with test_db.begin() as conn:
         await conn.execute(
             text(
@@ -492,18 +480,11 @@ async def test_a_copy_that_finds_a_live_claim_looks_again_after_1_2_4_seconds_un
         Route("inbox_world", "inbox.world", isolated=True), message.to_json(), lane=LANE
     )
 
-    await asyncio.sleep((lease_ends - datetime.now(UTC)).total_seconds() - 0.3)
-    assert world.got == [], "租约还没到期就处理了"
-    await eventually(lambda: world.got, timeout=10)
+    await eventually(lambda: world.got, timeout=15)
+    assert world.received_at[0] >= lease_ends, "租约还没到期就处理了"
     await asyncio.sleep(1.5)
     assert len(world.got) == 1
-
-    assert [delay for _at, delay, _checks in looks][:2] == [1000, 2000]
-    assert [checks for _at, _delay, checks in looks] == [1, 2, 3]
-    third_at, third, _ = looks[2]
-    assert third < 4000, "第三次没按租约截短"
-    looked_again_at = third_at + timedelta(milliseconds=third)
-    assert abs(looked_again_at - (lease_ends + timedelta(seconds=1))) < timedelta(milliseconds=200)
+    assert await broker.depth(f"inbox_world_{LANE}") == 0
 
 
 async def test_a_retry_after_a_failure_starts_counting_the_looks_at_a_live_claim_afresh(
