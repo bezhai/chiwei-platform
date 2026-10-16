@@ -18,7 +18,8 @@
 可以不记，问 :func:`succeeded_message_ids`：成功记下来了，同一条就再也到不了处理函数。
 
 **进死信的原因只有一个：业务处理函数本身失败，有限次重试已经用完，拥有者也没要求不限次数
-重试。** 普通消息的处理函数抛异常 → 按 :data:`PROCESSING_RETRY` 延时重投；次数用完 → 拒收，
+重试。** 普通消息的处理函数抛异常 → 按 :data:`PROCESSING_RETRY` 延时重投；次数（收件箱的
+``max_attempts``，不声明就是 :data:`PROCESSING_RETRY` 的）用完 → 拒收，
 broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保留消息体和消息头，可以查看、
 重放回原收件箱（:mod:`app.messaging.dead_letters`，入口是 ``/admin/messaging/dead-letters*``）。
 （消息本身解不开的也进死信：处理函数根本没法跑。）领取、标记成功或失败、租约冲突后的重投、
@@ -42,6 +43,11 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
   进死信。不限次数重试的每一次失败都让人看得到：记录者里记一行 ``retrying``（错误和下一次的
   延时），日志里一条 warning。判断本身出错按"不限次数"算，封顶用 :data:`PROCESSING_RETRY`
   的上限——宁可多试，不能把拥有者要保住的那条送进死信。
+* ``max_attempts`` —— 一条普通消息的处理函数最多调几次（第一次加重试），用完就进死信。不声明
+  就是 :data:`PROCESSING_RETRY` 的次数（4 次）；小于 1 拒绝开设。处理一次要花钱、失败了不该
+  再来的收件箱（读书）设 1：失败一次就进死信，人看过之后决定要不要重放。和
+  ``retry_without_limit`` 一起给时，拥有者判"不限次数"的那条不受它限制，判 ``None`` 的按它。
+  只数处理函数的失败：投递被取消、放回队列、占位过期被接管之后的重来都不算次数。
 * ``consume_while`` —— 只在持有它（一个异步上下文，比如一把跨进程的独占锁）期间消费普通消息。
   开设时不在启动流程里等它：队列照常建好，启动照常返回，后台等到进了这个上下文，才跑
   ``on_open``、开始消费；停止时等正在处理的消息处理完（见下面"停下时"）之后才退出这个
@@ -110,7 +116,7 @@ import socket
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AbstractAsyncContextManager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
@@ -235,6 +241,7 @@ class InboxSpec:
     on_open: OnOpen | None = None
     consume_while: ConsumeWhile | None = None
     retry_without_limit: RetryWithoutLimit | None = None
+    max_attempts: int | None = None
 
 
 INBOX_REGISTRY: dict[str, InboxSpec] = {}
@@ -249,6 +256,7 @@ def inbox(
     on_open: OnOpen | None = None,
     consume_while: ConsumeWhile | None = None,
     retry_without_limit: RetryWithoutLimit | None = None,
+    max_attempts: int | None = None,
 ) -> None:
     """声明本 App 拥有名为 ``name`` 的收件箱。插件 setup 时经宿主调（``ctx.inbox``），进程启动时开设。
 
@@ -257,14 +265,16 @@ def inbox(
     收件箱不接受提问，问它的一律拿到"没有回答"。问题走自己的队列，``on_question`` 可能
     跟 ``on_message`` 同时跑、也可能跑在没持有 ``consume_while`` 的进程里，所以它只该读。
 
-    ``processing_timeout`` / ``on_open`` / ``consume_while`` / ``retry_without_limit``
-    见模块说明。
+    ``processing_timeout`` / ``on_open`` / ``consume_while`` / ``retry_without_limit`` /
+    ``max_attempts`` 见模块说明。
     """
     participant(name)
     if name in INBOX_REGISTRY:
         raise RuntimeError(f"inbox {name!r} is already declared in this process")
     if processing_timeout is not None and processing_timeout <= timedelta(0):
         raise ValueError("processing_timeout must be positive")
+    if max_attempts is not None and max_attempts < 1:
+        raise ValueError(f"inbox {name!r}: max_attempts must be at least 1, got {max_attempts}")
     if (
         processing_timeout is not None
         and processing_timeout + CLAIM_AND_SETTLE_ROOM > DELIVERY_DEADLINE
@@ -282,6 +292,7 @@ def inbox(
         on_open=on_open,
         consume_while=consume_while,
         retry_without_limit=retry_without_limit,
+        max_attempts=max_attempts,
     )
 
 
@@ -807,7 +818,8 @@ async def _after_owner_failure(
     edge_id: str,
     exc: Exception,
 ) -> Verdict:
-    """拥有者的处理函数失败了一次：点名不限次数的按封顶退避再排；否则有限次重试，用完进死信。"""
+    """拥有者的处理函数失败了一次：点名不限次数的按封顶退避再排；否则有限次重试（收件箱的
+    ``max_attempts``，不声明就是 :data:`PROCESSING_RETRY` 的），用完进死信。"""
     cap = await _unlimited_cap(spec, message, edge_id)
     if cap is not None:
         attempt = delivery_count(received) + 1
@@ -837,7 +849,10 @@ async def _after_owner_failure(
         )
         return Verdict.ACK
 
-    decision = decide_retry(headers=received, policy=PROCESSING_RETRY)
+    policy = PROCESSING_RETRY
+    if spec.max_attempts is not None:
+        policy = replace(PROCESSING_RETRY, n=spec.max_attempts)
+    decision = decide_retry(headers=received, policy=policy)
     if decision.action == "retry":
         logger.warning(
             "messaging: %s %s failed (%r); retry %d in %d ms",

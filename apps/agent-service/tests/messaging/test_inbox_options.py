@@ -1,5 +1,5 @@
 """收件箱拥有者开设时可以声明的几件事：一条最多处理多久、一次只处理一条、开设时先做一件事、
-只在持有某样东西期间消费、点名哪条消息失败时不限次数重试。
+只在持有某样东西期间消费、点名哪条消息失败时不限次数重试、一条最多处理几次。
 
 world 的主 agent 一轮可能跑得比默认的 15 分钟租约还久，一次只能想一件事，进程启动时
 要按自己的私有状态决定要不要立刻醒一次，只有拿着卷的写锁才消费，最新那次唤醒永不进死信。
@@ -554,3 +554,115 @@ def test_clearing_the_inboxes_also_drops_the_ones_named_at_start():
     receiving.clear_inboxes()
 
     assert receiving.INBOXES_AT_START == []
+
+
+# ---------------------------------------------------------------------------
+# 一条消息最多处理几次
+# ---------------------------------------------------------------------------
+
+
+def _record_republished(monkeypatch) -> list[dict]:
+    """记下 world 收件箱上每一次重新发布（重试、别人拿着时再排）的消息头。"""
+    from app.messaging import receiving
+
+    republished: list[dict] = []
+    real = receiving.publish
+
+    async def publish(route, body, *, headers, delay_ms=None):
+        if route.queue == "inbox_world":
+            republished.append(dict(headers))
+        return await real(route, body, headers=headers, delay_ms=delay_ms)
+
+    monkeypatch.setattr(receiving, "publish", publish)
+    return republished
+
+
+async def test_a_message_in_an_inbox_that_handles_it_once_is_dead_lettered_after_one_failure(
+    broker, monkeypatch
+):
+    """处理要花钱、失败了不该重来的收件箱（读书）声明最多处理 1 次：处理函数失败一次，这条就进
+    本泳道的死信，处理函数只被调用这一次，没有重试的那一份。"""
+    from app.messaging.record import read_record
+
+    _fast_retry(monkeypatch)
+    republished = _record_republished(monkeypatch)
+    calls = {"n": 0}
+
+    async def fails(message) -> None:
+        calls["n"] += 1
+        raise RuntimeError("越过读一轮的错误")
+
+    inbox("world", on_message=fails, max_attempts=1)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="只处理一次。")
+
+    dead_letters = f"{ISOLATED_DEAD_LETTERS}_{LANE}"
+    await eventually(lambda: broker.depth(dead_letters), timeout=10)
+    await asyncio.sleep(1.0)  # 有重试的那一份的话（退避 200 毫秒），这时早已到了
+    assert calls["n"] == 1
+    assert republished == []
+    assert await broker.depth(dead_letters) == 1
+    assert await broker.depth(f"inbox_world_{LANE}") == 0
+    rows = await read_record(message_id=delivery.message_id)
+    assert [r["outcome"] for r in rows] == ["sending", "delivered"]
+
+
+@pytest.mark.parametrize("max_attempts", [0, -1])
+def test_an_inbox_must_handle_a_message_at_least_once(max_attempts):
+    from app.messaging import receiving
+
+    async def on_message(message) -> None:  # pragma: no cover - never opened
+        return None
+
+    with pytest.raises(ValueError, match="max_attempts"):
+        inbox("world", on_message=on_message, max_attempts=max_attempts)
+    assert "world" not in receiving.INBOX_REGISTRY
+
+
+async def test_messages_the_owner_does_not_single_out_are_handled_at_most_max_attempts_times(
+    broker, monkeypatch
+):
+    """同时给了 ``retry_without_limit``：拥有者对这条判 ``None``，就按收件箱的 ``max_attempts``。"""
+    _fast_retry(monkeypatch)  # 默认的上限是 3 次
+    calls = {"n": 0}
+
+    async def always_fails(message) -> None:
+        calls["n"] += 1
+        raise RuntimeError("失败")
+
+    async def never(message):
+        return None
+
+    inbox("world", on_message=always_fails, retry_without_limit=never, max_attempts=2)
+    await start_messaging()
+    await send(sender="operator", recipient="world", body="普通消息。")
+
+    dead_letters = f"{ISOLATED_DEAD_LETTERS}_{LANE}"
+    await eventually(lambda: broker.depth(dead_letters), timeout=15)
+    await asyncio.sleep(1.0)
+    assert calls["n"] == 2
+
+
+async def test_a_message_the_owner_singles_out_is_retried_past_max_attempts(broker, monkeypatch):
+    """拥有者判"不限次数"的那条不受 ``max_attempts`` 限制：最多 1 次的收件箱里，它失败三次，照样
+    一直重试，第四次成功，不进死信。"""
+    _fast_retry(monkeypatch)
+    calls = {"n": 0}
+    done: list[str] = []
+
+    async def fails_three_times(message) -> None:
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise RuntimeError(f"第 {calls['n']} 次失败")
+        done.append(message.message_id)
+
+    async def always(message):
+        return timedelta(milliseconds=300)
+
+    inbox("world", on_message=fails_three_times, retry_without_limit=always, max_attempts=1)
+    await start_messaging()
+    await send(sender="operator", recipient="world", body="会失败三次。")
+
+    await eventually(lambda: done, timeout=15)
+    assert calls["n"] == 4
+    assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0

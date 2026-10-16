@@ -667,7 +667,7 @@ async def test_registered_shows_what_each_registration_declared():
     def setup(ctx) -> None:
         ctx.clock("c", 60, _tick)
         ctx.route("GET", "/r", _Ask, _echo, inner_secret=True, lane_match=True)
-        ctx.inbox("probe", on_message=_ignore, on_question=on_question)
+        ctx.inbox("probe", on_message=_ignore, on_question=on_question, max_attempts=1)
         ctx.outbound(_Said, "recall")
 
     host = Host("world", [plugin("p", setup)])
@@ -691,6 +691,7 @@ async def test_registered_shows_what_each_registration_declared():
     }
     assert by_kind["inbox"].detail["on_message"] is _ignore
     assert by_kind["inbox"].detail["on_question"] is on_question
+    assert by_kind["inbox"].detail["max_attempts"] == 1
     assert by_kind["outbound"].detail == {"data_type": _Said, "queue": "recall"}
 
 

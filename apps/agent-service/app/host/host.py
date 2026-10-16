@@ -224,6 +224,7 @@ class Context:
         on_open: receiving.OnOpen | None = None,
         consume_while: receiving.ConsumeWhile | None = None,
         retry_without_limit: receiving.RetryWithoutLimit | None = None,
+        max_attempts: int | None = None,
     ) -> Disposer:
         """Own the inbox ``name``; see :func:`app.messaging.receiving.inbox` for the options."""
         options = {
@@ -233,6 +234,7 @@ class Context:
             "on_open": on_open,
             "consume_while": consume_while,
             "retry_without_limit": retry_without_limit,
+            "max_attempts": max_attempts,
         }
         declared: list[receiving.InboxSpec] = []
 
