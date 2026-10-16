@@ -1,4 +1,4 @@
-"""Contract tests for runtime/inflight.py — Gap 7.1 state machine."""
+"""Contract tests for app/messaging/claims.py — Gap 7.1 state machine."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from app.data.persist import fetch_one
 from app.data.tx import current_session, tx
-from app.runtime.inflight import (
+from app.messaging.claims import (
     claim_inflight,
     mark_failed,
     mark_succeeded,

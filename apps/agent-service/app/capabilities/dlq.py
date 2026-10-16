@@ -1,14 +1,15 @@
 """DLQAdminCapability — public facade for DLQ admin operations (plan B6).
 
 Business code that needs to inspect / requeue / clear DLQ entries imports
-this single class instead of poking the four runtime-internal modules
-(``rabbitmq_management``, ``inflight``, ``dlq_audit``, ``errors``). The
+this single class instead of poking the modules underneath
+(``app.runtime.rabbitmq_management``, ``app.messaging.claims``,
+``app.messaging.dead_letter_audit``). The
 6-step requeue protocol orchestrated by ``app/nodes/dlq_admin.py`` stays
 in business-land (it composes AMQP ``basic_get`` + Route lookup with
 audit + idempotent state, which is wiring rather than a primitive); this
 capability supplies the primitives.
 
-Mapping (capability method → runtime internal):
+Mapping (capability method → the function underneath):
     peek                   → RabbitMQManagementClient.peek_messages
     clear_inflight         → delete_inflight  (AlreadySucceeded → flag)
     open_audit             → insert_audit_row
@@ -30,14 +31,13 @@ from typing import Any, Literal
 import httpx
 
 from app.capabilities._errors import CapabilityCallFailed, CapabilityInvalidArg
-from app.runtime.dlq_audit import (
+from app.messaging.claims import AlreadySucceededError, delete_inflight
+from app.messaging.dead_letter_audit import (
     AuditAction,
     AuditStatus,
     insert_audit_row,
     update_audit_status,
 )
-from app.runtime.errors import AlreadySucceededError
-from app.runtime.inflight import delete_inflight
 from app.runtime.rabbitmq_management import RabbitMQManagementClient
 
 
@@ -46,7 +46,7 @@ class ClearInflightResult:
     """Outcome of DLQAdminCapability.clear_inflight.
 
     ``already_succeeded`` is True when the targeted edge_idempotent row was
-    in 'succeeded' state; the runtime refuses to delete it and the requeue
+    in 'succeeded' state; delete_inflight refuses to delete it and the requeue
     protocol must ack the DLQ message as a zombie instead of retrying.
     """
     deleted: int
@@ -57,7 +57,7 @@ class ClearInflightResult:
 
 
 class DLQAdminCapability:
-    """Public facade over runtime-internal DLQ admin primitives.
+    """Public facade over the DLQ admin primitives.
 
     Construct once per process (or per request); the underlying
     ``RabbitMQManagementClient`` is lazy-initialised from env so unit
@@ -70,7 +70,7 @@ class DLQAdminCapability:
         mgmt_client_factory: Any | None = None,
     ) -> None:
         # Factory indirection lets tests inject a mock without monkey-
-        # patching the runtime module. Default = RabbitMQManagementClient
+        # patching the client module. Default = RabbitMQManagementClient
         # .from_env at first use.
         self._mgmt_factory = mgmt_client_factory
         self._mgmt_instance: RabbitMQManagementClient | None = None

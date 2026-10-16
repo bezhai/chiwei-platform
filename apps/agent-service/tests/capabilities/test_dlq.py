@@ -1,13 +1,13 @@
-"""DLQAdminCapability — B6 facade over runtime-internal DLQ primitives.
+"""DLQAdminCapability — B6 facade over the DLQ primitives.
 
-The capability hides four runtime-internal modules from business nodes:
+The capability hides the modules underneath from business nodes:
 - ``runtime/rabbitmq_management.RabbitMQManagementClient`` (HTTP peek)
-- ``runtime/inflight.delete_inflight`` + ``AlreadySucceededError``
-- ``runtime/dlq_audit.{insert_audit_row, update_audit_status, AuditAction, AuditStatus}``
+- ``messaging/claims.delete_inflight`` + ``AlreadySucceededError``
+- ``messaging/dead_letter_audit.{insert_audit_row, update_audit_status, AuditAction, AuditStatus}``
 
-Each test pins one capability method to a runtime-internal collaborator so
+Each test pins one capability method to a collaborator underneath so
 the public surface stays a single import (``from app.capabilities.dlq
-import DLQAdminCapability``) rather than four scattered runtime imports.
+import DLQAdminCapability``) rather than three scattered imports.
 """
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ async def test_clear_inflight_already_succeeded_returns_marker():
     a typed-result flag so business nodes never import the runtime
     exception class directly.
     """
-    from app.runtime.errors import AlreadySucceededError
+    from app.messaging.claims import AlreadySucceededError
     cap = DLQAdminCapability()
     with patch(
         "app.capabilities.dlq.delete_inflight",
@@ -182,7 +182,7 @@ async def test_update_audit_status_passes_through():
 
 def test_capability_exposes_enum_aliases():
     """AuditAction / AuditStatus reachable via capability namespace so
-    dlq_admin.py doesn't need to import runtime/dlq_audit directly.
+    dlq_admin.py doesn't need to import messaging/dead_letter_audit directly.
     """
     assert AuditAction.REQUEUE == "requeue"
     assert AuditAction.CLEAR_IDEMPOTENT == "clear-idempotent"

@@ -1,4 +1,4 @@
-"""Phase 7b Gap 12: delete_inflight per-mode semantics."""
+"""Phase 7b Gap 12: delete_inflight per-mode semantics, and the error it refuses a succeeded row with."""
 from __future__ import annotations
 
 import asyncio
@@ -8,8 +8,7 @@ from sqlalchemy import text
 
 from app.data.persist import fetch_value
 from app.data.tx import current_session, tx
-from app.runtime.errors import AlreadySucceededError
-from app.runtime.inflight import delete_inflight
+from app.messaging.claims import AlreadySucceededError, delete_inflight
 
 pytestmark = pytest.mark.integration
 
@@ -74,3 +73,15 @@ def test_delete_inflight_rejects_missing_args():
         asyncio.run(delete_inflight(by="trace_id"))  # trace_id=None
     with pytest.raises(ValueError):
         asyncio.run(delete_inflight(by="edge_idempotent", edge_id="e"))  # idempotent_key=None
+
+
+def test_already_succeeded_error_carries_inflight_keys():
+    exc = AlreadySucceededError(edge_id="EdgeA::consumer", idempotent_key="abc123")
+    assert exc.edge_id == "EdgeA::consumer"
+    assert exc.idempotent_key == "abc123"
+    assert "EdgeA::consumer" in str(exc)
+    assert "abc123" in str(exc)
+
+
+def test_already_succeeded_error_is_exception():
+    assert issubclass(AlreadySucceededError, Exception)

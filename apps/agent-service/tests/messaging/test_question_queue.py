@@ -203,7 +203,7 @@ async def test_a_question_whose_claim_is_held_up_past_its_time_is_acknowledged_u
 ):
     """领取那一步卡在库里（这里是领取要拿的那把锁被别人拿着）、过了提问方不再等的时刻：不再答，
     确认掉，不重投；不会一直挂着等锁，直到 broker 的确认时限关掉通道。"""
-    from app.runtime.inflight import _lock_key
+    from app.messaging.claims import _lock_key
 
     thinker = NeverAnswers()
     inbox("world", on_message=answer_the_kitchen, on_question=thinker.on_question)

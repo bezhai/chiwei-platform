@@ -154,7 +154,7 @@ class RunnerFailingOn:
 
 def _fast_retry(monkeypatch):
     from app.messaging import receiving
-    from app.runtime.retry import RetryPolicy
+    from app.messaging.retry import RetryPolicy
 
     monkeypatch.setattr(
         receiving,

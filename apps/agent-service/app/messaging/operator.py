@@ -38,7 +38,6 @@ from app.messaging.dead_letters import peek_dead_letters, replay_dead_letters
 from app.messaging.message import Message, SendFailed
 from app.messaging.record import read_record
 from app.messaging.sending import ask, send, send_at
-from app.runtime import node
 from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
@@ -199,7 +198,6 @@ def _as_http_errors() -> Iterator[None]:
         ) from exc
 
 
-@node
 async def operator_send_node(req: OperatorSendRequest) -> OperatorSendResponse:
     with _as_http_errors():
         delivery = await send(
@@ -217,7 +215,6 @@ async def operator_send_node(req: OperatorSendRequest) -> OperatorSendResponse:
     )
 
 
-@node
 async def operator_ask_node(req: OperatorAskRequest) -> OperatorAskResponse:
     with _as_http_errors():
         answer = await ask(
@@ -236,7 +233,6 @@ async def operator_ask_node(req: OperatorAskRequest) -> OperatorAskResponse:
     )
 
 
-@node
 async def operator_send_at_node(req: OperatorSendAtRequest) -> OperatorSendAtResponse:
     with _as_http_errors():
         message_id = await send_at(
@@ -252,7 +248,6 @@ async def operator_send_at_node(req: OperatorSendAtRequest) -> OperatorSendAtRes
     )
 
 
-@node
 async def operator_record_node(req: OperatorRecordRequest) -> OperatorRecordResponse:
     with _as_http_errors():
         rows = await read_record(
@@ -261,7 +256,6 @@ async def operator_record_node(req: OperatorRecordRequest) -> OperatorRecordResp
     return OperatorRecordResponse(lane=_lane(), rows=rows)
 
 
-@node
 async def operator_dead_letters_node(
     req: OperatorDeadLettersRequest,
 ) -> OperatorDeadLettersResponse:
@@ -270,7 +264,6 @@ async def operator_dead_letters_node(
     return OperatorDeadLettersResponse(lane=_lane(), dead_letters=rows)
 
 
-@node
 async def operator_replay_node(req: OperatorReplayRequest) -> OperatorReplayResponse:
     with _as_http_errors():
         result = await replay_dead_letters(

@@ -1,4 +1,9 @@
-"""Phase 7b Gap 12: runtime_dlq_audit DDL + helpers.
+"""The ``runtime_dlq_audit`` table: the audit trail of dead letters an operator sends back or clears.
+
+Two writers, both dead-letter operations: messaging's replay of its own dead letters
+(:mod:`app.messaging.dead_letters`) and the ops DLQ tools (:mod:`app.capabilities.dlq`). The
+table is not a Data class; the host passes :data:`RUNTIME_DLQ_AUDIT_DDL` to the migrator. It
+keeps the name it had when the dataflow runtime owned it.
 
 Status state machine (see spec §3.2 6-step protocol):
   cleared -> requeued | publish_failed | zombie_acked | already_succeeded

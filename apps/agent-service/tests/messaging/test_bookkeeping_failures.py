@@ -23,8 +23,8 @@ from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, Route, mq
 from app.messaging.lifecycle import start_messaging
 from app.messaging.message import Kind, SendFailed, new_message
 from app.messaging.receiving import inbox
+from app.messaging.retry import RetryPolicy
 from app.messaging.sending import ask, send, send_at
-from app.runtime.retry import RetryPolicy
 
 from .conftest import LANE
 from .helpers import eventually

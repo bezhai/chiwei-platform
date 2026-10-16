@@ -31,15 +31,15 @@ from app.infra.rabbitmq import (
     mq,
 )
 from app.messaging.broker import SCHEDULED, inbox_route, lane, publish
-from app.messaging.message import Message, SendFailed
-from app.messaging.receiving import retry_headers
-from app.runtime.dlq_audit import (
+from app.messaging.dead_letter_audit import (
     AuditAction,
     AuditStatus,
     insert_audit_row,
     update_audit_status,
 )
-from app.runtime.retry import DELIVERY_COUNT_HEADER
+from app.messaging.message import Message, SendFailed
+from app.messaging.receiving import retry_headers
+from app.messaging.retry import DELIVERY_COUNT_HEADER
 
 logger = logging.getLogger(__name__)
 

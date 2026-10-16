@@ -265,7 +265,7 @@ async def migrate_schema(*, also: Sequence[str]) -> None:
     """Read the live schema, diff it against every registered ``Data``, apply the additive DDL.
 
     ``also`` is DDL for tables that are not Data, applied after the plan in the same
-    transaction. The host passes the runtime's own tables (``runtime_inflight``,
+    transaction. The host passes messaging's own tables (``runtime_inflight``,
     ``runtime_dlq_audit``): they are framework state, so :func:`plan_migration` does not track
     them, and their DDL is idempotent (``IF NOT EXISTS``) and always runs. They come in as an
     argument so that :mod:`app.data` does not import the packages that define them.

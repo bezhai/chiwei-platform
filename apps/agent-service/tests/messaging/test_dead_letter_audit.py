@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from app.data.persist import fetch_one
-from app.runtime.dlq_audit import (
+from app.messaging.dead_letter_audit import (
     AuditAction,
     AuditStatus,
     insert_audit_row,

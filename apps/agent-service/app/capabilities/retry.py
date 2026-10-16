@@ -1,9 +1,9 @@
 """``@retry`` — process-local retry decorator for async network calls.
 
-Sibling abstraction to ``app/runtime/retry.py`` but a different scope:
+Sibling abstraction to ``app/messaging/retry.py`` but a different scope:
 
-* ``app/runtime/retry.py`` decides whether a *durable* RabbitMQ message
-  should be re-delivered across processes (broker-layer redelivery).
+* ``app/messaging/retry.py`` decides whether a message whose handler failed
+  in its inbox should be delivered again (broker-layer redelivery).
 * ``@retry`` here is in-process. It wraps an ``async def`` and retries
   the call locally with exponential / linear backoff against a
   white-list of exception types — used for one-shot HTTP / LLM calls

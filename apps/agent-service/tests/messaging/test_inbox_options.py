@@ -19,8 +19,8 @@ from app.messaging.broker import inbox_route, opened
 from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.message import Kind, Message
 from app.messaging.receiving import inbox, inboxes_at_start
+from app.messaging.retry import RetryPolicy
 from app.messaging.sending import send
-from app.runtime.retry import RetryPolicy
 
 from .conftest import LANE
 from .helpers import eventually

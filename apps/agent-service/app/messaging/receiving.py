@@ -138,6 +138,12 @@ from app.messaging.broker import (
     question_route,
     reply_route,
 )
+from app.messaging.claims import (
+    claim_inflight,
+    mark_failed,
+    mark_succeeded,
+    succeeded_keys,
+)
 from app.messaging.message import (
     Kind,
     Message,
@@ -146,25 +152,19 @@ from app.messaging.message import (
     participant,
 )
 from app.messaging.record import Outcome, record
+from app.messaging.retry import (
+    DELIVERY_COUNT_HEADER,
+    RetryPolicy,
+    decide_retry,
+    delivery_count,
+)
 from app.messaging.sending import (
     ANSWER_BY_HEADER,
     REPLY_RK_HEADER,
     deliver,
     publish_recorded,
 )
-from app.runtime.inflight import (
-    claim_inflight,
-    mark_failed,
-    mark_succeeded,
-    succeeded_keys,
-)
 from app.runtime.propagation import bind_context, extract_context
-from app.runtime.retry import (
-    DELIVERY_COUNT_HEADER,
-    RetryPolicy,
-    decide_retry,
-    delivery_count,
-)
 
 logger = logging.getLogger(__name__)
 

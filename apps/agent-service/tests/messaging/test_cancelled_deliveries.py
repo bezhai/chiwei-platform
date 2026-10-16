@@ -23,11 +23,11 @@ from sqlalchemy import text
 
 from app.infra.rabbitmq import mq
 from app.messaging import receiving
+from app.messaging.claims import claim_inflight
 from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.receiving import inbox
+from app.messaging.retry import RetryPolicy
 from app.messaging.sending import ask, send
-from app.runtime.inflight import claim_inflight
-from app.runtime.retry import RetryPolicy
 
 from .conftest import LANE
 from .helpers import HangsOnce, Inbox, eventually

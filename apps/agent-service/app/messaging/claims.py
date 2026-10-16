@@ -1,11 +1,11 @@
-"""runtime_inflight state machine (Gap 7.1): the per-message claims messaging dedupes on.
+"""The ``runtime_inflight`` table: the per-message claims messaging dedupes on.
 
 Per-edge dedup state with lease semantics (worker death recovery). An edge is
 one inbox in one lane (``inbox:<name>@<lane>``, :mod:`app.messaging.receiving`);
 the key is the message id.
 
-Schema is owned by the runtime (not a Data class); the host passes
-:data:`RUNTIME_INFLIGHT_DDL` to the migrator.
+The table is not a Data class; the host passes :data:`RUNTIME_INFLIGHT_DDL` to
+the migrator. It keeps the name it had when the dataflow runtime owned it.
 
 Per-edge isolation: PK is ``(edge_id, idempotent_key)``, so the same key on
 two edges carries independent state — succeeded on one does not skip the
@@ -29,6 +29,9 @@ Caller protocol:
   released on commit; the consumer runs OUTSIDE that transaction.
 - After the consumer call, ``mark_succeeded(...)`` or ``mark_failed(...)``
   closes the row in a separate short transaction.
+
+The dead-letter tools clear rows with :func:`delete_inflight`, which refuses a
+``succeeded`` row with :class:`AlreadySucceededError`.
 """
 
 from __future__ import annotations
@@ -42,7 +45,6 @@ from typing import Literal
 from sqlalchemy import text
 
 from app.data.tx import auto_tx, current_session
-from app.runtime.errors import AlreadySucceededError
 
 RUNTIME_INFLIGHT_DDL: list[str] = [
     """
@@ -66,6 +68,24 @@ RUNTIME_INFLIGHT_DDL: list[str] = [
     ON runtime_inflight (state, locked_until)
     """,
 ]
+
+
+class AlreadySucceededError(Exception):
+    """Raised by :func:`delete_inflight` in edge_idempotent mode when the
+    targeted (edge_id, idempotent_key) already has state='succeeded'.
+
+    The DLQ requeue 6-step protocol catches this and treats the original
+    DLQ message as a zombie (ack + audit status='zombie_acked'); see
+    nodes/dlq_admin.py.
+    """
+
+    def __init__(self, *, edge_id: str, idempotent_key: str) -> None:
+        super().__init__(
+            f"inflight already succeeded: edge_id={edge_id!r} "
+            f"idempotent_key={idempotent_key!r}"
+        )
+        self.edge_id = edge_id
+        self.idempotent_key = idempotent_key
 
 
 def _lock_key(edge_id: str, idempotent_key: str) -> int:

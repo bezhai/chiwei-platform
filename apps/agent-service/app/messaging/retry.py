@@ -5,17 +5,17 @@ headers + a ``RetryPolicy``, returns a RetryDecision describing
 whether to republish (with backoff delay) or dead-letter. The
 messaging layer (``app.messaging.receiving``) is the caller.
 
-Delivery count is read from the runtime-managed ``x-delivery-count``
-header ONLY. We don't read RabbitMQ's automatic ``x-death`` header
+Delivery count is read from the ``x-delivery-count`` header that messaging
+sets itself, ONLY. We don't read RabbitMQ's automatic ``x-death`` header
 because its accumulation semantics depend on broker DLX configuration
-and are not the canonical attempt counter for this runtime — the
-publisher-side retry path always sets x-delivery-count explicitly.
+and are not the canonical attempt counter — the publisher-side retry path
+always sets x-delivery-count explicitly.
 
 First delivery has no header (count == 0).
 
 Idempotent_key reuse: retries are republished with the same body and
-headers (apart from ``x-delivery-count``). The inflight state machine
-(runtime/inflight.py) keys off the same idempotent_key, so retries flow
+headers (apart from ``x-delivery-count``). The claims
+(:mod:`app.messaging.claims`) key off the same idempotent_key, so retries flow
 back into the same row (state=failed → processing on next claim) — they
 don't bypass dedup, they continue it.
 """
@@ -29,7 +29,7 @@ DELIVERY_COUNT_HEADER = "x-delivery-count"
 
 
 def delivery_count(headers: dict[str, Any] | None) -> int:
-    """Extract the runtime's delivery_count from inbound message headers.
+    """Extract the delivery count from inbound message headers.
 
     Defensive: any non-int / negative / missing value coerces to 0
     (treated as first delivery).
@@ -50,7 +50,7 @@ class RetryPolicy:
     ``base_delay_ms`` / ``max_delay_ms`` clamp the per-attempt delay.
     ``lease_ms`` = how long the inflight ``processing`` row is reserved
     for this worker; another consumer may take over after expiry (lease
-    semantics live in runtime/inflight.py).
+    semantics live in :mod:`app.messaging.claims`).
     """
 
     n: int

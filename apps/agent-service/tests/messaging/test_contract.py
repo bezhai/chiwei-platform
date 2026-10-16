@@ -18,8 +18,8 @@ from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.message import Kind, Message, SendFailed, new_message
 from app.messaging.receiving import inbox
 from app.messaging.record import read_record
+from app.messaging.retry import RetryPolicy
 from app.messaging.sending import ask, send, send_at
-from app.runtime.retry import RetryPolicy
 
 from .conftest import LANE
 from .helpers import Inbox, eventually, outcomes, outcomes_become
@@ -972,8 +972,8 @@ async def test_starting_an_app_does_not_create_the_record_table(test_db, monkeyp
     跟这件事无关。
     """
     import app.data.migrator as migrator
-    from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
-    from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
+    from app.messaging.claims import RUNTIME_INFLIGHT_DDL
+    from app.messaging.dead_letter_audit import RUNTIME_DLQ_AUDIT_DDL
 
     monkeypatch.setattr(migrator, "DATA_REGISTRY", set())
     async with test_db.begin() as conn:

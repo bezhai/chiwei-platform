@@ -140,6 +140,40 @@ class BrokerHandle:
 
 
 @pytest.fixture
+async def inflight_db(test_db: object) -> AsyncGenerator[object, None]:  # noqa: F811
+    """Create the runtime_inflight schema on the test DB and yield the engine.
+
+    Each test gets a fresh table (test_db drops public schema between
+    tests, so the CREATE TABLE IF NOT EXISTS reapplies cleanly).
+    """
+    from sqlalchemy import text
+
+    from app.messaging.claims import RUNTIME_INFLIGHT_DDL
+
+    async with test_db.begin() as conn:
+        for ddl in RUNTIME_INFLIGHT_DDL:
+            await conn.execute(text(ddl))
+    yield test_db
+
+
+@pytest.fixture
+async def dlq_audit_db(test_db: object) -> AsyncGenerator[object, None]:  # noqa: F811
+    """Create the runtime_dlq_audit schema on the test DB and yield the engine.
+
+    Phase 7b Gap 12: mirrors inflight_db; applies RUNTIME_DLQ_AUDIT_DDL so
+    audit helper tests get a clean table every test.
+    """
+    from sqlalchemy import text
+
+    from app.messaging.dead_letter_audit import RUNTIME_DLQ_AUDIT_DDL
+
+    async with test_db.begin() as conn:
+        for ddl in RUNTIME_DLQ_AUDIT_DDL:
+            await conn.execute(text(ddl))
+    yield test_db
+
+
+@pytest.fixture
 async def messaging_db(test_db) -> AsyncGenerator[object, None]:  # noqa: F811
     """记录者、去重状态、死信重放审计三张表。
 
@@ -149,8 +183,8 @@ async def messaging_db(test_db) -> AsyncGenerator[object, None]:  # noqa: F811
     from sqlalchemy import text
 
     from app.data.models import MessageRecord
-    from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
-    from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
+    from app.messaging.claims import RUNTIME_INFLIGHT_DDL
+    from app.messaging.dead_letter_audit import RUNTIME_DLQ_AUDIT_DDL
 
     async with test_db.begin() as conn:
         for ddl in (*RUNTIME_INFLIGHT_DDL, *RUNTIME_DLQ_AUDIT_DDL):

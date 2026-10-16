@@ -54,7 +54,7 @@ async def create_schema(engine) -> None:
     * the SQLAlchemy models (``ensure_business_schema``),
     * every ``Data`` class defined under ``app`` (the runtime migrator; every plugin in both
       apps' manifests is imported so all of them are defined),
-    * the runtime's own tables (inflight, dlq audit),
+    * messaging's own tables (claims, dead-letter audit),
     * the two tables channel-server owns that her phone reads (``bot_config``,
       ``common_bot_presence``; same DDL as ``tests/living``).
     """
@@ -62,8 +62,8 @@ async def create_schema(engine) -> None:
     from app.data.models import Base
     from app.data.schema import DATA_REGISTRY
     from app.deployment import APPS
-    from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
-    from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
+    from app.messaging.claims import RUNTIME_INFLIGHT_DDL
+    from app.messaging.dead_letter_audit import RUNTIME_DLQ_AUDIT_DDL
     from tests.living.conftest import _BOT_CONFIG_DDL, _BOT_PRESENCE_DDL
 
     # Importing a plugin module defines its Data classes; it registers nothing until its setup.

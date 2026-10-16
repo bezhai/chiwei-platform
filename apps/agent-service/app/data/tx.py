@@ -4,7 +4,7 @@
 
   - ``async with tx():``  — 表达「这几行原子」
   - ``current_session()``  — ``app.data`` 内部（``persist`` 的读写原语、``queries`` 层）和框架
-    （``runtime`` 的 inflight / 死信审计、``messaging`` 的记录者）用；业务区禁止 import
+    （``messaging`` 的占位、死信审计和记录者）用；业务区禁止 import
   - ``in_tx()``  — 这个 task 上有没有开着的 ``tx()``。给必须自己提交、不能并进调用方事务的写入
     用：在调用方的事务里就拒绝，而不是晚于它声称的时刻才提交
 

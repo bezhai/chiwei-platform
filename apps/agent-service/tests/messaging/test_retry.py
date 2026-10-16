@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.runtime.retry import (
+from app.messaging.retry import (
     DELIVERY_COUNT_HEADER,
     RetryPolicy,
     decide_retry,

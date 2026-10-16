@@ -17,8 +17,8 @@ setup is refused: the host has nothing that would start a late registration.
    before any IO.
 4. ``schema``: the business tables of coe lanes (:func:`app.data.bootstrap.ensure_business_schema`).
 5. ``mq``: the broker connection and its main exchange, which the outbound queues publish on.
-6. ``schema``: the Data tables (:func:`app.data.migrator.migrate_schema`), and the runtime's own
-   tables, whose DDL the host passes in.
+6. ``schema``: the Data tables (:func:`app.data.migrator.migrate_schema`), and messaging's own
+   tables (claims, dead-letter audit), whose DDL the host passes in.
 7. ``tasks``: every task starts.
 8. ``mq``: messaging (inboxes, the at-start openers, scheduled delivery).
 9. ``http``: the routes go onto the app.
@@ -73,11 +73,11 @@ from app.host.http import METHODS, Handler, RouteSpec, bind_route, unbind_route
 from app.host.plugin import Disposer, Plugin, Registration
 from app.infra.rabbitmq import mq
 from app.messaging import receiving
+from app.messaging.claims import RUNTIME_INFLIGHT_DDL
+from app.messaging.dead_letter_audit import RUNTIME_DLQ_AUDIT_DDL
 from app.messaging.lifecycle import start_messaging, stop_messaging
-from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
 from app.runtime.emit import reset_emit_runtime
 from app.runtime.graph import compile_graph
-from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
 from app.runtime.lane_policy import (
     current_deployment_lane,
     time_sources_enabled_by_default,
