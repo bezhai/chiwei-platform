@@ -759,7 +759,7 @@
                 "(Background on this error at: https://sqlalche.me/e/<release>/e3q8)"
               ],
               "locked_until": null,
-              "state": "failed",
+              "state": "dead_lettered",
               "trace_id": null,
               "updated_at": "<db-clock>",
               "worker_id": null

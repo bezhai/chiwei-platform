@@ -11,8 +11,11 @@ from app.data.persist import fetch_one
 from app.data.tx import current_session, tx
 from app.messaging.claims import (
     claim_inflight,
+    mark_dead_lettered,
     mark_failed,
     mark_succeeded,
+    reopen_dead_lettered,
+    succeeded_keys,
 )
 
 pytestmark = pytest.mark.integration
@@ -232,3 +235,98 @@ class TestMarkOnlyByTheHolder:
             edge_id="E::c", idempotent_key="k1", worker_id="host:1#old"
         ) is False
         assert (await _row("E::c", "k1"))["state"] == "processing"
+
+
+async def _insert(state: str, *, key: str = "k1", worker_id: str | None = None) -> None:
+    async with tx():
+        await current_session().execute(text(
+            "INSERT INTO runtime_inflight "
+            "(edge_id, idempotent_key, data_table, state, attempts, last_error, worker_id) "
+            "VALUES ('E::c', :k, 'foo', :s, 1, 'boom', :w)"
+        ), {"k": key, "s": state, "w": worker_id})
+
+
+class TestDeadLettered:
+    """次数用完、进了死信的一条（``dead_lettered``）：重放之前任何一份都不再处理，重放把它改回
+    ``failed``，重放回去的那一份照常接管。被取消后放开的（``failed``）不受影响。"""
+
+    async def test_the_holder_marks_its_claim_dead_lettered(self, inflight_db: object) -> None:
+        await claim_inflight(
+            edge_id="E::c", idempotent_key="k1", data_table="foo",
+            worker_id="host:1#a", lease_ms=60_000,
+        )
+
+        assert await mark_dead_lettered(
+            edge_id="E::c", idempotent_key="k1", last_error="RuntimeError: boom",
+            worker_id="host:1#a",
+        ) is True
+        row = await _row("E::c", "k1")
+        assert (row["state"], row["locked_until"], row["worker_id"]) == (
+            "dead_lettered", None, None,
+        )
+        assert row["last_error"] == "RuntimeError: boom"
+
+    async def test_a_stale_holder_cannot_mark_a_takeover_dead_lettered(
+        self, inflight_db: object
+    ) -> None:
+        await claim_inflight(
+            edge_id="E::c", idempotent_key="k1", data_table="foo",
+            worker_id="host:1#new", lease_ms=60_000,
+        )
+
+        assert await mark_dead_lettered(
+            edge_id="E::c", idempotent_key="k1", last_error="late", worker_id="host:1#old",
+        ) is False
+        assert (await _row("E::c", "k1"))["state"] == "processing"
+
+    async def test_a_dead_lettered_key_is_skipped_and_left_as_it_is(
+        self, inflight_db: object
+    ) -> None:
+        await _insert("dead_lettered")
+
+        outcome = await claim_inflight(
+            edge_id="E::c", idempotent_key="k1", data_table="foo",
+            worker_id="host:1", lease_ms=60_000,
+        )
+
+        assert (outcome.action, outcome.locked_until, outcome.dead_lettered) == (
+            "skip", None, True,
+        )
+        row = await _row("E::c", "k1")
+        assert (row["state"], row["attempts"], row["worker_id"]) == ("dead_lettered", 1, None)
+
+    async def test_reopening_turns_a_dead_letter_back_into_failed_for_the_next_claim(
+        self, inflight_db: object
+    ) -> None:
+        await _insert("dead_lettered")
+
+        assert await reopen_dead_lettered(edge_id="E::c", idempotent_key="k1") is True
+        row = await _row("E::c", "k1")
+        assert (row["state"], row["last_error"]) == ("failed", "boom")
+        outcome = await claim_inflight(
+            edge_id="E::c", idempotent_key="k1", data_table="foo",
+            worker_id="host:1", lease_ms=60_000,
+        )
+        assert (outcome.action, outcome.attempts) == ("run", 2)
+
+    @pytest.mark.parametrize("state", ["succeeded", "failed", "processing"])
+    async def test_reopening_leaves_every_other_state_alone(
+        self, inflight_db: object, state: str
+    ) -> None:
+        await _insert(state, worker_id="host:other" if state == "processing" else None)
+
+        assert await reopen_dead_lettered(edge_id="E::c", idempotent_key="k1") is False
+        assert (await _row("E::c", "k1"))["state"] == state
+
+    async def test_reopening_a_key_without_a_claim_does_nothing(
+        self, inflight_db: object
+    ) -> None:
+        assert await reopen_dead_lettered(edge_id="E::c", idempotent_key="nope") is False
+
+    async def test_a_dead_lettered_key_is_not_among_the_succeeded(
+        self, inflight_db: object
+    ) -> None:
+        await _insert("dead_lettered", key="k1")
+        await _insert("succeeded", key="k2")
+
+        assert await succeeded_keys(edge_id="E::c", idempotent_keys=["k1", "k2"]) == {"k2"}

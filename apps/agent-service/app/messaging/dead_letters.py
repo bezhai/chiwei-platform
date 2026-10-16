@@ -38,7 +38,7 @@ from app.messaging.dead_letter_audit import (
     update_audit_status,
 )
 from app.messaging.message import Message, SendFailed
-from app.messaging.receiving import retry_headers
+from app.messaging.receiving import reopen_dead_letter, retry_headers
 from app.messaging.retry import DELIVERY_COUNT_HEADER
 
 logger = logging.getLogger(__name__)
@@ -134,7 +134,9 @@ async def replay_dead_letters(*, limit: int, operator: str | None) -> dict[str, 
     """把本泳道死信队列里的至多 ``limit`` 条发回它们原来的队列。
 
     发回去的消息重试计数清零，"看到过几次别人的占位"也去掉（:func:`app.messaging.receiving.retry_headers`），
-    和处理失败后的重试一样从头算；runtime_inflight 里它停在 ``failed``，下一次处理直接接管。
+    和处理失败后的重试一样从头算。发之前把它在 runtime_inflight 里的"进了死信"改回 ``failed``
+    （:func:`app.messaging.receiving.reopen_dead_letter`）：进死信之后、重放之前到的副本都被挡掉了，
+    重放回去的这一份要能接管。先改再发，发出去的那一份不会先读到"进了死信"被确认掉。
     每一条都在 ``runtime_dlq_audit`` 里留一行。
     """
     replayed = refused = failed = 0
@@ -178,6 +180,7 @@ async def replay_dead_letters(*, limit: int, operator: str | None) -> dict[str, 
             headers = retry_headers(
                 {k: v for k, v in received.items() if k not in _DEATH_HEADERS}, 0
             )
+            await reopen_dead_letter(route, message)
             try:
                 await publish(route, message.to_json(), headers=headers)
             except SendFailed as exc:

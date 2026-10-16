@@ -30,6 +30,18 @@ async def test_edge_idempotent_deletes_failed_row(inflight_db: object) -> None:
     assert out.skipped_succeeded == 0
 
 
+async def test_both_modes_delete_a_dead_lettered_row(inflight_db: object) -> None:
+    """进了死信的那一行不是"已经成功"：清掉它，下一份投递照常处理。"""
+    await _insert("dead_lettered", edge="e1", key="k1", trace="trace-d")
+    await _insert("dead_lettered", edge="e2", key="k2", trace="trace-d")
+
+    by_key = await delete_inflight(by="edge_idempotent", edge_id="e1", idempotent_key="k1")
+    by_trace = await delete_inflight(by="trace_id", trace_id="trace-d")
+
+    assert (by_key.deleted, by_trace.deleted, by_trace.skipped_succeeded) == (1, 1, 0)
+    assert await fetch_value("SELECT count(*) FROM runtime_inflight") == 0
+
+
 async def test_edge_idempotent_raises_on_succeeded(inflight_db: object) -> None:
     await _insert("succeeded", edge="e2", key="k3")
     with pytest.raises(AlreadySucceededError) as ei:

@@ -20,15 +20,23 @@ Lease semantics:
 - After ``locked_until <= now()`` (worker death, OOM, network loss,
   pod restart), the next claim takes over, increments ``attempts``,
   and runs the consumer fresh.
-- ``succeeded`` is the only dedup terminal — both ``failed`` and
+- ``succeeded`` is the only dedup terminal — ``failed`` (a failure with a
+  retry still to come, or a cancelled delivery that let go) and
   ``processing-expired`` resume.
+- ``dead_lettered``: the handler failed with no attempt left and the message
+  went to the dead letters. Every claim skips it, as if succeeded, until the
+  dead-letter replay turns it back into ``failed``
+  (:func:`reopen_dead_lettered`) just before it publishes the message again.
+  The holder writes it straight over its ``processing`` claim
+  (:func:`mark_dead_lettered`), so the row is never ``failed`` in between for
+  another copy to take over.
 
 Caller protocol:
 
 - ``claim_inflight(...)`` opens a short transaction. The advisory lock is
   released on commit; the consumer runs OUTSIDE that transaction.
-- After the consumer call, ``mark_succeeded(...)`` or ``mark_failed(...)``
-  closes the row in a separate short transaction.
+- After the consumer call, ``mark_succeeded(...)``, ``mark_failed(...)`` or
+  ``mark_dead_lettered(...)`` closes the row in a separate short transaction.
 
 The dead-letter tools clear rows with :func:`delete_inflight`, which refuses a
 ``succeeded`` row with :class:`AlreadySucceededError`.
@@ -105,8 +113,10 @@ class ClaimOutcome:
     attempts: int  # 0 if action == 'skip'
     # Set only when skipping because another worker holds a live lease: the
     # moment that lease runs out. A skip with ``None`` means the key has
-    # succeeded and never needs another look.
+    # succeeded, or was dead-lettered, and this copy never needs another look.
     locked_until: datetime | None = None
+    # A skip because the key was dead-lettered (and not replayed since).
+    dead_lettered: bool = False
 
 
 @dataclass(frozen=True)
@@ -154,6 +164,8 @@ async def claim_inflight(
         state = row["state"]
         if state == "succeeded":
             return ClaimOutcome(action="skip", attempts=0)
+        if state == "dead_lettered":
+            return ClaimOutcome(action="skip", attempts=0, dead_lettered=True)
         now = datetime.now(UTC)
         locked_until = row["locked_until"]
         if state == "processing" and locked_until is not None and locked_until > now:
@@ -217,17 +229,59 @@ async def mark_failed(
     last_error: str,
     worker_id: str | None = None,
 ) -> bool:
+    """The handler failed with a retry still to come, or the delivery was
+    cancelled and lets go of its claim: the next claim takes over."""
+    return await _end_with_error(
+        "failed", edge_id=edge_id, idempotent_key=idempotent_key,
+        last_error=last_error, worker_id=worker_id,
+    )
+
+
+async def mark_dead_lettered(
+    *, edge_id: str, idempotent_key: str, last_error: str, worker_id: str
+) -> bool:
+    """The handler failed with no attempt left and the message goes to the
+    dead letters: every claim skips the key until :func:`reopen_dead_lettered`.
+    One statement over the holder's own ``processing`` claim."""
+    return await _end_with_error(
+        "dead_lettered", edge_id=edge_id, idempotent_key=idempotent_key,
+        last_error=last_error, worker_id=worker_id,
+    )
+
+
+async def _end_with_error(
+    state: Literal["failed", "dead_lettered"],
+    *,
+    edge_id: str,
+    idempotent_key: str,
+    last_error: str,
+    worker_id: str | None,
+) -> bool:
     params = {
-        "err": last_error[:8000], "e": edge_id, "k": idempotent_key, "w": worker_id,
+        "s": state, "err": last_error[:8000], "e": edge_id, "k": idempotent_key,
+        "w": worker_id,
     }
     async with auto_tx():
         result = await current_session().execute(text(
             "UPDATE runtime_inflight "
-            "SET state='failed', locked_until=NULL, worker_id=NULL, "
+            "SET state=:s, locked_until=NULL, worker_id=NULL, "
             "    last_error=:err, updated_at=now() "
             "WHERE edge_id=:e AND idempotent_key=:k"
             + (_HELD_BY if worker_id is not None else "")
         ), params)
+    return bool(getattr(result, "rowcount", 0))
+
+
+async def reopen_dead_lettered(*, edge_id: str, idempotent_key: str) -> bool:
+    """The dead-letter replay is about to publish this message again: a
+    ``dead_lettered`` key becomes ``failed``, so the replayed copy takes it
+    over (``attempts`` and ``last_error`` stay). Any other state, or no row,
+    is left alone; returns whether a row changed."""
+    async with auto_tx():
+        result = await current_session().execute(text(
+            "UPDATE runtime_inflight SET state='failed', updated_at=now() "
+            "WHERE edge_id=:e AND idempotent_key=:k AND state='dead_lettered'"
+        ), {"e": edge_id, "k": idempotent_key})
     return bool(getattr(result, "rowcount", 0))
 
 

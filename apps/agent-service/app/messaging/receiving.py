@@ -8,7 +8,9 @@
 
 **至少一次，按消息 id 去重。** broker 在消费者断开时会把没确认的消息重投，所以同一条
 消息可能到两次。每个收件箱按 ``(inbox:<名字>@<泳道>, 消息 id)`` 在 ``runtime_inflight``
-上占位（带泳道是因为 ppe 和 prod 共用一个库，同一个 id 在两条泳道各是各的一条）：处理成功过的不再处理；另一个进程正拿着它（租约还没过期）的，不丢，延时
+上占位（带泳道是因为 ppe 和 prod 共用一个库，同一个 id 在两条泳道各是各的一条）：处理成功过的不再处理；
+次数用完进了死信的，在它被重放之前也不再处理（:func:`_claim_run_settle`），同一条的别的副本到了直接确认；
+另一个进程正拿着它（租约还没过期）的，不丢，延时
 重新排回收件箱、到时再看一次：第一次隔 1 秒，之后每次翻倍，封顶 60 秒，不晚于那份租约到期之后
 1 秒（:func:`_held_check_delay_ms`），已经看过几次记在消息头 :data:`HELD_CHECKS_HEADER` 里。拿着
 它的要是一次刚被取消、还没放开占位的投递，几秒内就由这里接手；那个进程要是半路死了，租约过期后
@@ -47,7 +49,8 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
   就是 :data:`PROCESSING_RETRY` 的次数（4 次）；小于 1 拒绝开设。处理一次要花钱、失败了不该
   再来的收件箱（读书）设 1：失败一次就进死信，人看过之后决定要不要重放。和
   ``retry_without_limit`` 一起给时，拥有者判"不限次数"的那条不受它限制，判 ``None`` 的按它。
-  只数处理函数的失败：投递被取消、放回队列、占位过期被接管之后的重来都不算次数。
+  只数处理函数的失败：投递被取消、放回队列、占位过期被接管之后的重来都不算次数。次数按每一份投递
+  自己带的消息头数，同一条的重复副本接手一次还没进死信的失败时，从它自己的次数接着数。
 * ``consume_while`` —— 只在持有它（一个异步上下文，比如一把跨进程的独占锁）期间消费普通消息。
   开设时不在启动流程里等它：队列照常建好，启动照常返回，后台等到进了这个上下文，才跑
   ``on_open``、开始消费；停止时等正在处理的消息处理完（见下面"停下时"）之后才退出这个
@@ -141,8 +144,10 @@ from app.messaging.broker import (
 )
 from app.messaging.claims import (
     claim_inflight,
+    mark_dead_lettered,
     mark_failed,
     mark_succeeded,
+    reopen_dead_lettered,
     succeeded_keys,
 )
 from app.messaging.message import (
@@ -641,10 +646,10 @@ async def _handle(
     edge_id: str,
     lease_ms: int,
     run: Callable[[], Awaitable[None]],
-    after_failure: Callable[[Message, dict[str, Any], Any, str, Exception], Awaitable[Verdict]],
+    after_failure: AfterFailure,
 ) -> Verdict:
     """领取 → 业务处理 → 标记，整体最多 :data:`DELIVERY_DEADLINE`。只有 ``run`` 的失败算业务失败，
-    交给 ``after_failure``；别的步骤抛出去，由 :func:`_consumer` 按基础设施失败处理。
+    由 ``after_failure`` 定去向；别的步骤抛出去，由 :func:`_consumer` 按基础设施失败处理。
 
     按消息 id 去重：处理成功过的不再处理；另一个进程正拿着（租约没过期）的，隔一会儿重新排回去
     再看（:func:`_held_check_delay_ms`）——拿着它的正在放开的话几秒内接手，那个进程要是半路死了，
@@ -697,9 +702,15 @@ async def _claim_run_settle(
     edge_id: str,
     lease_ms: int,
     run: Callable[[], Awaitable[None]],
-    after_failure: Callable[[Message, dict[str, Any], Any, str, Exception], Awaitable[Verdict]],
+    after_failure: AfterFailure,
 ) -> Verdict:
-    """:func:`_handle` 的那三步，用 ``claim_token`` 占位。"""
+    """:func:`_handle` 的那三步，用 ``claim_token`` 占位。
+
+    处理函数失败时，先定这条的去向，再按去向收掉占位：进死信的从"处理中"直接记成 ``dead_lettered``，
+    一条带着本次标记的更新，中间不经过 ``failed``——同一条的另一份副本正隔一会儿再看的话，回来时
+    看到的是"进了死信"，不会接管、让处理函数再跑一遍；重放之前它一直这样（:func:`reopen_dead_letter`）。
+    其余的记成 ``failed``，重试的那一份（和被取消后放开的一样）照常接管。
+    """
     claim = await claim_inflight(
         edge_id=edge_id,
         idempotent_key=message.message_id,
@@ -709,7 +720,14 @@ async def _claim_run_settle(
         trace_id=extract_context(received).trace_id,
     )
     if claim.action == "skip":
-        if claim.locked_until is not None:
+        if claim.dead_lettered:
+            logger.info(
+                "messaging: %s %s went to the dead letters and has not been replayed; this "
+                "copy is acknowledged without being handled",
+                edge_id,
+                message.message_id,
+            )
+        elif claim.locked_until is not None:
             checks = _held_checks(received)
             delay_ms = _held_check_delay_ms(checks, claim.locked_until, datetime.now(UTC))
             await publish(
@@ -729,7 +747,9 @@ async def _claim_run_settle(
     try:
         await run()
     except Exception as exc:
-        still_mine = await mark_failed(
+        then = await after_failure(message, received, edge_id)
+        mark = mark_dead_lettered if then is Verdict.DEAD_LETTER else mark_failed
+        still_mine = await mark(
             edge_id=edge_id,
             idempotent_key=message.message_id,
             last_error=f"{type(exc).__name__}: {exc}",
@@ -743,7 +763,7 @@ async def _claim_run_settle(
                 message.message_id,
             )
             return Verdict.ACK
-        return await after_failure(message, received, route, edge_id, exc)
+        return await _carry_out(then, message, received, route, edge_id, exc)
 
     if not await mark_succeeded(
         edge_id=edge_id, idempotent_key=message.message_id, worker_id=claim_token
@@ -819,14 +839,24 @@ async def _release(edge_id: str, message: Message, claim_token: str, why: str) -
     )
 
 
+@dataclass(frozen=True)
+class _Retry:
+    """处理失败之后再排一次：重排的那一份是第几次重试、隔多久。``without_limit`` 是拥有者点名不限次数
+    的那种，每一次失败都在记录者里记一行 ``retrying``。"""
+
+    attempt: int
+    delay_ms: int
+    without_limit: bool = False
+
+
+# 处理函数失败一次之后，这条消息的去向：再排一次、放回原队列，或者进死信。参数是消息、它的消息头、
+# 去重的 edge。只定去向；收掉占位、发重试那一份、记日志都在 :func:`_claim_run_settle` 里。
+AfterFailure = Callable[[Message, dict[str, Any], str], Awaitable["_Retry | Verdict"]]
+
+
 async def _after_owner_failure(
-    spec: InboxSpec,
-    message: Message,
-    received: dict[str, Any],
-    route,
-    edge_id: str,
-    exc: Exception,
-) -> Verdict:
+    spec: InboxSpec, message: Message, received: dict[str, Any], edge_id: str
+) -> _Retry | Verdict:
     """拥有者的处理函数失败了一次：点名不限次数的按封顶退避再排；否则有限次重试（收件箱的
     ``max_attempts``，不声明就是 :data:`PROCESSING_RETRY` 的），用完进死信。"""
     cap = await _unlimited_cap(spec, message, edge_id)
@@ -839,52 +869,67 @@ async def _after_owner_failure(
             max_delay_ms=max(1, int(cap.total_seconds() * 1000)),
             lease_ms=PROCESSING_RETRY.lease_ms,
         ).delay_for_attempt(attempt)
-        reason = (
-            f"第 {attempt} 次处理失败（{type(exc).__name__}: {exc}），"
-            f"{delay_ms / 1000:g} 秒后再试"
-        )
-        logger.warning(
-            "messaging: %s %s failed; retrying without limit: %s",
-            edge_id,
-            message.message_id,
-            reason,
-        )
-        await _note_retrying(message, reason)
-        await publish(
-            route,
-            message.to_json(),
-            headers=retry_headers(received, attempt),
-            delay_ms=delay_ms,
-        )
-        return Verdict.ACK
+        return _Retry(attempt, delay_ms, without_limit=True)
 
     policy = PROCESSING_RETRY
     if spec.max_attempts is not None:
         policy = replace(PROCESSING_RETRY, n=spec.max_attempts)
     decision = decide_retry(headers=received, policy=policy)
     if decision.action == "retry":
-        logger.warning(
-            "messaging: %s %s failed (%r); retry %d in %d ms",
-            edge_id,
-            message.message_id,
-            exc,
-            decision.attempt,
-            decision.delay_ms,
-        )
+        return _Retry(decision.attempt, decision.delay_ms)
+    return Verdict.DEAD_LETTER
+
+
+async def _carry_out(
+    then: _Retry | Verdict,
+    message: Message,
+    received: dict[str, Any],
+    route,
+    edge_id: str,
+    exc: Exception,
+) -> Verdict:
+    """占位已经按去向收掉之后：记日志，要再排的发出重试的那一份。"""
+    if isinstance(then, _Retry):
+        if then.without_limit:
+            reason = (
+                f"第 {then.attempt} 次处理失败（{type(exc).__name__}: {exc}），"
+                f"{then.delay_ms / 1000:g} 秒后再试"
+            )
+            logger.warning(
+                "messaging: %s %s failed; retrying without limit: %s",
+                edge_id,
+                message.message_id,
+                reason,
+            )
+            await _note_retrying(message, reason)
+        else:
+            logger.warning(
+                "messaging: %s %s failed (%r); retry %d in %d ms",
+                edge_id,
+                message.message_id,
+                exc,
+                then.attempt,
+                then.delay_ms,
+            )
         await publish(
             route,
             message.to_json(),
-            headers=retry_headers(received, decision.attempt),
-            delay_ms=decision.delay_ms,
+            headers=retry_headers(received, then.attempt),
+            delay_ms=then.delay_ms,
         )
         return Verdict.ACK
-    logger.error(
-        "messaging: %s %s failed for good (%r); dead-lettered",
-        edge_id,
-        message.message_id,
-        exc,
-    )
-    return Verdict.DEAD_LETTER
+    if then is Verdict.DEAD_LETTER:
+        logger.error(
+            "messaging: %s %s failed for good (%r); dead-lettered",
+            edge_id,
+            message.message_id,
+            exc,
+        )
+    else:
+        logger.warning(
+            "messaging: %s %s failed (%r); putting it back", edge_id, message.message_id, exc
+        )
+    return then
 
 
 def retry_headers(received: dict[str, Any], attempt: int) -> dict[str, Any]:
@@ -927,6 +972,19 @@ def _edge(base: str) -> str:
 def _inbox_edge(name: str) -> str:
     """一个收件箱（普通消息和问题共用）的去重状态 edge。"""
     return _edge(f"inbox:{name}")
+
+
+def _scheduled_edge() -> str:
+    """定时队列的去重状态 edge。"""
+    return _edge("messaging:scheduled")
+
+
+async def reopen_dead_letter(route, message: Message) -> bool:
+    """死信重放把 ``message`` 发回 ``route``（定时队列，或者它的接收方的收件箱）之前调：它在那里记着
+    "进了死信"的话改回 ``failed``，重放回去的那一份领取时照常接管；之前到的副本都被挡掉了
+    （:func:`_claim_run_settle`）。交回改了没有。"""
+    edge_id = _scheduled_edge() if route == SCHEDULED else _inbox_edge(message.recipient)
+    return await reopen_dead_lettered(edge_id=edge_id, idempotent_key=message.message_id)
 
 
 async def succeeded_message_ids(inbox_name: str, message_ids: Iterable[str]) -> set[str]:
@@ -1152,21 +1210,15 @@ async def _hand_over(incoming: AbstractIncomingMessage) -> Verdict:
             message,
             received,
             route=SCHEDULED,
-            edge_id=_edge("messaging:scheduled"),
+            edge_id=_scheduled_edge(),
             lease_ms=PROCESSING_RETRY.lease_ms,
             run=lambda: _deliver_due(message),
             after_failure=_hand_over_again,
         )
 
 
-async def _hand_over_again(
-    message: Message, received: dict[str, Any], route, edge_id: str, exc: Exception
-) -> Verdict:
-    logger.warning(
-        "messaging: handing over %s failed (%r); putting it back",
-        message.message_id,
-        exc,
-    )
+async def _hand_over_again(message: Message, received: dict[str, Any], edge_id: str) -> Verdict:
+    """转交失败是基础设施失败：放回定时队列，一直重试。"""
     return Verdict.PUT_BACK
 
 

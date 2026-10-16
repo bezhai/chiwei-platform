@@ -607,6 +607,94 @@ async def test_a_message_in_an_inbox_that_handles_it_once_is_dead_lettered_after
     assert [r["outcome"] for r in rows] == ["sending", "delivered"]
 
 
+class _FailsOnceTheDuplicateHasLooked:
+    """处理函数：第一次调用等到同一条消息的另一份看到它拿着、排好了再看的那一份，然后失败；之后的
+    调用成功，记下来。"""
+
+    def __init__(self, monkeypatch) -> None:
+        from app.messaging import receiving
+
+        self.calls = 0
+        self.handled: list[str] = []
+        self._looked = asyncio.Event()
+        real = receiving.publish
+
+        async def publish(route, body, *, headers, delay_ms=None):
+            if headers.get(receiving.HELD_CHECKS_HEADER):
+                self._looked.set()
+            return await real(route, body, headers=headers, delay_ms=delay_ms)
+
+        monkeypatch.setattr(receiving, "publish", publish)
+
+    async def on_message(self, message) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            await asyncio.wait_for(self._looked.wait(), timeout=10)
+            raise RuntimeError("读完了却写不下来")
+        self.handled.append(message.message_id)
+
+
+async def _dead_lettered_while_a_duplicate_waits(broker, monkeypatch):
+    """最多处理 1 次的收件箱里，同一条消息两份投递：第一份在处理，第二份看到它拿着、隔一会儿再看；
+    第一份失败、进了死信。等到第二份回来过之后，交回处理函数和那条消息的 id。"""
+    from app.messaging import receiving
+
+    owner = _FailsOnceTheDuplicateHasLooked(monkeypatch)
+    inbox("world", on_message=owner.on_message, max_attempts=1)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="两份投递。")
+    await _publish_again(delivery.message_id, "两份投递。")
+
+    dead_letters = f"{ISOLATED_DEAD_LETTERS}_{LANE}"
+    await eventually(lambda: broker.depth(dead_letters), timeout=15)
+    await asyncio.sleep(receiving.HELD_CHECK_FIRST_MS / 1000 + 2.0)  # 第二份隔 1 秒再看
+    return owner, delivery.message_id
+
+
+async def test_a_duplicate_that_comes_back_after_its_message_was_dead_lettered_is_not_handled(
+    broker, monkeypatch
+):
+    """一条消息次数用完进了死信，在它被重放之前，同一条的另一份投递回来时处理函数不再被调用：
+    那一份确认掉，死信里只有这一条。读书收件箱最多处理 1 次，读一程失败只能花一次钱。"""
+    owner, _message_id = await _dead_lettered_while_a_duplicate_waits(broker, monkeypatch)
+
+    assert owner.calls == 1, f"进了死信之后又处理了一遍（共 {owner.calls} 次）"
+    assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 1
+    assert await broker.depth(f"inbox_world_{LANE}") == 0
+
+
+async def test_a_dead_letter_replayed_after_its_duplicate_was_turned_away_is_handled_once(
+    broker, monkeypatch, test_db
+):
+    """被挡掉的只是重放之前的那些副本：死信重放回去的那一份照常处理，只处理一次。"""
+    from sqlalchemy import text
+
+    from app.messaging.dead_letters import replay_dead_letters
+
+    owner, message_id = await _dead_lettered_while_a_duplicate_waits(broker, monkeypatch)
+
+    assert await replay_dead_letters(limit=10, operator="test") == {
+        "replayed": 1,
+        "refused": 0,
+        "failed": 0,
+    }
+    await eventually(lambda: owner.handled, timeout=10)
+    await asyncio.sleep(1.0)
+    assert owner.handled == [message_id]
+    assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0
+    async with test_db.connect() as conn:
+        state = (
+            await conn.execute(
+                text(
+                    "SELECT state FROM runtime_inflight "
+                    "WHERE edge_id = :e AND idempotent_key = :k"
+                ),
+                {"e": f"inbox:world@{LANE}", "k": message_id},
+            )
+        ).scalar()
+    assert state == "succeeded"
+
+
 @pytest.mark.parametrize("max_attempts", [0, -1])
 def test_an_inbox_must_handle_a_message_at_least_once(max_attempts):
     from app.messaging import receiving

@@ -22,7 +22,8 @@ the message is acknowledged.
   dead-lettered; nothing is queued for a retry.
 * ``commit_fails`` — the round reads, but writing her impression fails at commit: the handler
   raises and the message is rejected into this lane's ``isolated_dead_letters``; nothing is
-  queued for a retry.
+  queued for a retry, and its claim is left ``dead_lettered``, so no other copy of the round is
+  read before the dead letter is replayed.
 * ``killed_after_commit`` — the process dies right after her impression commits, before the
   delivery is marked done. RabbitMQ hands the unsettled message to the restarted process, which
   gets it after the dead process's six-minute claim (the inbox's five-minute processing timeout

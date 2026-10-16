@@ -206,7 +206,8 @@ async def test_a_round_whose_impression_cannot_be_written_goes_to_the_dead_lette
     assert await broker.depth(_INBOX) == 0
     assert retries == [], f"排了重试：{retries}"
     claim = await _claim(test_db, message_id)
-    assert (claim["state"], claim["attempts"]) == ("failed", 1)
+    # 进了死信：重放之前同一程的任何一份都不再读。
+    assert (claim["state"], claim["attempts"]) == ("dead_lettered", 1)
     assert (
         await read_so_far(lane=LANE, persona_id="akao", attachment_id=_BOOK.attachment_id)
         is None
