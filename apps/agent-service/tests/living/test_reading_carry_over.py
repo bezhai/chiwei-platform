@@ -483,3 +483,44 @@ async def test_other_lanes_rounds_are_put_back_unless_they_are_to_be_discarded(
     await asyncio.sleep(0.5)
     assert one_round.round_ids == ["prod-pending"]
 
+
+async def test_a_put_back_that_fails_neither_stops_the_other_put_backs_nor_leaves_a_channel_open(
+    broker, reading_inbox, monkeypatch  # noqa: F811
+):
+    """一次调用结束时放回留下的消息、关掉通道。其中一条放回失败：其余的照样放回，每条通道都关上；
+    失败的那一条没确认，通道关上时 broker 把它放回原队列。"""
+    await reading_inbox()
+    await _seed_a_lane(broker)
+
+    real_nack = aio_pika.IncomingMessage.nack
+    nacked: list[bytes] = []
+
+    async def first_one_fails(self, multiple: bool = False, requeue: bool = True) -> None:
+        nacked.append(self.body)
+        if len(nacked) == 1:
+            raise ConnectionError("injected: the first put-back fails")
+        await real_nack(self, multiple=multiple, requeue=requeue)
+
+    real_open = mq.open_channel
+    opened: list = []
+
+    async def recorded_open(*args, **kwargs):
+        channel = await real_open(*args, **kwargs)
+        opened.append(channel)
+        return channel
+
+    raised: BaseException | None = None
+    with monkeypatch.context() as patch:
+        patch.setattr(aio_pika.IncomingMessage, "nack", first_one_fails)
+        patch.setattr(mq, "open_channel", recorded_open)
+        try:
+            await _carry()
+        except Exception as exc:
+            raised = exc
+
+    # 只看：两条队列里一共 6 条，都要放回。
+    assert len(nacked) == 6, f"放回了 {len(nacked)} 条就停了"
+    assert opened and [channel.is_closed for channel in opened] == [True] * len(opened)
+    assert raised is None, raised
+    await eventually(lambda: _depth_is(broker, OWN, 1))
+    await eventually(lambda: _depth_is(broker, FALLBACK, 5))

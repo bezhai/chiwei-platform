@@ -32,7 +32,8 @@ passive declare 打开，不存在就报不存在，不会建出来。
 **一次调用扫完每一条队列。** 先用 passive declare 拿到深度，然后取这么多条：取到的在这一次结束之前
 都不放回，所以 ``basic.get`` 每次拿到的是下一条，不会把放回的那一条再取一遍——放回的消息回到队首，
 要是一次只扫前面一截，排在后面的永远扫不到。搬走的在发送确认之后确认，丢掉的在写进日志之后确认，其余
-在这一次全部处理完之后一起放回。取出来的消息都挂在通道上没确认，所以深度超过 :data:`SCAN_LIMIT` 的
+在这一次全部处理完之后一起放回；放回和关通道每一步各自做，一步失败只记日志，不耽误其余的
+（:func:`_put_back_and_close`）。取出来的消息都挂在通道上没确认，所以深度超过 :data:`SCAN_LIMIT` 的
 队列一条都不取，只报深度和 ``too_many``（看的时候也一样）。回答里每条队列报操作前后的深度、消费者数、
 各类计数。操作后的深度（``depth_after``）是放回、关通道之后马上量的，broker 要过一会儿才把放回的消息
 全部算进就绪，放回得多时它偏小；要准确的数就再看一次。
@@ -278,6 +279,32 @@ async def _scan(channel, state: _Queue, req, held: list) -> None:
         state.carried += 1
 
 
+async def _put_back_and_close(channel, queue: str, held: list) -> None:
+    """放回这条通道上留下的消息，再关掉通道。每一条放回、关通道各自做，失败只记日志、接着做下一步：
+    放回失败的那一条还没确认，通道关上时 broker 照样把它放回原队列。"""
+    for incoming in held:
+        try:
+            await incoming.nack(requeue=True)
+        except Exception:
+            logger.warning(
+                "reading carry-over: putting a message back on %s failed; it goes back when "
+                "its channel closes",
+                queue,
+                exc_info=True,
+            )
+    if channel.is_closed:
+        return
+    try:
+        await channel.close()
+    except Exception:
+        logger.warning(
+            "reading carry-over: closing the channel of %s failed; what it holds goes back "
+            "when the connection closes",
+            queue,
+            exc_info=True,
+        )
+
+
 async def _depth(name: str) -> int | None:
     """队列现在的深度；不存在是 ``None``。不存在时 passive declare 会关掉通道，所以用一条一次性的。"""
     channel = await mq.open_channel()
@@ -308,20 +335,18 @@ async def carry_over_reading(req: ReadingCarryOverRequest) -> ReadingCarryOverRe
     lane = current_deployment_lane()
     own = lane_queue(OLD_QUEUE, lane)
     states = [_Queue(own)] if lane is None else [_Queue(own), _Queue(OLD_QUEUE)]
-    channels = []
-    held: list = []
+    # 每条队列：它的通道，和这一次结束时要放回的消息。
+    scans: list[tuple[Any, _Queue, list]] = []
     try:
         for state in states:
             # 一条队列一条通道：队列不存在时 passive declare 会关掉它所在的通道。
             channel = await mq.open_channel()
-            channels.append(channel)
+            held: list = []
+            scans.append((channel, state, held))
             await _scan(channel, state, req, held)
     finally:
-        for incoming in held:
-            await incoming.nack(requeue=True)
-        for channel in channels:
-            if not channel.is_closed:
-                await channel.close()
+        for channel, state, held in scans:
+            await _put_back_and_close(channel, state.name, held)
     for state in states:
         if state.exists:
             state.depth_after = await _depth(state.name)
