@@ -21,6 +21,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import text
 
+from app.infra.rabbitmq import mq
 from app.messaging import receiving
 from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.messaging.receiving import inbox
@@ -79,6 +80,84 @@ async def test_a_delivery_cancelled_while_claiming_because_its_channel_closed_is
     assert "channel" in row["last_error"], row["last_error"]
     assert "process was stopping" not in row["last_error"], "通道被关掉的取消记成了进程在停"
     assert "PRECONDITION_FAILED" in caplog.text, "broker 关通道的原因没有记进日志"
+
+
+class _ReleaseLandsAfterTheNextClaim:
+    """把时序固定在竞态的那一边（2026-10-16 查明）。
+
+    被取消的投递放开占位，是被取消的任务里之后才做的一笔更新；broker 在通道关上的那一刻就把消息
+    放回队列。两者之间没有先后保证，重投的那一份可能先读到"别人拿着、租约还很长"。这里让第一次
+    领取提交之后停住（等着被取消），放开占位的那一笔等到下一次领取返回之后才执行，于是重投的
+    那一份一定先看到有效的占位。不靠 sleep。
+    """
+
+    def __init__(self, monkeypatch) -> None:
+        self.hang = HangsOnce(receiving.claim_inflight, after_commit=True)
+        self.claims: list = []
+        self._next_claim_returned = asyncio.Event()
+        self._real_mark_failed = receiving.mark_failed
+        monkeypatch.setattr(receiving, "claim_inflight", self._claim)
+        monkeypatch.setattr(receiving, "mark_failed", self._mark_failed)
+
+    async def _claim(self, **kw):
+        outcome = await self.hang(**kw)  # 第一次停在这里不返回，之后照常
+        self.claims.append(outcome)
+        self._next_claim_returned.set()
+        return outcome
+
+    async def _mark_failed(self, **kw):
+        if "cancelled" in kw["last_error"]:
+            await self._next_claim_returned.wait()
+        return await self._real_mark_failed(**kw)
+
+
+async def test_a_redelivered_copy_that_claims_before_the_release_lands_is_taken_up_within_seconds(
+    broker, test_db, monkeypatch
+):
+    """通道被 broker 关掉，重投的那一份在放开占位落下之前就去领取：它看到的是还剩 11 分钟的有效
+    占位。这一份不能按剩下的租约推迟，要隔一秒左右再看，那时占位已经放开，马上处理。"""
+    order = _ReleaseLandsAfterTheNextClaim(monkeypatch)
+    world = Inbox()
+    inbox("world", on_message=world.on_message, processing_timeout=LONG_LEASE)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="领取时卡住。")
+    await asyncio.wait_for(order.hang.stuck.wait(), timeout=10)
+
+    await _close_the_inbox_channel_from_the_broker()
+
+    await eventually(lambda: world.got, timeout=5)
+    assert order.claims[0].action == "skip", "时序没有固定住：重投的那一份领取时占位已经放开了"
+    assert [m.message_id for m in world.got] == [delivery.message_id]
+    await eventually(lambda: _state_is(test_db, delivery.message_id, "succeeded"), timeout=5)
+    assert (await _inflight(test_db, delivery.message_id))["attempts"] == 2
+
+
+async def test_a_delivery_cancelled_while_the_process_stops_is_taken_up_by_the_next_process_within_seconds(
+    broker, test_db, monkeypatch
+):
+    """进程在停，同一条收件箱上另有一个进程在消费（滚动发布时新旧 Pod 重叠）：关通道时 broker 把
+    这条交给新进程，新进程领取时旧进程还没放开占位。新进程隔一秒左右再看，接手处理一次。"""
+    monkeypatch.setattr(receiving, "STOP_GRACE_SECONDS", 0.3)
+    order = _ReleaseLandsAfterTheNextClaim(monkeypatch)
+    world = Inbox()
+    inbox("world", on_message=world.on_message, processing_timeout=LONG_LEASE)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="停机时还在领取。")
+    await asyncio.wait_for(order.hang.stuck.wait(), timeout=10)
+    # 新进程：同一条收件箱上另一个消费通道。它不在 receiving._consumers 里，停机时不会被关掉。
+    next_process = await mq.open_channel(prefetch_count=10)
+    queue = await next_process.get_queue(f"inbox_world_{LANE}")
+    await queue.consume(receiving._message_handler(receiving.INBOX_REGISTRY["world"]))
+    try:
+        await asyncio.wait_for(stop_messaging(), timeout=10)
+
+        await eventually(lambda: world.got, timeout=5)
+        assert order.claims[0].action == "skip", "时序没有固定住：新进程领取时占位已经放开了"
+        await asyncio.sleep(1.5)
+        assert [m.message_id for m in world.got] == [delivery.message_id]
+        await eventually(lambda: _state_is(test_db, delivery.message_id, "succeeded"), timeout=5)
+    finally:
+        await next_process.close()
 
 
 async def test_a_delivery_cancelled_while_claiming_because_the_process_stops_is_released(

@@ -8,8 +8,11 @@
 
 **至少一次，按消息 id 去重。** broker 在消费者断开时会把没确认的消息重投，所以同一条
 消息可能到两次。每个收件箱按 ``(inbox:<名字>@<泳道>, 消息 id)`` 在 ``runtime_inflight``
-上占位（带泳道是因为 ppe 和 prod 共用一个库，同一个 id 在两条泳道各是各的一条）：处理成功过的不再处理；另一个进程正拿着它（租约还没过期）的，不丢，按剩下的
-租约延时重新排回收件箱——那个进程要是半路死了，租约过期后由这里接管。接收方的处理
+上占位（带泳道是因为 ppe 和 prod 共用一个库，同一个 id 在两条泳道各是各的一条）：处理成功过的不再处理；另一个进程正拿着它（租约还没过期）的，不丢，延时
+重新排回收件箱、到时再看一次：第一次隔 1 秒，之后每次翻倍，封顶 60 秒，不晚于那份租约到期之后
+1 秒（:func:`_held_check_delay_ms`），已经看过几次记在消息头 :data:`HELD_CHECKS_HEADER` 里。拿着
+它的要是一次刚被取消、还没放开占位的投递，几秒内就由这里接手；那个进程要是半路死了，租约过期后
+由这里接管。处理失败后的重试那一份不带这个头，再碰上别人拿着时从 1 秒重新算。接收方的处理
 函数仍然可能在极端情况下看到同一条消息两次（处理完、还没来得及标记成功就崩了），
 所以它拿到的 ``Message`` 带着 ``message_id``，自己据此去重。拥有者自己记的"处理过哪些"什么时候
 可以不记，问 :func:`succeeded_message_ids`：成功记下来了，同一条就再也到不了处理函数。
@@ -66,10 +69,11 @@ setup 时就要名字，可有的名字存在库里（三姐妹的名字取自�
 **停下时正在处理的消息**（:func:`stop_receiving`）：先取消消费者（不再有新消息进来），等正在
 处理的那几条处理完、照常确认，最多等 :data:`STOP_GRACE_SECONDS`。等不完的，先关通道再取消：
 通道关着，取消时不会拒收进死信，broker 把没确认的消息放回原队列；取消的同时放开它的去重
-占位，重投的那一份马上有人接，不用等租约过期。**问题例外**：问题不重试，等不完的问题在通道
-还开着的时候取消，确认掉、占位收成"处理过"，不退回队列，下一个进程不会再答它一遍。声明了
-``consume_while`` 的收件箱：还在等着进上下文的，停止时直接放弃等待；已经在消费的，等上面这些
-都做完才退出上下文。
+占位，重投的那一份不用等租约过期。broker 放回消息和这里放开占位之间没有先后保证：重投的那一份
+（可能在另一个进程里）领取时放开还没落下，就隔一秒左右再看，那时已经放开，接手处理。
+**问题例外**：问题不重试，等不完的问题在通道还开着的时候取消，确认掉、占位收成"处理过"，不退回
+队列，下一个进程不会再答它一遍。声明了 ``consume_while`` 的收件箱：还在等着进上下文的，停止时
+直接放弃等待；已经在消费的，等上面这些都做完才退出上下文。
 
 **一次投递有期限。** 从领取、处理到记下结果，整体最多 :data:`DELIVERY_DEADLINE`，比 broker 等
 确认的时限短。领取和记结果那十几次查库在处理时限之外，库很慢时按各自的上限加起来能超过 broker 的
@@ -169,7 +173,13 @@ PROCESSING_RETRY = RetryPolicy(
     lease_ms=900_000,
 )
 
-# 另一个进程正拿着这条消息时，等它的租约到期后再多等这么久才重新看。
+# 另一个进程正拿着这条消息（租约没过期）时，这一份隔多久再来看一次（:func:`_held_check_delay_ms`）：
+# 第一次 HELD_CHECK_FIRST_MS，之后每次翻倍，封顶 HELD_CHECK_CAP_MS，并且不晚于那份租约到期之后
+# _LEASE_MARGIN_MS。已经看过几次，记在重新发布的那一份的消息头 HELD_CHECKS_HEADER 里。
+HELD_CHECK_FIRST_MS = 1_000
+HELD_CHECK_CAP_MS = 60_000
+HELD_CHECKS_HEADER = "x-held-checks"
+# 等到对方租约到期再看时，多等这么久，免得正好落在到期那一刻之前。
 _LEASE_MARGIN_MS = 1_000
 
 # 声明了处理时限的收件箱：租约比时限多出这么久。超时取消之后还要把这次失败记下来、
@@ -616,13 +626,16 @@ async def _handle(
     """领取 → 业务处理 → 标记，整体最多 :data:`DELIVERY_DEADLINE`。只有 ``run`` 的失败算业务失败，
     交给 ``after_failure``；别的步骤抛出去，由 :func:`_consumer` 按基础设施失败处理。
 
-    按消息 id 去重：处理成功过的不再处理；另一个进程正拿着（租约没过期）的，按剩下的租约延时
-    重新排回去——那个进程要是半路死了，租约过期后由这里接管。每次占位用一个只属于这一次的
-    标记：租约过期被别人接管之后，这里的成功或失败都不再改那一行，也不再重投。
+    按消息 id 去重：处理成功过的不再处理；另一个进程正拿着（租约没过期）的，隔一会儿重新排回去
+    再看（:func:`_held_check_delay_ms`）——拿着它的正在放开的话几秒内接手，那个进程要是半路死了，
+    租约过期后由这里接管。每次占位用一个只属于这一次的标记：租约过期被别人接管之后，这里的成功
+    或失败都不再改那一行，也不再重投。
 
     被取消时放开占位（:func:`_release`），不管取消落在哪一步：领取的事务可能已经提交、卡在之后
     关连接那一步（2026-10-06 在 coe 上就是这样），标记的那一笔可能还没落下。不放开的话，占位一直
-    是"处理中"，重投的那一份要等租约过期才有人接。放开按这次占位的标记做，没占上的、已经记下了
+    是"处理中"，重投的那一份要等租约过期才有人接。放开是被取消之后才落下的一笔更新，broker 在
+    通道关上时就放回了消息，重投的那一份可能先读到还没放开的占位，所以它只隔一小段再看，不按
+    剩下的租约推迟（2026-10-16 查明）。放开按这次占位的标记做，没占上的、已经记下了
     结果的都不改；标记成功之前被取消的，重投时处理函数会再看到它一次。到了期限也是这样取消、放开，
     然后只把这一条放回原队列，通道照常开着。
     """
@@ -677,14 +690,19 @@ async def _claim_run_settle(
     )
     if claim.action == "skip":
         if claim.locked_until is not None:
-            wait_ms = hop_delay_ms(claim.locked_until, datetime.now(UTC))
+            checks = _held_checks(received)
+            delay_ms = _held_check_delay_ms(checks, claim.locked_until, datetime.now(UTC))
             await publish(
-                route, message.to_json(), headers=received, delay_ms=wait_ms + _LEASE_MARGIN_MS
+                route,
+                message.to_json(),
+                headers={**received, HELD_CHECKS_HEADER: checks + 1},
+                delay_ms=delay_ms,
             )
             logger.info(
-                "messaging: %s %s is held by another worker; re-queued",
+                "messaging: %s %s is held by another worker; re-queued to look again in %d ms",
                 edge_id,
                 message.message_id,
+                delay_ms,
             )
         return Verdict.ACK
 
@@ -718,6 +736,24 @@ async def _claim_run_settle(
     return Verdict.ACK
 
 
+def _held_checks(received: dict[str, Any]) -> int:
+    """这一份之前已经看到过几次别人的有效占位（:data:`HELD_CHECKS_HEADER`）；没有或读不出来是 0。"""
+    value = received.get(HELD_CHECKS_HEADER)
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _held_check_delay_ms(checks: int, locked_until: datetime, now: datetime) -> int:
+    """已经看过 ``checks`` 次、这次又看到别人拿着（租约到 ``locked_until``）：隔多久再看。
+
+    不一次推迟到租约结束：拿着它的可能正是一次刚被取消、正在放开占位的投递（broker 在通道关上的
+    那一刻就把消息放回队列，放开占位是之后才落下的一笔更新），等它放开，这一份几秒内就该接手。
+    真有活着的进程长时间拿着时，代价是多看几次：按封顶 60 秒算，15 分钟的租约约 20 次。
+    """
+    doubling = HELD_CHECK_FIRST_MS * 2 ** min(checks, 16)
+    until_the_lease_ends = max(0, int((locked_until - now).total_seconds() * 1000))
+    return min(doubling, HELD_CHECK_CAP_MS, until_the_lease_ends + _LEASE_MARGIN_MS)
+
+
 def _cancel_cause(deadline: asyncio.Timeout) -> str:
     """一次处理为什么被取消，记进占位和日志：到了期限、进程在停，还是所在的通道被关掉了。"""
     if deadline.expired():
@@ -732,8 +768,8 @@ def _cancel_cause(deadline: asyncio.Timeout) -> str:
 
 async def _release(edge_id: str, message: Message, claim_token: str, why: str) -> None:
     """这一次处理被取消了（原因 ``why``，见 :func:`_cancel_cause`）：按这次占位的标记放开它，
-    重投的那一份马上有人接。没占上的、已经记下了结果的不改；放不开、或者
-    :data:`RELEASE_SECONDS` 之内没放开，只记一笔，占位留到租约过期。通道不是因为进程在停而关掉的，
+    重投的那一份不用等租约过期（赶在放开之前来领的，隔一秒左右再看就接上）。没占上的、已经记下了
+    结果的不改；放不开、或者 :data:`RELEASE_SECONDS` 之内没放开，只记一笔，占位留到租约过期。通道不是因为进程在停而关掉的，
     关闭原因在 :func:`_closed_while_consuming` 记的那条 warning 里。
     """
     try:
@@ -796,7 +832,7 @@ async def _after_owner_failure(
         await publish(
             route,
             message.to_json(),
-            headers={**received, DELIVERY_COUNT_HEADER: attempt},
+            headers=_retry_headers(received, attempt),
             delay_ms=delay_ms,
         )
         return Verdict.ACK
@@ -814,7 +850,7 @@ async def _after_owner_failure(
         await publish(
             route,
             message.to_json(),
-            headers={**received, DELIVERY_COUNT_HEADER: decision.attempt},
+            headers=_retry_headers(received, decision.attempt),
             delay_ms=decision.delay_ms,
         )
         return Verdict.ACK
@@ -825,6 +861,13 @@ async def _after_owner_failure(
         exc,
     )
     return Verdict.DEAD_LETTER
+
+
+def _retry_headers(received: dict[str, Any], attempt: int) -> dict[str, Any]:
+    """处理失败后重试那一份的消息头：记下这是第几次，去掉"看到过几次别人的占位"——它要是再碰上
+    别人拿着，那是新的一段，从 :data:`HELD_CHECK_FIRST_MS` 重新算起。"""
+    kept = {k: v for k, v in received.items() if k != HELD_CHECKS_HEADER}
+    return {**kept, DELIVERY_COUNT_HEADER: attempt}
 
 
 async def _unlimited_cap(spec: InboxSpec, message: Message, edge_id: str) -> timedelta | None:
