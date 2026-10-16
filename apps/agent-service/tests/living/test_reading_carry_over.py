@@ -164,6 +164,8 @@ async def _seed_a_lane(broker) -> None:  # noqa: F811
     # 不带后缀的那一条：本泳道 10 秒没人消费的（这里让它 1 毫秒就过期）、本泳道被拒收的、
     # 别的泳道被拒收的、prod 的、解不开的。
     await _publish_old(_body("expired"), lane=LANE, expiration=timedelta(milliseconds=1))
+    # 等它过期、进了不带后缀的那一条，再往本泳道的队列里放下一条：不然下面取出来拒收的可能是它。
+    await eventually(lambda: _depth_is(broker, FALLBACK, 1))
     await _reject_once(LANE, _body("dead"))
     await mq.declare_route(OLD, lane=OTHER_LANE)
     await _reject_once(OTHER_LANE, _body("other-lane", lane=OTHER_LANE))
