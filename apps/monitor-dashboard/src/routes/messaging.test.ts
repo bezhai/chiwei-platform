@@ -279,3 +279,59 @@ describe('本泳道的死信', () => {
     ]);
   });
 });
+
+describe('旧读书队列的搬运（一次性，prod 切换完成、旧队列删掉之后随上游路由一起删）', () => {
+  async function carryOver(init: { headers?: Record<string, string>; body: unknown; caller?: string }) {
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      if (init.caller) c.set('caller' as never, init.caller as never);
+      await next();
+      lastStash = c.get('gatewayAudit' as never) as Record<string, unknown> | undefined;
+    });
+    app.route('/', createMessagingRoutes(stubClient));
+    const res = await app.request('/api/ops/reading/carry-over', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(init.headers || {}) },
+      body: JSON.stringify(init.body),
+    });
+    let body: Record<string, unknown> = {};
+    try {
+      body = (await res.json()) as Record<string, unknown>;
+    } catch {
+      /* not JSON */
+    }
+    return { status: res.status, body };
+  }
+
+  it('POST reading/carry-over → POST /admin/reading/carry-over，请求体原样交下去，带泳道头和 X-Operator', async () => {
+    const answer = { lane: 'coe-living', dry_run: true, queues: [] };
+    nextResult = { ok: answer };
+    const body = { dry_run: false, limit: 50, discard_dead: false, delete_empty: true };
+    const res = await carryOver({ headers: { 'x-lane': 'coe-living' }, body, caller: 'bezhai' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(answer);
+    expect(calls).toEqual([
+      {
+        method: 'POST',
+        path: '/admin/reading/carry-over',
+        body,
+        extraHeaders: { 'x-ctx-lane': 'coe-living', 'X-Operator': 'bezhai' },
+        options: undefined,
+      },
+    ]);
+    expect(lastStash).toMatchObject({ request_lane: 'coe-living', executed_lane: 'coe-living', outcome: 'ok' });
+  });
+
+  it('上游拒绝（409 泳道不符）时状态码和上游自报的 lane 一起带回', async () => {
+    nextResult = {
+      fail: upstreamError(409, { lane: 'prod', message: 'request was meant for lane coe-living but reached lane prod' }),
+    };
+    const res = await carryOver({ headers: { 'x-ctx-lane': 'coe-living' }, body: { dry_run: true } });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      message: 'request was meant for lane coe-living but reached lane prod',
+      lane: 'prod',
+    });
+    expect(lastStash).toMatchObject({ request_lane: 'coe-living', executed_lane: 'prod', outcome: 'upstream_error' });
+  });
+});

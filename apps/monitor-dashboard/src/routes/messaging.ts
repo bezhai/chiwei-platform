@@ -4,7 +4,8 @@ import type { AppEnv } from '../types';
 import { agentClient } from '../paas-client';
 
 // ---------------------------------------------------------------------------
-// 通信机制的人工入口：转发到 agent-service 的 /admin/messaging/*。
+// 通信机制的人工入口：转发到 agent-service 的 /admin/messaging/*；另有一条一次性的
+// /admin/reading/carry-over（旧读书队列搬进读书收件箱），契约和下面这几条一样。
 //
 // 那四条要内网凭据（INNER_HTTP_SECRET），开发机拿不到；开发机经 $PAAS_API 打到这里
 // （认 PAAS_TOKEN、落审计），这里带着凭据转过去。
@@ -25,6 +26,7 @@ const SEND_AT_PATH = '/admin/messaging/send-at';
 const RECORD_PATH = '/admin/messaging/record';
 const DEAD_LETTERS_PATH = '/admin/messaging/dead-letters';
 const REPLAY_PATH = '/admin/messaging/dead-letters/replay';
+const READING_CARRY_OVER_PATH = '/admin/reading/carry-over';
 
 /** 上游 /admin/messaging/ask 不给 timeout_seconds 时的默认等待时长（秒）。 */
 const ASK_DEFAULT_SECONDS = 60;
@@ -170,6 +172,12 @@ export function createMessagingRoutes(client: AgentMessagingClient) {
 
   /** POST /api/ops/messaging/dead-letters/replay — 把本泳道的死信发回原队列；调用者作为 X-Operator 记进上游审计 */
   postRoute('/api/ops/messaging/dead-letters/replay', REPLAY_PATH, { withOperator: true });
+
+  /**
+   * POST /api/ops/reading/carry-over — 把旧读书队列里的消息搬进读书收件箱（先看、再搬、再删空队列）；
+   * 调用者作为 X-Operator 记进上游日志。一次性：prod 切换完成、旧队列删掉之后，连同上游路由一起删除。
+   */
+  postRoute('/api/ops/reading/carry-over', READING_CARRY_OVER_PATH, { withOperator: true });
 
   return app;
 }
