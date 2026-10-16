@@ -2,7 +2,7 @@
 
 Business code that needs to inspect / requeue / clear DLQ entries imports
 this single class instead of poking the modules underneath
-(``app.runtime.rabbitmq_management``, ``app.messaging.claims``,
+(``app.infra.rabbitmq_management``, ``app.messaging.claims``,
 ``app.messaging.dead_letter_audit``). The
 6-step requeue protocol orchestrated by ``app/nodes/dlq_admin.py`` stays
 in business-land (it composes AMQP ``basic_get`` + Route lookup with
@@ -31,6 +31,7 @@ from typing import Any, Literal
 import httpx
 
 from app.capabilities._errors import CapabilityCallFailed, CapabilityInvalidArg
+from app.infra.rabbitmq_management import RabbitMQManagementClient
 from app.messaging.claims import AlreadySucceededError, delete_inflight
 from app.messaging.dead_letter_audit import (
     AuditAction,
@@ -38,7 +39,6 @@ from app.messaging.dead_letter_audit import (
     insert_audit_row,
     update_audit_status,
 )
-from app.runtime.rabbitmq_management import RabbitMQManagementClient
 
 
 @dataclass(frozen=True)

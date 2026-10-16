@@ -18,8 +18,8 @@ import time
 from dataclasses import dataclass, field
 
 from app.data.queries import find_persona
+from app.infra.lane_policy import current_deployment_lane
 from app.living.persona import read_latest_persona_version
-from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 

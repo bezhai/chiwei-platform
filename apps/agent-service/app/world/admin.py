@@ -29,8 +29,8 @@ from pydantic import Field
 
 from app.api.middleware import get_header_var
 from app.data.schema import Data, Key
+from app.infra.lane_policy import current_deployment_lane
 from app.runtime import node
-from app.runtime.lane_policy import current_deployment_lane
 from app.world import records
 from app.world.volume import VolumeUnavailable, WriterLockNotHeld
 

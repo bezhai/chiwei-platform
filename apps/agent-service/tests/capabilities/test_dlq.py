@@ -1,7 +1,7 @@
 """DLQAdminCapability — B6 facade over the DLQ primitives.
 
 The capability hides the modules underneath from business nodes:
-- ``runtime/rabbitmq_management.RabbitMQManagementClient`` (HTTP peek)
+- ``infra/rabbitmq_management.RabbitMQManagementClient`` (HTTP peek)
 - ``messaging/claims.delete_inflight`` + ``AlreadySucceededError``
 - ``messaging/dead_letter_audit.{insert_audit_row, update_audit_status, AuditAction, AuditStatus}``
 

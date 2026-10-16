@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.runtime.rabbitmq_management import RabbitMQManagementClient
+from app.infra.rabbitmq_management import RabbitMQManagementClient
 
 
 @pytest.fixture

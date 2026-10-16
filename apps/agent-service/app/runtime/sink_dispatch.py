@@ -17,6 +17,7 @@ queue 直接 raise GraphError，所以这里 ``_route_by_queue`` 返回 None
 from __future__ import annotations
 
 from app.data.schema import Data
+from app.infra.propagation import inject_context, outbound_context
 from app.infra.rabbitmq import (
     ALL_ROUTES,
     CHANNEL_PARTITIONED_ROUTES,
@@ -24,7 +25,6 @@ from app.infra.rabbitmq import (
     channel_route_for_payload,
     mq,
 )
-from app.runtime.propagation import inject_context, outbound_context
 from app.runtime.sink import SinkSpec
 
 

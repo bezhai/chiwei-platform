@@ -28,7 +28,7 @@ from typing import Annotated
 from pydantic import field_validator
 
 from app.data.schema import CommitOrder, Data, Key
-from app.runtime.lane_policy import current_deployment_lane
+from app.infra.lane_policy import current_deployment_lane
 
 
 def living_lane() -> str:

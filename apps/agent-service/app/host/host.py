@@ -71,6 +71,10 @@ from app.host.errors import (
 )
 from app.host.http import METHODS, Handler, RouteSpec, bind_route, unbind_route
 from app.host.plugin import Disposer, Plugin, Registration
+from app.infra.lane_policy import (
+    current_deployment_lane,
+    time_sources_enabled_by_default,
+)
 from app.infra.rabbitmq import mq
 from app.messaging import receiving
 from app.messaging.claims import RUNTIME_INFLIGHT_DDL
@@ -78,10 +82,6 @@ from app.messaging.dead_letter_audit import RUNTIME_DLQ_AUDIT_DDL
 from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.runtime.emit import reset_emit_runtime
 from app.runtime.graph import compile_graph
-from app.runtime.lane_policy import (
-    current_deployment_lane,
-    time_sources_enabled_by_default,
-)
 from app.runtime.sink import Sink
 from app.runtime.wire import WIRING_REGISTRY, WireSpec
 

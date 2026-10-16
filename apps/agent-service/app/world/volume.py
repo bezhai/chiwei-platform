@@ -35,7 +35,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from app.infra.cst_time import now_cst
-from app.runtime.lane_policy import current_deployment_lane
+from app.infra.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 

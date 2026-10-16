@@ -1,4 +1,4 @@
-"""Runtime lane policy.
+"""The process's deployment lane, and whether time-based work runs in it.
 
 PaaS owns lane naming, but agent-service still needs one local decision:
 time-based sources (cron / interval) must not run by default in test lanes.

@@ -95,7 +95,7 @@ from app.capabilities.retry import retry as _retry_decorator
 from app.deployment import DEFAULT_APP
 from app.infra import cst_time
 from app.infra.config import settings
-from app.runtime.lane_policy import (
+from app.infra.lane_policy import (
     classify_deployment_lane,
     current_deployment_lane,
     normalize_deployment_lane,

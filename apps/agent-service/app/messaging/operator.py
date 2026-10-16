@@ -34,11 +34,11 @@ from pydantic import Field
 
 from app.api.middleware import get_header_var
 from app.data.schema import Data, Key
+from app.infra.lane_policy import current_deployment_lane
 from app.messaging.dead_letters import peek_dead_letters, replay_dead_letters
 from app.messaging.message import Message, SendFailed
 from app.messaging.record import read_record
 from app.messaging.sending import ask, send, send_at
-from app.runtime.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 

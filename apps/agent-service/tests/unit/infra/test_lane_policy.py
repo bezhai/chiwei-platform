@@ -1,8 +1,8 @@
-"""Runtime lane policy tests."""
+"""Lane policy tests: the deployment lane and whether time-based work runs in it."""
 
 from __future__ import annotations
 
-from app.runtime.lane_policy import (
+from app.infra.lane_policy import (
     classify_deployment_lane,
     normalize_deployment_lane,
     time_sources_enabled_by_default,

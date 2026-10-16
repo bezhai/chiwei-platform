@@ -1,8 +1,10 @@
 """Trace / lane context propagation primitive (Gap 11).
 
-The runtime moves messages across processes via RabbitMQ. Every transport hop
-reads inbound headers into contextvars before invoking business code, and
-writes contextvars back into outbound headers before publishing.
+Messages cross processes via RabbitMQ. Every transport hop reads inbound
+headers into contextvars before invoking business code, and writes
+contextvars back into outbound headers before publishing. The hops are
+messaging (:mod:`app.messaging`), the outbound queues' sink dispatch
+(:mod:`app.runtime.sink_dispatch`) and the host's clocks (:mod:`app.host.clock`).
 
 Four primitives:
 
@@ -14,10 +16,8 @@ Four primitives:
 * ``bind_context(ctx)`` — async context manager that sets contextvars on enter,
   restores on exit (works on success and exception paths).
 
-Business code MUST NOT touch ``trace_id_var`` / ``lane_var`` directly. New
-``Source`` types and new transport paths inside ``runtime/`` use these
-primitives only — duplicated header-reading logic in durable / debounce /
-source-mq / sink-dispatch is replaced by them.
+Business code MUST NOT touch ``trace_id_var`` / ``lane_var`` directly, and a
+new transport path uses these primitives instead of reading the headers itself.
 """
 
 from __future__ import annotations

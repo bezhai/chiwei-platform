@@ -23,10 +23,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from app.infra.lane_policy import current_deployment_lane
+from app.infra.propagation import Context, inject_context, outbound_context
 from app.infra.rabbitmq import X_DELAY_MAX_MS, Route, lane_queue, mq
 from app.messaging.message import SendFailed, broker_form
-from app.runtime.lane_policy import current_deployment_lane
-from app.runtime.propagation import Context, inject_context, outbound_context
 
 SCHEDULED = Route("messaging_scheduled", "messaging.scheduled", isolated=True)
 

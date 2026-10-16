@@ -126,6 +126,7 @@ from typing import Any
 from aio_pika.abc import AbstractIncomingMessage
 from aio_pika.exceptions import ChannelInvalidStateError
 
+from app.infra.propagation import bind_context, extract_context
 from app.infra.rabbitmq import BROKER_ACK_TIMEOUT_MS, lane_queue, mq
 from app.messaging.broker import (
     SCHEDULED,
@@ -164,7 +165,6 @@ from app.messaging.sending import (
     deliver,
     publish_recorded,
 )
-from app.runtime.propagation import bind_context, extract_context
 
 logger = logging.getLogger(__name__)
 

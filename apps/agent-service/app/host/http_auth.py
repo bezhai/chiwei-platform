@@ -43,7 +43,7 @@ from fastapi import Depends, HTTPException, Request
 
 from app.data.schema import Data
 from app.infra import config
-from app.runtime.lane_policy import current_deployment_lane, normalize_deployment_lane
+from app.infra.lane_policy import current_deployment_lane, normalize_deployment_lane
 
 # 一句话 → 这条路由拒绝时 detail 长什么样（:func:`refusal_detail` 按路由的声明造）。
 RefusalDetail = Callable[[str], str | dict]

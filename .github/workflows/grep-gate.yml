@@ -52,17 +52,17 @@ jobs:
         shell: bash
         run: |
           set -e
-          # trace_id_var / lane_var allowlist: runtime/{propagation,middleware,
-          # sink_dispatch}, api/middleware, infra/rabbitmq,
+          # trace_id_var / lane_var allowlist: infra/{propagation,rabbitmq},
+          # runtime/{middleware,sink_dispatch}, api/middleware,
           # capabilities/* (HTTP capability injects trace into outbound calls).
           c=$(grep -rn "trace_id_var\|lane_var" apps/agent-service/app/ \
               2>/dev/null \
-              | grep -v "runtime/propagation.py\|runtime/middleware.py\|api/middleware.py\|infra/rabbitmq.py\|runtime/sink_dispatch.py\|capabilities/\|__pycache__\|/test_" \
+              | grep -v "infra/propagation.py\|runtime/middleware.py\|api/middleware.py\|infra/rabbitmq.py\|runtime/sink_dispatch.py\|capabilities/\|__pycache__\|/test_" \
               | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c contextvar reads outside allowlist"; exit 1; }
           # nobody reads message.headers["trace_id"|"lane"] except propagation
           c=$(grep -rn 'headers\["trace_id"\]\|headers\["lane"\]' apps/agent-service/app/ \
-              2>/dev/null | grep -v "runtime/propagation.py\|__pycache__\|/test_" | wc -l || true)
+              2>/dev/null | grep -v "infra/propagation.py\|__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c raw header reads"; exit 1; }
       - name: Gap 8 — business `await emit(` count == 2 reviewed call sites
         shell: bash

@@ -38,7 +38,7 @@ from opentelemetry import context as otel_context
 
 from app.agent.tools._common import get_or_create_counter
 from app.infra.config import settings
-from app.runtime.lane_policy import current_deployment_lane
+from app.infra.lane_policy import current_deployment_lane
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

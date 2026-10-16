@@ -24,7 +24,7 @@ whatever the work takes, so a slow tick does not skew the cadence.
 
 **Lanes.** Time-based work does not run by default outside prod: test lanes may share prod's
 data, and a second runner would cause real side effects there. The caller passes the decision
-(:func:`app.runtime.lane_policy.time_sources_enabled_by_default`); skipped clocks are logged
+(:func:`app.infra.lane_policy.time_sources_enabled_by_default`); skipped clocks are logged
 with the escape hatch, ``DATAFLOW_ENABLE_TIME_SOURCES=1``.
 """
 
@@ -39,8 +39,8 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from app.runtime.lane_policy import current_deployment_lane
-from app.runtime.propagation import Context, bind_context
+from app.infra.lane_policy import current_deployment_lane
+from app.infra.propagation import Context, bind_context
 
 logger = logging.getLogger(__name__)
 

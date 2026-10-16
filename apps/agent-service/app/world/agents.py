@@ -34,7 +34,7 @@ from app.agent.trace import collect_usage, separate_trace
 from app.capabilities.agent import AgentRunner
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import now_cst, to_cst_full
-from app.runtime.lane_policy import current_deployment_lane
+from app.infra.lane_policy import current_deployment_lane
 from app.world.wake import WORLD
 
 logger = logging.getLogger(__name__)

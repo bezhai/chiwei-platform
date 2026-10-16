@@ -1,11 +1,11 @@
-"""Contract tests for runtime/propagation.py — Gap 11 primitive."""
+"""Contract tests for app/infra/propagation.py — Gap 11 primitive."""
 
 from __future__ import annotations
 
 import pytest
 
 from app.api.middleware import lane_var, trace_id_var
-from app.runtime.propagation import (
+from app.infra.propagation import (
     Context,
     bind_context,
     extract_context,
