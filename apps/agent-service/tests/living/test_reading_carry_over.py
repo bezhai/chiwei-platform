@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -193,15 +194,20 @@ async def test_a_dry_run_reports_every_kind_in_both_queues_and_changes_nothing(
     own, fallback = queues[OWN], queues[FALLBACK]
     assert own["exists"] is True and fallback["exists"] is True
     assert (own["depth_before"], own["unprocessed"], own["dead"], own["foreign"]) == (1, 1, 0, 0)
-    assert (fallback["depth_before"], fallback["unprocessed"], fallback["dead"], fallback["foreign"]) == (
-        5, 1, 1, 3,
-    )
+    assert (
+        fallback["depth_before"],
+        fallback["unprocessed"],
+        fallback["dead"],
+        fallback["foreign"],
+        fallback["unreadable"],
+    ) == (5, 1, 1, 2, 1)
+    assert fallback["foreign_lanes"] == {OTHER_LANE: 1, "prod": 1}
     assert [(d["round_id"], d["persona_id"], d["title"], d["reason"]) for d in fallback["dead_letters"]] == [
         ("dead", "akao", "dead.txt", "rejected")
     ]
     assert own["carried"] == fallback["carried"] == 0
     assert own["depth_after"] == 1 and fallback["depth_after"] == 5
-    assert own["not_scanned"] == fallback["not_scanned"] == 0
+    assert (own["too_many"], fallback["too_many"]) == (False, False)
     assert await broker.depth(OWN) == 1
     assert await broker.depth(FALLBACK) == 5
     assert await read_record(participant=READING, limit=10) == []
@@ -241,7 +247,7 @@ async def test_carrying_sends_each_unprocessed_round_to_the_reading_inbox_once(
 
     # 丢掉旧死信：只有本泳道被拒收的那一条走了，读书收件箱没收到它。
     discarded = _by_queue(await _carry(dry_run=False, discard_dead=True))
-    assert discarded[FALLBACK]["discarded"] == 1
+    assert discarded[FALLBACK]["discarded_dead"] == 1
     left = await _bodies(FALLBACK)
     assert sorted(_round_or_raw(b) for b in left) == sorted(
         ["other-lane", "prod-pending", "not json at all"]
@@ -359,3 +365,121 @@ async def test_old_queues_that_do_not_exist_are_reported_and_not_created(
 
     assert await broker.depth(OWN) == -1
     assert await broker.depth(FALLBACK) == -1
+
+
+async def test_one_call_carries_this_lanes_rounds_behind_any_number_of_foreign_ones(
+    broker, reading_inbox  # noqa: F811
+):
+    """放回的消息回到队首：要是一次只扫前面一截，排在一大串别的泳道的消息后面的那几程，调多少次
+    都搬不到。一次调用扫完整条队列，排在后面的也一次搬完。"""
+    one_round = await reading_inbox()
+    await mq.declare_route(OLD, lane=None)
+    await mq.declare_route(OLD, lane=LANE)
+    foreign = 1100  # 比原来一次最多扫的 1000 条还多
+    for i in range(foreign):
+        await _publish_old(_body(f"other-{i}", lane=OTHER_LANE), lane=None)
+    await _publish_old(_body("behind-1"), lane=None)
+    await _publish_old(_body("behind-2"), lane=None)
+    await eventually(lambda: _depth_is(broker, FALLBACK, foreign + 2), timeout=30)
+
+    fallback = _by_queue(await _carry(dry_run=False))[FALLBACK]
+
+    assert (fallback["scanned"], fallback["foreign"], fallback["carried"]) == (
+        foreign + 2,
+        foreign,
+        2,
+    )
+    assert fallback["too_many"] is False
+    await eventually(lambda: _read(one_round, {"behind-1", "behind-2"}))
+    # 放回的那一千多条要过一会儿才在 broker 上全部回到就绪（见 depth_after 的说明）。
+    await eventually(lambda: _depth_is(broker, FALLBACK, foreign))
+
+
+async def _never_taken(queue_name: str) -> list[str]:
+    """队列里每一条的 round_id，并断言没有一条被谁取出来过（取出来再放回的 broker 会标成重投）。"""
+    channel = await mq._connection.channel()  # type: ignore[union-attr]
+    taken = []
+    try:
+        queue = await channel.declare_queue(queue_name, passive=True)
+        while (incoming := await queue.get(no_ack=False, fail=False)) is not None:
+            taken.append(incoming)
+        assert [m.redelivered for m in taken] == [False] * len(taken)
+        return [_round_or_raw(m.body) for m in taken]
+    finally:
+        for m in taken:
+            await m.nack(requeue=True)
+        await channel.close()
+
+
+async def test_a_queue_deeper_than_the_scan_limit_is_reported_and_left_alone(
+    broker, reading_inbox, monkeypatch  # noqa: F811
+):
+    """一次调用要把整条队列取出来、处理完才放回；队列深到超过上限，就一条都不取，只报深度和"太多"，
+    看的时候也一样。"""
+    from app.nodes import reading_carry_over
+
+    monkeypatch.setattr(reading_carry_over, "SCAN_LIMIT", 3, raising=False)
+    monkeypatch.delenv("LANE")
+    one_round = await reading_inbox()
+    await mq.declare_route(OLD, lane=None)
+    for i in range(4):
+        await _publish_old(_body(f"prod-{i}", lane="prod"), lane=None)
+    await _publish_old(_body("ppe-pending", lane="ppe-x"), lane=None)
+    await eventually(lambda: _depth_is(broker, OLD.queue, 5))
+
+    for fields in (
+        {},
+        {"dry_run": False, "discard_dead": True, "discard_foreign": True, "delete_empty": True},
+    ):
+        (only,) = (await _carry(**fields))["queues"]
+        assert (only["depth_before"], only.get("too_many"), only["scanned"]) == (5, True, 0), fields
+        assert (only["carried"], only["deleted"], only["depth_after"]) == (0, False, 5), fields
+
+    assert sorted(await _never_taken(OLD.queue)) == sorted(
+        ["prod-0", "prod-1", "prod-2", "prod-3", "ppe-pending"]
+    )
+    assert await read_record(participant=READING, limit=10) == []
+    assert one_round.round_ids == []
+
+
+async def test_other_lanes_rounds_are_put_back_unless_they_are_to_be_discarded(
+    broker, reading_inbox, monkeypatch, caplog  # noqa: F811
+):
+    """prod 不带后缀的那条旧队列里有 ppe 泳道过期转进来的消息，那些泳道已经没人消费。默认原样放回；
+    人看过 dry_run（按泳道报了几条）之后给 ``discard_foreign``，就逐条把消息体写进日志、确认掉。
+    解不开的不算别的泳道的，照样放回。"""
+    monkeypatch.delenv("LANE")
+    one_round = await reading_inbox()
+    await mq.declare_route(OLD, lane=None)
+    await _publish_old(_body("ppe-a-1", lane="ppe-a"), lane=None)
+    await _publish_old(_body("prod-pending", lane="prod"), lane=None)
+    await _publish_old(_body("ppe-b-1", lane="ppe-b"), lane=None)
+    await _publish_old(_body("ppe-a-2", lane="ppe-a"), lane=None)
+    await _publish_old(b"not json at all", lane=None)
+    await eventually(lambda: _depth_is(broker, OLD.queue, 5))
+
+    # 只看：给了 discard_foreign 也不丢。
+    (looked,) = (await _carry(discard_foreign=True))["queues"]
+    assert (looked["foreign"], looked["unreadable"], looked["discarded_foreign"]) == (3, 1, 0)
+    assert looked["foreign_lanes"] == {"ppe-a": 2, "ppe-b": 1}
+    assert await broker.depth(OLD.queue) == 5
+
+    # 搬，不给 discard_foreign：本泳道的搬走，别的泳道的和解不开的都放回。
+    (kept,) = (await _carry(dry_run=False))["queues"]
+    assert (kept["carried"], kept["foreign"], kept["discarded_foreign"]) == (1, 3, 0)
+    await eventually(lambda: _read(one_round, {"prod-pending"}))
+    assert sorted(_round_or_raw(b) for b in await _bodies(OLD.queue)) == sorted(
+        ["ppe-a-1", "ppe-b-1", "ppe-a-2", "not json at all"]
+    )
+
+    # 给 discard_foreign：别的泳道的逐条记下消息体、确认掉；解不开的还在。
+    with caplog.at_level(logging.WARNING, logger="app.nodes.reading_carry_over"):
+        (dropped,) = (await _carry(dry_run=False, discard_foreign=True))["queues"]
+    assert (dropped["foreign"], dropped["discarded_foreign"], dropped["unreadable"]) == (3, 3, 1)
+    assert [_round_or_raw(b) for b in await _bodies(OLD.queue)] == ["not json at all"]
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    for round_id, lane in (("ppe-a-1", "ppe-a"), ("ppe-b-1", "ppe-b"), ("ppe-a-2", "ppe-a")):
+        assert json.dumps(_body(round_id, lane=lane)) in logged, logged
+    await asyncio.sleep(0.5)
+    assert one_round.round_ids == ["prod-pending"]
+

@@ -306,7 +306,7 @@ describe('旧读书队列的搬运（一次性，prod 切换完成、旧队列�
   it('POST reading/carry-over → POST /admin/reading/carry-over，请求体原样交下去，带泳道头和 X-Operator', async () => {
     const answer = { lane: 'coe-living', dry_run: true, queues: [] };
     nextResult = { ok: answer };
-    const body = { dry_run: false, limit: 50, discard_dead: false, delete_empty: true };
+    const body = { dry_run: false, discard_dead: false, discard_foreign: false, delete_empty: true };
     const res = await carryOver({ headers: { 'x-lane': 'coe-living' }, body, caller: 'bezhai' });
     expect(res.status).toBe(200);
     expect(res.body).toEqual(answer);

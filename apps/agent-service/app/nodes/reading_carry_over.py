@@ -12,22 +12,30 @@ passive declare 打开，不存在就报不存在，不会建出来。
 
 **每条消息归哪一类**，按这个顺序判断：
 
-* 解不开（不是那几个字段的 JSON）的，或者正文里的 ``lane`` 不是本进程泳道的：``foreign``，原样放回；
+* 解不开（不是那几个字段的 JSON）的：``unreadable``，原样放回；
+* 正文里的 ``lane`` 不是本进程泳道的：``foreign``，回答里按泳道报条数（``foreign_lanes``）；
 * broker 加的 ``x-death`` 头最近一项是 ``rejected`` 的：``dead``，旧的持久边处理失败、拒收过的；
 * 其余：``unprocessed``，从没被处理过的一程。
 
 **搬**（``dry_run=false``）：``unprocessed`` 的按读书收件箱的格式发过去
 （:func:`app.living.reading.send_round`：消息 id 是 ``round_id``，发送方是那个人在世界里的名字），
 发送成功（记录写好、broker 确认）之后才确认旧消息；那个人不在三姐妹里、或者没送到，就放回，计入
-``failed``。``discard_dead=true`` 时 ``dead`` 的逐条把消息体写进日志再确认掉，否则放回。同一程不会
-读两遍：收件箱按消息 id 去重，读书那一侧按 ``FileRead.round_id`` 跳过已经提交过的那一程。
+``failed``。``discard_dead=true`` 时 ``dead`` 的逐条把消息体写进日志再确认掉，否则放回。
+``discard_foreign=true`` 时 ``foreign`` 的也这样丢掉，否则放回：prod 不带后缀的那条旧队列里可能有 ppe
+泳道 10 秒没人消费、转进来的消息，那些泳道已经没有消费者，不丢掉它们，这条队列永远删不掉；要不要丢，
+由人看过 ``dry_run`` 报的泳道之后决定。``unreadable`` 的永远放回。同一程不会读两遍：收件箱按消息 id
+去重，读书那一侧按 ``FileRead.round_id`` 跳过已经提交过的那一程。
 
 **删**（``delete_empty=true``，``dry_run=false`` 时才做）：只删本泳道的那一条，而且只在它空的时候删
 （``if_empty``）。泳道里不删不带后缀的那一条：别的泳道可能还在跑旧版本、往里送消息。
 
-一次调用从这些队列里一共最多取 ``limit`` 条，本泳道的那一条先取。取到的消息处理完之前都不确认，
-要放回的等这一次全部处理完再一起放回，所以同一次调用不会把放回的那一条再取一遍。回答里每条队列
-报操作前后的深度、消费者数、各类计数，以及这一次没扫到的条数。
+**一次调用扫完每一条队列。** 先用 passive declare 拿到深度，然后取这么多条：取到的在这一次结束之前
+都不放回，所以 ``basic.get`` 每次拿到的是下一条，不会把放回的那一条再取一遍——放回的消息回到队首，
+要是一次只扫前面一截，排在后面的永远扫不到。搬走的在发送确认之后确认，丢掉的在写进日志之后确认，其余
+在这一次全部处理完之后一起放回。取出来的消息都挂在通道上没确认，所以深度超过 :data:`SCAN_LIMIT` 的
+队列一条都不取，只报深度和 ``too_many``（看的时候也一样）。回答里每条队列报操作前后的深度、消费者数、
+各类计数。操作后的深度（``depth_after``）是放回、关通道之后马上量的，broker 要过一会儿才把放回的消息
+全部算进就绪，放回得多时它偏小；要准确的数就再看一次。
 """
 from __future__ import annotations
 
@@ -53,6 +61,10 @@ logger = logging.getLogger(__name__)
 # 旧持久边的队列名（``durable_<数据>_<消费者>``）。
 OLD_QUEUE = "durable_file_picked_up_read_a_round"
 
+# 一次调用最多从一条队列里取多少条。整条队列在一次调用里取出来、处理完才放回，取出来的都挂在通道上
+# 没确认；比它深的队列一条都不取。
+SCAN_LIMIT = 5000
+
 
 def _new_request_id() -> str:
     return uuid.uuid4().hex
@@ -61,8 +73,8 @@ def _new_request_id() -> str:
 class ReadingCarryOverRequest(Data):
     request_id: Annotated[str, Key] = Field(default_factory=_new_request_id)
     dry_run: bool = True
-    limit: int = Field(default=200, ge=1, le=1000)
     discard_dead: bool = False
+    discard_foreign: bool = False
     delete_empty: bool = False
 
     class Meta:
@@ -87,34 +99,39 @@ class _Queue:
     depth_before: int | None = None
     consumers: int | None = None
     depth_after: int | None = None
+    # 深度超过 SCAN_LIMIT，这一次一条都没取。
+    too_many: bool = False
     scanned: int = 0
     unprocessed: int = 0
     dead: int = 0
     foreign: int = 0
+    foreign_lanes: dict[str, int] = field(default_factory=dict)
+    unreadable: int = 0
     carried: int = 0
     failed: int = 0
-    discarded: int = 0
+    discarded_dead: int = 0
+    discarded_foreign: int = 0
     deleted: bool = False
     dead_letters: list[dict[str, Any]] = field(default_factory=list)
 
     def report(self) -> dict[str, Any]:
-        not_scanned = (
-            max(self.depth_before - self.scanned, 0) if self.depth_before is not None else None
-        )
         return {
             "queue": self.name,
             "exists": self.exists,
             "depth_before": self.depth_before,
             "consumers": self.consumers,
+            "too_many": self.too_many,
             "scanned": self.scanned,
             "unprocessed": self.unprocessed,
             "dead": self.dead,
             "foreign": self.foreign,
+            "foreign_lanes": self.foreign_lanes,
+            "unreadable": self.unreadable,
             "carried": self.carried,
             "failed": self.failed,
-            "discarded": self.discarded,
+            "discarded_dead": self.discarded_dead,
+            "discarded_foreign": self.discarded_foreign,
             "depth_after": self.depth_after,
-            "not_scanned": not_scanned,
             "deleted": self.deleted,
             "dead_letters": self.dead_letters,
         }
@@ -138,7 +155,7 @@ def _sort(incoming, here: str) -> tuple[str, FilePickedUp | None]:
     try:
         picked = FilePickedUp.model_validate_json(incoming.body)
     except ValidationError:
-        return "foreign", None
+        return "unreadable", None
     if picked.lane != here:
         return "foreign", picked
     if _text(_last_death(incoming.headers).get("reason")) == "rejected":
@@ -179,8 +196,20 @@ async def _carry(picked: FilePickedUp, queue: str) -> bool:
     return True
 
 
-async def _scan(channel, state: _Queue, budget: int, req, held: list) -> None:
-    """打开这条队列，取至多 ``budget`` 条分类、处理；要放回的放进 ``held``。"""
+async def _discard(incoming, queue: str, what: str) -> None:
+    """丢掉一条：完整的消息体先写进日志，再确认掉。"""
+    logger.warning(
+        "reading carry-over: discarding %s from %s (operator %s): %s",
+        what,
+        queue,
+        get_header_var("operator"),
+        incoming.body.decode("utf-8", "replace"),
+    )
+    await incoming.ack()
+
+
+async def _scan(channel, state: _Queue, req, held: list) -> None:
+    """打开这条队列，把开始时在里面的每一条分类、处理；要放回的放进 ``held``。"""
     try:
         queue = await channel.declare_queue(state.name, passive=True)
     except aiormq.exceptions.ChannelNotFoundEntity:
@@ -188,16 +217,38 @@ async def _scan(channel, state: _Queue, budget: int, req, held: list) -> None:
     state.exists = True
     state.depth_before = int(queue.declaration_result.message_count)
     state.consumers = int(queue.declaration_result.consumer_count)
+    if state.depth_before > SCAN_LIMIT:
+        state.too_many = True
+        logger.warning(
+            "reading carry-over: %s holds %d messages, more than the %d one call takes; "
+            "nothing taken",
+            state.name,
+            state.depth_before,
+            SCAN_LIMIT,
+        )
+        return
     here = living_lane()
-    for _ in range(budget):
+    # 取到的这一次结束之前都不放回，所以每次拿到的是下一条。
+    for _ in range(state.depth_before):
         incoming = await queue.get(no_ack=False, fail=False)
         if incoming is None:
             break
         state.scanned += 1
         kind, picked = _sort(incoming, here)
+        if kind == "unreadable":
+            state.unreadable += 1
+            held.append(incoming)
+            continue
         if kind == "foreign":
             state.foreign += 1
-            held.append(incoming)
+            state.foreign_lanes[picked.lane] = state.foreign_lanes.get(picked.lane, 0) + 1
+            if req.dry_run or not req.discard_foreign:
+                held.append(incoming)
+                continue
+            await _discard(
+                incoming, state.name, f"round {picked.round_id} of lane {picked.lane}"
+            )
+            state.discarded_foreign += 1
             continue
         if kind == "dead":
             state.dead += 1
@@ -214,16 +265,8 @@ async def _scan(channel, state: _Queue, budget: int, req, held: list) -> None:
             if req.dry_run or not req.discard_dead:
                 held.append(incoming)
                 continue
-            logger.warning(
-                "reading carry-over: discarding the old dead letter of round %s from %s "
-                "(operator %s): %s",
-                picked.round_id,
-                state.name,
-                get_header_var("operator"),
-                incoming.body.decode("utf-8", "replace"),
-            )
-            await incoming.ack()
-            state.discarded += 1
+            await _discard(incoming, state.name, f"the old dead letter of round {picked.round_id}")
+            state.discarded_dead += 1
             continue
         state.unprocessed += 1
         if req.dry_run or not await _carry(picked, state.name):
@@ -265,7 +308,6 @@ async def carry_over_reading(req: ReadingCarryOverRequest) -> ReadingCarryOverRe
     lane = current_deployment_lane()
     own = lane_queue(OLD_QUEUE, lane)
     states = [_Queue(own)] if lane is None else [_Queue(own), _Queue(OLD_QUEUE)]
-    budget = req.limit
     channels = []
     held: list = []
     try:
@@ -273,8 +315,7 @@ async def carry_over_reading(req: ReadingCarryOverRequest) -> ReadingCarryOverRe
             # 一条队列一条通道：队列不存在时 passive declare 会关掉它所在的通道。
             channel = await mq.open_channel()
             channels.append(channel)
-            await _scan(channel, state, budget, req, held)
-            budget -= state.scanned
+            await _scan(channel, state, req, held)
     finally:
         for incoming in held:
             await incoming.nack(requeue=True)
