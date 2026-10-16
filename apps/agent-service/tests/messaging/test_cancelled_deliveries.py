@@ -235,6 +235,37 @@ async def test_a_delivery_cancelled_after_its_success_was_recorded_stays_succeed
     assert row["last_error"] is None, "放开占位改了一条已经成功的记录"
 
 
+async def test_a_delivery_cancelled_after_recording_its_dead_letter_still_ends_in_the_dead_letters(
+    broker, test_db, monkeypatch
+):
+    """最后一次失败，"进了死信"已经记下、拒收还没交给 broker 时被取消（通道断了、进程退出）：broker
+    把原消息重投回来。重投的那一份不再交给处理函数，也不确认掉，而是照样送进本泳道的死信——确认掉的
+    话，这条既没处理成功，也不在任何死信里，人工重放都找不到它。"""
+    from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS
+    from app.messaging.dead_letters import peek_dead_letters
+
+    mark = HangsOnce(receiving.mark_dead_lettered, after_commit=True)
+    monkeypatch.setattr(receiving, "mark_dead_lettered", mark)
+    world = Inbox(fail_times=10)
+    inbox("world", on_message=world.on_message, processing_timeout=LONG_LEASE, max_attempts=1)
+    await start_messaging()
+    delivery = await send(sender="operator", recipient="world", body="记下进死信之后断开。")
+    await asyncio.wait_for(mark.stuck.wait(), timeout=10)
+    assert await _state_is(test_db, delivery.message_id, "dead_lettered")
+
+    await _close_the_inbox_channel_from_the_broker()
+
+    dead_letters = f"{ISOLATED_DEAD_LETTERS}_{LANE}"
+    await eventually(lambda: broker.depth(dead_letters), timeout=10)
+    await asyncio.sleep(0.5)
+    assert world.calls == 1, "重投的那一份又交给了处理函数"
+    assert await broker.depth(f"inbox_world_{LANE}") == 0
+    assert [row["message"]["message_id"] for row in await peek_dead_letters(limit=10)] == [
+        delivery.message_id
+    ]
+    assert await _state_is(test_db, delivery.message_id, "dead_lettered")
+
+
 async def test_a_delivery_cancelled_after_another_worker_took_its_claim_over_leaves_that_claim(
     broker, test_db, monkeypatch
 ):

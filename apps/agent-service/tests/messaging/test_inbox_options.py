@@ -651,37 +651,54 @@ async def _dead_lettered_while_a_duplicate_waits(broker, monkeypatch):
     return owner, delivery.message_id
 
 
+async def _dead_letter_ids() -> list[str]:
+    from app.messaging.dead_letters import peek_dead_letters
+
+    return [row["message"]["message_id"] for row in await peek_dead_letters(limit=10)]
+
+
 async def test_a_duplicate_that_comes_back_after_its_message_was_dead_lettered_is_not_handled(
     broker, monkeypatch
 ):
-    """一条消息次数用完进了死信，在它被重放之前，同一条的另一份投递回来时处理函数不再被调用：
-    那一份确认掉，死信里只有这一条。读书收件箱最多处理 1 次，读一程失败只能花一次钱。"""
-    owner, _message_id = await _dead_lettered_while_a_duplicate_waits(broker, monkeypatch)
+    """一条消息次数用完进了死信，在它被重放之前，同一条的另一份投递回来时处理函数不再被调用；那一份
+    也送进死信，不确认掉——它可能正是进死信那一次没送到 broker 的那一份，确认掉就哪儿都找不到了。
+    读书收件箱最多处理 1 次，读一程失败只能花一次钱。"""
+    owner, message_id = await _dead_lettered_while_a_duplicate_waits(broker, monkeypatch)
 
     assert owner.calls == 1, f"进了死信之后又处理了一遍（共 {owner.calls} 次）"
-    assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 1
     assert await broker.depth(f"inbox_world_{LANE}") == 0
+    assert await _dead_letter_ids() == [message_id, message_id], "有一份被确认掉了"
 
 
-async def test_a_dead_letter_replayed_after_its_duplicate_was_turned_away_is_handled_once(
+async def test_two_dead_letters_of_one_message_are_handled_once_whichever_is_replayed(
     broker, monkeypatch, test_db
 ):
-    """被挡掉的只是重放之前的那些副本：死信重放回去的那一份照常处理，只处理一次。"""
+    """死信里同一条消息有两份：重放一份，照常处理一次；再重放另一份，它领取时看到已经处理成功，
+    确认掉，处理函数不再被调用。"""
     from sqlalchemy import text
 
     from app.messaging.dead_letters import replay_dead_letters
 
     owner, message_id = await _dead_lettered_while_a_duplicate_waits(broker, monkeypatch)
+    dead_letters = f"{ISOLATED_DEAD_LETTERS}_{LANE}"
+    assert await broker.depth(dead_letters) == 2
 
-    assert await replay_dead_letters(limit=10, operator="test") == {
+    assert await replay_dead_letters(limit=1, operator="test") == {
         "replayed": 1,
         "refused": 0,
         "failed": 0,
     }
     await eventually(lambda: owner.handled, timeout=10)
+    assert await replay_dead_letters(limit=1, operator="test") == {
+        "replayed": 1,
+        "refused": 0,
+        "failed": 0,
+    }
+    await eventually(lambda: _depth_is(broker, f"inbox_world_{LANE}", 0), timeout=10)
     await asyncio.sleep(1.0)
     assert owner.handled == [message_id]
-    assert await broker.depth(f"{ISOLATED_DEAD_LETTERS}_{LANE}") == 0
+    assert owner.calls == 2, "第二份重放又处理了一遍"
+    assert await broker.depth(dead_letters) == 0
     async with test_db.connect() as conn:
         state = (
             await conn.execute(
@@ -693,6 +710,10 @@ async def test_a_dead_letter_replayed_after_its_duplicate_was_turned_away_is_han
             )
         ).scalar()
     assert state == "succeeded"
+
+
+async def _depth_is(broker, name: str, depth: int) -> bool:
+    return await broker.depth(name) == depth
 
 
 @pytest.mark.parametrize("max_attempts", [0, -1])

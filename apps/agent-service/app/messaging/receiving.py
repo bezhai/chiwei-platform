@@ -9,8 +9,8 @@
 **至少一次，按消息 id 去重。** broker 在消费者断开时会把没确认的消息重投，所以同一条
 消息可能到两次。每个收件箱按 ``(inbox:<名字>@<泳道>, 消息 id)`` 在 ``runtime_inflight``
 上占位（带泳道是因为 ppe 和 prod 共用一个库，同一个 id 在两条泳道各是各的一条）：处理成功过的不再处理；
-次数用完进了死信的，在它被重放之前也不再处理（:func:`_claim_run_settle`），同一条的别的副本到了直接确认；
-另一个进程正拿着它（租约还没过期）的，不丢，延时
+次数用完进了死信的，在它被重放之前也不再处理（:func:`_claim_run_settle`），同一条的别的副本到了也送进
+死信；另一个进程正拿着它（租约还没过期）的，不丢，延时
 重新排回收件箱、到时再看一次：第一次隔 1 秒，之后每次翻倍，封顶 60 秒，不晚于那份租约到期之后
 1 秒（:func:`_held_check_delay_ms`），已经看过几次记在消息头 :data:`HELD_CHECKS_HEADER` 里。拿着
 它的要是一次刚被取消、还没放开占位的投递，几秒内就由这里接手；那个进程要是半路死了，租约过期后
@@ -24,7 +24,10 @@
 ``max_attempts``，不声明就是 :data:`PROCESSING_RETRY` 的）用完 → 拒收，
 broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保留消息体和消息头，可以查看、
 重放回原收件箱（:mod:`app.messaging.dead_letters`，入口是 ``/admin/messaging/dead-letters*``）。
-（消息本身解不开的也进死信：处理函数根本没法跑。）领取、标记成功或失败、租约冲突后的重投、
+（消息本身解不开的也进死信：处理函数根本没法跑。）这样进了死信的消息，重放之前再来的副本不交给
+处理函数，也送进死信：那一份可能正是记下"进了死信"之后、拒收交给 broker 之前通道断了被重投回来的
+原消息，确认掉它，这条就哪儿都找不到了。代价是真有重复副本时，同一个消息 id 在死信里有两份；重放
+其中一份处理成功之后，另一份重放回来领取时按"处理成功过"确认掉。领取、标记成功或失败、租约冲突后的重投、
 重投那一份的发布、定时转交、分段发布失败，都是基础设施失败，不是消息的问题：普通消息停一会儿
 放回原队列（停的时长翻倍、封顶 :data:`PUT_BACK_CAP_SECONDS`，不限次数），问题确认掉。结论
 只在 :func:`_settle` 一处交给 broker，见下面"一条消息的处理"那一节。
@@ -539,7 +542,8 @@ async def stop_receiving() -> None:
 #
 # 进死信的原因只有一个：**业务处理函数（收件箱的 on_message）本身失败，有限次重试已经用完，
 # 拥有者也没要求不限次数重试**（:func:`_after_owner_failure`）。消息解不开也进死信——那是它
-# 本身坏了，处理函数根本没法跑。除此之外，领取、标记成功或失败、租约冲突后的重投、重投那一份
+# 本身坏了，处理函数根本没法跑。这样进过死信、还没重放的消息，再来的副本也进死信，不交给处理
+# 函数（:func:`_claim_run_settle`）。除此之外，领取、标记成功或失败、租约冲突后的重投、重投那一份
 # 的发布、定时转交、分段发布，这些环节抛出来的都是基础设施失败：由 :func:`_consumer` 统一接住，
 # 普通消息放回原队列（:data:`Verdict.PUT_BACK`，停一会儿再放，停的时长按次数翻倍、有上限，
 # 不限次数），问题确认掉（问题不重试）。结论只在 :func:`_settle` 一处交给 broker；
@@ -553,7 +557,7 @@ class Verdict(Enum):
     ACK = "ack"
     # 基础设施失败：停一会儿，原样放回原队列。不进死信，不限次数。
     PUT_BACK = "put_back"
-    # 业务处理失败到头（或者消息本身解不开）：进本泳道的死信，人工查看、重放。
+    # 业务处理失败到头（或者消息本身解不开、或者它已经这样进过死信）：进本泳道的死信，人工查看、重放。
     DEAD_LETTER = "dead_letter"
 
 
@@ -709,7 +713,8 @@ async def _claim_run_settle(
     处理函数失败时，先定这条的去向，再按去向收掉占位：进死信的从"处理中"直接记成 ``dead_lettered``，
     一条带着本次标记的更新，中间不经过 ``failed``——同一条的另一份副本正隔一会儿再看的话，回来时
     看到的是"进了死信"，不会接管、让处理函数再跑一遍；重放之前它一直这样（:func:`reopen_dead_letter`）。
-    其余的记成 ``failed``，重试的那一份（和被取消后放开的一样）照常接管。
+    看到"进了死信"的副本自己也进死信，不确认（见模块说明）。其余的记成 ``failed``，重试的那一份
+    （和被取消后放开的一样）照常接管。
     """
     claim = await claim_inflight(
         edge_id=edge_id,
@@ -721,13 +726,14 @@ async def _claim_run_settle(
     )
     if claim.action == "skip":
         if claim.dead_lettered:
-            logger.info(
-                "messaging: %s %s went to the dead letters and has not been replayed; this "
-                "copy is acknowledged without being handled",
+            logger.warning(
+                "messaging: %s %s went to the dead letters before and has not been replayed; "
+                "this copy goes to the dead letters too, unhandled",
                 edge_id,
                 message.message_id,
             )
-        elif claim.locked_until is not None:
+            return Verdict.DEAD_LETTER
+        if claim.locked_until is not None:
             checks = _held_checks(received)
             delay_ms = _held_check_delay_ms(checks, claim.locked_until, datetime.now(UTC))
             await publish(

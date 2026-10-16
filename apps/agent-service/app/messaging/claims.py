@@ -24,12 +24,13 @@ Lease semantics:
   retry still to come, or a cancelled delivery that let go) and
   ``processing-expired`` resume.
 - ``dead_lettered``: the handler failed with no attempt left and the message
-  went to the dead letters. Every claim skips it, as if succeeded, until the
-  dead-letter replay turns it back into ``failed``
+  went to the dead letters. Every claim skips it, until the dead-letter
+  replay turns it back into ``failed``
   (:func:`reopen_dead_lettered`) just before it publishes the message again.
   The holder writes it straight over its ``processing`` claim
   (:func:`mark_dead_lettered`), so the row is never ``failed`` in between for
-  another copy to take over.
+  another copy to take over. A copy that finds it is not handled; the
+  messaging layer sends it to the dead letters too.
 
 Caller protocol:
 
@@ -115,7 +116,8 @@ class ClaimOutcome:
     # moment that lease runs out. A skip with ``None`` means the key has
     # succeeded, or was dead-lettered, and this copy never needs another look.
     locked_until: datetime | None = None
-    # A skip because the key was dead-lettered (and not replayed since).
+    # A skip because the key was dead-lettered (and not replayed since): the
+    # copy is not handled, and the caller dead-letters it too.
     dead_lettered: bool = False
 
 
