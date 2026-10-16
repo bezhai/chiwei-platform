@@ -125,14 +125,18 @@ jobs:
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c don't-catch comments in business code"; exit 1; }
           # Manual ack/nack/requeue=False belongs to the framework
           # (runtime/*). The DLQ admin tooling at
-          # nodes/dlq_admin.py is the only business-facing exception
-          # (the 6-step requeue protocol). Scan business dirs only.
+          # nodes/dlq_admin.py is the business-facing exception
+          # (the 6-step requeue protocol). nodes/reading_carry_over.py is a
+          # one-off second one: it takes the old reading queue's messages and
+          # puts back (nack, requeue) the ones it does not carry over; it is
+          # removed once prod has switched over and the old queue is deleted.
+          # Scan business dirs only.
           c=$(grep -rn "requeue=False\|\.nack(" \
               apps/agent-service/app/agent/ apps/agent-service/app/living/ \
               apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
               apps/agent-service/app/skills/ apps/agent-service/app/world/ \
               2>/dev/null \
-              | grep -v "nodes/dlq_admin.py\|__pycache__\|/test_" \
+              | grep -v "nodes/dlq_admin.py\|nodes/reading_carry_over.py\|__pycache__\|/test_" \
               | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c nack/requeue=False call sites in business code"; exit 1; }
       - name: Gap 13 — nothing outside app/data opens a database session

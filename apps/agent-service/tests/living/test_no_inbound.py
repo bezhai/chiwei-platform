@@ -154,6 +154,14 @@ _OPS_ONLY_ROUTES = frozenset({
     _operator("app.messaging.operator.OperatorReplayRequest", "POST",
               "/admin/messaging/dead-letters/replay",
               "app.messaging.operator.operator_replay_node"),
+    # 一次性的搬运：旧的读书队列（持久边那一条）里剩下的消息，按读书收件箱的格式发进读书收件箱
+    # （``app.nodes.reading_carry_over``）。**它的处理函数不在 app.living 里**，能做到的跟运维入口往
+    # 读书收件箱里投一条一样：让读书 agent 读一程，碰不到她的一轮（下面
+    # ``test_the_reading_inbox_handler_cannot_run_her_round`` 守着）。三项检查跟运维入口一样都开着。
+    # prod 切换完成、旧队列删掉之后，这一条连同路由一起删除。
+    Route("POST", "/admin/reading/carry-over",
+          "app.nodes.reading_carry_over.ReadingCarryOverRequest",
+          "app.nodes.reading_carry_over.carry_over_reading", True, True, True),
 })
 
 @functools.cache

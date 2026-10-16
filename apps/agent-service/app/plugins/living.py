@@ -1,5 +1,5 @@
-"""Living: the three sisters' life engine — five clocks, the reading inbox, the two outbound queues
-and the sisters' inboxes.
+"""Living: the three sisters' life engine — five clocks, the reading inbox, the two outbound queues,
+the sisters' inboxes, and a one-off admin route that empties the old reading queue.
 
   every  60 s  LifeMomentTick     -> life_moment_tick     her rounds (the node decides who is due)
   every  60 s  PhoneNudgeTick     -> phone_nudge_tick     wake her early for a call or a message
@@ -12,6 +12,8 @@ and the sisters' inboxes.
 
   the inboxes named after the three personas -> received  stored only; she reads them on her clock
   the reading inbox                          -> read_a_round  one stretch of reading
+
+  POST /admin/reading/carry-over  carry_over_reading  the old reading queue -> the reading inbox
 
 **Clocks tick denser than the work they drive.** A clock's seconds are fixed when it is
 registered, so the intervals that are business parameters (ten minutes between rounds, the
@@ -33,6 +35,13 @@ an error past the stretch dead-letters the message and a person decides whether 
 Processing is limited to five minutes, above the reading agent's own timeout; it bounds how long a
 stretch whose process died stays claimed before another process reads it again. What reaches this
 inbox from outside can run the reading agent, not her round (``tests/living/test_no_inbound.py``).
+
+**The old reading queue.** Reading used to run from a durable edge whose queue
+(``durable_file_picked_up_read_a_round``) nothing consumes any more. The admin route reports what is
+left there, carries the rounds that were never read over to the reading inbox, and deletes the
+lane's empty queue (:mod:`app.nodes.reading_carry_over`). Its handler is not in ``app.living``; it
+has the inner credential and lane checks of the operator routes. It is removed once prod has
+switched over and the old queue is deleted.
 
 **The inboxes are opened at start**: their names come from the persona table, which cannot be read
 at import (:func:`app.living.received.open_inboxes`, which declares them through the function the
@@ -65,6 +74,7 @@ from app.living.persona_review import (
 )
 from app.living.reading import read_a_round
 from app.living.received import open_inboxes
+from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
 
 # (tick Data, seconds, node). The clock is named after its tick Data.
 CLOCKS: tuple[tuple[type[Data], float, Callable[[Data], Awaitable[None]]], ...] = (
@@ -93,6 +103,15 @@ def setup(ctx: Context) -> None:
         on_message=read_a_round,
         processing_timeout=timedelta(minutes=5),
         max_attempts=1,
+    )
+    ctx.route(
+        "POST",
+        "/admin/reading/carry-over",
+        ReadingCarryOverRequest,
+        carry_over_reading,
+        inner_secret=True,
+        lane_match=True,
+        answers_with_lane=True,
     )
     ctx.outbound(ChatResponseSegment, "chat_response")
     ctx.outbound(Recall, "recall")

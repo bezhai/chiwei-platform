@@ -81,7 +81,7 @@ from app.living.participants import READING, residents
 from app.living.phone import Sender, _who_tag, reachable_conversations
 from app.living.records import _require_aware, esc
 from app.living.scope import moment_scope
-from app.messaging.message import Kind, Message, SendFailed
+from app.messaging.message import Delivery, Kind, Message, SendFailed
 
 # module-level 引入，测试从这里换替身（不碰 broker）
 from app.messaging.sending import send
@@ -491,12 +491,7 @@ async def read_a_bit(
         tos_file=picked.tos_file,
     )
     try:
-        delivery = await send(
-            sender=residents().by_persona[persona_id],
-            recipient=READING,
-            body=this_round.model_dump_json(),
-            message_id=round_id,
-        )
+        delivery = await send_round(this_round, sender=residents().by_persona[persona_id])
     except SendFailed as exc:
         raise RuntimeError(_NOT_STARTED) from exc
     if not delivery.delivered:
@@ -509,6 +504,21 @@ async def read_a_bit(
     return (
         f"你拿起{_name_of(picked)}读了起来。读进去要一会儿 —— "
         f"读到什么、它给你留下什么，得等你自己读完这一程。"
+    )
+
+
+async def send_round(this_round: FilePickedUp, *, sender: str) -> Delivery:
+    """把这一程发给读书收件箱：消息 id 是 ``round_id``，正文是这一程的 JSON，发送方是 ``sender``
+    （她在世界里的名字）。
+
+    两处发这种消息：她拿起文件时（:func:`read_a_bit`），和旧读书队列的一次性搬运
+    （:mod:`app.nodes.reading_carry_over`）。格式只在这里定一次，:func:`read_a_round` 按它解开。
+    """
+    return await send(
+        sender=sender,
+        recipient=READING,
+        body=this_round.model_dump_json(),
+        message_id=this_round.round_id,
     )
 
 

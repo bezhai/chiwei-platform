@@ -60,6 +60,10 @@ EXPECTED_ROUTES: dict[str, dict[str, list[str]]] = {
         "GET /admin/messaging/record": GUARDED,
         "GET /admin/messaging/dead-letters": GUARDED,
         "POST /admin/messaging/dead-letters/replay": GUARDED,
+        # One-off: carries what is left in the old reading queue (the durable edge's) over to the
+        # reading inbox. Removed, with its monitor-dashboard forward, once prod has switched over
+        # and the old queue is deleted.
+        "POST /admin/reading/carry-over": GUARDED,
     },
     "world": {
         **_COMMON_ROUTES,
