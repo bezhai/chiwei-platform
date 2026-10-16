@@ -1,4 +1,4 @@
-"""life 这一侧认识的参与者：三姐妹自己，和 world。名字就是她们在通信机制里的地址。
+"""life 这一侧认识的参与者：三姐妹自己、world，和读书收件箱。名字就是它们在通信机制里的地址。
 
 **三姐妹用的是她们在世界里的名字，取自人设表的显示名**（``bot_persona.display_name``），
 代码里不写任何一个名字。``akao`` 这类 id 只留在 life 内部：world 和它发来的告知里用的都
@@ -10,7 +10,8 @@
   * 人设表里没有这个人，或者她的显示名是空的；
   * 显示名不符合通信机制的名字规则（:func:`app.messaging.message.participant`）；
   * 两个人的显示名一样——发给其中一个的消息会进另一个的收件箱；
-  * 显示名跟已有的参与者撞了（:data:`WORLD`、``operator``）——发给她的消息会进别人的收件箱。
+  * 显示名跟已有的参与者撞了（:data:`WORLD`、``operator``、:data:`READING`）——发给她的消息会进
+    别人的收件箱。
 
 几处同时有问题时一次报全：名字改在人设表里，改一处、重启、再撞下一处太慢。
 
@@ -35,8 +36,12 @@ from app.messaging.operator import OPERATOR
 # :func:`app.living.received.render_received`）。
 WORLD = "world"
 
+# 读书收件箱的名字（:mod:`app.living.reading`）：她拿起一个文件时发一条消息到这里，由 living 插件
+# 开设的收件箱读那一程。收件方是代码，不是谁的人设。
+READING = "reading"
+
 # 已经有主的名字。姐妹的显示名撞上其中一个，发给她的消息就会进别人的收件箱。
-_TAKEN = (WORLD, OPERATOR)
+_TAKEN = (WORLD, OPERATOR, READING)
 
 
 @dataclass(frozen=True)

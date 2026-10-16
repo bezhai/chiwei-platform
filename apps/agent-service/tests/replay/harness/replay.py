@@ -93,7 +93,7 @@ class Replay:
         self._tables = Tables(engine)
         self.redis = None
         self.process: AppProcess | None = None
-        # Processes started so far; names each one's durable worker (``<app>#<n>``).
+        # Processes started so far; names each one's messaging worker (``<app>#<n>``).
         self._started = 0
         self.steps: list[dict[str, Any]] = []
 

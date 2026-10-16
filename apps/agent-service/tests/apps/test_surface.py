@@ -86,7 +86,6 @@ EXPECTED_TABLES: dict[str, list[str]] = {
         "data_dlq_inspect_response",
         "data_dlq_requeue_request",
         "data_dlq_requeue_response",
-        "data_file_picked_up",
         "data_file_read",
         "data_happening",
         "data_life_moment",

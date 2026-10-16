@@ -385,6 +385,7 @@ async def test_the_operator_owns_an_inbox_in_agent_service(app_host):
     from app.messaging.receiving import INBOX_REGISTRY
 
     host = await app_host("agent-service")
-    assert [r.plugin for r in host.registered() if r.kind == "inbox"] == ["operator"]
+    inboxes = [(r.plugin, r.name) for r in host.registered() if r.kind == "inbox"]
+    assert ("operator", "operator") in inboxes
     assert "operator" in INBOX_REGISTRY
     assert INBOX_REGISTRY["operator"].on_question is None

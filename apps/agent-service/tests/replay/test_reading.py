@@ -1,14 +1,16 @@
 """Replay: her reading round, driven the way production drives it. A moment of hers picks a file
-up (``read_a_bit`` emits a durable ``FilePickedUp``), and the scenario hands that message to the
-durable queue's consumer (``read_a_round``), which fetches the file's bytes (tool-service signs
-``files/<file_key>``, the store answers the GET), decodes and pages them, and runs the reading
-agent.
+up (``read_a_bit`` sends a message to the ``reading`` inbox; its message id is the round's
+``round_id``, its sender her name in the world, its body the round as JSON), and the scenario
+hands that message to the inbox's consumer (``read_a_round``), which fetches the file's bytes
+(tool-service signs ``files/<file_key>``, the store answers the GET), decodes and pages them, and
+runs the reading agent.
 
-Spec decision 7 moves this path from the durable edge to messaging (T3). What has to survive the
-move is pinned here: the round's identity (``round_id``, derived from the moment and the file),
-the reading-side dedupe (the same round is never read twice), and, for an error that reaches the
-consumer, a single run whose message is rejected without a retry. A failed model call does not
-reach it: the reading round is fail-soft and the message is acknowledged.
+Spec decision 7 moved this path from the durable edge to messaging (T3). What survived the move
+is pinned here: the round's identity (``round_id``, derived from the moment and the file), the
+reading-side dedupe (the same round is never read twice), and, for an error that reaches the
+consumer, a single run whose message is dead-lettered without a retry (the inbox handles a
+message at most once). A failed model call does not reach it: the reading round is fail-soft and
+the message is acknowledged.
 
 * ``continuation`` — her moment picks the file up, then fails; the same cell runs again and picks
   it up again under the same identity, so two copies of one round are queued. The first reads
@@ -18,16 +20,19 @@ reach it: the reading round is fail-soft and the message is acknowledged.
 * ``model_call_fails`` — the reading agent's model call fails: it is called once, the round
   writes nothing (impression and page untouched), and the message is acknowledged, not
   dead-lettered; nothing is queued for a retry.
-* ``commit_fails`` — the round reads, but writing her impression fails at commit: the consumer
-  raises and the message is rejected (dead-lettered by the broker); nothing is queued for a retry.
+* ``commit_fails`` — the round reads, but writing her impression fails at commit: the handler
+  raises and the message is rejected into this lane's ``isolated_dead_letters``; nothing is
+  queued for a retry.
 * ``killed_after_commit`` — the process dies right after her impression commits, before the
   delivery is marked done. RabbitMQ hands the unsettled message to the restarted process, which
-  comes up after the dead process's five-minute claim has run out: the new process takes the claim
-  over, and the reading side sees this round already committed and does not read it again (the
-  reading-side dedupe on ``round_id``, the one that has to survive the move to messaging).
+  gets it after the dead process's six-minute claim (the inbox's five-minute processing timeout
+  plus a minute) has run out: the new process takes the claim over, and the reading side sees
+  this round already committed and does not read it again (the reading-side dedupe on
+  ``round_id``).
 * ``killed_mid_round`` — the process dies while fetching the file. The message comes back to the
-  restarted process a minute later, while the dead process's claim on it is still live, and it is
-  settled without being read: that reading round is gone.
+  restarted process a minute later, while the dead process's claim on it is still live: the copy
+  is put back to look again in a second and acknowledged. Once the claim has run out, that copy
+  is delivered, takes the claim over, and the round is read.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ import pytest
 from app.capabilities._errors import CapabilityTimeout
 from app.domain.reading_source import decode_pages
 from app.infra.cst_time import CST, now_cst
-from app.infra.rabbitmq import lane_queue
+from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, lane_queue
 from app.living.moment import run_moment
 from tests.replay import seeds
 from tests.replay.harness import Fail, ProcessKilled, Reply, ToolUse
@@ -64,7 +69,7 @@ def _at(hour: int, minute: int = 0) -> datetime:
 
 
 def _queue(replay) -> str:
-    return lane_queue("durable_file_picked_up_read_a_round", replay.lane)
+    return replay.inbox("reading")
 
 
 async def _bezhai_sent_her_a_book(replay) -> None:
@@ -106,6 +111,13 @@ async def _nothing_queued(replay) -> None:
         return replay.broker.queued(_queue(replay))
 
     await replay.step("nothing is queued for a retry", queued)
+
+
+async def _dead_letters(replay) -> None:
+    async def parked() -> list:
+        return replay.broker.queued(lane_queue(ISOLATED_DEAD_LETTERS, replay.lane))
+
+    await replay.step("the message is in this lane's dead letters", parked)
 
 
 async def test_continuation(replay):
@@ -212,6 +224,7 @@ async def test_commit_fails(replay):
         at=_at(14, 2),
     )
     await _nothing_queued(replay)
+    await _dead_letters(replay)
 
     replay.check("reading/commit_fails")
 
@@ -238,7 +251,7 @@ async def test_killed_after_commit(replay):
     await replay.step(
         "the unsettled message comes back after the dead process's claim ran out",
         lambda: replay.broker.deliver(_queue(replay)),
-        at=_at(14, 8),
+        at=_at(14, 9),
     )
 
     replay.check("reading/killed_after_commit")
@@ -262,6 +275,13 @@ async def test_killed_mid_round(replay):
         "the unsettled message comes back to the new process",
         lambda: replay.broker.deliver(_queue(replay)),
         at=_at(14, 3),
+    )
+
+    replay.model.script(READING, *_reads_the_first_page())
+    await replay.step(
+        "the copy put back to look again is delivered after the dead process's claim ran out",
+        lambda: replay.broker.deliver(_queue(replay)),
+        at=_at(14, 9),
     )
 
     replay.check("reading/killed_mid_round")

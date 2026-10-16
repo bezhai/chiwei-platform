@@ -27,7 +27,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("skills", "service"): 1,
         ("skills", "task"): 1,
         ("living", "clock"): 5,
-        ("living", "durable"): 1,
+        ("living", "inbox"): 1,
         ("living", "outbound"): 2,
         ("living", "inboxes_at_start"): 1,
     }

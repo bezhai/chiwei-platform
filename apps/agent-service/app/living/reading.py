@@ -13,9 +13,19 @@
 **绝不排个序取第一个** —— 读哪一份是她的事。回问里给的那串 ``file=<id>`` 原样抄回来
 就能开读，所以"让她指"是真指得动的，不是一句空话。
 
-**一程是异步的：她拿起来，然后这次醒来就过去了。** 工具只 emit 一个 durable
-:class:`FilePickedUp`，读那一程在别处跑（读一页要取字节、解码、几轮模型调用，塞进
-一轮里会把她卡在网络上）。这跟她说出去的话要等下一轮才知道下场是同一个形状。
+**一程是异步的：她拿起来，然后这次醒来就过去了。** 工具只往读书收件箱
+（:data:`app.living.participants.READING`）发一条消息，读那一程由收件箱的处理函数
+:func:`read_a_round` 跑（读一页要取字节、解码、几轮模型调用，塞进一轮里会把她卡在网络上）。
+这跟她说出去的话要等下一轮才知道下场是同一个形状。消息的 id 就是这一程的 ``round_id``，
+发送方是她在世界里的名字，正文是 :class:`FilePickedUp` 的 JSON：收件方是代码，不是谁的
+模型，它要的是这几个字段。没送到、没确认，工具如实告诉她没拿起来，她可以再拿一次（同一轮里
+还是同一程、同一个消息 id）。
+
+**读书收件箱里的每条消息最多处理一次，处理时限 5 分钟**（living 插件开设时声明）。读一程里的
+失败（取不到字节、解码失败、超时、模型调用失败、空产出）都在读一程里吞掉，处理函数正常返回，
+消息确认；越过读一程的错误（写印象时提交失败）让处理函数抛出，消息直接进本泳道的死信，不再
+调一次模型——重放是人看过之后的决定。投递被取消（停机、通道关掉）不算处理过，消息回到队列，
+有人接着读。
 
 **读到哪了、读出什么，落在 :class:`FileRead` 上，一个文件一条版本链。** 不复用旧
 引擎的 ``BookImpression``：那张表的 ``status`` 有"放下"这一档，而新引擎里"放下一本
@@ -28,11 +38,10 @@
 ``None``，这里据此**不提交**：印象和读到第几页原样停在上一程的位置，她下次自己想读
 了再拿起来一次。绝不写半截脏印象 —— 空印象覆盖整篇就是真失忆。
 
-**同一程递两次不能读两遍。** durable 边本身按 ``(lane, round_id)`` 去重，但那层去重
-的租约会过期、过期后另一个 worker 会接手；接手时上一次可能已经提交过了。所以这里
-还有第二道：跑昂贵的那一程之前先看当前印象上的 ``round_id`` 是不是就是这一程 ——
-是就跳过。提交本身走版本 CAS，拿着过时印象的那一程（并发 / 重放）写不进去，页号
-不会被推两次。
+**同一程递两次不能读两遍。** 收件箱按消息 id（= ``round_id``）去重，但那层去重的
+占位会过期、过期后另一个进程会接手；接手时上一次可能已经提交过了。所以这里还有第二道：
+跑昂贵的那一程之前先看当前印象上的 ``round_id`` 是不是就是这一程 —— 是就跳过。提交本身
+走版本 CAS，拿着过时印象的那一程（并发 / 重放）写不进去，页号不会被推两次。
 
 **上限只管她还没翻开过的那摞**（:data:`FILE_LIST_LIMIT`）。读过的一条都不省 ——
 印象是她的记忆，被条数上限截掉就是替她遗忘。而没翻开过的那摞被挤下去也不是永久
@@ -56,7 +65,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 # module-level 引入，测试从这里换替身（一程真跑起来要取字节 + 几轮模型调用）
 from app.agent.reading import run_reading_round
@@ -68,11 +77,14 @@ from app.data.schema import Data, Key, Version, table_name
 from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
 from app.infra.cst_time import CST, to_cst_dated
+from app.living.participants import READING, residents
 from app.living.phone import Sender, _who_tag, reachable_conversations
 from app.living.records import _require_aware, esc
 from app.living.scope import moment_scope
-from app.runtime.emit import emit
-from app.runtime.node import node
+from app.messaging.message import Kind, Message, SendFailed
+
+# module-level 引入，测试从这里换替身（不碰 broker）
+from app.messaging.sending import send
 
 logger = logging.getLogger(__name__)
 
@@ -132,13 +144,13 @@ class FileRead(Data):
         return _require_aware("read_at", v)
 
 
-class FilePickedUp(Data):
-    """她在某一轮拿起了一个文件要读一程 —— 交给别处去读的那个信号。
+class FilePickedUp(BaseModel):
+    """她在某一轮拿起了一个文件要读一程 —— 发给读书收件箱的那条消息的正文（JSON）。
 
-    自然键 ``(lane, round_id)``；``round_id`` 从 ``(lane, persona, moment, 这个附件
-    实例)`` 派生，所以工具重试、整轮重放、这次 moment 重跑全撞同一程，durable 边按它去重、
-    不重复读。下一次是新的 ``moment_id`` = 新的一程 —— **要不要接着读是她的决定**，
-    不是系统替她排的下一次。
+    只用来编码和解码，不落表。``round_id`` 从 ``(lane, persona, moment, 这个附件实例)``
+    派生，也是那条消息的 id，所以工具重试、整轮重放、这次 moment 重跑全撞同一程，收件箱按
+    消息 id 去重、不重复读。下一次是新的 ``moment_id`` = 新的一程 —— **要不要接着读是她的
+    决定**，不是系统替她排的下一次。
 
     ``title`` 一样东西两个用处：给她看（她眼里这文件叫什么），以及解码时按后缀分流
     （``.epub`` 走 epub 解析、其余按 txt 读）。分流必须靠原始文件名 —— ``file_key``
@@ -148,8 +160,8 @@ class FilePickedUp(Data):
     不等任何回填（那条回填机制是 image-only、对文件根本不跑）。读那一程按它取字节。
     """
 
-    lane: Annotated[str, Key]
-    round_id: Annotated[str, Key]
+    lane: str
+    round_id: str
     persona_id: str
     attachment_id: str
     title: str
@@ -289,6 +301,11 @@ def _name_of(f: SentFile) -> str:
     来就行。所以它跟别的外面来的字串一样过 :func:`esc`（理由写在那个函数上）。
     """
     return f"《{esc(f.title)}》" if f.title else "（一个没有名字的文件）"
+
+
+# 没送到读书收件箱、或者没确认时，回给她的那句。没确认的那一份可能已经到了，她再拿一次用的是
+# 同一个消息 id，到了的那份按 id 去重。
+_NOT_STARTED = "你没拿起来，这一程没开始读。可以再拿起来一次。"
 
 
 # 撤回掉的那份，摆在她眼前时说的那句。**说得出口的只有这件事**：这东西现在拿不到了。
@@ -465,16 +482,29 @@ async def read_a_bit(
         _ID_NS,
         f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{picked.attachment_id}",
     ).hex
-    await emit(
-        FilePickedUp(
-            lane=lane,
-            round_id=round_id,
-            persona_id=persona_id,
-            attachment_id=picked.attachment_id,
-            title=picked.title,
-            tos_file=picked.tos_file,
-        )
+    this_round = FilePickedUp(
+        lane=lane,
+        round_id=round_id,
+        persona_id=persona_id,
+        attachment_id=picked.attachment_id,
+        title=picked.title,
+        tos_file=picked.tos_file,
     )
+    try:
+        delivery = await send(
+            sender=residents().by_persona[persona_id],
+            recipient=READING,
+            body=this_round.model_dump_json(),
+            message_id=round_id,
+        )
+    except SendFailed as exc:
+        raise RuntimeError(_NOT_STARTED) from exc
+    if not delivery.delivered:
+        logger.warning(
+            "living reading lane=%s persona=%s file=%s round=%s 没送到读书收件箱（%s）",
+            lane, persona_id, picked.attachment_id, round_id, delivery.reason,
+        )
+        raise RuntimeError(_NOT_STARTED)
     # 只陈述客观的那一件：你拿起来读了。读出什么感受是她读出来的，不在这儿替她编。
     return (
         f"你拿起{_name_of(picked)}读了起来。读进去要一会儿 —— "
@@ -486,26 +516,41 @@ READING_TOOLS = [look_for_something_to_read, read_a_bit]
 
 
 # ---------------------------------------------------------------------------
-# 读那一程（在别处跑）
+# 读那一程（读书收件箱的处理函数）
 # ---------------------------------------------------------------------------
 
 
-@node
-async def read_a_round(picked: FilePickedUp) -> None:
-    """读一程：查重 → 取字节、解码、往下读 → CAS 提交读到哪了 + 印象。
+async def read_a_round(message: Message) -> None:
+    """读书收件箱收到一条：解开这一程 → 查重 → 取字节、解码、往下读 → CAS 提交读到哪了 + 印象。
+
+    不是普通消息的（定时消息被退回的告知；读书收件箱不该收到）记一条 warning，不读。正文里的
+    ``round_id`` 跟消息 id 对不上就抛：收件箱按消息 id 去重，下面按 ``round_id`` 查重，两者说的
+    必须是同一程。正文解不开也抛。抛出去的进本泳道的死信（最多处理 1 次）。
 
     三道都是"错了就静默"的那种：
 
-      1. **跑之前先查这一程提交过没有。** durable 边按 ``(lane, round_id)`` 去重，
-         但那层的租约会过期、过期后另一个 worker 接手，而接手时上一次可能已经提交
-         过了。没有这一道就是白烧一次钱、而且页号被推两次（她跳过了中间那几页，
-         一句报错都没有）。
+      1. **跑之前先查这一程提交过没有。** 收件箱按消息 id 去重，但那层的占位会过期、
+         过期后另一个进程接手，而接手时上一次可能已经提交过了。没有这一道就是白烧一次
+         钱、而且页号被推两次（她跳过了中间那几页，一句报错都没有）。
       2. **提交走版本 CAS。** 拿着过时印象的那一程（并发 / 重放）写入被拒，不会用
          旧印象盖掉新的、也不会把页号回退。
       3. **读不成就什么都不动。** 取不到字节 / 解码失败 / 超时 / 空产出，
          :func:`run_reading_round` 返回 ``None``，这里不提交 —— 印象和页号原样停在
          上一程的位置，她下次自己想读了再拿起来一次。
     """
+    if message.kind is not Kind.MESSAGE:
+        logger.warning(
+            "living reading: the reading inbox got a %s (%s), not a round to read; set aside",
+            message.kind,
+            message.message_id,
+        )
+        return
+    picked = FilePickedUp.model_validate_json(message.body)
+    if picked.round_id != message.message_id:
+        raise ValueError(
+            f"reading inbox: message {message.message_id} carries round {picked.round_id}; "
+            "a round's message id is its round_id"
+        )
     lane, persona_id = picked.lane, picked.persona_id
     attachment_id = picked.attachment_id
 

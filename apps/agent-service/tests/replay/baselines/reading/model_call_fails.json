@@ -10,16 +10,17 @@
       "model_calls": [],
       "effects": [],
       "consumers_started": [
-        "durable_file_picked_up_read_a_round_coe-replay",
         "inbox_:bgtr75i_coe-replay",
         "inbox_:ntst98f_coe-replay",
         "inbox_:r9qr6a_coe-replay",
         "inbox_operator_coe-replay",
+        "inbox_reading_coe-replay",
         "messaging_scheduled_coe-replay",
         "questions_:bgtr75i_coe-replay",
         "questions_:ntst98f_coe-replay",
         "questions_:r9qr6a_coe-replay",
-        "questions_operator_coe-replay"
+        "questions_operator_coe-replay",
+        "questions_reading_coe-replay"
       ],
       "rows": {},
       "files": {}
@@ -300,23 +301,36 @@
           ]
         },
         {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
           "publish": [
-            "durable_file_picked_up_read_a_round_coe-replay"
+            "inbox_reading_coe-replay"
           ],
-          "rk": "durable.file_picked_up.read_a_round.coe-replay",
+          "rk": "inbox.reading.coe-replay",
           "headers": {
-            "data_type": "FilePickedUp",
             "trace_id": "",
             "lane": "coe-replay"
           },
           "body": {
-            "lane": "coe-replay",
-            "round_id": "0e7c8f023d2457d2b15762556032c09a",
-            "persona_id": "akao",
-            "attachment_id": "b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi",
-            "title": "小王子.txt",
-            "tos_file": "files/file_v3_xiaowangzi"
-          }
+            "message_id": "0e7c8f023d2457d2b15762556032c09a",
+            "sender": "赤尾",
+            "recipient": "reading",
+            "time": "2026-07-25T06:00:00+00:00",
+            "kind": "message",
+            "wakes_recipient": true,
+            "body": "{\"lane\":\"coe-replay\",\"round_id\":\"0e7c8f023d2457d2b15762556032c09a\",\"persona_id\":\"akao\",\"attachment_id\":\"b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi\",\"title\":\"小王子.txt\",\"tos_file\":\"files/file_v3_xiaowangzi\"}"
+          },
+          "confirmed": true
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
         },
         {
           "db": "commit",
@@ -475,6 +489,52 @@
               "total_tokens": 2200
             }
           ]
+        },
+        "message_record": {
+          "added": [
+            {
+              "body": {
+                "attachment_id": "b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi",
+                "lane": "coe-replay",
+                "persona_id": "akao",
+                "round_id": "0e7c8f023d2457d2b15762556032c09a",
+                "title": "小王子.txt",
+                "tos_file": "files/file_v3_xiaowangzi"
+              },
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "0e7c8f023d2457d2b15762556032c09a",
+              "message_time": "2026-07-25T14:00:00+08:00",
+              "outcome": "delivered",
+              "reason": null,
+              "recipient": "reading",
+              "recorded_at": "<db-clock>",
+              "sender": "赤尾"
+            },
+            {
+              "body": {
+                "attachment_id": "b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi",
+                "lane": "coe-replay",
+                "persona_id": "akao",
+                "round_id": "0e7c8f023d2457d2b15762556032c09a",
+                "title": "小王子.txt",
+                "tos_file": "files/file_v3_xiaowangzi"
+              },
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "0e7c8f023d2457d2b15762556032c09a",
+              "message_time": "2026-07-25T14:00:00+08:00",
+              "outcome": "sending",
+              "reason": null,
+              "recipient": "reading",
+              "recorded_at": "<db-clock>",
+              "sender": "赤尾"
+            }
+          ]
         }
       },
       "files": {}
@@ -543,19 +603,13 @@
       ],
       "effects": [
         {
-          "deliver": "durable_file_picked_up_read_a_round_coe-replay",
-          "message_id": null
+          "deliver": "inbox_reading_coe-replay",
+          "message_id": "0e7c8f023d2457d2b15762556032c09a"
         },
         {
           "db": "commit",
           "writes": [
             "INSERT runtime_inflight"
-          ]
-        },
-        {
-          "db": "commit",
-          "writes": [
-            "INSERT data_file_picked_up"
           ]
         },
         {
@@ -579,34 +633,20 @@
         },
         {
           "settled": "ack",
-          "queue": "durable_file_picked_up_read_a_round_coe-replay",
-          "message_id": null
+          "queue": "inbox_reading_coe-replay",
+          "message_id": "0e7c8f023d2457d2b15762556032c09a"
         }
       ],
       "consumers_started": [],
       "rows": {
-        "data_file_picked_up": {
-          "added": [
-            {
-              "attachment_id": "b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi",
-              "created_at": "<db-clock>",
-              "dedup_hash": "<dedup>",
-              "lane": "coe-replay",
-              "persona_id": "akao",
-              "round_id": "0e7c8f023d2457d2b15762556032c09a",
-              "title": "小王子.txt",
-              "tos_file": "files/file_v3_xiaowangzi"
-            }
-          ]
-        },
         "runtime_inflight": {
           "added": [
             {
               "attempts": 1,
               "created_at": "<db-clock>",
-              "data_table": "data_file_picked_up",
-              "edge_id": "FilePickedUp::read_a_round",
-              "idempotent_key": "fc212d272b9a368817829ada5d94782dcec68523cc7c7274c2f1262713554491",
+              "data_table": "inbox_reading",
+              "edge_id": "inbox:reading@coe-replay",
+              "idempotent_key": "0e7c8f023d2457d2b15762556032c09a",
               "last_error": null,
               "locked_until": null,
               "state": "succeeded",

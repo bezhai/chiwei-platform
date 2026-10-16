@@ -26,7 +26,7 @@ from app.living.nudge import NudgeBegun
 from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
 from app.living.persona import PersonaVersion
 from app.living.pictures import Picture
-from app.living.reading import FilePickedUp, FileRead
+from app.living.reading import FileRead
 from app.living.received import ReceivedMessage, ReceivedRead
 from app.living.records import (
     KIND_SPEECH,
@@ -73,14 +73,6 @@ _VALID: dict[type, dict] = {
         "finished": False,
         "read_at": _AWARE,
         "round_id": "r-1",
-    },
-    FilePickedUp: {
-        "lane": "coe-x",
-        "round_id": "r-1",
-        "persona_id": "akao",
-        "attachment_id": "msg-1:key-a",
-        "title": "斜阳.txt",
-        "tos_file": "files/key-a",
     },
     Picture: {
         "lane": "coe-x",
@@ -184,17 +176,6 @@ _PINNED: dict[type, dict[str, str]] = {
         "finished": "BOOLEAN",
         "read_at": "TIMESTAMPTZ",
         "round_id": "TEXT",
-    },
-    # durable 边落地的那条信号行（``(lane, round_id)`` 就是它的去重键）。它没有
-    # 时刻列 —— 一程真正的时刻是**读完**那一版写下的 ``FileRead.read_at``，
-    # 而不是她按下那一下；在信号上再放一个时刻只会多出一个没人该信的口径。
-    FilePickedUp: {
-        "lane": "TEXT",
-        "round_id": "TEXT",
-        "persona_id": "TEXT",
-        "attachment_id": "TEXT",
-        "title": "TEXT",
-        "tos_file": "TEXT",
     },
     # 她做过的一张图。**没有 URL 列**：预签名地址 1.5 小时就死，存下来的后果是静默的
     # （那一行还在，点开是过期签名）。永久的是 ``file_name``，要看的时候现签。
@@ -328,7 +309,6 @@ def test_living_data_reaches_the_registry_when_agent_service_starts():
         "Happening",
         "Whereabouts",
         "FileRead",
-        "FilePickedUp",
         "Picture",
         "LivingDayPage",
         "PersonaVersion",

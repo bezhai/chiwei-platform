@@ -7,13 +7,18 @@
 
 第二期之前 life 一个收件箱都没有。现在三姐妹各有一个收件箱（通信机制，
 :mod:`app.living.received`），这是她唯一的入口：world 告诉她察觉到了什么、姐妹直接对她说
-的话都从这里来。所以这里验的是（看的是 agent-service 的插件宿主上登记的东西）：
+的话都从这里来。另有一个读书收件箱（:mod:`app.living.reading`）：她在自己的一轮里拿起一个
+文件时发一条消息到这里，读那一程。所以这里验的是（看的是 agent-service 的插件宿主上登记的
+东西）：
 
   * 实验泳道上没有任何一条路由能到达 ``app.living`` 里的处理函数，路由之外能把东西送进进程的
     登记（收件箱、durable 边、将来别的种类）都逐种过一遍；
-  * life 开设的收件箱只有三姐妹那一组，处理函数是 :func:`app.living.received.receive`，
-    它只存一行、不碰模型：跑一遍看得到一行、看不到任何一次模型调用；它所在的模块连同
-    它 import 的一切，一行能跑模型的代码都没有；
+  * life 开设的收件箱只有三姐妹那一组和读书收件箱。三姐妹的处理函数是
+    :func:`app.living.received.receive`，它只存一行、不碰模型：跑一遍看得到一行、看不到任何一次
+    模型调用；它所在的模块连同它 import 的一切，一行能跑模型的代码都没有；
+  * 读书收件箱和别的收件箱一样，运维入口（``/admin/messaging/send``）能以任何身份往里投。投进来
+    能做到的只有读一程：处理函数 :func:`app.living.reading.read_a_round` 所在的模块连同它 import
+    的一切，碰不到她的一轮（:mod:`app.living.moment`）；
   * ``app.living`` 的源码里一次都没有出现旧 chat 入站那几个名字；
   * living 自己登记的只有那五条钟，而且钟上那条 Data 除了 ``ts`` 什么都装不下——
     装不下内容的钟，天然没法当入站口用。
@@ -153,11 +158,6 @@ _OPS_ONLY_ROUTES = frozenset({
               "app.messaging.operator.operator_replay_node"),
 })
 
-# 唯一的 durable 边：她自己在一轮里拿起一个文件，读一程（``tests/living/test_reading.py``）。投递方
-# 和消费方都是这个进程；多出一条，就是又一条能把东西送进 living 的路，要重新判断。
-_THE_READING_EDGE = ["app.living.reading.FilePickedUp", "app.living.reading.read_a_round"]
-
-
 @functools.cache
 def _registered(lane: str) -> dict:
     """在一个干净进程里按线上那样起 agent-service 的宿主，交回它登记的东西（:data:`_REGISTERED`）。"""
@@ -190,8 +190,8 @@ def test_nothing_from_outside_reaches_the_living_engine():
     白名单里的运维路由的处理函数换成 living 的节点也会红。
 
     第二条断言是围栏：路由必须逐字出现在 :data:`_OPS_ONLY_ROUTES` 里，连方法、路径、处理函数和
-    检查一起对，所以多出来的任何一条路由都会红。收件箱由下面两条查；durable 边只许是读一程那一条；
-    宿主多出一种登记，先红在第一条断言上。
+    检查一起对，所以多出来的任何一条路由都会红。收件箱由下面几条查；durable 边一条都不许有（读一程
+    已经改走读书收件箱）；宿主多出一种登记，先红在第一条断言上。
     """
     registered = _registered(LANE)
 
@@ -219,8 +219,9 @@ def test_nothing_from_outside_reaches_the_living_engine():
         f"加进 _OPS_ONLY_ROUTES，并说明为什么它的处理函数不在 {_LIVING_ROOT} 里。"
     )
 
-    assert registered["durable"] == [_THE_READING_EDGE], (
-        f"durable 边不只是读一程那一条了：{registered['durable']}"
+    assert registered["durable"] == [], (
+        f"又登记了 durable 边：{registered['durable']}。读一程走读书收件箱，"
+        "新的一条要先判断它能把什么送进 living。"
     )
 
     for name in ("ChatTrigger", "ChatRequest"):
@@ -233,39 +234,45 @@ def test_nothing_from_outside_reaches_the_living_engine():
 _OPEN_HER_INBOXES = "app.living.received.open_inboxes"
 _HER_INBOX_HANDLER = "app.living.received"
 
+# 读书收件箱：名字、处理函数。
+_READING_INBOX = ["reading", "app.living.reading.read_a_round"]
+_READING_HANDLER = "app.living.reading"
+
+# 她的一轮。读书收件箱的处理函数所在的模块连同它 import 的一切，不许碰到它。
+_HER_ROUND = "app.living.moment"
+
 # 能跑模型的代码住在这几处。收件处理所在的模块连同它 import 的一切，一个都不许碰到。
-_MODEL_RUNNING = ("app.agent", "app.capabilities", "app.living.moment")
+_MODEL_RUNNING = ("app.agent", "app.capabilities", _HER_ROUND)
 
 
-def test_the_only_inboxes_living_opens_are_the_residents():
-    """life 开设的收件箱只有三姐妹那一组，由 :func:`app.living.received.open_inboxes` 开。
+def test_the_only_inboxes_living_opens_are_the_residents_and_reading():
+    """life 开设的收件箱只有两类：三姐妹那一组，由 :func:`app.living.received.open_inboxes` 在开始
+    接收时开；读书收件箱，setup 时直接开，处理函数是 :func:`app.living.reading.read_a_round`。
 
-    名字在人设表里，setup 时只声明"开始接收时再开"；所以宿主起完 setup 之后，直接开设的
-    收件箱一个都不许落在 ``app.living`` 里，"启动时再开"的声明只许是那一个。多出任何一个，
+    三姐妹的名字在人设表里，setup 时只声明"开始接收时再开"；所以宿主起完 setup 之后，直接开设的
+    收件箱落在 ``app.living`` 里的只许是读书那一个，"启动时再开"的声明只许是那一个。多出任何一个，
     都是又一条能把东西送进 life 的路，要重新判断。
     """
     registered = _registered(LANE)
 
-    assert [n for n, handler in registered["inboxes"] if _lives_in_living(handler)] == [], (
-        registered["inboxes"]
-    )
+    assert [
+        [n, handler] for n, handler in registered["inboxes"] if _lives_in_living(handler)
+    ] == [_READING_INBOX], registered["inboxes"]
     assert registered["at_start"] == [_OPEN_HER_INBOXES]
 
 
-def test_the_inbox_handler_cannot_reach_a_model():
-    """收件处理所在的模块，连同它 import 的一切，一行能跑模型的代码都没有。
+def _app_modules_loaded_by_importing(module: str) -> list[str]:
+    """在一个干净进程里只 import ``module``，交回那之后 ``sys.modules`` 里的 ``app.*``。
 
-    "只存储"在这里是结构：处理函数手边根本没有能叫醒她、能调模型的东西。哪天有人在收件
-    处理里 import 一轮 moment 或者一个 agent，这条就红。
+    不走 ``in_a_fresh_process``：它先起整个 agent-service，那时什么模块都早就在了。
     """
-    # 不走 ``in_a_fresh_process``：它先起整个 agent-service，那时模型代码早就在了。
     env = dict(os.environ)
     env["LANE"] = LANE
     proc = subprocess.run(
         [
             sys.executable,
             "-c",
-            f"import sys; import {_HER_INBOX_HANDLER};"
+            f"import sys; import {module};"
             "print(repr(sorted(m for m in sys.modules if m.startswith('app.'))))",
         ],
         capture_output=True,
@@ -275,7 +282,17 @@ def test_the_inbox_handler_cannot_reach_a_model():
     )
     assert proc.returncode == 0, proc.stderr
     loaded = ast.literal_eval(proc.stdout.strip().splitlines()[-1])
-    assert _HER_INBOX_HANDLER in loaded, "用例前提没成立：处理函数的模块根本没被 import"
+    assert module in loaded, f"用例前提没成立：{module} 根本没被 import"
+    return loaded
+
+
+def test_the_inbox_handler_cannot_reach_a_model():
+    """收件处理所在的模块，连同它 import 的一切，一行能跑模型的代码都没有。
+
+    "只存储"在这里是结构：处理函数手边根本没有能叫醒她、能调模型的东西。哪天有人在收件
+    处理里 import 一轮 moment 或者一个 agent，这条就红。
+    """
+    loaded = _app_modules_loaded_by_importing(_HER_INBOX_HANDLER)
     reached = [
         m
         for m in loaded
@@ -284,6 +301,20 @@ def test_the_inbox_handler_cannot_reach_a_model():
     assert reached == [], (
         f"收件处理（{_HER_INBOX_HANDLER}）能碰到跑模型的代码了：{reached}。"
         "收件只存储，她自己醒来时再读。"
+    )
+
+
+def test_the_reading_inbox_handler_cannot_run_her_round():
+    """读书收件箱的处理函数所在的模块，连同它 import 的一切，碰不到她的一轮。
+
+    运维入口能以任何身份往读书收件箱里投（跟往三姐妹的收件箱里投是同一个信任级别），投进来的
+    东西能让读书 agent 读一程，不能让她跑一轮：处理函数手边没有 :mod:`app.living.moment`。
+    """
+    loaded = _app_modules_loaded_by_importing(_READING_HANDLER)
+    reached = [m for m in loaded if m == _HER_ROUND or m.startswith(_HER_ROUND + ".")]
+    assert reached == [], (
+        f"读书收件箱的处理函数（{_READING_HANDLER}）碰得到她的一轮了：{reached}。"
+        "往读书收件箱里投一条，只该让读书 agent 读一程。"
     )
 
 

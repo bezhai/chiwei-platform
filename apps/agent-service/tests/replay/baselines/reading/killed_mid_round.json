@@ -10,16 +10,17 @@
       "model_calls": [],
       "effects": [],
       "consumers_started": [
-        "durable_file_picked_up_read_a_round_coe-replay",
         "inbox_:bgtr75i_coe-replay",
         "inbox_:ntst98f_coe-replay",
         "inbox_:r9qr6a_coe-replay",
         "inbox_operator_coe-replay",
+        "inbox_reading_coe-replay",
         "messaging_scheduled_coe-replay",
         "questions_:bgtr75i_coe-replay",
         "questions_:ntst98f_coe-replay",
         "questions_:r9qr6a_coe-replay",
-        "questions_operator_coe-replay"
+        "questions_operator_coe-replay",
+        "questions_reading_coe-replay"
       ],
       "rows": {},
       "files": {}
@@ -300,23 +301,36 @@
           ]
         },
         {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
           "publish": [
-            "durable_file_picked_up_read_a_round_coe-replay"
+            "inbox_reading_coe-replay"
           ],
-          "rk": "durable.file_picked_up.read_a_round.coe-replay",
+          "rk": "inbox.reading.coe-replay",
           "headers": {
-            "data_type": "FilePickedUp",
             "trace_id": "",
             "lane": "coe-replay"
           },
           "body": {
-            "lane": "coe-replay",
-            "round_id": "0e7c8f023d2457d2b15762556032c09a",
-            "persona_id": "akao",
-            "attachment_id": "b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi",
-            "title": "小王子.txt",
-            "tos_file": "files/file_v3_xiaowangzi"
-          }
+            "message_id": "0e7c8f023d2457d2b15762556032c09a",
+            "sender": "赤尾",
+            "recipient": "reading",
+            "time": "2026-07-25T06:00:00+00:00",
+            "kind": "message",
+            "wakes_recipient": true,
+            "body": "{\"lane\":\"coe-replay\",\"round_id\":\"0e7c8f023d2457d2b15762556032c09a\",\"persona_id\":\"akao\",\"attachment_id\":\"b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi\",\"title\":\"小王子.txt\",\"tos_file\":\"files/file_v3_xiaowangzi\"}"
+          },
+          "confirmed": true
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
         },
         {
           "db": "commit",
@@ -475,6 +489,52 @@
               "total_tokens": 2200
             }
           ]
+        },
+        "message_record": {
+          "added": [
+            {
+              "body": {
+                "attachment_id": "b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi",
+                "lane": "coe-replay",
+                "persona_id": "akao",
+                "round_id": "0e7c8f023d2457d2b15762556032c09a",
+                "title": "小王子.txt",
+                "tos_file": "files/file_v3_xiaowangzi"
+              },
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "0e7c8f023d2457d2b15762556032c09a",
+              "message_time": "2026-07-25T14:00:00+08:00",
+              "outcome": "delivered",
+              "reason": null,
+              "recipient": "reading",
+              "recorded_at": "<db-clock>",
+              "sender": "赤尾"
+            },
+            {
+              "body": {
+                "attachment_id": "b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi",
+                "lane": "coe-replay",
+                "persona_id": "akao",
+                "round_id": "0e7c8f023d2457d2b15762556032c09a",
+                "title": "小王子.txt",
+                "tos_file": "files/file_v3_xiaowangzi"
+              },
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "0e7c8f023d2457d2b15762556032c09a",
+              "message_time": "2026-07-25T14:00:00+08:00",
+              "outcome": "sending",
+              "reason": null,
+              "recipient": "reading",
+              "recorded_at": "<db-clock>",
+              "sender": "赤尾"
+            }
+          ]
         }
       },
       "files": {}
@@ -488,19 +548,13 @@
       "model_calls": [],
       "effects": [
         {
-          "deliver": "durable_file_picked_up_read_a_round_coe-replay",
-          "message_id": null
+          "deliver": "inbox_reading_coe-replay",
+          "message_id": "0e7c8f023d2457d2b15762556032c09a"
         },
         {
           "db": "commit",
           "writes": [
             "INSERT runtime_inflight"
-          ]
-        },
-        {
-          "db": "commit",
-          "writes": [
-            "INSERT data_file_picked_up"
           ]
         },
         {
@@ -514,34 +568,20 @@
       ],
       "consumers_started": [],
       "rows": {
-        "data_file_picked_up": {
-          "added": [
-            {
-              "attachment_id": "b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi",
-              "created_at": "<db-clock>",
-              "dedup_hash": "<dedup>",
-              "lane": "coe-replay",
-              "persona_id": "akao",
-              "round_id": "0e7c8f023d2457d2b15762556032c09a",
-              "title": "小王子.txt",
-              "tos_file": "files/file_v3_xiaowangzi"
-            }
-          ]
-        },
         "runtime_inflight": {
           "added": [
             {
               "attempts": 1,
               "created_at": "<db-clock>",
-              "data_table": "data_file_picked_up",
-              "edge_id": "FilePickedUp::read_a_round",
-              "idempotent_key": "fc212d272b9a368817829ada5d94782dcec68523cc7c7274c2f1262713554491",
+              "data_table": "inbox_reading",
+              "edge_id": "inbox:reading@coe-replay",
+              "idempotent_key": "0e7c8f023d2457d2b15762556032c09a",
               "last_error": null,
-              "locked_until": "2026-07-25T14:07:00+08:00",
+              "locked_until": "2026-07-25T14:08:00+08:00",
               "state": "processing",
               "trace_id": null,
               "updated_at": "<db-clock>",
-              "worker_id": "agent-service#1"
+              "worker_id": "agent-service#1#<uuid:1>[:12]"
             }
           ]
         }
@@ -557,16 +597,17 @@
       "model_calls": [],
       "effects": [],
       "consumers_started": [
-        "durable_file_picked_up_read_a_round_coe-replay",
         "inbox_:bgtr75i_coe-replay",
         "inbox_:ntst98f_coe-replay",
         "inbox_:r9qr6a_coe-replay",
         "inbox_operator_coe-replay",
+        "inbox_reading_coe-replay",
         "messaging_scheduled_coe-replay",
         "questions_:bgtr75i_coe-replay",
         "questions_:ntst98f_coe-replay",
         "questions_:r9qr6a_coe-replay",
-        "questions_operator_coe-replay"
+        "questions_operator_coe-replay",
+        "questions_reading_coe-replay"
       ],
       "rows": {},
       "files": {}
@@ -580,17 +621,288 @@
       "model_calls": [],
       "effects": [
         {
-          "deliver": "durable_file_picked_up_read_a_round_coe-replay",
-          "message_id": null
+          "deliver": "inbox_reading_coe-replay",
+          "message_id": "0e7c8f023d2457d2b15762556032c09a"
+        },
+        {
+          "publish": [
+            "inbox_reading_coe-replay"
+          ],
+          "rk": "inbox.reading.coe-replay",
+          "delay_ms": 1000,
+          "headers": {
+            "trace_id": "",
+            "lane": "coe-replay",
+            "x-held-checks": 1
+          },
+          "body": {
+            "message_id": "0e7c8f023d2457d2b15762556032c09a",
+            "sender": "赤尾",
+            "recipient": "reading",
+            "time": "2026-07-25T06:00:00+00:00",
+            "kind": "message",
+            "wakes_recipient": true,
+            "body": "{\"lane\":\"coe-replay\",\"round_id\":\"0e7c8f023d2457d2b15762556032c09a\",\"persona_id\":\"akao\",\"attachment_id\":\"b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi\",\"title\":\"小王子.txt\",\"tos_file\":\"files/file_v3_xiaowangzi\"}"
+          },
+          "confirmed": true
         },
         {
           "settled": "ack",
-          "queue": "durable_file_picked_up_read_a_round_coe-replay",
-          "message_id": null
+          "queue": "inbox_reading_coe-replay",
+          "message_id": "0e7c8f023d2457d2b15762556032c09a"
         }
       ],
       "consumers_started": [],
       "rows": {},
+      "files": {}
+    },
+    {
+      "step": "the copy put back to look again is delivered after the dead process's claim ran out",
+      "at": "2026-07-25T14:09:00+08:00",
+      "outcome": {
+        "returned": "ack"
+      },
+      "model_calls": [
+        {
+          "agent": "book_reading_impression",
+          "number": 1,
+          "call": "complete",
+          "model": "deepseek-v4-flash",
+          "prompt": {
+            "name": "book_reading_impression",
+            "version": 1,
+            "variables": {
+              "currDate": "2026-07-25",
+              "currTime": "14:09:00",
+              "persona_name": "赤尾",
+              "persona_lite": "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。"
+            }
+          },
+          "options": {
+            "session_id": "coe-replay:akao:2026-07-25"
+          },
+          "tools": [
+            "read"
+          ],
+          "messages": [
+            {
+              "role": "system",
+              "content": [
+                "你是 赤尾。她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。",
+                "",
+                "你在读一本书。你对一本书的记忆，是单条、不断被你重写的第一人称印象——不是剧情梗概、不是人物表，而是这本书在你心里激起了什么、你怎么看里头的人和事、哪些瞬间留在你心上。读得多了，早先读的会变糊、近读的会清楚，你会记岔、会忘，这都正常，本就如此。",
+                "",
+                "每读一程，你把\"此前的印象\"和\"这一程新读到的\"揉成一篇新的，整篇重写、取代旧的那篇。写你真实的反应和感受，第一人称、你自己的话。只写你真读到过的，绝不编造你没读到的情节、人物或结局。不写剧情复述，写你的 reactions。",
+                "",
+                "直接输出印象正文，不要标题、不要分点、不要解释、不要报页数、不要任何机器标记。"
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                "你在读一本书。下面给你两样东西：你此前读这本书读到现在的印象（可能还没有，那就是你刚翻开它），和你现在该从第几页接着往下读。用 read(page_num) 这只手一页一页往后读——从给你的那一页开始，读你想读的一程，读到你这一程想停下的地方就停（读不读得完、读多少，你自己定；读到没有下一页了就是读到结尾了）。",
+                "",
+                "读完这一程，把你**此前的印象**和**这一程新读到的**揉成一篇新的印象，整篇重写、取代旧的那篇。写的是这本书在你心里激起了什么、你怎么看里头的人和事、哪一段留在你心上——是你的反应和感受，不是剧情梗概、不是复述情节。读得多了，早先的会变糊、近的会清楚，记岔了、忘了些也没关系，本就如此。只写你**真读到过**的，绝不编你没读到的情节。",
+                "",
+                "直接输出重写后的印象正文——第一人称、你自己的话，不要标题、不要列表、不要解释说明、不要报你读到第几页（页数不归你管）、不要任何机器标记。",
+                "",
+                "【你在读的书】《小王子.txt》",
+                "",
+                "【你此前读这本书的印象】",
+                "（你还没读过这本书——这是你第一次翻开它。）",
+                "",
+                "【从第几页接着读】第 0 页（用 read(0) 开始往后读）"
+              ]
+            }
+          ],
+          "reply": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "book_reading_impression:1:1",
+                "name": "read",
+                "arguments": {
+                  "page_num": 0
+                }
+              }
+            ],
+            "turn_parts": [
+              {
+                "kind": "tool_call",
+                "call_id": "book_reading_impression:1:1"
+              }
+            ]
+          }
+        },
+        {
+          "agent": "book_reading_impression",
+          "number": 2,
+          "call": "complete",
+          "model": "deepseek-v4-flash",
+          "prompt": {
+            "name": "book_reading_impression",
+            "version": 1,
+            "variables": {
+              "currDate": "2026-07-25",
+              "currTime": "14:09:00",
+              "persona_name": "赤尾",
+              "persona_lite": "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。"
+            }
+          },
+          "options": {
+            "session_id": "coe-replay:akao:2026-07-25"
+          },
+          "tools": [
+            "read"
+          ],
+          "continues": "book_reading_impression #1",
+          "then": [
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "book_reading_impression:1:1",
+                  "name": "read",
+                  "arguments": {
+                    "page_num": 0
+                  }
+                }
+              ],
+              "turn_parts": [
+                {
+                  "kind": "tool_call",
+                  "call_id": "book_reading_impression:1:1"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。我六岁那年，在一本描写原始森林的书里看到一幅精彩的插画。",
+              "tool_call_id": "book_reading_impression:1:1"
+            }
+          ],
+          "reply": {
+            "role": "assistant",
+            "content": "开头那幅蟒蛇吞大象的画，大人们都说是帽子。",
+            "turn_parts": [
+              {
+                "kind": "text",
+                "text": "开头那幅蟒蛇吞大象的画，大人们都说是帽子。"
+              }
+            ]
+          }
+        }
+      ],
+      "effects": [
+        {
+          "deliver": "inbox_reading_coe-replay",
+          "message_id": "0e7c8f023d2457d2b15762556032c09a"
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "UPDATE runtime_inflight"
+          ]
+        },
+        {
+          "http": "POST tool-service/api/image-pipeline/get-url",
+          "lane": "coe-replay",
+          "request": {
+            "file_name": "files/file_v3_xiaowangzi"
+          },
+          "status": 200
+        },
+        {
+          "http": "GET object-store/files/file_v3_xiaowangzi",
+          "status": 200,
+          "served": "text/plain, 5444 bytes, sha256:c568ae7bf6ec"
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT data_thinking_tokens_spent"
+          ]
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT data_file_read"
+          ]
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "UPDATE runtime_inflight"
+          ]
+        },
+        {
+          "settled": "ack",
+          "queue": "inbox_reading_coe-replay",
+          "message_id": "0e7c8f023d2457d2b15762556032c09a"
+        }
+      ],
+      "consumers_started": [],
+      "rows": {
+        "data_file_read": {
+          "added": [
+            {
+              "attachment_id": "b607396e-b912-51c0-a52d-b26b371b3f1d:file_v3_xiaowangzi",
+              "created_at": "<db-clock>",
+              "dedup_hash": "<dedup>",
+              "finished": false,
+              "impression": "开头那幅蟒蛇吞大象的画，大人们都说是帽子。",
+              "lane": "coe-replay",
+              "pages_read": 1,
+              "persona_id": "akao",
+              "read_at": "2026-07-25T14:09:00+08:00",
+              "round_id": "0e7c8f023d2457d2b15762556032c09a",
+              "title": "小王子.txt",
+              "ver": 1
+            }
+          ]
+        },
+        "data_thinking_tokens_spent": {
+          "added": [
+            {
+              "actor": "akao:reading",
+              "cached_tokens": 800,
+              "created_at": "<db-clock>",
+              "dedup_hash": "<dedup>",
+              "input_tokens": 2000,
+              "lane": "coe-replay",
+              "model_calls": 2,
+              "observed_at": "2026-07-25T14:09:00+08:00",
+              "output_tokens": 200,
+              "round_id": "0e7c8f023d2457d2b15762556032c09a",
+              "total_tokens": 2200
+            }
+          ]
+        },
+        "runtime_inflight": {
+          "changed": [
+            {
+              "key": {
+                "edge_id": "inbox:reading@coe-replay",
+                "idempotent_key": "0e7c8f023d2457d2b15762556032c09a"
+              },
+              "before": {
+                "attempts": 1,
+                "locked_until": "2026-07-25T14:08:00+08:00",
+                "state": "processing",
+                "worker_id": "agent-service#1#<uuid:1>[:12]"
+              },
+              "after": {
+                "attempts": 2,
+                "locked_until": null,
+                "state": "succeeded",
+                "worker_id": null
+              }
+            }
+          ]
+        }
+      },
       "files": {}
     }
   ],
@@ -1071,6 +1383,32 @@
         },
         "required": [
           "place"
+        ]
+      }
+    },
+    "read": {
+      "description": [
+        "从你正在读的那一页往后读一页：给页号，返回这一页的正文。",
+        "",
+        "从外壳告诉你的那一页开始，**一页一页连续往后读**（page_num 严格 +1 递增、不跳页、",
+        "不往回翻）。返回这一页的正文你就接着读；返回「没有下一页了」就是读到这本书的结尾",
+        "了，别再往后读、该停下来揉你的印象了。",
+        "",
+        "Args:",
+        "    page_num: 要读的页号（= 你该读的下一页：从起始页起一页页 +1）。",
+        "",
+        "Returns:",
+        "    这一页的正文；到结尾时一句「没有下一页了」；翻乱了时一句提示你该读的下一页。"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "page_num": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "page_num"
         ]
       }
     },

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.living import participants as participants_mod
-from app.living.participants import WORLD, load_residents, residents
+from app.living.participants import READING, WORLD, load_residents, residents
 from app.living.persona import LIVING_PERSONAS
 from app.messaging.operator import OPERATOR
 
@@ -96,7 +96,7 @@ async def test_two_residents_with_the_same_name_refuse_to_start(persona_table):
     assert "ayana" in str(refused.value) and "chinagi" in str(refused.value)
 
 
-@pytest.mark.parametrize("taken", [WORLD, OPERATOR])
+@pytest.mark.parametrize("taken", [WORLD, OPERATOR, READING])
 async def test_a_name_another_participant_already_has_refuses_to_start(persona_table, taken):
     persona_table["ayana"] = taken
 

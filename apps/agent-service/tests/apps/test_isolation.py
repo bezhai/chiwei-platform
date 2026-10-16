@@ -69,8 +69,8 @@ def test_the_agent_service_app_loads_its_own_plugins():
     assert "app.living.moment" in loaded["living"]
     assert "LifeMomentTick" in loaded["clocks"]
     # 三姐妹的收件箱名字在人设表里，setup 时只声明"开始接收时再开"，所以起完 setup 只看得到
-    # ``operator``；开出来的是哪几个名字由 ``tests/living/test_received.py`` 验。
-    assert loaded["inboxes"] == ["operator"]
+    # ``operator`` 和读书收件箱；开出来的是哪几个名字由 ``tests/living/test_received.py`` 验。
+    assert loaded["inboxes"] == ["operator", "reading"]
     assert loaded["inboxes_at_start"] == ["app.living.received.open_inboxes"]
 
 

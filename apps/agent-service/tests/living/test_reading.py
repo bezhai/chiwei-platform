@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import text
 
 from app.data.tx import current_session, tx
+from app.living.participants import READING
 from app.living.reading import (
     FILE_LIST_LIMIT,
     READING_TOOLS,
@@ -31,7 +32,9 @@ from app.living.reading import (
     read_a_round,
     read_so_far,
 )
+from app.messaging.message import Kind, Message, new_message
 from tests.hosting import in_a_fresh_process
+from tests.living.conftest import RESIDENT_NAMES, Post
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -202,17 +205,18 @@ async def reading_db(living_db, pinned):
 
 
 @pytest.fixture
-def picked_up(monkeypatch):
-    """接住她拿起文件时吐出去的 durable 触发，不真的进队列。"""
+def picked_up(monkeypatch) -> Post:
+    """她拿起文件时发给读书收件箱的消息，记在替身里，不碰 broker。"""
     from app.living import reading as reading_mod
 
-    out: list[FilePickedUp] = []
+    stand_in = Post()
+    monkeypatch.setattr(reading_mod, "send", stand_in.send)
+    return stand_in
 
-    async def fake_emit(data):
-        out.append(data)
 
-    monkeypatch.setattr(reading_mod, "emit", fake_emit)
-    return out
+def _rounds(post: Post) -> list[FilePickedUp]:
+    """替身记下的每一条消息解开来的那一程。"""
+    return [FilePickedUp.model_validate_json(sent.body) for sent in post.sent]
 
 
 @pytest.fixture
@@ -245,14 +249,29 @@ def one_round(monkeypatch):
     return fake
 
 
-def _trigger(*, attachment_id: str, round_id: str = "r-1", title: str = "斜阳.txt"):
-    return FilePickedUp(
+def _trigger(
+    *,
+    attachment_id: str,
+    round_id: str = "r-1",
+    title: str = "斜阳.txt",
+    message_id: str | None = None,
+    kind: Kind = Kind.MESSAGE,
+) -> Message:
+    """读书收件箱收到的一条：她拿起文件时发出的那条消息，消息 id 就是这一程的 ``round_id``。"""
+    picked = FilePickedUp(
         lane=LANE,
         round_id=round_id,
         persona_id="akao",
         attachment_id=attachment_id,
         title=title,
         tos_file="files/key-dm-shayang",
+    )
+    return new_message(
+        sender=RESIDENT_NAMES["akao"],
+        recipient=READING,
+        body=picked.model_dump_json(),
+        kind=kind,
+        message_id=message_id or round_id,
     )
 
 
@@ -362,7 +381,7 @@ async def test_a_file_she_never_opened_and_was_taken_back_is_gone_for_her(
     assert "拿不到" in outcome["message"], (
         f"该如实说这份东西已经不在了，而不是说没有对得上的。拿到：{outcome['message']}"
     )
-    assert picked_up == []
+    assert picked_up.sent == []
 
 
 @pytest.mark.integration
@@ -403,7 +422,7 @@ async def test_a_file_taken_back_keeps_what_she_read_but_offers_no_handle(
     assert "拿不到" in outcome["message"], (
         f"该如实说这份东西已经不在了。拿到：{outcome['message']}"
     )
-    assert picked_up == []
+    assert picked_up.sent == []
 
 
 @pytest.mark.integration
@@ -418,7 +437,7 @@ async def test_she_can_only_pick_up_files_from_conversations_that_are_hers(
     assert "不该看见" not in listed
     assert "斜阳.txt" in listed
     assert isinstance(outcome, dict), "她拿起了一个不在她手机上的文件"
-    assert picked_up == []
+    assert picked_up.sent == []
 
 
 @pytest.mark.integration
@@ -443,8 +462,13 @@ async def test_picking_up_a_file_by_name_starts_exactly_one_round(
         said = await read_a_bit.invoke({"which": "人间失格"})
 
     assert isinstance(said, str), said
-    assert len(picked_up) == 1
-    only = picked_up[0]
+    assert len(picked_up.sent) == 1
+    sent = picked_up.sent[0]
+    assert (sent.sender, sent.recipient) == (RESIDENT_NAMES["akao"], READING), (
+        "这一程该由她（用她在世界里的名字）发给读书收件箱"
+    )
+    (only,) = _rounds(picked_up)
+    assert sent.message_id == only.round_id, "消息 id 就是这一程的身份，按它去重"
     assert only.lane == LANE and only.persona_id == "akao"
     assert only.title == "人间失格.epub"
     assert only.attachment_id == _attachment(
@@ -463,7 +487,7 @@ async def test_a_name_that_matches_nothing_is_said_so_and_starts_nothing(
 
     assert isinstance(outcome, dict)
     assert "百年孤独" in outcome["message"]
-    assert picked_up == []
+    assert picked_up.sent == []
 
 
 @pytest.mark.integration
@@ -482,7 +506,7 @@ async def test_two_files_with_the_same_name_are_handed_back_for_her_to_pick(
         outcome = await read_a_bit.invoke({"which": "斜阳"})
 
     assert isinstance(outcome, dict), "同名两份，她被替着选了一个"
-    assert picked_up == []
+    assert picked_up.sent == []
     message = outcome["message"]
     assert dm_one in message and group_one in message
     # 光有两串 id 分不出哪个是哪个 —— 来路（谁发的）必须在回问里。
@@ -492,7 +516,7 @@ async def test_two_files_with_the_same_name_are_handed_back_for_her_to_pick(
         said = await read_a_bit.invoke({"which": group_one})
 
     assert isinstance(said, str), said
-    assert [p.attachment_id for p in picked_up] == [group_one]
+    assert [p.attachment_id for p in _rounds(picked_up)] == [group_one]
 
 
 @pytest.mark.integration
@@ -521,7 +545,7 @@ async def test_she_can_point_back_with_the_handle_exactly_as_it_was_shown(
         said = await read_a_bit.invoke({"which": handles[1]})
 
     assert isinstance(said, str), said
-    assert [p.attachment_id for p in picked_up] == [
+    assert [p.attachment_id for p in _rounds(picked_up)] == [
         handles[1].removeprefix("file=")
     ]
 
@@ -544,10 +568,49 @@ async def test_picking_up_the_same_file_twice_in_one_moment_is_one_round(
     async with in_a_moment("akao", moment_id="2026-07-25T21:40+08:00"):
         await read_a_bit.invoke({"which": dm_one})
 
-    ids = [p.round_id for p in picked_up]
+    ids = [sent.message_id for sent in picked_up.sent]
+    assert ids == [p.round_id for p in _rounds(picked_up)]
     assert len(ids) == 3
     assert ids[0] == ids[1], "同一轮里拿起两次派生了两程 —— 一程会被白读两遍"
     assert ids[2] != ids[0], "下一轮拿不起同一个文件了 —— 她再也读不下去"
+
+
+@pytest.mark.integration
+async def test_a_round_the_reading_inbox_did_not_get_is_said_so_and_can_be_picked_up_again(
+    reading_db, in_a_moment, picked_up
+):
+    """读书收件箱没开（这条泳道上没人在读）：她被告知没拿起来；再拿一次还是同一程、同一个消息 id。"""
+    dm_one = _attachment(_M_DM_SHAYANG, "key-dm-shayang")
+    picked_up.no_inbox.add(READING)
+
+    async with in_a_moment("akao"):
+        outcome = await read_a_bit.invoke({"which": dm_one})
+    picked_up.no_inbox.clear()
+    async with in_a_moment("akao"):
+        said = await read_a_bit.invoke({"which": dm_one})
+
+    assert isinstance(outcome, dict), f"没送到却告诉她拿起来了：{outcome}"
+    assert "没开始读" in outcome["message"], outcome["message"]
+    assert isinstance(said, str), said
+    first, second = picked_up.sent
+    assert first.message_id == second.message_id
+
+
+@pytest.mark.integration
+async def test_a_round_whose_send_is_not_confirmed_is_said_so(
+    reading_db, in_a_moment, picked_up
+):
+    """发给读书收件箱没确认：可能到了也可能没到，她被告知没拿起来，再拿一次用同一个 id，到了的
+    那一份按 id 去重。"""
+    dm_one = _attachment(_M_DM_SHAYANG, "key-dm-shayang")
+    picked_up.failing.add(READING)
+
+    async with in_a_moment("akao"):
+        outcome = await read_a_bit.invoke({"which": dm_one})
+
+    assert isinstance(outcome, dict), f"没确认却告诉她拿起来了：{outcome}"
+    assert "没开始读" in outcome["message"], outcome["message"]
+    assert [p.attachment_id for p in _rounds(picked_up)] == [dm_one]
 
 
 # --------------------------------------------------------------------------
@@ -678,7 +741,7 @@ async def test_bytes_that_never_arrive_do_not_write_half_an_impression(
 async def test_the_same_round_delivered_twice_does_not_read_twice(
     reading_db, one_round
 ):
-    """durable 重投 / 租约过期被接手：昂贵的那一程不能重跑，页号更不能双推进。"""
+    """消息重投、占位过期被接手：昂贵的那一程不能重跑，页号更不能双推进。"""
     one_round.gives(impression="读了一程。", pages_read=7)
 
     await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"))
@@ -727,6 +790,42 @@ async def test_a_stale_round_never_overwrites_a_newer_impression(
     assert (mark.pages_read, mark.ver) == (30, 1)
 
 
+@pytest.mark.integration
+async def test_a_round_whose_id_is_not_the_message_id_is_refused(reading_db, one_round):
+    """正文里那一程的身份跟消息 id 对不上：这不是她拿起文件时发出的那条，不读，抛出去（进死信）。
+
+    消息 id 就是 ``round_id``，收件箱按它去重；两者不一致的话，按消息 id 挡下的重复副本和按
+    ``round_id`` 查的"这一程提交过没有"说的不是同一程。
+    """
+    one_round.gives(impression="不该写下的。", pages_read=7)
+
+    with pytest.raises(ValueError, match="r-2"):
+        await read_a_round(
+            _trigger(attachment_id="msg-1:key-a", round_id="r-1", message_id="r-2")
+        )
+
+    assert one_round.calls == []
+    assert (
+        await read_so_far(lane=LANE, persona_id="akao", attachment_id="msg-1:key-a")
+        is None
+    )
+
+
+@pytest.mark.integration
+async def test_a_notice_that_is_not_a_message_is_set_aside(reading_db, one_round, caplog):
+    """读书收件箱只收她拿起文件时发的普通消息。别的类型（比如定时消息被退回的告知）记一条
+    warning，不读，正常返回（消息确认，不进死信）。"""
+    one_round.gives(impression="不该写下的。", pages_read=7)
+
+    with caplog.at_level("WARNING", logger="app.living.reading"):
+        await read_a_round(
+            _trigger(attachment_id="msg-1:key-a", kind=Kind.NOT_DELIVERED)
+        )
+
+    assert one_round.calls == []
+    assert any("not_delivered" in r.getMessage() for r in caplog.records), caplog.text
+
+
 # --------------------------------------------------------------------------
 # 六 · 她问得到自己读到哪、记得什么
 # --------------------------------------------------------------------------
@@ -764,7 +863,7 @@ async def test_nothing_to_read_is_said_plainly(living_db, in_a_moment):
 
 @pytest.mark.integration
 async def test_the_list_caps_the_unopened_pile_but_never_her_own_memory(
-    reading_db, in_a_moment, one_round
+    reading_db, in_a_moment, one_round, picked_up
 ):
     """条数上限只管她还没翻开过的那摞。
 
@@ -827,40 +926,38 @@ def test_no_reading_tool_ever_asks_her_how_long_something_takes():
             )
 
 
-def test_the_reading_round_is_a_durable_edge_and_not_an_inbound_one():
-    """读一程那条 durable 边**不是给外面开的口**：没有哪条路由收 ``FilePickedUp``。
+def test_the_reading_inbox_is_opened_on_every_lane_and_no_route_takes_a_round():
+    """读一程从 living 开设的 ``reading`` 收件箱里来：处理函数是 :func:`read_a_round`，最多处理
+    1 次（失败一次就进死信，读一程要花钱），处理时限 5 分钟。没有哪条路由收 ``FilePickedUp``。
 
-    这条边上跑的东西只有她自己刚刚在某一轮里拿起的那个文件，投递方和消费方都是这一个进程
-    （``tests/living/test_no_inbound.py`` 那条"外面的东西到不了 living"照旧成立）。
-
-    同时钉住这条边在每条泳道上都登记着：登记跟泳道名无关（那道按泳道名分流的门随旧实现
-    一起删掉了）。
+    收件箱在每条泳道上都开设：登记跟泳道名无关。别人能不能往这个收件箱里投、投进来能做到
+    什么，见 ``tests/living/test_no_inbound.py``。
     """
     probe = (
-        "print(sorted((r.detail['data_type'].__name__, r.detail['consumer'].__name__)"
-        " for r in host.registered() if r.kind == 'durable'));"
-        "print(sorted(r.detail['request'].__name__"
-        " for r in host.registered() if r.kind == 'route'))"
+        "import json;"
+        "rs = host.registered();"
+        "print(json.dumps(sorted([r.name,"
+        " r.detail['on_message'].__module__ + '.' + r.detail['on_message'].__qualname__,"
+        " str(r.detail['processing_timeout']), r.detail['max_attempts']]"
+        " for r in rs if r.kind == 'inbox')));"
+        "print(sorted(r.detail['request'].__name__ for r in rs if r.kind == 'route'))"
     )
-    on_lane, off_lane = (
-        in_a_fresh_process("agent-service", probe, lane=LANE),
-        in_a_fresh_process("agent-service", probe, lane=None),
-    )
-    durable, requests = on_lane.strip().splitlines()
-    assert durable == "[('FilePickedUp', 'read_a_round')]", durable
-    assert "FilePickedUp" not in requests, (
-        f"有一条路由收 FilePickedUp —— 读一程那条边成了信箱。拿到：{requests}"
-    )
-    assert "('FilePickedUp', 'read_a_round')" in off_lane, (
-        f"读一程在别的泳道上不见了 —— 登记不该看泳道名。拿到：{off_lane}"
-    )
+    reading = [READING, "app.living.reading.read_a_round", "0:05:00", 1]
+    for lane in (LANE, None):
+        inboxes, requests = in_a_fresh_process("agent-service", probe, lane=lane).strip().splitlines()
+        assert reading in json.loads(inboxes), (
+            f"泳道 {lane or 'prod'} 上没有按这些选项开设的读书收件箱。拿到：{inboxes}"
+        )
+        assert "FilePickedUp" not in requests, (
+            f"有一条路由收 FilePickedUp —— 读一程成了外面能直接调的入口。拿到：{requests}"
+        )
 
 
 def test_both_hands_are_ones_she_actually_has():
     """这两只手要真在她的工具集里。
 
-    没挂上去是**静默失败**：模块写好了、这个文件里的用例全绿，durable 边也接上了，
-    但她的工具列表里没有它们，于是永远不会调、那条边永远不会被触发。同款用例
+    没挂上去是**静默失败**：模块写好了、这个文件里的用例全绿，读书收件箱也开着，
+    但她的工具列表里没有它们，于是永远不会调、读书收件箱永远收不到东西。同款用例
     见 ``test_phone.py`` 的 ``test_finding_someone_is_one_of_the_hands_she_actually_has``。
     """
     from app.living.moment import MOMENT_TOOLS
@@ -935,4 +1032,4 @@ async def test_she_cannot_pick_up_a_file_from_a_conversation_out_of_sight(
         outcome = await read_a_bit.invoke({"which": "名单外的那本"})
 
     assert isinstance(outcome, dict), "她读起了名单外那条会话里的文件"
-    assert picked_up == []
+    assert picked_up.sent == []

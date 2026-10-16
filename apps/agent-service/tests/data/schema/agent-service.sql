@@ -14,8 +14,6 @@ CREATE TABLE IF NOT EXISTS data_dlq_requeue_request ("request_id" TEXT, "queue" 
 CREATE UNIQUE INDEX IF NOT EXISTS ix_data_dlq_requeue_request_dedup ON data_dlq_requeue_request("dedup_hash");
 CREATE TABLE IF NOT EXISTS data_dlq_requeue_response ("request_id" TEXT, "requeued" BIGINT, "publish_failed" BIGINT, "zombie_acked" BIGINT, "status_code" BIGINT, "dedup_hash" TEXT, "created_at" TIMESTAMPTZ DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS ix_data_dlq_requeue_response_dedup ON data_dlq_requeue_response("dedup_hash");
-CREATE TABLE IF NOT EXISTS data_file_picked_up ("lane" TEXT, "round_id" TEXT, "persona_id" TEXT, "attachment_id" TEXT, "title" TEXT, "tos_file" TEXT, "dedup_hash" TEXT, "created_at" TIMESTAMPTZ DEFAULT now());
-CREATE UNIQUE INDEX IF NOT EXISTS ix_data_file_picked_up_dedup ON data_file_picked_up("dedup_hash");
 CREATE TABLE IF NOT EXISTS data_file_read ("lane" TEXT, "persona_id" TEXT, "attachment_id" TEXT, "ver" BIGINT, "title" TEXT, "impression" TEXT, "pages_read" BIGINT, "finished" BOOLEAN, "read_at" TIMESTAMPTZ, "round_id" TEXT, "dedup_hash" TEXT, "created_at" TIMESTAMPTZ DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS ix_data_file_read_dedup ON data_file_read("dedup_hash");
 CREATE INDEX IF NOT EXISTS ix_data_file_read_key_ver ON data_file_read("lane", "persona_id", "attachment_id", "ver" DESC);

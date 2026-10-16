@@ -1,4 +1,4 @@
-"""Living: the three sisters' life engine — five clocks, the reading edge, the two outbound queues
+"""Living: the three sisters' life engine — five clocks, the reading inbox, the two outbound queues
 and the sisters' inboxes.
 
   every  60 s  LifeMomentTick     -> life_moment_tick     her rounds (the node decides who is due)
@@ -7,11 +7,11 @@ and the sisters' inboxes.
   every 300 s  DayPageTick        -> day_page_tick        yesterday's page (04:00-06:00 window)
   every 300 s  PersonaReviewTick  -> persona_review_tick  Monday's "who I am" (06:00-08:00 window)
 
-  FilePickedUp        -> read_a_round                     durable: one stretch of reading
   ChatResponseSegment -> chat_response_{channel}          what she says
   Recall              -> recall_{channel}                 what she takes back
 
   the inboxes named after the three personas -> received  stored only; she reads them on her clock
+  the reading inbox                          -> read_a_round  one stretch of reading
 
 **Clocks tick denser than the work they drive.** A clock's seconds are fixed when it is
 registered, so the intervals that are business parameters (ten minutes between rounds, the
@@ -23,9 +23,16 @@ required field fails there, and the clock's watchdog stops the process. The node
 tick's work and runs on its own.
 
 **She has no inbound edge.** Messages on her phone she reads from ``common_message`` in her own
-rounds; what world and her sisters tell her arrives in her inbox, which only stores it. The
-durable edge carries only the file she picked up in one of her own rounds
+rounds; what world and her sisters tell her arrives in her inbox, which only stores it
 (``tests/living/test_no_inbound.py``).
+
+**The reading inbox** (:data:`app.living.participants.READING`) gets a message when she picks a
+file up in one of her rounds (:func:`app.living.reading.read_a_bit`); its handler reads that
+stretch. A message is handled at most once (``max_attempts=1``): a stretch costs model calls, so
+an error past the stretch dead-letters the message and a person decides whether to replay it.
+Processing is limited to five minutes, above the reading agent's own timeout; it bounds how long a
+stretch whose process died stays claimed before another process reads it again. What reaches this
+inbox from outside can run the reading agent, not her round (``tests/living/test_no_inbound.py``).
 
 **The inboxes are opened at start**: their names come from the persona table, which cannot be read
 at import (:func:`app.living.received.open_inboxes`, which declares them through the function the
@@ -39,7 +46,7 @@ that chain. The other living Data classes come in with the modules below.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.data.schema import Data
 from app.domain.chat_dataflow import ChatResponseSegment
@@ -50,12 +57,13 @@ from app.living.day_page import DAY_PAGE_TICK_SECONDS, DayPageTick, day_page_tic
 from app.living.landing import LANDING_TICK_SECONDS, LandingTick, landing_tick
 from app.living.moment import LIFE_MOMENT_TICK_SECONDS, LifeMomentTick, life_moment_tick
 from app.living.nudge import PHONE_NUDGE_TICK_SECONDS, PhoneNudgeTick, phone_nudge_tick
+from app.living.participants import READING
 from app.living.persona_review import (
     PERSONA_REVIEW_TICK_SECONDS,
     PersonaReviewTick,
     persona_review_tick,
 )
-from app.living.reading import FilePickedUp, read_a_round
+from app.living.reading import read_a_round
 from app.living.received import open_inboxes
 
 # (tick Data, seconds, node). The clock is named after its tick Data.
@@ -80,7 +88,12 @@ def _ticker(data_type: type[Data], node: Callable[[Data], Awaitable[None]]) -> T
 def setup(ctx: Context) -> None:
     for data_type, seconds, node in CLOCKS:
         ctx.clock(data_type.__name__, seconds, _ticker(data_type, node))
-    ctx.durable(FilePickedUp, read_a_round)
+    ctx.inbox(
+        READING,
+        on_message=read_a_round,
+        processing_timeout=timedelta(minutes=5),
+        max_attempts=1,
+    )
     ctx.outbound(ChatResponseSegment, "chat_response")
     ctx.outbound(Recall, "recall")
     ctx.inboxes_at_start(open_inboxes)

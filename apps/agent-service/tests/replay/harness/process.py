@@ -14,9 +14,9 @@ Stop is the host's stop: messaging, durable consumers, then every registration t
 restart is stop + start with the database, the broker's queues and the volume left as they were,
 which is what a new process finds.
 
-The durable consumer names itself ``hostname:pid`` (``app.runtime.durable.WORKER_ID``) on the
-inflight rows it claims; a replayed process is named ``<app>#<n>`` (the n-th process the scenario
-started) instead, so a claim a dead process left behind reads the same on every machine.
+Messaging names the process ``hostname:pid`` (``app.messaging.receiving.WORKER_ID``) in the
+claims it writes on inflight rows; a replayed process is named ``<app>#<n>`` (the n-th process the
+scenario started) instead, so a claim a dead process left behind reads the same on every machine.
 """
 
 from __future__ import annotations
@@ -83,9 +83,9 @@ class AppProcess:
 
         self._monkeypatch.setenv("APP_NAME", self.app_name)
         if self._worker is not None:
-            import app.runtime.durable as durable
+            import app.messaging.receiving as receiving
 
-            self._monkeypatch.setattr(durable, "WORKER_ID", self._worker)
+            self._monkeypatch.setattr(receiving, "WORKER_ID", self._worker)
         _fresh_process_state(self._monkeypatch)
         host = Host.for_app(self.app_name)
         await host.start(http=None, schema=False, mq=True, clocks=False, tasks=False)
