@@ -33,8 +33,8 @@ class Plugin:
 class Registration:
     """One thing a plugin registered, as :meth:`app.host.Host.registered` shows it.
 
-    ``kind`` is ``clock`` / ``task`` / ``route`` / ``inbox`` / ``inboxes_at_start`` / ``durable``
-    / ``outbound`` / ``service`` / ``on_stop``; ``detail`` is what the registration declared
+    ``kind`` is ``clock`` / ``task`` / ``route`` / ``inbox`` / ``inboxes_at_start`` / ``outbound``
+    / ``service`` / ``on_stop``; ``detail`` is what the registration declared
     (a clock's seconds, a route's flags and handler, an inbox's options, the inboxes an opener
     declared so far). Read-only: tests and governance checks look, nothing acts on it.
     """

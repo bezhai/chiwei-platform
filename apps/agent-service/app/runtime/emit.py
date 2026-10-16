@@ -1,17 +1,15 @@
 """emit(): publish a Data instance into the compiled dataflow graph.
 
 Looks up every wire whose ``data_type`` matches the emitted instance and
-dispatches to its consumers. In-process edges call the consumer directly
-(awaiting completion); ``durable()`` edges hand off to the durable queue
-layer; ``Sink.mq`` targets publish to their outbound queue.
+dispatches to its consumers. Consumers are called directly, in this process
+(awaiting completion); ``Sink.mq`` targets publish to their outbound queue.
 
 The registry holds only this process's wires (the plugin host registers its
-app's edges), so a consumer that is not durable runs here.
+app's edges).
 
-In-process dispatch is strict: if any consumer raises, the remaining
-fan-out (sibling consumers and later-matching wires) is aborted and the
-exception propagates to ``emit``'s caller. Use ``.durable()`` when
-independent isolation between consumers is required.
+Dispatch is strict: if any consumer raises, the remaining fan-out (sibling
+consumers and later-matching wires) is aborted and the exception propagates
+to ``emit``'s caller.
 """
 
 from __future__ import annotations
@@ -42,14 +40,7 @@ async def emit(data: Data) -> None:
         if w.data_type is not cls:
             continue
         for c in w.consumers:
-            if w.durable:
-                # durable: publish to the consumer's queue; this process's
-                # durable consumer picks it up and runs it.
-                from app.runtime.durable import publish_durable
-
-                await publish_durable(w, c, data)
-            else:
-                await c(**_inputs_for(c, data))
+            await c(**_inputs_for(c, data))
         # Phase 2: sink dispatch — out-of-graph publish (RabbitMQ).
         # compile_graph 已校验 Sink.mq(name) ∈ ALL_ROUTES，这里直接调。
         for s in w.sinks:

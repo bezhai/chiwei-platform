@@ -171,7 +171,7 @@ async def test_provides_must_match_what_setup_provided(recorded_phases, setup, d
     with pytest.raises(UndeclaredService, match=f"plugin 'living' {complaint}"):
         await host.start(http=None, schema=True, mq=True, clocks=True, tasks=True)
 
-    io = {"ensure_business_schema", "declare_durable_topology", "migrate_schema", "start_consumers"}
+    io = {"ensure_business_schema", "mq.connect", "migrate_schema", "start_messaging"}
     assert io.isdisjoint(recorded_phases.calls)
 
 

@@ -10,9 +10,8 @@ What is derived from a class is computed here, once, so every consumer agrees:
 
 * :func:`table_name`: ``data_`` plus the class name in snake_case. The module is not part of
   it: moving a class to another module keeps its table, renaming the class does not.
-* :func:`to_snake`: the CamelCase -> snake_case conversion behind table names and durable queue
-  names. One implementation keeps those identifiers aligned: for a Data class ``HTTPRequest``
-  both reference ``http_request`` instead of drifting to ``h_t_t_p_request`` in one place.
+* :func:`to_snake`: the CamelCase -> snake_case conversion behind table names: for a Data class
+  ``HTTPRequest`` the table is ``data_http_request``, not ``data_h_t_t_p_request``.
 * :func:`pg_type` / :func:`is_jsonb_column`: a field's PostgreSQL column type, judged on the
   *declared* annotation, never on a runtime value. The migrator decides each column's DDL type
   from it and persist decides which columns take the JSONB json-encoding path on write, so the

@@ -4,8 +4,7 @@ Walks ``WIRING_REGISTRY`` and verifies that:
   * every consumer referenced by a wire is decorated with ``@node``;
   * every consumer's signature accepts exactly the data type the wire
     routes to it;
-  * durable wires carry a Data with a table, and every ``Sink.mq`` names
-    a known route.
+  * every ``Sink.mq`` names a known route.
 
 Returns a ``CompiledGraph`` summarising the data types, nodes, and wires
 seen. Errors surface as ``GraphError`` at startup so mis-wired graphs
@@ -78,28 +77,6 @@ def compile_graph() -> CompiledGraph:
                     f"inputs {sorted(t.__name__ for t in needed)} "
                     f"({'; '.join(hint)})"
                 )
-
-    # 4b) ``Meta.transient = True`` means "no pg table, in-process only"
-    # (the migrator skips DDL for transient Data, see ``migrator.py``).
-    # ``.durable()`` requires the data type to round-trip through a
-    # RabbitMQ queue *and* the consumer-side ``insert_idempotent`` for
-    # at-least-once dedup — both demand a real pg table. A transient type
-    # has no row and never will, so the only honest answer is to refuse
-    # the combination at boot rather than crash on first message with a
-    # ``relation does not exist``.
-    for w in wires:
-        if not w.durable:
-            continue
-        meta = getattr(w.data_type, "Meta", None)
-        if meta is not None and getattr(meta, "transient", False):
-            raise GraphError(
-                f"wire({w.data_type.__name__}).durable(): {w.data_type.__name__} "
-                f"declares ``Meta.transient = True`` (no pg table), but "
-                f"durable edges require a persisted table for "
-                f"consumer-side ``insert_idempotent`` dedup. Either "
-                f"remove ``transient`` so the runtime owns the table, "
-                f"or drop ``.durable()`` and keep this edge in-process."
-            )
 
     # 5b) Phase 2 sink dispatch validation: every Sink.mq(name) must
     # reference a queue declared in ALL_ROUTES, otherwise sink dispatch

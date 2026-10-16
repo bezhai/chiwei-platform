@@ -1,7 +1,7 @@
 """Unit tests for the shared ``to_snake`` identifier helper.
 
 These cases lock in the algorithm's behavior so migrator-generated table
-names and durable-edge queue names never drift apart again.
+names do not change under existing data.
 """
 
 from __future__ import annotations
@@ -19,15 +19,14 @@ def test_one_word_message():
 
 def test_acronym_prefix():
     # The human-readable convention: ``HTTPRequest`` -> ``http_request``,
-    # NOT ``h_t_t_p_request``. This is why migrator and durable now share
-    # the same algorithm.
+    # NOT ``h_t_t_p_request``.
     assert to_snake("HTTPRequest") == "http_request"
 
 
 def test_trailing_version_suffix():
     # Locks in whatever the regex naturally does with a digit-bearing
     # suffix like ``V2`` — documented here so future changes don't
-    # silently break table/queue names.
+    # silently break table names.
     assert to_snake("MyDataV2") == "my_data_v2"
 
 

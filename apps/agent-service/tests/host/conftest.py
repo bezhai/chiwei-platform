@@ -64,6 +64,12 @@ def recorded_phases(monkeypatch) -> Recorder:
             rec.note("lane_provider")
 
     class _Mq:
+        async def connect(self) -> None:
+            rec.note("mq.connect")
+
+        async def declare_topology(self) -> None:
+            rec.note("mq.declare_topology")
+
         async def close(self) -> None:
             rec.note("mq.close")
 
@@ -90,14 +96,9 @@ def recorded_phases(monkeypatch) -> Recorder:
     monkeypatch.setattr(host_module, "dynamic_config", _DynamicConfig())
     monkeypatch.setattr(host_module, "compile_graph", rec.sync("compile_graph"))
     monkeypatch.setattr(host_module, "ensure_business_schema", rec.coro("ensure_business_schema"))
-    monkeypatch.setattr(
-        host_module, "declare_durable_topology", rec.coro("declare_durable_topology")
-    )
     monkeypatch.setattr(host_module, "migrate_schema", rec.coro("migrate_schema"))
-    monkeypatch.setattr(host_module, "start_consumers", rec.coro("start_consumers"))
     monkeypatch.setattr(host_module, "start_messaging", rec.coro("start_messaging"))
     monkeypatch.setattr(host_module, "stop_messaging", rec.coro("stop_messaging"))
-    monkeypatch.setattr(host_module, "stop_consumers", rec.coro("stop_consumers"))
     monkeypatch.setattr(host_module, "mq", _Mq())
     monkeypatch.setattr(host_module, "Clocks", _Clocks)
     monkeypatch.setattr(host_module, "bind_route", _bind_route)

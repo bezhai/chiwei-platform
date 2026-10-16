@@ -12,7 +12,7 @@
 东西）：
 
   * 实验泳道上没有任何一条路由能到达 ``app.living`` 里的处理函数，路由之外能把东西送进进程的
-    登记（收件箱、durable 边、将来别的种类）都逐种过一遍；
+    登记（收件箱、将来别的种类）都逐种过一遍；
   * life 开设的收件箱只有三姐妹那一组和读书收件箱。三姐妹的处理函数是
     :func:`app.living.received.receive`，它只存一行、不碰模型：跑一遍看得到一行、看不到任何一次
     模型调用；它所在的模块连同它 import 的一切，一行能跑模型的代码都没有；
@@ -83,8 +83,6 @@ print(json.dumps({
         for r in rs if r.kind == 'route'),
     'inboxes': sorted([r.name, _id(r.detail['on_message'])] for r in rs if r.kind == 'inbox'),
     'at_start': sorted(_id(r.detail['open']) for r in rs if r.kind == 'inboxes_at_start'),
-    'durable': sorted([_id(r.detail['data_type']), _id(r.detail['consumer'])]
-                      for r in rs if r.kind == 'durable'),
     'clocks': sorted([r.plugin, r.name] for r in rs if r.kind == 'clock'),
 }))
 """
@@ -92,7 +90,7 @@ print(json.dumps({
 # 宿主能登记的每一种东西，按"能不能把外面的东西送进这个进程"分。能的那几种下面逐种查；钟不能：
 # 每一拍只造一个只装得下 ``ts`` 的 Data（最后两条）。宿主多出一种登记，这里先红，要重新判断它算
 # 哪一边。
-_INBOUND_KINDS = frozenset({"route", "inbox", "inboxes_at_start", "durable"})
+_INBOUND_KINDS = frozenset({"route", "inbox", "inboxes_at_start"})
 _NOT_INBOUND_KINDS = frozenset({"clock", "task", "outbound", "service", "on_stop"})
 
 _LIVING_ROOT = "app.living"
@@ -190,8 +188,8 @@ def test_nothing_from_outside_reaches_the_living_engine():
     白名单里的运维路由的处理函数换成 living 的节点也会红。
 
     第二条断言是围栏：路由必须逐字出现在 :data:`_OPS_ONLY_ROUTES` 里，连方法、路径、处理函数和
-    检查一起对，所以多出来的任何一条路由都会红。收件箱由下面几条查；durable 边一条都不许有（读一程
-    已经改走读书收件箱）；宿主多出一种登记，先红在第一条断言上。
+    检查一起对，所以多出来的任何一条路由都会红。收件箱由下面几条查；宿主多出一种登记，先红在第一条
+    断言上。
     """
     registered = _registered(LANE)
 
@@ -217,11 +215,6 @@ def test_nothing_from_outside_reaches_the_living_engine():
         + "\n  ".join(f"{r.method} {r.path} → {r.request} → {r.handler}" for r in unlisted)
         + f"\n确实是运维口的话，把它的完整身份（方法、路径、类标识、处理函数、检查）"
         f"加进 _OPS_ONLY_ROUTES，并说明为什么它的处理函数不在 {_LIVING_ROOT} 里。"
-    )
-
-    assert registered["durable"] == [], (
-        f"又登记了 durable 边：{registered['durable']}。读一程走读书收件箱，"
-        "新的一条要先判断它能把什么送进 living。"
     )
 
     for name in ("ChatTrigger", "ChatRequest"):

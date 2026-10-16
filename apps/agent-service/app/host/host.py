@@ -2,25 +2,25 @@
 and takes back everything they registered.
 
 **Setup only registers.** Each plugin's ``setup`` gets a :class:`Context` and registers through
-it: clocks, tasks, admin routes, inboxes, the durable edge, outbound queues, services, things to
-undo at stop. Every registration returns a disposer that takes it back; :meth:`Host.stop` calls
-them all, plugins in reverse order, each plugin's in reverse order of registration. Registering
-outside setup is refused: the host has nothing that would start a late registration.
+it: clocks, tasks, admin routes, inboxes, outbound queues, services, things to undo at stop.
+Every registration returns a disposer that takes it back; :meth:`Host.stop` calls them all,
+plugins in reverse order, each plugin's in reverse order of registration. Registering outside
+setup is refused: the host has nothing that would start a late registration.
 
 **Start** runs these phases, each only when its flag asks for it:
 
 1. Dynamic Config reads the deployment lane.
 2. Every plugin's ``setup``, in order; right after each one, what it provided must match its
    ``provides``.
-3. The dataflow graph is reset and compiled, so a mis-wired durable or outbound edge fails here.
+3. The dataflow graph is reset and compiled, so a mis-wired outbound edge fails here.
    Nothing so far touched the database or the broker: a manifest the host cannot run fails
    before any IO.
 4. ``schema``: the business tables of coe lanes (:func:`app.data.bootstrap.ensure_business_schema`).
-5. ``mq``: the durable routes are declared, so this process can publish before their consumer runs.
+5. ``mq``: the broker connection and its main exchange, which the outbound queues publish on.
 6. ``schema``: the Data tables (:func:`app.data.migrator.migrate_schema`), and the runtime's own
    tables, whose DDL the host passes in.
 7. ``tasks``: every task starts.
-8. ``mq``: the durable consumers, then messaging (inboxes, the at-start openers, scheduled delivery).
+8. ``mq``: messaging (inboxes, the at-start openers, scheduled delivery).
 9. ``http``: the routes go onto the app.
 10. ``clocks``: the clocks start, outside prod only with ``DATAFLOW_ENABLE_TIME_SOURCES=1``.
 
@@ -28,15 +28,15 @@ A phase that fails stops the phases already started, takes back every registrati
 error is raised again.
 
 **Stop** keeps today's shutdown order: clocks first (their ticks still running are cancelled,
-rounds included), then the messaging drain, the durable consumers, tasks, the broker connection;
-registrations last. A stop phase that fails is logged and the rest still run; the first error is
-raised at the end. A stop that is cancelled raises the cancellation and leaves what it had not
-reached to the next stop; the piece it interrupted is not run again.
+rounds included), then the messaging drain, tasks, the broker connection; registrations last. A
+stop phase that fails is logged and the rest still run; the first error is raised at the end. A
+stop that is cancelled raises the cancellation and leaves what it had not reached to the next
+stop; the piece it interrupted is not run again.
 
-**What T1 does not do yet.** Inboxes and the durable consumer start and stop as a whole with
-messaging and the durable layer (:mod:`app.messaging`, :mod:`app.runtime.durable`): their
-disposers remove the registration, the consumers stop at the host's stop. There is no API that
-stops one plugin while the others keep running; plugins are not started or stopped at runtime.
+**What T1 does not do yet.** Inboxes start and stop as a whole with messaging
+(:mod:`app.messaging`): their disposers remove the registration, the consumers stop at the host's
+stop. There is no API that stops one plugin while the others keep running; plugins are not
+started or stopped at runtime.
 Data classes register themselves when they are imported (``DATA_REGISTRY`` in
 :mod:`app.data.schema`), so the tables an app builds are those of the code it loads; tables are
 never dropped, so there is nothing to take back.
@@ -75,11 +75,6 @@ from app.infra.rabbitmq import mq
 from app.messaging import receiving
 from app.messaging.lifecycle import start_messaging, stop_messaging
 from app.runtime.dlq_audit import RUNTIME_DLQ_AUDIT_DDL
-from app.runtime.durable import (
-    declare_durable_topology,
-    start_consumers,
-    stop_consumers,
-)
 from app.runtime.emit import reset_emit_runtime
 from app.runtime.graph import compile_graph
 from app.runtime.inflight import RUNTIME_INFLIGHT_DDL
@@ -278,18 +273,6 @@ class Context:
             add=lambda: receiving.inboxes_at_start(opener),
         )
 
-    def durable(self, data_type: type[Data], consumer: Callable) -> Disposer:
-        """The durable edge ``data_type`` → ``consumer`` (a ``@node``): an emit of ``data_type``
-        is published to the consumer's queue and consumed by :mod:`app.runtime.durable`."""
-        spec = WireSpec(data_type=data_type, consumers=[consumer], durable=True)
-        return self._register(
-            "durable",
-            f"{data_type.__name__}->{consumer.__name__}",
-            lambda: {"data_type": data_type, "consumer": consumer},
-            _unwire(spec),
-            add=lambda: WIRING_REGISTRY.append(spec),
-        )
-
     def outbound(self, data_type: type[Data], queue: str) -> Disposer:
         """An emit of ``data_type`` is published to the outbound ``queue`` (``Sink.mq``)."""
         spec = WireSpec(data_type=data_type, sinks=[Sink.mq(queue)])
@@ -443,7 +426,6 @@ class Host:
         for phase, run in (
             ("clocks", self._stop_clocks),
             ("messaging", stop_messaging),
-            ("durable consumers", stop_consumers),
             ("tasks", self._stop_tasks),
             ("the broker connection", mq.close),
         ):
@@ -475,8 +457,9 @@ class Host:
         if schema:
             await ensure_business_schema()
         if use_mq:
-            self._phases.update(("messaging", "durable consumers", "the broker connection"))
-            await declare_durable_topology()
+            self._phases.update(("messaging", "the broker connection"))
+            await mq.connect()
+            await mq.declare_topology()
         if schema:
             await migrate_schema(also=(*RUNTIME_INFLIGHT_DDL, *RUNTIME_DLQ_AUDIT_DDL))
         if tasks:
@@ -486,7 +469,6 @@ class Host:
                 task.add_done_callback(self._task_ended)
                 self._tasks[name] = task
         if use_mq:
-            await start_consumers()
             await start_messaging()
         if http is not None:
             self._phases.add("http")

@@ -3,36 +3,24 @@ stopped and nothing it registered is left; a start that fails half-way cleans up
 
 The consumer counts are read on a separate connection just before the host closes the shared
 one: closing the connection would drop every consumer anyway, so counting afterwards would not
-show that the messaging drain and the durable stop did their job.
+show that the messaging drain did its job.
 """
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated
 
 import aio_pika
 import pytest
 
-from app.data.schema import Data, Key
 from app.host import Host
 from app.infra.rabbitmq import lane_queue, mq
 from app.messaging import receiving
 from app.messaging.broker import SCHEDULED, inbox_route, question_route
-from app.runtime import durable, node
-from app.runtime.wire import WIRING_REGISTRY, WireSpec
+from app.runtime.wire import WIRING_REGISTRY
 from tests.messaging.conftest import LANE
 from tests.messaging.helpers import eventually
 
 from .conftest import plugin
-
-
-class _Probe(Data):
-    pid: Annotated[str, Key]
-
-
-@node
-async def _probe_read(p: _Probe) -> None:  # pragma: no cover - nothing is published here
-    raise AssertionError
 
 
 async def _ignore(message) -> None:  # pragma: no cover - nothing is sent here
@@ -43,7 +31,6 @@ QUEUES = [
     lane_queue(inbox_route("probe").queue, LANE),
     lane_queue(question_route("probe").queue, LANE),
     lane_queue(SCHEDULED.queue, LANE),
-    lane_queue(durable._route_for(WireSpec(_Probe), _probe_read).queue, LANE),
 ]
 
 
@@ -66,7 +53,6 @@ def _nothing_left(host: Host) -> None:
     assert receiving.INBOX_REGISTRY == {}
     assert receiving.INBOXES_AT_START == []
     assert WIRING_REGISTRY == []
-    assert durable._consumer_tags == []
     assert receiving._consumers == []
 
 
@@ -92,7 +78,6 @@ async def test_after_stop_clocks_tasks_and_consumers_have_stopped(
         ctx.clock("probe", 0.05, note)
         ctx.task("resident", resident)
         ctx.inbox("probe", on_message=_ignore)
-        ctx.durable(_Probe, _probe_read)
 
     counted_at_close: dict[str, int] = {}
     real_close = mq.close
@@ -124,8 +109,8 @@ async def test_after_stop_clocks_tasks_and_consumers_have_stopped(
 async def test_a_start_that_fails_opening_an_inbox_cleans_up_and_can_start_again(
     broker, delayed_broker
 ):
-    """Risk 2: the messaging start fails after the scheduled queue, the question queue and the
-    durable consumer are already consuming; the cleanup must stop them, not hang, and leave the
+    """Risk 2: the messaging start fails after the scheduled queue and the question queue are
+    already consuming; the cleanup must stop them, not hang, and leave the
     process able to start again."""
     attempts: list[int] = []
 
@@ -136,7 +121,6 @@ async def test_a_start_that_fails_opening_an_inbox_cleans_up_and_can_start_again
 
     def setup(ctx) -> None:
         ctx.inbox("probe", on_message=_ignore, on_open=on_open)
-        ctx.durable(_Probe, _probe_read)
 
     host = Host("agent-service", [plugin("probe", setup)])
     start = host.start(http=None, schema=False, mq=True, clocks=False, tasks=False)

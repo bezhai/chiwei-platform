@@ -31,12 +31,6 @@ async def test_edge_idempotent_deletes_failed_row(inflight_db: object) -> None:
     assert out.skipped_succeeded == 0
 
 
-async def test_edge_idempotent_deletes_review_row(inflight_db: object) -> None:
-    await _insert("review", edge="e1", key="k2")
-    out = await delete_inflight(by="edge_idempotent", edge_id="e1", idempotent_key="k2")
-    assert out.deleted == 1
-
-
 async def test_edge_idempotent_raises_on_succeeded(inflight_db: object) -> None:
     await _insert("succeeded", edge="e2", key="k3")
     with pytest.raises(AlreadySucceededError) as ei:
@@ -54,9 +48,8 @@ async def test_trace_id_deletes_only_non_succeeded(inflight_db: object) -> None:
     await _insert("failed", edge="e1", key="k1", trace="trace-a")
     await _insert("processing", edge="e2", key="k2", trace="trace-a")
     await _insert("succeeded", edge="e3", key="k3", trace="trace-a")
-    await _insert("review", edge="e4", key="k4", trace="trace-a")
     out = await delete_inflight(by="trace_id", trace_id="trace-a")
-    assert out.deleted == 3
+    assert out.deleted == 2
     assert out.skipped_succeeded == 1
     n = await fetch_value(
         "SELECT count(*) FROM runtime_inflight WHERE trace_id='trace-a'"

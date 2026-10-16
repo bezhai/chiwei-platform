@@ -348,9 +348,9 @@ class _RabbitMQ:
     ) -> None:
         """Declare a single route's queue + binding on the main exchange.
 
-        Used by the dataflow runtime to register durable wires dynamically on
-        top of the existing lane-aware topology (DLX, lane-TTL fallback, lazy
-        lane-queue declare all continue to work). ``declare_topology()`` still
+        Used by messaging to declare its queues (inboxes, question queues, the
+        scheduled queue) on top of the existing lane-aware topology (DLX,
+        lane-TTL fallback, lazy lane-queue declare all continue to work). ``declare_topology()`` still
         owns the static ``ALL_ROUTES`` list; this method is its per-route
         sibling so new routes can plug in without amending that list.
 
@@ -448,14 +448,14 @@ class _RabbitMQ:
     ) -> bool:
         """Publish with broker publish-confirm; return True iff broker ack-ed.
 
-        Used by the durable retry transport (Gap 7.2). Caller decides on
-        False (DLQ-fallback for retry).
+        Used by messaging (:func:`app.messaging.broker.publish`) and the DLQ
+        requeue tool (:mod:`app.nodes.dlq_admin`). Caller decides on False.
 
         aio-pika channels default to ``publisher_confirms=True`` so the
         underlying ``exchange.publish`` already awaits broker confirm. We
         wrap with a hard timeout + broad exception catch so a transient
-        network blip never raises out into the durable handler (which
-        already owns ack/nack semantics via ``message.process``).
+        network blip never raises out into the caller, which owns what to do
+        with an unconfirmed publish.
         """
         import asyncio
 

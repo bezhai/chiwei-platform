@@ -16,7 +16,6 @@ from fastapi import FastAPI
 from app.data.schema import Data, Key
 from app.host import Host, HostError
 from app.messaging import receiving
-from app.runtime import node
 from app.runtime.wire import WIRING_REGISTRY
 from tests.hosting import start_without_io
 
@@ -30,21 +29,12 @@ class _Ask(Data):
         transient = True
 
 
-class _Picked(Data):
-    pid: Annotated[str, Key]
-
-
 class _Said(Data):
     sid: Annotated[str, Key]
     channel: str
 
     class Meta:
         transient = True
-
-
-@node
-async def _read_it(p: _Picked) -> None:  # pragma: no cover - never delivered here
-    raise AssertionError
 
 
 async def _echo(req: _Ask) -> _Ask:
@@ -111,10 +101,10 @@ async def test_start_runs_the_phases_in_order(recorded_phases):
             "setup:b",
             "compile_graph",
             "ensure_business_schema",
-            "declare_durable_topology",
+            "mq.connect",
+            "mq.declare_topology",
             "migrate_schema",
             "task.start:ta",
-            "start_consumers",
             "start_messaging",
             "bind_route:/a",
             "clocks.start",
@@ -124,8 +114,8 @@ async def test_start_runs_the_phases_in_order(recorded_phases):
 
 
 async def test_stop_runs_the_shutdown_order_and_revokes_last(recorded_phases):
-    """Clocks first (rounds they started are cancelled, as today), then the messaging drain, the
-    durable consumers, tasks, the broker connection; registrations go last, plugins in reverse."""
+    """Clocks first (rounds they started are cancelled, as today), then the messaging drain, tasks,
+    the broker connection; registrations go last, plugins in reverse."""
     host = _two_plugins(recorded_phases)
     await _start_everything(host)
     recorded_phases.calls.clear()
@@ -135,7 +125,6 @@ async def test_stop_runs_the_shutdown_order_and_revokes_last(recorded_phases):
     assert recorded_phases.calls == [
         "clocks.stop",
         "stop_messaging",
-        "stop_consumers",
         "task.cancelled:ta",
         "mq.close",
         "on_stop:b",
@@ -206,7 +195,6 @@ async def test_a_failed_start_stops_what_already_started_then_re_raises(recorded
     after = recorded_phases.calls[recorded_phases.calls.index("start_messaging") + 1 :]
     assert after == [
         "stop_messaging",
-        "stop_consumers",
         "task.cancelled:ta",
         "mq.close",
         "on_stop:b",
@@ -257,7 +245,6 @@ async def test_a_failing_clock_start_still_stops_every_other_phase(recorded_phas
     assert after == [
         "clocks.stop",
         "stop_messaging",
-        "stop_consumers",
         "task.cancelled:ta",
         "mq.close",
         "on_stop:b",
@@ -278,7 +265,6 @@ async def test_a_failing_stop_phase_does_not_skip_the_rest(recorded_phases):
     assert recorded_phases.calls == [
         "clocks.stop",
         "stop_messaging",
-        "stop_consumers",
         "task.cancelled:ta",
         "mq.close",
         "on_stop:b",
@@ -382,7 +368,6 @@ async def test_a_stop_cancelled_in_a_phase_leaves_the_later_phases_to_the_next_s
     assert recorded_phases.calls == [
         "clocks.stop",
         "stop_messaging",
-        "stop_consumers",
         "task.cancelled:ta",
         "mq.close",
         "on_stop:b",
@@ -532,7 +517,6 @@ def _everything_plugin(ran: list[str], *, inbox_name: str = "probe"):
         ctx.route("POST", "/everything", _Ask, _echo)
         ctx.inbox(inbox_name, on_message=_ignore)
         ctx.inboxes_at_start(open_them)
-        ctx.durable(_Picked, _read_it)
         ctx.outbound(_Said, "recall")
         ctx.provide("thing", object())
         ctx.clock("c", 60, _tick)
@@ -557,7 +541,6 @@ async def test_stop_revokes_every_registration():
         ("route", "POST /everything"),
         ("inbox", "probe"),
         ("inboxes_at_start", "_everything_plugin.<locals>.open_them"),
-        ("durable", "_Picked->_read_it"),
         ("outbound", "_Said->recall"),
         ("service", "thing"),
         ("clock", "c"),
@@ -567,7 +550,7 @@ async def test_stop_revokes_every_registration():
     assert "/everything" in _paths(app)
     assert set(receiving.INBOX_REGISTRY) == {"probe"}
     assert len(receiving.INBOXES_AT_START) == 1
-    assert [w.data_type for w in WIRING_REGISTRY] == [_Picked, _Said]
+    assert [w.data_type for w in WIRING_REGISTRY] == [_Said]
     app.openapi()
 
     await host.stop()
@@ -582,30 +565,23 @@ async def test_stop_revokes_every_registration():
     assert ran == ["setup", "on_stop"]
 
 
-async def test_the_durable_and_outbound_wires_carry_emits_only_while_registered(monkeypatch):
-    import app.runtime.durable as durable_mod
+async def test_the_outbound_wires_carry_emits_only_while_registered(monkeypatch):
     import app.runtime.sink_dispatch as sink_mod
     from app.runtime.emit import emit
     published: list[tuple[str, object]] = []
 
-    async def publish_durable(w, consumer, data) -> None:
-        published.append(("durable", consumer))
-
     async def dispatch_mq_sink(spec, data) -> None:
         published.append(("outbound", spec.params["queue"]))
 
-    monkeypatch.setattr(durable_mod, "publish_durable", publish_durable)
     monkeypatch.setattr(sink_mod, "_dispatch_mq_sink", dispatch_mq_sink)
     host = Host("agent-service", [_everything_plugin([])])
     await start_without_io(host)
 
-    await emit(_Picked(pid="1"))
     await emit(_Said(sid="1", channel="lark"))
     await host.stop()
-    await emit(_Picked(pid="2"))
     await emit(_Said(sid="2", channel="lark"))
 
-    assert published == [("durable", _read_it), ("outbound", "recall")]
+    assert published == [("outbound", "recall")]
 
 
 async def test_a_disposer_takes_back_its_registration_while_the_host_runs():

@@ -1,16 +1,15 @@
-"""runtime_inflight state machine (Gap 7.1).
+"""runtime_inflight state machine (Gap 7.1): the per-message claims messaging dedupes on.
 
-Replaces ``insert_idempotent`` for durable wires. Provides per-edge dedup
-state with lease semantics (worker death recovery) and history backfill
-(adoption of pre-7a Data rows that pre-existed before this state machine
-was introduced).
+Per-edge dedup state with lease semantics (worker death recovery). An edge is
+one inbox in one lane (``inbox:<name>@<lane>``, :mod:`app.messaging.receiving`);
+the key is the message id.
 
-Schema is owned by the runtime (not a Data class); migrator hooks via
-``RUNTIME_INTERNAL_DDL``.
+Schema is owned by the runtime (not a Data class); the host passes
+:data:`RUNTIME_INFLIGHT_DDL` to the migrator.
 
-Per-edge isolation: PK is ``(edge_id, idempotent_key)`` so wire(D).to(c1)
-and wire(D).to(c2) carry independent state — consumer A succeeded does
-not skip consumer B with the same Data dedup_hash.
+Per-edge isolation: PK is ``(edge_id, idempotent_key)``, so the same key on
+two edges carries independent state — succeeded on one does not skip the
+other.
 
 Lease semantics:
 
@@ -30,9 +29,6 @@ Caller protocol:
   released on commit; the consumer runs OUTSIDE that transaction.
 - After the consumer call, ``mark_succeeded(...)`` or ``mark_failed(...)``
   closes the row in a separate short transaction.
-- For history backfill (Gap 7.1.1), if the claim returned ``fresh=True``
-  the caller checks the Data table for an existing row before running
-  the consumer; if present, calls ``mark_succeeded`` and acks.
 """
 
 from __future__ import annotations
@@ -72,16 +68,6 @@ RUNTIME_INFLIGHT_DDL: list[str] = [
 ]
 
 
-def edge_id_for(data_type_qualname: str, consumer_qualname: str) -> str:
-    """Stable identifier for the (data_type, consumer) edge.
-
-    Used as the first component of the runtime_inflight PK. Two wires
-    sharing a Data type but pointing to different consumers get distinct
-    edge_id values, so consumer A's success does not dedup consumer B.
-    """
-    return f"{data_type_qualname}::{consumer_qualname}"
-
-
 def _lock_key(edge_id: str, idempotent_key: str) -> int:
     """Map (edge_id, idempotent_key) into pg_advisory_xact_lock's int4 space.
 
@@ -97,10 +83,9 @@ def _lock_key(edge_id: str, idempotent_key: str) -> int:
 class ClaimOutcome:
     action: Literal["run", "skip"]
     attempts: int  # 0 if action == 'skip'
-    fresh: bool    # True iff inflight row was just inserted this call
     # Set only when skipping because another worker holds a live lease: the
-    # moment that lease runs out. A skip with ``None`` means the key reached a
-    # terminal state (succeeded / review) and never needs another look.
+    # moment that lease runs out. A skip with ``None`` means the key has
+    # succeeded and never needs another look.
     locked_until: datetime | None = None
 
 
@@ -144,18 +129,15 @@ async def claim_inflight(
                 "VALUES (:e, :k, :t, 'processing', 1, :lu, :w, :tid)"
             ), {"e": edge_id, "k": idempotent_key, "t": data_table,
                 "lu": lease_until, "w": worker_id, "tid": trace_id})
-            return ClaimOutcome(action="run", attempts=1, fresh=True)
+            return ClaimOutcome(action="run", attempts=1)
 
         state = row["state"]
-        # Phase 7b Gap 18 round-4 finding 1: review is a terminal too.
-        if state in ("succeeded", "review"):
-            return ClaimOutcome(action="skip", attempts=0, fresh=False)
+        if state == "succeeded":
+            return ClaimOutcome(action="skip", attempts=0)
         now = datetime.now(UTC)
         locked_until = row["locked_until"]
         if state == "processing" and locked_until is not None and locked_until > now:
-            return ClaimOutcome(
-                action="skip", attempts=0, fresh=False, locked_until=locked_until
-            )
+            return ClaimOutcome(action="skip", attempts=0, locked_until=locked_until)
 
         # processing-expired or failed: take over
         new_attempts = (row["attempts"] or 0) + 1
@@ -166,15 +148,14 @@ async def claim_inflight(
             "WHERE edge_id=:e AND idempotent_key=:k"
         ), {"a": new_attempts, "lu": lease_until, "w": worker_id,
             "e": edge_id, "k": idempotent_key})
-        return ClaimOutcome(action="run", attempts=new_attempts, fresh=False)
+        return ClaimOutcome(action="run", attempts=new_attempts)
 
 
 async def succeeded_keys(*, edge_id: str, idempotent_keys: Collection[str]) -> set[str]:
     """``idempotent_keys`` 里在 ``edge_id`` 上已经记成 ``succeeded`` 的那些。
 
     ``succeeded`` 是最终的：:func:`claim_inflight` 对它一律跳过，:func:`delete_inflight` 也不删它，
-    所以这里交回的 key，之后再来的同一条都不会再交给处理方。``review`` 虽然也让 claim 跳过，但
-    死信处理会删它，不算在内。
+    所以这里交回的 key，之后再来的同一条都不会再交给处理方。
     """
     if not idempotent_keys:
         return set()
@@ -184,28 +165,6 @@ async def succeeded_keys(*, edge_id: str, idempotent_keys: Collection[str]) -> s
             "WHERE edge_id=:e AND idempotent_key = ANY(:ks) AND state='succeeded'"
         ), {"e": edge_id, "ks": list(idempotent_keys)})
     return {row[0] for row in rows}
-
-
-async def mark_history_backfill(
-    *, edge_id: str, idempotent_key: str, data_table: str
-) -> None:
-    """Insert a succeeded inflight row for a Data row that pre-existed.
-
-    Used by the durable handler when ``claim_inflight`` returns
-    ``fresh=True`` AND the Data table already contains the row — the
-    consumer must NOT run, but the inflight terminal must be set so
-    future re-deliveries dedup.
-
-    Idempotent (ON CONFLICT DO NOTHING) so concurrent backfill paths
-    don't fight; whichever wins, both end up at ``succeeded``.
-    """
-    async with auto_tx():
-        await current_session().execute(text(
-            "UPDATE runtime_inflight "
-            "SET state='succeeded', attempts=0, locked_until=NULL, "
-            "    worker_id=NULL, trace_id='backfill', updated_at=now() "
-            "WHERE edge_id=:e AND idempotent_key=:k"
-        ), {"e": edge_id, "k": idempotent_key})
 
 
 # ``worker_id`` guard for the two marks below: with it, the update only lands

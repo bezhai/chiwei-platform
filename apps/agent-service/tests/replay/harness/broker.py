@@ -3,7 +3,7 @@ broker with queues, bindings and consumers.
 
 Interception point: the methods of ``app.infra.rabbitmq.mq`` (every module shares that one
 instance). Everything above it is real: the messaging layer's records, claims, retries and settle
-decisions; sink dispatch for the two outbound queues; the durable consumers.
+decisions; sink dispatch for the two outbound queues.
 
 What the broker does and does not do on its own:
 

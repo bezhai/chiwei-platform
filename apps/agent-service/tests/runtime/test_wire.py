@@ -23,8 +23,3 @@ def test_wire_to_registers():
     w = WIRING_REGISTRY[0]
     assert w.data_type is Msg
     assert w.consumers == [f]
-
-
-def test_wire_durable():
-    wire(Msg).to(f).durable()
-    assert WIRING_REGISTRY[0].durable is True

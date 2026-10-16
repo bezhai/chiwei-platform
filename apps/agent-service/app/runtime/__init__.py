@@ -8,7 +8,7 @@ surface promised by `docs/guides/dataflow-framework.md`.
 Data classes and their markers are storage, not runtime: they come from
 :mod:`app.data.schema`.
 
-Internals (compile_graph, registries, durable plumbing) intentionally stay
+Internals (compile_graph, registries, sink dispatch) intentionally stay
 submodule-only — they are not needed to write a node and may change without
 notice. Starting an app is the plugin host's (:mod:`app.host`).
 """

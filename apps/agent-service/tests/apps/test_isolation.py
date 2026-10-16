@@ -27,7 +27,7 @@ print(json.dumps({
     'clocks': [r.name for r in rs if r.kind == 'clock'],
     'wired_types': sorted(
         r.detail['data_type'].__module__ + '.' + r.detail['data_type'].__name__
-        for r in rs if r.kind in ('durable', 'outbound')),
+        for r in rs if r.kind == 'outbound'),
     'inboxes': sorted(INBOX_REGISTRY),
     'inboxes_at_start': sorted(
         r.detail['open'].__module__ + '.' + r.detail['open'].__qualname__

@@ -1,9 +1,8 @@
 """The dataflow edges of this process: ``WireSpec``s in ``WIRING_REGISTRY``.
 
-The plugin host appends the edges its plugins register (``ctx.durable``,
-``ctx.outbound``, :mod:`app.host.host`); ``wire(T).to(consumer).durable()``
-builds the same spec directly. compile_graph, emit and durable read the
-registry.
+The plugin host appends the edges its plugins register (``ctx.outbound``,
+:mod:`app.host.host`); ``wire(T).to(...)`` builds the same spec directly.
+compile_graph and emit read the registry.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ class WireSpec:
     data_type: type[Data]
     consumers: list[Callable] = field(default_factory=list)
     sinks: list[SinkSpec] = field(default_factory=list)
-    durable: bool = False
 
 
 WIRING_REGISTRY: list[WireSpec] = []
@@ -41,10 +39,6 @@ class WireBuilder:
                 self._spec.sinks.append(t)
             else:
                 self._spec.consumers.append(t)
-        return self
-
-    def durable(self) -> WireBuilder:
-        self._spec.durable = True
         return self
 
 

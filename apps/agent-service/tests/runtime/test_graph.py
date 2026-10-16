@@ -31,15 +31,6 @@ class ChannelledM(Data):
     channel: str = "lark"
 
 
-class TMsg(Data):
-    """Transient Data: no pg table. Used by the durable+transient mutual-exclusion test."""
-
-    tid: Annotated[str, Key]
-
-    class Meta:
-        transient = True
-
-
 def setup_function():
     clear_wiring()
 
@@ -103,20 +94,6 @@ def test_consumer_in_two_wires_rejected():
     wire(M).to(shared)
     wire(X).to(shared)
     with pytest.raises(GraphError, match="appear on exactly one wire|does not match the wire inputs"):
-        compile_graph()
-
-
-def test_durable_transient_data_rejected():
-    # Meta.transient = True means no pg table; durable consumers call
-    # insert_idempotent which writes to that table — so the combo only
-    # works as far as the queue, then the consumer crashes on first
-    # message. Reject at compile time so the failure isn't deferred to
-    # the first inflight delivery.
-    @node
-    async def consumer(t: TMsg) -> None: ...
-
-    wire(TMsg).to(consumer).durable()
-    with pytest.raises(GraphError, match="transient.*durable|durable.*transient"):
         compile_graph()
 
 

@@ -3,14 +3,13 @@ parts the scenario drives itself.
 
 Start: fresh in-process state (registries, messaging's module state, residents, the volume
 lock), then the app's plugin host (``Host.for_app``, the manifest in ``app.deployment.APPS``)
-with the broker phases only: every plugin's setup, the graph compiled, the durable routes
-declared, durable consumers and messaging (inboxes, question queues, scheduled delivery). Not
-started: the schema step (the replay builds the schema once, :func:`create_schema`), the interval
+with the broker phases only: every plugin's setup, the graph compiled, the broker connected, and
+messaging (inboxes, question queues, scheduled delivery). Not started: the schema step (the replay builds the schema once, :func:`create_schema`), the interval
 clocks, the HTTP routes, the skill reload task. Rounds run when the scenario calls them. The skills
 plugin loads ``SKILLS_DIR``, which the replay points at an empty directory, so the skill registry is
 empty (no guides on hand).
 
-Stop is the host's stop: messaging, durable consumers, then every registration taken back. A
+Stop is the host's stop: messaging, then every registration taken back. A
 restart is stop + start with the database, the broker's queues and the volume left as they were,
 which is what a new process finds.
 
@@ -32,7 +31,6 @@ def _fresh_process_state(monkeypatch) -> None:
     import app.living.participants as participants
     import app.messaging.receiving as receiving
     import app.messaging.sending as sending
-    import app.runtime.durable as durable
     import app.world.volume as volume
     from app.messaging.receiving import clear_inboxes
     from app.runtime.emit import reset_emit_runtime
@@ -57,7 +55,6 @@ def _fresh_process_state(monkeypatch) -> None:
         (sending, "_reply_channel", None),
         (sending, "_reply_lock", None),
         (sending, "_waiting", {}),
-        (durable, "_consumer_tags", []),
         (participants, "_known", None),
         (volume, "_held", None),
     ):

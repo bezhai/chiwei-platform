@@ -11,9 +11,7 @@ from app.data.persist import fetch_one
 from app.data.tx import current_session, tx
 from app.runtime.inflight import (
     claim_inflight,
-    edge_id_for,
     mark_failed,
-    mark_history_backfill,
     mark_succeeded,
 )
 
@@ -30,14 +28,8 @@ async def _row(edge_id: str, idem_key: str) -> dict:
     return dict(row)
 
 
-class TestEdgeIdHelper:
-    def test_combines_qualnames(self) -> None:
-        assert edge_id_for("Foo", "consumer") == "Foo::consumer"
-        assert edge_id_for("mod.Foo", "mod.consumer") == "mod.Foo::mod.consumer"
-
-
-class TestClaimInflightFresh:
-    async def test_first_time_creates_processing_row_and_returns_fresh(
+class TestClaimInflightFirstTime:
+    async def test_first_time_creates_processing_row(
         self, inflight_db: object
     ) -> None:
         outcome = await claim_inflight(
@@ -46,7 +38,6 @@ class TestClaimInflightFresh:
         )
         assert outcome.action == "run"
         assert outcome.attempts == 1
-        assert outcome.fresh is True
 
         row = await _row("E::c", "k1")
         assert row["state"] == "processing"
@@ -70,7 +61,6 @@ class TestClaimInflightSucceededSkip:
             worker_id="host:1", lease_ms=60_000,
         )
         assert outcome.action == "skip"
-        assert outcome.fresh is False
         assert outcome.locked_until is None  # 做完了，不必再看
 
 
@@ -121,7 +111,6 @@ class TestClaimInflightLeaseExpired:
         )
         assert outcome.action == "run"
         assert outcome.attempts == 3
-        assert outcome.fresh is False
 
         row = await _row("E::c", "k1")
         assert row["worker_id"] == "host:new"
@@ -144,7 +133,6 @@ class TestClaimInflightFailedResume:
         )
         assert outcome.action == "run"
         assert outcome.attempts == 2
-        assert outcome.fresh is False
 
 
 class TestMarkSucceeded:
@@ -178,25 +166,6 @@ class TestMarkFailed:
         assert row["worker_id"] is None
 
 
-class TestMarkHistoryBackfill:
-    async def test_overrides_processing_to_succeeded(
-        self, inflight_db: object
-    ) -> None:
-        # Simulate fresh claim having just inserted a processing row,
-        # then handler discovers existing Data row → backfill.
-        await claim_inflight(
-            edge_id="E::c", idempotent_key="k1", data_table="foo",
-            worker_id="host:1", lease_ms=60_000, trace_id="t",
-        )
-        await mark_history_backfill(
-            edge_id="E::c", idempotent_key="k1", data_table="foo",
-        )
-        row = await _row("E::c", "k1")
-        assert row["state"] == "succeeded"
-        assert row["attempts"] == 0
-        assert row["trace_id"] == "backfill"
-
-
 class TestEdgeIdIsolation:
     """Same idempotent_key + 不同 edge_id (consumer A 与 consumer B)
     必须独立 state — consumer A succeeded 不让 consumer B 被 dedup。"""
@@ -216,7 +185,7 @@ class TestEdgeIdIsolation:
         )
         assert outcome_a.action == "run"
         assert outcome_b.action == "run"
-        assert outcome_b.fresh is True  # B 是首次创建
+        assert outcome_b.attempts == 1  # B 是首次创建
 
 
 class TestMarkOnlyByTheHolder:
