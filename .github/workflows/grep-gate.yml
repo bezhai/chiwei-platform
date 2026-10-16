@@ -278,14 +278,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Only the cycles listed in KNOWN_CYCLES remain
+      - name: Only the cycles listed in KNOWN_CYCLES remain, and no edge in FORBIDDEN_EDGES
         shell: bash
         working-directory: apps/agent-service
         run: |
           # app/ 下每个子包和顶层模块是一个节点，包里任何一处 import 另一个包就是一条边
           # （函数里的 import、import_module 的字符串字面量都算）。互相走得到的几个包
           # 是一组环：不在 KNOWN_CYCLES 里的环失败，名单上的环消失或缩小了也失败，
-          # 所以名单只能缩。
+          # 所以名单只能缩。FORBIDDEN_EDGES 里的边（messaging -> runtime、
+          # messaging -> host、runtime -> messaging）不管成不成环，出现就失败。
           # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_package_cycles.py
           python3 -m scripts.check_package_cycles app
 

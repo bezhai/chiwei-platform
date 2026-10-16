@@ -1,4 +1,4 @@
-"""CI 规则：``app/`` 下的包之间不许出现新的环。
+"""CI 规则：``app/`` 下的包之间不许出现新的环，也不许出现名单上禁止的边。
 
 ``app/`` 下每个子包（``app/runtime/``、``app/data/`` ……）和每个顶层模块（``app/main.py``）
 是一个节点；包里任何一个模块 import 了另一个包里的东西，就是一条从前者指向后者的边。认
@@ -10,7 +10,8 @@ import、``importlib.import_module`` / ``__import__`` 的字符串字面量都�
 
 * 不在 :data:`KNOWN_CYCLES` 里的环一律失败，并列出把这组包连起来的每一条边各一处 import；
 * :data:`KNOWN_CYCLES` 里的环不见了（拆开了，或者缩小成别的样子）也失败：名单要跟着改
-  成现在的样子。所以名单只能缩，不能悄悄留着一条已经不存在的环。
+  成现在的样子。所以名单只能缩，不能悄悄留着一条已经不存在的环；
+* :data:`FORBIDDEN_EDGES` 里的边，不管成不成环，出现就失败，并列出造成它的每一处 import。
 
 用法：在 ``apps/agent-service`` 下 ``python3 -m scripts.check_package_cycles [app 目录]``，
 默认是 ``app/``。有问题时逐条打印并以 1 退出。只用标准库，CI 上不装依赖直接跑。
@@ -28,6 +29,15 @@ from scripts.check_world_life_imports import imported_names, module_name
 # 拆开一部分就把这里改成剩下的样子。
 KNOWN_CYCLES: list[frozenset[str]] = [
     frozenset({"agent", "capabilities", "living", "memory", "skills"}),
+]
+
+# 不管成不成环都不许出现的边（从哪个包，到哪个包）。消息机制是宿主下面的一层：宿主启停它，
+# 插件经宿主开设收件箱，所以它不依赖宿主；它也不依赖 dataflow 的 runtime（出站边和 ``@node``），
+# runtime 也不依赖它。
+FORBIDDEN_EDGES: list[tuple[str, str]] = [
+    ("messaging", "runtime"),
+    ("messaging", "host"),
+    ("runtime", "messaging"),
 ]
 
 # 一条边：import 它的那一处，``app/<包>/<文件>.py:<行号>``。
@@ -131,18 +141,37 @@ def cycle_problems(root: Path, known: Iterable[frozenset[str]] = KNOWN_CYCLES) -
     return problems
 
 
+def edge_problems(
+    root: Path, forbidden: Iterable[tuple[str, str]] = FORBIDDEN_EDGES
+) -> list[str]:
+    """``forbidden`` 里出现了的每一条边，一条一段说明，列出造成它的每一处 import。"""
+    graph = package_graph(root)
+    problems: list[str] = []
+    for source, target in forbidden:
+        sites = graph.get(source, {}).get(target, [])
+        if sites:
+            problems.append(
+                "\n".join([f"forbidden import {source} -> {target}:", *(f"  {s}" for s in sites)])
+            )
+    return problems
+
+
 def main(argv: list[str]) -> int:
     root = Path(argv[1]) if len(argv) > 1 else Path(__file__).resolve().parent.parent / "app"
-    problems = cycle_problems(root)
+    problems = cycle_problems(root) + edge_problems(root)
     for problem in problems:
         print(problem)
     if problems:
-        print(f"{len(problems)} package cycle problem(s)")
+        print(f"{len(problems)} package import problem(s)")
         return 1
     groups = strongly_connected_groups(package_graph(root))
     print(
         "package cycles: only the listed ones remain: "
         + ", ".join(_names(g) for g in groups)
+    )
+    print(
+        "forbidden edges: none of "
+        + ", ".join(f"{source} -> {target}" for source, target in FORBIDDEN_EDGES)
     )
     return 0
 
