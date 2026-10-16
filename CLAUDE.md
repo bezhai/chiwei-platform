@@ -57,7 +57,7 @@ paas-engine 的 `domain.ClassifyLane` 按前缀校验，未知前缀直接拒绝
 | `ppe-<name>` | 共用 prod 全部组件（PG/Redis/MQ/Qdrant/Mongo） | 业务逻辑、prompt 验证；读写的是线上数据 |
 | `coe-<name>` | 独立的 chiwei-test 容器集，连接串由 ConfigBundle `class_overrides[coe]` 注入 | schema 变更、协议变更、可能写入错误数据的改动 |
 
-验证 agent-service 的改动只能用 `coe-*`（原因见 e2e-testing.md）。非 prod 泳道默认不启动 cron/interval 定时源，要启动就设 Release env `DATAFLOW_ENABLE_TIME_SOURCES=1`。
+验证 agent-service 的改动只能用 `coe-*`（原因见 e2e-testing.md）。非 prod 泳道默认不启动 cron/interval 定时源，但 ConfigBundle `agent-service-runtime` 对 coe 类别把 `DATAFLOW_ENABLE_TIME_SOURCES` 设成了 1，所以部署到 coe 就会开始跑她的轮次；其他非 prod 泳道要启动就设 Release env `DATAFLOW_ENABLE_TIME_SOURCES=1`。
 
 ## 部署
 
