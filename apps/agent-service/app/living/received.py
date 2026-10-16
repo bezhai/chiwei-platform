@@ -3,7 +3,7 @@
 **收件箱开在 agent-service 进程里，名字是她们在世界里的名字**（:mod:`app.living.participants`）。
 名字存在人设表里，插件 setup 的时候还不读库，所以 living 插件只声明"开始接收时再开"
 （:func:`app.messaging.receiving.inboxes_at_start`），:func:`open_inboxes` 在那时读名字、检查、
-逐个开设。名字有问题就抛，进程起不来。
+经宿主交来的声明函数逐个开设。名字有问题就抛，进程起不来。
 
 **收件处理只做存储，不调模型**（:func:`receive`）。没选"收到就当场跑她一轮"：她每一轮已经
 有自己的锁和节奏（:mod:`app.living.moment`），收件处理只负责把消息存好，不碰她的循环；
@@ -52,7 +52,7 @@ from app.infra.cst_time import dated_clock
 from app.living.participants import WORLD, load_residents, residents
 from app.living.records import _require_aware, esc, legacy_null_is, living_lane
 from app.messaging.message import Kind, Message
-from app.messaging.receiving import inbox
+from app.messaging.receiving import Declare
 
 logger = logging.getLogger(__name__)
 
@@ -124,11 +124,12 @@ _RECEIVED_TABLE = table_name(ReceivedMessage)
 _READ_TABLE = table_name(ReceivedRead)
 
 
-async def open_inboxes() -> None:
-    """读三姐妹的名字，按名字各开一个收件箱。通信机制开始接收之前调一次。"""
+async def open_inboxes(declare: Declare) -> None:
+    """读三姐妹的名字，按名字各开一个收件箱：对每个名字调 ``declare``（宿主交来的，参数和
+    :func:`app.messaging.receiving.inbox` 一样）。通信机制开始接收之前调一次。"""
     known = await load_residents()
     for name in known.by_persona.values():
-        inbox(name, on_message=receive)
+        declare(name, on_message=receive)
 
 
 async def receive(message: Message) -> None:

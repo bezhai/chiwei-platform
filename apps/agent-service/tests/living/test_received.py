@@ -27,7 +27,7 @@ from app.living.received import (
     unread_received,
 )
 from app.messaging.message import Kind, Message, new_message
-from app.messaging.receiving import INBOX_REGISTRY
+from app.messaging.receiving import INBOX_REGISTRY, inbox
 from tests.living.conftest import clock_at
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
@@ -60,7 +60,7 @@ async def inboxes(living_db, monkeypatch):
 
     monkeypatch.setattr(participants_mod, "find_persona", find_persona)
     monkeypatch.setattr(participants_mod, "_known", None)
-    await open_inboxes()
+    await open_inboxes(inbox)
     return living_db
 
 

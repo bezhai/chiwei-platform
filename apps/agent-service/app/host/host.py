@@ -250,18 +250,18 @@ class Context:
 
     def inboxes_at_start(self, open_them: receiving.OpenAtStart) -> Disposer:
         """Inboxes whose names are known only at start; see
-        :func:`app.messaging.receiving.inboxes_at_start`. The host notes which inboxes
-        ``open_them`` declared, so taking it back takes those back too."""
+        :func:`app.messaging.receiving.inboxes_at_start`. ``open_them`` is handed a ``declare``
+        function (the options of :meth:`inbox`) and declares its inboxes through it. The host
+        notes every name declared that way, so taking ``open_them`` back takes those back too."""
         declared: list[str] = []
 
-        async def opener() -> None:
-            before = set(receiving.INBOX_REGISTRY)
-            try:
-                await open_them()
-            finally:
-                declared.extend(
-                    n for n in receiving.INBOX_REGISTRY if n not in before and n not in declared
-                )
+        async def opener(declare: receiving.Declare) -> None:
+            def noted(name: str, **options: Any) -> None:
+                declare(name, **options)
+                if name not in declared:
+                    declared.append(name)
+
+            await open_them(noted)
 
         async def undo() -> None:
             with suppress(ValueError):

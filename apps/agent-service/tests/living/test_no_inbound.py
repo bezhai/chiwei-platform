@@ -298,7 +298,7 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
     from app.living import participants as participants_mod
     from app.living.received import open_inboxes
     from app.messaging.message import Kind, new_message
-    from app.messaging.receiving import INBOX_REGISTRY
+    from app.messaging.receiving import INBOX_REGISTRY, inbox
 
     monkeypatch.setenv("LANE", LANE)
     names = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
@@ -316,7 +316,7 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
     monkeypatch.setattr(moment_mod, "build_moment_runner", no_model)
     monkeypatch.setattr(moment_mod, "run_moment", no_model)
 
-    await open_inboxes()
+    await open_inboxes(inbox)
     for name in names.values():
         await INBOX_REGISTRY[name].on_message(
             new_message(sender="world", recipient=name, body="窗外下起了雨。", kind=Kind.MESSAGE)

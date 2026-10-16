@@ -524,7 +524,7 @@ async def test_a_start_cancelled_while_it_cleans_up_raises_the_cancellation_with
 
 
 def _everything_plugin(ran: list[str], *, inbox_name: str = "probe"):
-    async def open_them() -> None:  # pragma: no cover - mq is off in these tests
+    async def open_them(declare) -> None:  # pragma: no cover - mq is off in these tests
         raise AssertionError
 
     def setup(ctx) -> None:
@@ -738,8 +738,9 @@ async def test_the_host_restarts_in_the_same_process(monkeypatch):
 
 
 async def test_the_host_knows_which_inboxes_each_opener_declared(recorded_phases, monkeypatch):
-    """The opener runs inside messaging's start; the host watches the inbox registry around it,
-    so taking the opener back also takes back the inboxes it opened, and only those."""
+    """The opener runs inside messaging's start and declares through the function the host hands
+    it; the host notes each name, so taking the opener back also takes back the inboxes it opened,
+    and only those."""
     import app.host.host as host_module
 
     monkeypatch.setattr(
@@ -747,9 +748,9 @@ async def test_the_host_knows_which_inboxes_each_opener_declared(recorded_phases
     )
     disposers: list = []
 
-    async def open_sisters() -> None:
+    async def open_sisters(declare) -> None:
         for name in ("赤尾", "绫奈"):
-            receiving.inbox(name, on_message=_ignore)
+            declare(name, on_message=_ignore)
 
     def sisters(ctx) -> None:
         disposers.append(ctx.inboxes_at_start(open_sisters))
@@ -779,8 +780,8 @@ async def test_a_failing_opener_leaves_no_inbox_behind(recorded_phases, monkeypa
         host_module, "start_messaging", receiving._open_inboxes_named_at_start
     )
 
-    async def half_named() -> None:
-        receiving.inbox("赤尾", on_message=_ignore)
+    async def half_named(declare) -> None:
+        declare("赤尾", on_message=_ignore)
         raise RuntimeError("两个人的显示名一样")
 
     def setup(ctx) -> None:

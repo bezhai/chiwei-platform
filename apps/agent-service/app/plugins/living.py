@@ -28,7 +28,8 @@ durable edge carries only the file she picked up in one of her own rounds
 (``tests/living/test_no_inbound.py``).
 
 **The inboxes are opened at start**: their names come from the persona table, which cannot be read
-at import (:func:`app.living.received.open_inboxes`).
+at import (:func:`app.living.received.open_inboxes`, which declares them through the function the
+host hands it).
 
 **``records`` and ``pictures`` are imported for their Data classes.** A Data class registers when
 its module is imported, and the schema step builds tables only for registered classes. Both are

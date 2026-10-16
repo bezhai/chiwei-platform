@@ -440,9 +440,9 @@ async def test_inboxes_named_at_start_are_opened_when_receiving_starts(broker):
     async def on_message(message) -> None:
         got.append(message)
 
-    async def open_by_name() -> None:
+    async def open_by_name(declare) -> None:
         named.append("绫奈")  # 真实的拥有者在这里读库
-        inbox("绫奈", on_message=on_message)
+        declare("绫奈", on_message=on_message)
 
     inboxes_at_start(open_by_name)
     assert named == [], "声明时就去取名字了：接线 import 的时候库还没准备好"
@@ -463,9 +463,9 @@ async def test_inboxes_named_at_start_are_named_once_per_process(broker):
     async def on_message(message) -> None:
         return None
 
-    async def open_by_name() -> None:
+    async def open_by_name(declare) -> None:
         named.append("绫奈")
-        inbox("绫奈", on_message=on_message)
+        declare("绫奈", on_message=on_message)
 
     inboxes_at_start(open_by_name)
     await start_messaging()
@@ -483,7 +483,7 @@ async def test_a_failure_while_naming_inboxes_at_start_fails_the_start(broker):
     async def on_message(message) -> None:
         return None
 
-    async def names_are_wrong() -> None:
+    async def names_are_wrong(declare) -> None:
         raise RuntimeError("两个人的显示名一样")
 
     inbox("operator", on_message=on_message)
@@ -501,8 +501,8 @@ async def test_a_failure_while_naming_inboxes_at_start_fails_every_later_start_t
     async def on_message(message) -> None:
         return None
 
-    async def names_are_wrong() -> None:
-        inbox("赤尾", on_message=on_message)  # 开了一个，下一个名字才发现有问题
+    async def names_are_wrong(declare) -> None:
+        declare("赤尾", on_message=on_message)  # 开了一个，下一个名字才发现有问题
         raise RuntimeError("两个人的显示名一样")
 
     inbox("operator", on_message=on_message)
@@ -525,12 +525,12 @@ async def test_naming_inboxes_at_start_is_tried_again_in_full_after_a_failure(br
     async def on_message(message) -> None:
         return None
 
-    async def flaky() -> None:
+    async def flaky(declare) -> None:
         attempts.append(len(attempts) + 1)
-        inbox("赤尾", on_message=on_message)
+        declare("赤尾", on_message=on_message)
         if len(attempts) == 1:
             raise RuntimeError("库一时连不上")
-        inbox("绫奈", on_message=on_message)
+        declare("绫奈", on_message=on_message)
 
     inboxes_at_start(flaky)
     with pytest.raises(RuntimeError, match="库一时连不上"):
@@ -547,8 +547,8 @@ def test_clearing_the_inboxes_also_drops_the_ones_named_at_start():
     开始接收时就会替上一个用例去读库。"""
     from app.messaging import receiving
 
-    async def open_by_name() -> None:
-        inbox("绫奈", on_message=None)  # 不会被调到
+    async def open_by_name(declare) -> None:
+        declare("绫奈", on_message=None)  # 不会被调到
 
     inboxes_at_start(open_by_name)
     receiving.clear_inboxes()

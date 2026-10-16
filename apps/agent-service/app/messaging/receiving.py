@@ -57,9 +57,11 @@ broker 把它送进本泳道的 ``isolated_dead_letters_<泳道>``，原样保�
 **名字到进程启动时才知道的收件箱**（:func:`inboxes_at_start`）。:func:`inbox` 在插件
 setup 时就要名字，可有的名字存在库里（三姐妹的名字取自人设表），setup 不读库。
 这类拥有者在 setup 里只声明一个"开设它们"的函数，:func:`start_receiving` 在开设任何收件箱之前
-调它一次，它在里面取名字、对每个名字调 :func:`inbox`。它抛异常，启动就失败，一个收件箱都
-不开：名字就是地址，名字有问题时不该带着其中一部分收件箱运行。失败的那一次里已经按名字声明
-的收件箱一并撤掉，声明本身留着：同一个进程再开始接收时整组重新调一遍，名字还有问题就照样失败，
+调它一次，交给它一个声明函数（参数和 :func:`inbox` 一样），它在里面取名字、对每个名字调这个
+声明函数。这一组有哪些收件箱，以经它声明的为准：失败时撤掉的、宿主撤销这个开设函数时一并撤掉
+的（``ctx.inboxes_at_start``），都是这些。它抛异常，启动就失败，一个收件箱都不开：名字就是
+地址，名字有问题时不该带着其中一部分收件箱运行。失败的那一次里已经按名字声明的收件箱一并撤掉，
+声明本身留着：同一个进程再开始接收时整组重新调一遍，名字还有问题就照样失败，
 问题没了就开出完整的一组——不会把上一次开了一半的那几个当成开好的。全部调成功之后，每个声明
 在一个进程里就不再调，停了再开始接收时开设的还是那一次取到的那几个名字。
 
@@ -296,7 +298,9 @@ def inbox(
     )
 
 
-OpenAtStart = Callable[[], Awaitable[None]]
+# 交给"启动时再开"的开设函数的那个声明函数，参数和 :func:`inbox` 一样。
+Declare = Callable[..., None]
+OpenAtStart = Callable[[Declare], Awaitable[None]]
 
 # 还没调成功过的"启动时再开"的声明（:func:`inboxes_at_start`）。开始接收时逐个调，全部成功才清空。
 INBOXES_AT_START: list[OpenAtStart] = []
@@ -305,9 +309,9 @@ INBOXES_AT_START: list[OpenAtStart] = []
 def inboxes_at_start(open_them: OpenAtStart) -> None:
     """声明一组名字到进程启动时才知道的收件箱。插件 setup 时经宿主调（``ctx.inboxes_at_start``），见模块说明。
 
-    ``open_them`` 在 :func:`start_receiving` 开设任何收件箱之前调，在里面取名字、对每个
-    名字调 :func:`inbox`。它抛异常，启动就失败，它这一次声明的收件箱撤掉，下一次开始接收时
-    再调一遍。
+    ``open_them(declare)`` 在 :func:`start_receiving` 开设任何收件箱之前调，在里面取名字、对每个
+    名字调 ``declare``（参数和 :func:`inbox` 一样）。它抛异常，启动就失败，它这一次经 ``declare``
+    声明的收件箱撤掉，下一次开始接收时再调一遍。
     """
     INBOXES_AT_START.append(open_them)
 
@@ -408,14 +412,19 @@ async def _open_while_held(spec: InboxSpec, opener: _HeldOpener, let_go: asyncio
 
 
 async def _open_inboxes_named_at_start() -> None:
-    """调全部"启动时再开"的声明。有一个失败，这一次声明的收件箱全部撤掉、声明全部留着再抛。"""
-    declared_before = dict(INBOX_REGISTRY)
+    """调全部"启动时再开"的声明。有一个失败，这一次经它们声明的收件箱全部撤掉、声明全部留着再抛。"""
+    declared: list[str] = []
+
+    def declare(name: str, **options: Any) -> None:
+        inbox(name, **options)
+        declared.append(name)
+
     try:
         for open_them in INBOXES_AT_START:
-            await open_them()
+            await open_them(declare)
     except BaseException:
-        INBOX_REGISTRY.clear()
-        INBOX_REGISTRY.update(declared_before)
+        for name in declared:
+            INBOX_REGISTRY.pop(name, None)
         raise
     INBOXES_AT_START.clear()
 
