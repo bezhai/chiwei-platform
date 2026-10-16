@@ -12,8 +12,8 @@
 重新排回收件箱、到时再看一次：第一次隔 1 秒，之后每次翻倍，封顶 60 秒，不晚于那份租约到期之后
 1 秒（:func:`_held_check_delay_ms`），已经看过几次记在消息头 :data:`HELD_CHECKS_HEADER` 里。拿着
 它的要是一次刚被取消、还没放开占位的投递，几秒内就由这里接手；那个进程要是半路死了，租约过期后
-由这里接管。处理失败后的重试那一份不带这个头，再碰上别人拿着时从 1 秒重新算。接收方的处理
-函数仍然可能在极端情况下看到同一条消息两次（处理完、还没来得及标记成功就崩了），
+由这里接管。处理失败后的重试那一份、死信重放回去的那一份都不带这个头，再碰上别人拿着时从 1 秒
+重新算。接收方的处理函数仍然可能在极端情况下看到同一条消息两次（处理完、还没来得及标记成功就崩了），
 所以它拿到的 ``Message`` 带着 ``message_id``，自己据此去重。拥有者自己记的"处理过哪些"什么时候
 可以不记，问 :func:`succeeded_message_ids`：成功记下来了，同一条就再也到不了处理函数。
 
@@ -853,7 +853,7 @@ async def _after_owner_failure(
         await publish(
             route,
             message.to_json(),
-            headers=_retry_headers(received, attempt),
+            headers=retry_headers(received, attempt),
             delay_ms=delay_ms,
         )
         return Verdict.ACK
@@ -874,7 +874,7 @@ async def _after_owner_failure(
         await publish(
             route,
             message.to_json(),
-            headers=_retry_headers(received, decision.attempt),
+            headers=retry_headers(received, decision.attempt),
             delay_ms=decision.delay_ms,
         )
         return Verdict.ACK
@@ -887,9 +887,10 @@ async def _after_owner_failure(
     return Verdict.DEAD_LETTER
 
 
-def _retry_headers(received: dict[str, Any], attempt: int) -> dict[str, Any]:
-    """处理失败后重试那一份的消息头：记下这是第几次，去掉"看到过几次别人的占位"——它要是再碰上
-    别人拿着，那是新的一段，从 :data:`HELD_CHECK_FIRST_MS` 重新算起。"""
+def retry_headers(received: dict[str, Any], attempt: int) -> dict[str, Any]:
+    """重新排一次处理的那一份的消息头：处理失败后的重试（``attempt`` 是第几次），以及死信重放回去
+    的那一份（:mod:`app.messaging.dead_letters`，从 0 算起）。记下这是第几次，去掉"看到过几次别人的
+    占位"——它要是再碰上别人拿着，那是新的一段，从 :data:`HELD_CHECK_FIRST_MS` 重新算起。"""
     kept = {k: v for k, v in received.items() if k != HELD_CHECKS_HEADER}
     return {**kept, DELIVERY_COUNT_HEADER: attempt}
 

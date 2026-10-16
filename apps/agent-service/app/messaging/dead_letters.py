@@ -32,6 +32,7 @@ from app.infra.rabbitmq import (
 )
 from app.messaging.broker import SCHEDULED, inbox_route, lane, publish
 from app.messaging.message import Message, SendFailed
+from app.messaging.receiving import retry_headers
 from app.runtime.dlq_audit import (
     AuditAction,
     AuditStatus,
@@ -42,7 +43,7 @@ from app.runtime.retry import DELIVERY_COUNT_HEADER
 
 logger = logging.getLogger(__name__)
 
-# broker 每送一次死信就往头里加这几项。重放时去掉，重试计数清零，让它从头算起。
+# broker 每送一次死信就往头里加这几项。重放时去掉，再按 retry_headers 从头算起。
 _DEATH_HEADERS = (
     "x-death",
     "x-first-death-queue",
@@ -132,7 +133,8 @@ async def peek_dead_letters(*, limit: int) -> list[dict[str, Any]]:
 async def replay_dead_letters(*, limit: int, operator: str | None) -> dict[str, int]:
     """把本泳道死信队列里的至多 ``limit`` 条发回它们原来的队列。
 
-    发回去的消息重试计数清零；runtime_inflight 里它停在 ``failed``，下一次处理直接接管。
+    发回去的消息重试计数清零，"看到过几次别人的占位"也去掉（:func:`app.messaging.receiving.retry_headers`），
+    和处理失败后的重试一样从头算；runtime_inflight 里它停在 ``failed``，下一次处理直接接管。
     每一条都在 ``runtime_dlq_audit`` 里留一行。
     """
     replayed = refused = failed = 0
@@ -173,8 +175,9 @@ async def replay_dead_letters(*, limit: int, operator: str | None) -> dict[str, 
                     ),
                 )
                 continue
-            headers = {k: v for k, v in received.items() if k not in _DEATH_HEADERS}
-            headers[DELIVERY_COUNT_HEADER] = 0
+            headers = retry_headers(
+                {k: v for k, v in received.items() if k not in _DEATH_HEADERS}, 0
+            )
             try:
                 await publish(route, message.to_json(), headers=headers)
             except SendFailed as exc:

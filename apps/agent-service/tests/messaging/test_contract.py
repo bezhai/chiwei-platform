@@ -554,6 +554,67 @@ async def test_a_retry_after_a_failure_starts_counting_the_looks_at_a_live_claim
     assert "x-held-checks" not in retries[0], retries[0]
 
 
+async def test_a_replayed_dead_letter_starts_counting_the_looks_at_a_live_claim_afresh(
+    broker, test_db, monkeypatch
+):
+    """看过一次别人的占位、接手之后处理失败进了死信：重放回去的那一份不带"看过几次"，它要是再
+    碰上别人拿着，第一次也是隔 1 秒再看。"""
+    from app.messaging import receiving
+    from app.messaging.dead_letters import replay_dead_letters
+
+    world = Inbox(fail_times=1)
+    inbox("world", on_message=world.on_message, max_attempts=1)
+    await start_messaging()
+
+    message = new_message(
+        sender="operator", recipient="world", body="接手后失败，进死信。", kind=Kind.MESSAGE
+    )
+    async with test_db.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO runtime_inflight (edge_id, idempotent_key, data_table, "
+                "state, attempts, locked_until, worker_id) VALUES "
+                "('inbox:world@coe-msg', :k, 'inbox_world', 'processing', 1, "
+                "now() + interval '0.5 seconds', 'dead-peer:1')"
+            ),
+            {"k": message.message_id},
+        )
+    assert await mq.publish_with_confirm(
+        Route("inbox_world", "inbox.world", isolated=True), message.to_json(), lane=LANE
+    )
+    dead_letters = f"{ISOLATED_DEAD_LETTERS}_{LANE}"
+    await eventually(lambda: broker.depth(dead_letters), timeout=10)
+    assert world.calls == 1
+
+    looks: list[tuple[int | None, object]] = []
+    real_publish = receiving.publish
+
+    async def recorded(route, body, *, headers, delay_ms=None):
+        if route.queue == "inbox_world":
+            looks.append((delay_ms, headers.get("x-held-checks")))
+        await real_publish(route, body, headers=headers, delay_ms=delay_ms)
+
+    monkeypatch.setattr(receiving, "publish", recorded)
+    async with test_db.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE runtime_inflight SET state = 'processing', "
+                "locked_until = now() + interval '3 seconds', worker_id = 'dead-peer:2' "
+                "WHERE edge_id = 'inbox:world@coe-msg' AND idempotent_key = :k"
+            ),
+            {"k": message.message_id},
+        )
+
+    assert await replay_dead_letters(limit=10, operator="test") == {
+        "replayed": 1,
+        "refused": 0,
+        "failed": 0,
+    }
+
+    await eventually(lambda: world.got, timeout=15)
+    assert looks[0] == (1000, 1), looks
+
+
 # ---------------------------------------------------------------------------
 # 要不要叫醒收件人：发件方说了算，消息一路带着它
 #
