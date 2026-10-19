@@ -16,8 +16,6 @@ since that is what the provider adapter downloads and sends.
 
 from __future__ import annotations
 
-import struct
-import zlib
 from datetime import datetime
 
 import pytest
@@ -33,23 +31,6 @@ pytestmark = pytest.mark.integration
 MOMENT = "living_life_moment"
 
 
-def _png(red: int, green: int, blue: int) -> bytes:
-    """A real one-pixel PNG of that colour, so each picture has its own bytes."""
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        body = kind + data
-        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
-
-    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-    pixels = zlib.compress(bytes([0, red, green, blue]))
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", header)
-        + chunk(b"IDAT", pixels)
-        + chunk(b"IEND", b"")
-    )
-
-
 def _at(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 7, 25, hour, minute, tzinfo=CST)
 
@@ -63,7 +44,9 @@ async def test_pictures_reach_her(replay):
     await seeds.seed_akaos_phone()
     replay.broker.declare_inbox("world")
 
-    replay.objects.put("pictures/akao-sakura.png", _png(250, 200, 220), "image/png")
+    replay.objects.put(
+        "pictures/akao-sakura.png", seeds.png(250, 200, 220), "image/png"
+    )
     await remember_a_picture(
         lane=replay.lane,
         persona_id="akao",
@@ -71,7 +54,7 @@ async def test_pictures_reach_her(replay):
         what="窗外的樱花",
         made_at=datetime(2026, 7, 24, 20, 0, tzinfo=CST),
     )
-    replay.objects.put("images/bezhai-cat.png", _png(120, 90, 40), "image/png")
+    replay.objects.put("images/bezhai-cat.png", seeds.png(120, 90, 40), "image/png")
     # The second picture's object was never stored (the inbound cache missed it): it signs, and
     # the fetch answers 404.
     await seeds.bezhai_sends(

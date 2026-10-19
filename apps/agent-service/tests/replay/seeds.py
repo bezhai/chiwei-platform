@@ -1,4 +1,5 @@
-"""What replayed rounds read that no round writes: the household, her phone, the people around.
+"""What replayed rounds read that no round writes: the household, her phone, the people around,
+and picture bytes.
 
 Seeds are written before the steps that read them and are not part of any step's record. Ids
 are fixed (``uuid5``) so they read the same in every baseline.
@@ -7,7 +8,9 @@ are fixed (``uuid5``) so they read the same in every baseline.
 from __future__ import annotations
 
 import json
+import struct
 import uuid
+import zlib
 from datetime import datetime
 
 from sqlalchemy import text
@@ -119,3 +122,20 @@ async def bezhai_sends(
                 "named": [],
             },
         )
+
+
+def png(red: int, green: int, blue: int) -> bytes:
+    """A real one-pixel PNG of that colour, so each picture has its own bytes."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    pixels = zlib.compress(bytes([0, red, green, blue]))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", pixels)
+        + chunk(b"IEND", b"")
+    )

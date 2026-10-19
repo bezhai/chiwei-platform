@@ -20,7 +20,7 @@ skipping, because a baseline that silently skips guards nothing.
 |---|---|
 | `harness/` | The core. Scenarios should not need to change it. |
 | `prompts/<prompt id>.txt` / `.json` | Fixture text for each Langfuse prompt a round renders (text prompt, or a chat prompt as a list of `{role, content}`). |
-| `seeds.py` | Rows the rounds read that no round writes (personas, her bot, a private chat). |
+| `seeds.py` | Rows the rounds read that no round writes (personas, her bot, a private chat), and picture bytes. |
 | `test_<kind>.py` | Scenarios of one round kind. |
 | `test_harness.py` | Self-tests of the core, for guarantees whose breaking no scenario would notice (a swallowed `ScriptExhausted`, Redis shared between scenarios, a missing answer from an outside service, a request to a host nothing serves). |
 | `baselines/<kind>/<scenario>.json` | The recorded baselines. |
