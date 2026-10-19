@@ -1219,6 +1219,81 @@ async def test_a_cell_that_already_ran_late_does_not_run_again(moment_db, stub_m
     assert len(runner.runs) == 2
 
 
+# --------------------------------------------------------------------------
+# 七 quater · 常规一轮的身份和从它派生的 id，写死字面值
+#
+# 她一轮里记下的位置、经历都按这一轮的身份派生 id，派生出的 id 是重跑时去重的全部依据。身份的
+# 写法改一个字节，重跑同一格的那一轮就对不上第一遍写下的行：同一件事记两遍。所以这里写的是
+# 字面值，不从实现里算。
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("minutes", "now", "named"),
+    [
+        (10, dt.datetime(2026, 7, 25, 14, 7, 59, tzinfo=_CST), "2026-07-25T14:00+08:00"),
+        (15, dt.datetime(2026, 7, 25, 14, 29, tzinfo=_CST), "2026-07-25T14:15+08:00"),
+        # 格子从北京时间的午夜起算：七分钟一格，01:00 落在 00:56 那一格。
+        (7, dt.datetime(2026, 7, 25, 1, 0, tzinfo=_CST), "2026-07-25T00:56+08:00"),
+        # 钟读出来是 UTC 的时刻，格子照样按北京时间落、按北京时间写。
+        (10, dt.datetime(2026, 7, 25, 6, 7, tzinfo=dt.UTC), "2026-07-25T14:00+08:00"),
+    ],
+)
+async def test_a_regular_round_is_named_by_the_minute_its_cell_starts(
+    moment_db, stub_moment, monkeypatch, minutes, now, named
+):
+    from app.living import moment as moment_mod
+
+    stub_moment(said="继续")
+
+    async def cell_minutes() -> int:
+        return minutes
+
+    monkeypatch.setattr(moment_mod, "life_moment_minutes", cell_minutes)
+
+    moment = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(now))
+
+    assert moment.moment_id == named
+
+
+@pytest.mark.integration
+async def test_where_she_is_and_what_she_does_are_named_from_her_rounds_identity(
+    moment_db, stub_moment
+):
+    """位置的自然键是 ``<身份>:<地点和事的哈希前八位>``，经历的 id 是 ``moment:<uuid5>``，
+    uuid5 的输入是她、这一轮的身份、说话还是动作、原话、说给谁。"""
+    from app.data.persist import fetch_all
+    from app.data.schema import table_name
+    from app.living.records import Happening, Whereabouts
+
+    stub_moment(
+        ("switch_to", {"doing": "煮抹茶", "place": "家/厨房", "because": "想喝点热的"}),
+        ("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}),
+        ("act", {"what": "把水壶放上灶台"}),
+        said="去煮了",
+    )
+
+    moment = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 7)))
+
+    assert moment.moment_id == "2026-07-25T14:00+08:00"
+    where = await fetch_all(
+        f"SELECT moment_id FROM {table_name(Whereabouts)} "
+        f"WHERE lane = :lane AND persona_id = 'akao'",
+        lane=LANE,
+    )
+    assert [r["moment_id"] for r in where] == ["2026-07-25T14:00+08:00:c669f260"]
+    happened = await fetch_all(
+        f"SELECT happening_id FROM {table_name(Happening)} "
+        f"WHERE lane = :lane AND actor = 'akao' ORDER BY seq",
+        lane=LANE,
+    )
+    assert [r["happening_id"] for r in happened] == [
+        "moment:57cb8541cfab5304809136eab9b80464",
+        "moment:fb932eafeb4b5349bed5f95e80a4ed19",
+    ]
+
+
 def test_one_wake_has_room_for_more_than_one_whole_thing():
     """上限的含义是"她一口气能做几件事"，不是"一次思考多深"。
 

@@ -576,6 +576,34 @@ async def test_picking_up_the_same_file_twice_in_one_moment_is_one_round(
 
 
 @pytest.mark.integration
+async def test_a_stretch_of_reading_is_named_from_her_rounds_identity_and_the_file(
+    reading_db, in_a_moment, picked_up
+):
+    """一程的身份是 ``uuid5(读书的命名空间, "泳道␟她␟她那一轮的身份␟附件")``，写死字面值。
+
+    读书收件箱按它去重：她那一轮重跑时拿起同一个文件，靠它认出是同一程。她一轮的身份（常规的
+    格子、被叫醒的那条消息）的写法改了，或者这里的拼法改了，重跑就会把同一段再读一遍。
+    """
+    dm_one = _attachment(_M_DM_SHAYANG, "key-dm-shayang")
+    assert dm_one == "4faff808-adbd-5894-94c8-6984a7a8801b:key-dm-shayang"
+
+    async with in_a_moment("akao", moment_id="2026-07-25T21:30+08:00"):
+        await read_a_bit.invoke({"which": dm_one})
+    async with in_a_moment("akao", moment_id="nudge:inbox:ayana-dinner-1"):
+        await read_a_bit.invoke({"which": dm_one})
+
+    namespace = uuid.UUID("6f2a5d38-9b41-4c07-a5e2-3d81b6f0c974")
+    assert [p.round_id for p in _rounds(picked_up)] == [
+        uuid.uuid5(namespace, f"{LANE}\x1fakao\x1f2026-07-25T21:30+08:00\x1f{dm_one}").hex,
+        uuid.uuid5(namespace, f"{LANE}\x1fakao\x1fnudge:inbox:ayana-dinner-1\x1f{dm_one}").hex,
+    ]
+    assert [p.round_id for p in _rounds(picked_up)] == [
+        "d70a246d3f4e500d8c32d5dae0b616c9",
+        "80d5de6492045c588ce04c861f3c3e1a",
+    ]
+
+
+@pytest.mark.integration
 async def test_a_round_the_reading_inbox_did_not_get_is_said_so_and_can_be_picked_up_again(
     reading_db, in_a_moment, picked_up
 ):

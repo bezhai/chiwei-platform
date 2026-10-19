@@ -112,14 +112,16 @@ async def _incoming(
     sender_name: str = "bezhai",
     names_bot: uuid.UUID | None = None,
     mention_unrecorded: bool = False,
+    message_id: uuid.UUID | None = None,
 ) -> str:
     """``names_bot`` 写进 ``mentioned_common_user_ids``，不是往 ``content`` 里塞
     一条 mention item —— 公共层的内容契约没有那种片段（见 test_phone 的同名夹具）。
 
     ``mention_unrecorded`` 写 NULL：没人算过这条消息（存量行、QQ 的行）。
+    ``message_id`` 不给就随机取一个。
     """
     items = [{"kind": "text", "text": body}]
-    mid = uuid.uuid4()
+    mid = message_id or uuid.uuid4()
     async with tx():
         s = current_session()
         await s.execute(
@@ -1171,3 +1173,65 @@ async def test_a_round_a_summons_woke_that_failed_is_retried_as_itself_whatever_
 
     then = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35)))
     assert then is not None and then.moment_id == f"nudge:{newer}"
+
+
+# --------------------------------------------------------------------------
+# 提前一轮的身份和"已开始"那一行，写死字面值
+#
+# 被叫醒的那一轮里她做的事、发的话都按这一轮的身份派生 id；"已开始"那一行记下的是这一轮被
+# 什么叫醒，重跑时按它还原同一个身份。两者的写法改一个字节，重跑的那一轮就对不上第一遍写下的
+# 行。所以这里写的是字面值，不从实现里算。
+# --------------------------------------------------------------------------
+
+
+async def _begun() -> list[str]:
+    from app.data.schema import table_name
+    from app.living.nudge import NudgeBegun
+
+    rows = await fetch_all(
+        f"SELECT nudged_by FROM {table_name(NudgeBegun)} "
+        f"WHERE lane = :l AND persona_id = 'akao' ORDER BY created_at",
+        l=LANE,
+    )
+    return [r["nudged_by"] for r in rows]
+
+
+@pytest.mark.integration
+async def test_a_round_a_summons_woke_is_named_after_that_chat_message(nudge_db, stub_life):
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    await _incoming(
+        _DM,
+        body="在吗",
+        at=_at(21, 31),
+        message_id=uuid.UUID("0b6f3c1e-7d24-4a59-8e13-5c2f9a71d406"),
+    )
+
+    moment = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+
+    assert moment.moment_id == "nudge:0b6f3c1e-7d24-4a59-8e13-5c2f9a71d406"
+    assert await _begun() == ["0b6f3c1e-7d24-4a59-8e13-5c2f9a71d406"]
+
+
+@pytest.mark.integration
+async def test_a_round_a_received_message_woke_is_named_after_that_message(
+    nudge_db, stub_life, named
+):
+    from app.living.received import receive
+    from app.messaging.message import Kind, new_message
+
+    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    await receive(
+        new_message(
+            sender="绫奈",
+            recipient="赤尾",
+            body="姐，下来吃饭。",
+            kind=Kind.MESSAGE,
+            time=_at(21, 31),
+            message_id="ayana-dinner-1",
+        )
+    )
+
+    moment = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+
+    assert moment.moment_id == "nudge:inbox:ayana-dinner-1"
+    assert await _begun() == ["inbox:ayana-dinner-1"]

@@ -1445,6 +1445,34 @@ async def test_a_send_without_pictures_derives_exactly_the_id_it_always_did(
 
 
 @pytest.mark.integration
+async def test_a_send_with_pictures_derives_exactly_the_id_it_always_did(
+    mouth_db, in_a_moment, spoken, guard, a_picture
+):
+    """带图那条路的 id 也写死：泳道、她、这一轮的身份、会话、张数、每张的文件名（按她给的
+    顺序）、原话，用带图的那个命名空间。她这一轮的身份的写法改了，这个值就变。"""
+    from app.living.mouth import latest_outbound
+
+    one = await a_picture(file_name="temp/tos_one.jpg")
+    two = await a_picture(file_name="temp/tos_two.jpg")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        await send_message.invoke(
+            {
+                "what": "两张一起给他",
+                "channel_id": str(_DM),
+                "pictures": [two.picture_id, one.picture_id],
+            }
+        )
+
+    row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+    assert row.outbound_id == "3e0b8806ad6155b5b82c53136c065d20"
+
+
+@pytest.mark.integration
 async def test_a_handle_that_is_not_hers_never_gets_sent(
     mouth_db, in_a_moment, spoken, guard, a_picture
 ):
