@@ -22,7 +22,7 @@ skipping, because a baseline that silently skips guards nothing.
 | `prompts/<prompt id>.txt` / `.json` | Fixture text for each Langfuse prompt a round renders (text prompt, or a chat prompt as a list of `{role, content}`). |
 | `seeds.py` | Rows the rounds read that no round writes (personas, her bot, a private chat). |
 | `test_<kind>.py` | Scenarios of one round kind. |
-| `test_harness.py` | Self-tests of the core, for guarantees whose breaking no scenario would notice (a swallowed `ScriptExhausted`, Redis shared between scenarios). |
+| `test_harness.py` | Self-tests of the core, for guarantees whose breaking no scenario would notice (a swallowed `ScriptExhausted`, Redis shared between scenarios, a missing answer from an outside service, a request to a host nothing serves). |
 | `baselines/<kind>/<scenario>.json` | The recorded baselines. |
 | `.actual/` | Written when a comparison fails; git-ignored. |
 
@@ -69,8 +69,13 @@ plugins' setup and the dataflow graph.
 | Redis | `app.infra.redis._redis` | `fakeredis` (`replay.redis`), on a server of its own per scenario (fakeredis otherwise looks its server up by a `uuid4` host name, which the replay makes deterministic, so every scenario would share one). Only the banned-word set is read today, under the bare key `banned_words`: the Redis capability adds no lane prefix since the 2026-05-13 hotfix (`app/capabilities/redis.py`); a coe lane has a Redis of its own. |
 | RabbitMQ | the methods of `app.infra.rabbitmq.mq` (`harness/broker.py`) | In-memory queues, bindings and consumers. Nothing is delivered unless the scenario delivers it (`replay.broker.deliver(queue)`), except replies to a process's own reply queue. Other processes' inboxes are declared with `broker.declare_inbox(name, answers=...)`. A rejected message moves to a dead-letter queue only for isolated routes (their lane's `isolated_dead_letters`); the broker-side dead-lettering of other queues (DLX, lane TTL fallback) is not modelled, so for such a queue the record is the `reject` itself. A delivery whose consumer was killed is never settled; `replay.broker.requeue_unsettled()` puts it back at the front of its queue, marked redelivered, as RabbitMQ does when the dead consumer's channel closes. |
 | Database | real Postgres (`tests/runtime/conftest.py::test_db`); SQLAlchemy engine events (`harness/database.py`) | The full schema both apps run on. Write statements are recorded by transaction; every table is read before and after each step. |
-| Object storage and tool-service's image pipeline | `httpx.AsyncHTTPTransport.handle_async_request`, for two hosts only (`harness/objects.py`); requests to any other host go out as before | `tool-service` `POST /api/image-pipeline/get-url` signs a name into `https://object-store.replay/<file_name>?signed-until=<frozen clock + 1.5 h>` (signing is pure computation, as in tool-service: it signs names nothing was stored under). A `GET` on the store answers what the scenario put there (`replay.objects.put(file_name, bytes, content_type)`), `404` for anything else, `403` once the signature has run out. `image_client` (envelope, lane header, error handling), the reading round's byte fetch and the phone's reachability check all run for real above it. Any other tool-service path raises `UnservedRequest` (a `BaseException`, so `image_client`'s `except Exception` cannot hide it): add it to `harness/objects.py`. Every request to these hosts goes onto the effects timeline. |
-| Process | `harness/process.py` | Starts an app the way `app.main`'s lifespan does, through its plugin host (`Host.for_app`) with only the broker phases: every plugin's setup, the graph, the broker connection, messaging. No schema step (built once per scenario), interval clocks, HTTP routes or skill reload task; `SKILLS_DIR` is an empty directory. Rounds run when a scenario calls them. Messaging's worker name (`app.messaging.receiving.WORKER_ID`, `hostname:pid` in production, the start of the claim it writes on an inflight row) is `<app>#<n>`, the n-th process the scenario started. |
+| HTTP | `httpx.AsyncHTTPTransport.handle_async_request` and `httpx.HTTPTransport.handle_request` (`harness/network.py`) | Every request is answered by the boundary that serves its host (the rows below). **Nothing goes out to the network**: a request to any other host, or one a served host was given no answer for, is refused: recorded, and raised as `UnservedRequest`, a `BaseException`, so a tool's `@tool_error` or a capability's `except Exception` cannot turn it into a quiet failure. `replay.check()` fails on every refused request even when something above swallowed it. The one exception is the lane router's registry poll (a daemon thread on its own 30 s timer), which gets `httpx.ConnectError` as it does on any machine without a registry. The providers' hosts and keys come from `app.infra.config.settings`; the replay swaps it, in every `app` module that bound it, for a copy pointing each provider at its replay host, so the environment cannot change where a request goes. |
+| Object storage and tool-service's image pipeline | Two hosts (`harness/objects.py`) | `tool-service` `POST /api/image-pipeline/get-url` signs a name into `https://object-store.replay/<file_name>?signed-until=<frozen clock + 1.5 h>` (signing is pure computation, as in tool-service: it signs names nothing was stored under). `POST /api/image-pipeline/to-tos` stores an image under tool-service's name shape (`temp/tos_<md5:16>_<upload ordinal, 8 hex>.jpg`) and answers it signed: the decoded bytes of a base64 upload, or for a url what the scenario said that address serves on the web (`replay.objects.on_the_web(url, bytes, content_type)`); unlike tool-service it does not re-encode as JPEG. A `GET` on the store answers what the scenario put there (`replay.objects.put(file_name, bytes, content_type)`) or an upload stored, `404` for anything else, `403` once the signature has run out. `image_client` (envelope, lane header, error handling), `upload_image`, the reading round's byte fetch and the phone's reachability check all run for real above it. Any other tool-service path is refused: add it to `harness/objects.py`. Every request to these hosts goes onto the effects timeline. |
+| Web search and reranker | Two hosts (`harness/web.py`): You Search (Google CSE unset) and SiliconFlow | `GET /v1/search`, `POST /v1/contents`, `GET /images` and `POST /v1/rerank` answer what the scenario gave for the query, the url, the image query and the rerank query (`replay.web.results(query, [Hit(...)])`, `.page(url, text)`, `.images(query, [FoundImage(...)])`, `.rerank(query, [score per document sent])`). `app.capabilities.web_search` / `image_search` (`HTTPClient`, parameters, parsing) and `search_web`'s fetch-chunk-rerank pipeline run for real. |
+| Image model | `app.agent.image_gen.resolve_model_info` resolves every model id to an OpenAI-compatible provider at `image-model.replay` (`harness/image_model.py`) | `generate_image`'s dispatch and the OpenAI SDK run for real; `POST /v1/images/generations` answers the picture the scenario gave for the prompt (`replay.image_model.draws(prompt, bytes)`) as `b64_json`. |
+| Script sandbox | `sandbox-worker` (`harness/sandbox.py`) | `POST /exec` answers what the scenario gave for the command (`replay.sandbox.runs(command, stdout=, stderr=, exit_code=)`): her `run_a_script` and a guide's `` !`cmd` `` preprocessing both go through `app.capabilities.sandbox.run`, output cap included. |
+| Weather | QWeather at `weather.replay` (`harness/weather.py`) | `GET /geo/v2/city/lookup` and `/weather/v1/{current,hourly,daily}/{lat}/{lon}` answer the provider JSON the scenario gave (`replay.weather.places(name, [...])`, `.current(lat, lon, body)`, `.hourly(...)`, `.daily(...)`). `app.capabilities.weather` and world's three weather tools run for real. |
+| Process | `harness/process.py` | Starts an app the way `app.main`'s lifespan does, through its plugin host (`Host.for_app`) with only the broker phases: every plugin's setup, the graph, the broker connection, messaging. No schema step (built once per scenario), interval clocks, HTTP routes or skill reload task; `SKILLS_DIR` is an empty directory unless the scenario puts a guide there before starting the process (`replay.guide(name, text)`). Rounds run when a scenario calls them. Messaging's worker name (`app.messaging.receiving.WORKER_ID`, `hostname:pid` in production, the start of the claim it writes on an inflight row) is `<app>#<n>`, the n-th process the scenario started. |
 
 ## What a baseline holds
 
@@ -94,8 +99,9 @@ One JSON document per scenario: the steps in order, and the schema of every tool
   deliveries and how the consumer settled them, file writes and deletes, and requests to
   tool-service and the object store (`{"http": "POST tool-service/api/image-pipeline/get-url",
   "lane": ..., "request": {...}, "status": 200}`, `{"http": "GET object-store/<file_name>",
-  "status": 200, "served": "<content type>, <n> bytes, sha256:<12 hex>"}`). This is where the
-  phases of a round's end show (spec decision 3).
+  "status": 200, "served": "<content type>, <n> bytes, sha256:<12 hex>"}`), and requests to the
+  outside services (web search, reranker, image model, sandbox, weather) with what they asked.
+  This is where the phases of a round's end show (spec decision 3).
 - `consumers_started`: queues that got a consumer (the start step lists what the app opens).
 - `rows`: per table, rows added / changed / removed by the step.
 - `files`: per file on the world volume, added / before→after / removed.
@@ -158,6 +164,14 @@ replay.check("living_moment/continuation")
 - `replay.objects.put(file_name, data, content_type)`: an object in the store (an attachment the
   inbound pipeline cached, a picture she made). A name nothing was put under signs fine and
   fetches as `404`, which is what a cache miss looks like in production.
+- Outside services answer only what the scenario gives, keyed by the request:
+  `replay.web.results / page / images / rerank`, `replay.image_model.draws`,
+  `replay.sandbox.runs`, `replay.weather.places / current / hourly / daily`, and
+  `replay.objects.on_the_web` for a picture tool-service is asked to fetch. An answer can be used
+  any number of times. A request without an answer is refused and fails `replay.check()`, and so
+  does an answer nothing asked for.
+- `replay.guide(name, text)` before `replay.start(...)`: a guide on hand
+  (`SKILLS_DIR/<name>/SKILL.md`).
 - `replay.broker.requeue_unsettled()` after `replay.restart()`: the message a killed consumer was
   handling comes back (see `test_reading.py`'s kill scenarios).
 
@@ -177,11 +191,10 @@ replay.check("living_moment/continuation")
 5. Record: `REPLAY_RECORD=<kind>/<scenario> uv run pytest tests/replay/test_<kind>.py`. Read the
    baseline before committing it: it is the claim of what the code does today.
 
-If a kind reads something no boundary covers (an HTTP service other than tool-service and the
-object store, an image-generation or search provider), add the boundary to the core, document it
-in the table above, and make sure the existing baselines still pass. Requests to hosts the
-harness does not serve go out to the network unchanged, so a missing boundary shows up as a
-connection error in what the step recorded, or as a hang; read the baseline for it.
+If a kind reads something no boundary covers (an HTTP service no row above serves), add the
+boundary to the core, document it in the table above, and make sure the existing baselines still
+pass. A request to a host the harness does not serve is refused, so a missing boundary fails the
+scenario with the request it refused.
 
 ## Re-recording after an intended change
 

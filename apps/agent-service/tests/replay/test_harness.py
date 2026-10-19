@@ -7,13 +7,22 @@ breaking, because a broken one still passes.
   agent and call number, and must neither compare nor record a baseline.
 * ``redis_is_per_replay`` — what one scenario puts in Redis is not there in the next. fakeredis
   picks its server by a random host name from ``uuid4``, which the replay makes deterministic.
+* ``answer_missing`` — a tool reaches an outside service the scenario gave no answer for (her
+  web search). The request is refused with ``UnservedRequest``, which the tool's ``@tool_error``
+  does not turn into a tool result, so the round fails; and the replay fails at ``check()`` even
+  for a step that expected the failure, without comparing or recording a baseline.
+* ``unserved_host`` — a request to a host the replay does not serve never goes out: async and
+  sync clients are both refused, and a refusal the code swallowed
+  (``gather(return_exceptions=True)``) still fails the replay.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from datetime import datetime
 
+import httpx
 import pytest
 
 from app.capabilities import banned_words
@@ -23,6 +32,7 @@ from tests.replay import seeds
 from tests.replay.conftest import DEFAULT_START, LANE
 from tests.replay.harness import Replay, Reply, ToolUse
 from tests.replay.harness import baseline as baseline_mod
+from tests.replay.harness.network import UnservedRequest
 
 pytestmark = pytest.mark.integration
 
@@ -66,6 +76,63 @@ async def test_script_runs_out(replay, monkeypatch):
     with pytest.raises(AssertionError, match=r"'guard_output_safety' call #1\b"):
         replay.check("harness/script_runs_out")
     assert compared == [], "a replay whose script ran out was compared or recorded"
+
+
+async def test_answer_missing(replay, monkeypatch):
+    compared: list[str] = []
+    monkeypatch.setattr(
+        baseline_mod, "compare_or_record", lambda name, document: compared.append(name)
+    )
+    await seeds.seed_household()
+    await seeds.seed_akaos_phone()
+    replay.broker.declare_inbox("world")
+    await replay.start("agent-service")
+
+    # No ``replay.web.results(...)`` for her question.
+    searches = Reply(tools=(ToolUse("search_online", {"question": "明天会下雨吗"}),))
+    replay.model.script("living_life_moment", searches, searches)
+    with pytest.raises(
+        UnservedRequest, match="web search no answer for '明天会下雨吗'"
+    ):
+        await replay.step(
+            "she searches the web; the scenario gave the search no answer",
+            lambda: run_moment(lane=replay.lane, persona_id="akao", clock=now_cst),
+            at=_at(14, 0),
+        )
+    # Even a step that expected the failure does not make the replay pass.
+    await replay.step(
+        "the same search, expected to fail",
+        lambda: run_moment(lane=replay.lane, persona_id="akao", clock=now_cst),
+        raises=UnservedRequest,
+    )
+
+    with pytest.raises(
+        AssertionError, match=r"requests were refused: GET https://web-search"
+    ):
+        replay.check("harness/answer_missing")
+    assert compared == [], "a replay with a refused request was compared or recorded"
+
+
+async def test_unserved_host(replay, monkeypatch):
+    compared: list[str] = []
+    monkeypatch.setattr(
+        baseline_mod, "compare_or_record", lambda name, document: compared.append(name)
+    )
+
+    async def swallowed() -> list:
+        async with httpx.AsyncClient() as client:
+            return await asyncio.gather(
+                client.get("https://example.com/async"), return_exceptions=True
+            )
+
+    outcome = await replay.step("a request the code swallows", swallowed)
+    assert isinstance(outcome[0], UnservedRequest)
+    with pytest.raises(UnservedRequest), httpx.Client() as client:
+        client.get("https://example.com/sync")
+
+    with pytest.raises(AssertionError, match=r"example\.com/async.*example\.com/sync"):
+        replay.check("harness/unserved_host")
+    assert compared == [], "a replay with a refused request was compared or recorded"
 
 
 _DROP_TABLES = """

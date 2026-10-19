@@ -27,15 +27,27 @@ import time_machine
 from pydantic import BaseModel
 
 from app.infra.cst_time import now_cst
-from tests.replay.harness import baseline, model, prompts, volume
+from tests.replay.harness import (
+    baseline,
+    image_model,
+    model,
+    prompts,
+    volume,
+    weather,
+    web,
+)
 from tests.replay.harness.broker import FakeBroker
 from tests.replay.harness.database import Tables, WriteLog, create_schema, row_changes
 from tests.replay.harness.errors import describe_error
 from tests.replay.harness.ids import DeterministicIds
+from tests.replay.harness.image_model import ImageModel
+from tests.replay.harness.network import Network, point_providers_at
 from tests.replay.harness.objects import ObjectStore
 from tests.replay.harness.process import AppProcess
+from tests.replay.harness.sandbox import Sandbox
 from tests.replay.harness.timeline import Timeline
 from tests.replay.harness.volume import file_changes, read_tree
+from tests.replay.harness.weather import Weather
 
 CONTAINER_TZ = "Asia/Shanghai"
 
@@ -72,8 +84,16 @@ class Replay:
         # Everything with an order that matters, in the order it happened during a step: write
         # transactions ending, publishes, deliveries and how they settled, file writes/deletes.
         self.effects = Timeline()
+        # Every HTTP request; hosts nothing serves are refused (see harness/network.py).
+        self.network = Network(self.effects)
         # Object storage and tool-service's image pipeline (attachment and picture bytes).
-        self.objects = ObjectStore(self.effects)
+        self.objects = ObjectStore(self.network)
+        # The outside services her and world's tools reach: what each answers is given by the
+        # scenario, and a request it gave no answer for is refused.
+        self.web = web.Web(self.network)
+        self.image_model = ImageModel(self.network)
+        self.sandbox = Sandbox(self.network)
+        self.weather = Weather(self.network)
         self.model = model.ModelScript(self.effects, objects=self.objects)
         self.broker = FakeBroker(self.effects)
         self.ids = DeterministicIds()
@@ -81,8 +101,10 @@ class Replay:
         # unset (the code's own defaults apply).
         self.config: dict[str, str] = {}
         self.volume = root / "world-volume"
-        # The skills plugin loads ``SKILLS_DIR`` when it is set up: an empty one, no guides on hand.
-        self._skills = root / "no-skills"
+        # The skills plugin loads ``SKILLS_DIR`` when it is set up: empty, no guides on hand,
+        # unless the scenario puts one there before starting the process (:meth:`guide`).
+        self._skills = root / "skills"
+        self._restore_settings = None
         self._engine = engine
         self._monkeypatch = monkeypatch
         self._start = start
@@ -123,7 +145,11 @@ class Replay:
         self.ids.install(mp)
         model.install(self.model, mp)
         self.broker.install(mp)
-        self.objects.install(mp)
+        self.network.install(mp)
+        image_model.install(mp)
+        self._restore_settings = point_providers_at(
+            mp, {**web.SETTINGS, **weather.SETTINGS}
+        )
         volume.install(mp, self.volume, self.effects)
         self._install_langfuse(mp)
         self._install_dynamic_config(mp)
@@ -139,6 +165,8 @@ class Replay:
         finally:
             if self._writes is not None:
                 self._writes.close()
+            if self._restore_settings is not None:
+                self._restore_settings()
             if self._clock is not None:
                 self._clock.stop()
             if self._tz_before is None:
@@ -213,6 +241,13 @@ class Replay:
             self.broker,
             worker=f"{app_name}#{self._started}",
         )
+
+    def guide(self, name: str, text: str) -> None:
+        """A guide on hand: ``SKILLS_DIR/<name>/SKILL.md``. The skills plugin loads the directory
+        when the process starts, so call it before :meth:`start`."""
+        folder = self._skills / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "SKILL.md").write_text(text, encoding="utf-8")
 
     # ------------------------------------------------------------------ faults
 
@@ -331,9 +366,21 @@ class Replay:
     def check(self, name: str) -> None:
         """Compare everything recorded with ``baselines/<name>.json`` (or record it).
 
-        A model call that found its script empty fails the replay here, before anything is
-        compared or recorded, even when the step passed because the code under test swallowed
-        the ``ScriptExhausted``."""
+        A model call that found its script empty, and a request the replay refused (no answer
+        given, or a host nothing serves), fail the replay here, before anything is compared or
+        recorded, even when the step passed because the code under test swallowed the
+        ``ScriptExhausted`` or ``UnservedRequest``."""
+        refused = self.network.refused
+        if refused:
+            raise AssertionError(
+                "replay: requests were refused: "
+                + "; ".join(refused)
+                + ". Give the scenario an answer for each (or serve the host in harness/). The "
+                "code under test may have swallowed the UnservedRequest, so the steps passing "
+                "proves nothing. Nothing was compared or recorded."
+            )
+        unanswered = self.network.unused()
+        assert not unanswered, f"replay: answers never asked for: {unanswered}"
         ran_out = self.model.exhausted
         if ran_out:
             calls = ", ".join(f"{agent!r} call #{number}" for agent, number in ran_out)

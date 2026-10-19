@@ -1,28 +1,38 @@
 """Object storage and tool-service's image pipeline, at the HTTP boundary.
 
-Interception point: ``httpx.AsyncHTTPTransport.handle_async_request``, the last step before a
-request goes out on the network. Everything above it runs for real: ``image_client`` (lane
-headers, the ``{success, data}`` envelope, its error handling), the reading round's byte fetch,
-the phone's "is this picture really there" check. Two hosts are served; a request to any other
-host goes out exactly as it did before this boundary existed.
+Two hosts served on :mod:`tests.replay.harness.network`. Everything above runs for real:
+``image_client`` (lane headers, the ``{success, data}`` envelope, its error handling), the reading
+round's byte fetch, the phone's "is this picture really there" check, ``upload_image``.
 
 * **tool-service** (``http://tool-service[:port]``, whatever ``lane_router`` resolves).
-  ``POST /api/image-pipeline/get-url`` signs a ``file_name`` into a store address valid for 1.5
-  hours (tool-service's ``tos_client.get_file_url`` expiry). Signing is pure computation there
-  too, so it signs any name, stored or not; whether the object exists only shows when it is
-  fetched. Any other tool-service path raises :class:`UnservedRequest`, a ``BaseException`` so
-  that ``image_client``'s ``except Exception`` cannot turn a missing boundary into a quiet
-  ``None``: add the path here instead.
+
+  * ``POST /api/image-pipeline/get-url`` signs a ``file_name`` into a store address valid for
+    1.5 hours (tool-service's ``tos_client.get_file_url`` expiry). Signing is pure computation
+    there too, so it signs any name, stored or not; whether the object exists only shows when it
+    is fetched.
+  * ``POST /api/image-pipeline/to-tos`` stores an image and answers ``{url, file_name}``:
+    ``source_type: "base64"`` stores the decoded bytes; ``source_type: "url"`` stores what that
+    address serves on the web, which the scenario gives (:meth:`ObjectStore.on_the_web`; an
+    address it did not give is refused). The name is tool-service's shape,
+    ``temp/tos_<md5 of the bytes, 16 hex>_<8 hex>.jpg``, with the upload's ordinal as the last
+    part where tool-service has 8 random hex digits. tool-service re-encodes every upload as
+    JPEG; the store here keeps the bytes and content type it was given.
+
+  Any other tool-service path is refused (:class:`~tests.replay.harness.network.UnservedRequest`):
+  add it here.
 * **the object store** (``https://object-store.replay/<file_name>?signed-until=<CST time>``).
-  ``GET`` answers what the scenario put there (:meth:`ObjectStore.put`) with its content type;
-  ``404`` for a name nothing was put under; ``403`` once the signature has run out (the frozen
-  clock is past ``signed-until``).
+  ``GET`` answers what the scenario put there (:meth:`ObjectStore.put`) or a ``to-tos`` stored,
+  with its content type; ``404`` for a name nothing was stored under; ``403`` once the signature
+  has run out (the frozen clock is past ``signed-until``).
 
 Every request to those two hosts goes onto the step's effects timeline, in order with commits
 and publishes::
 
     {"http": "POST tool-service/api/image-pipeline/get-url",
      "lane": "coe-replay", "request": {"file_name": "files/k1"}, "status": 200}
+    {"http": "POST tool-service/api/image-pipeline/to-tos", "lane": "coe-replay",
+     "request": {"source_type": "url", "data": "https://..."}, "status": 200,
+     "stored": "temp/tos_...jpg: image/png, 69 bytes, sha256:1a2b3c4d5e6f"}
     {"http": "GET object-store/files/k1", "status": 200,
      "served": "text/plain; charset=utf-8, 2001 bytes, sha256:1a2b3c4d5e6f"}
 
@@ -40,6 +50,8 @@ object"``. That annotation is a read of the store, not an effect, and is not on 
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 from dataclasses import dataclass
@@ -50,6 +62,7 @@ from urllib.parse import quote, unquote
 import httpx
 
 from app.infra.cst_time import CST, now_cst
+from tests.replay.harness.network import Network, json_response
 
 TOOL_SERVICE_HOST = "tool-service"
 STORE_HOST = "object-store.replay"
@@ -60,10 +73,8 @@ SIGNATURE_LIFETIME = timedelta(minutes=90)
 _SIGNED_UNTIL = "signed-until"
 _SIGNED_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
-
-class UnservedRequest(BaseException):
-    """A request to a served host that the harness does not answer. A ``BaseException``: the
-    code's own ``except Exception`` must not turn a missing boundary into a quiet failure."""
+_GET_URL = "/api/image-pipeline/get-url"
+_TO_TOS = "/api/image-pipeline/to-tos"
 
 
 @dataclass(frozen=True)
@@ -79,9 +90,14 @@ class StoredObject:
 class ObjectStore:
     """What the object store holds, and the two hosts that serve it."""
 
-    def __init__(self, effects) -> None:
-        self._effects = effects
+    def __init__(self, network: Network) -> None:
+        self._network = network
         self._objects: dict[str, StoredObject] = {}
+        # What addresses on the web serve, for tool-service's ``to-tos`` of a url.
+        self._web = network.answers("the web (tool-service to-tos)")
+        self._uploads = 0
+        network.serve(TOOL_SERVICE_HOST, self._tool_service)
+        network.serve(STORE_HOST, self._store)
 
     # ------------------------------------------------------------------ scenario API
 
@@ -89,6 +105,11 @@ class ObjectStore:
         """An object the store holds under ``file_name`` (an upload that happened before the
         scenario; not recorded)."""
         self._objects[file_name] = StoredObject(bytes(data), content_type)
+
+    def on_the_web(self, url: str, data: bytes, content_type: str) -> None:
+        """What ``url`` serves on the web, when tool-service is asked to store it (``to-tos``
+        with ``source_type: "url"``: a picture she found online)."""
+        self._web.give(url, StoredObject(bytes(data), content_type))
 
     # ------------------------------------------------------------------ signing / fetching
 
@@ -148,28 +169,58 @@ class ObjectStore:
 
     async def _tool_service(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        body = json.loads(request.content or b"{}")
-        if request.method != "POST" or path != "/api/image-pipeline/get-url":
-            raise UnservedRequest(
-                f"replay: tool-service {request.method} {path} is not served; add it to "
-                f"tests/replay/harness/objects.py"
+        if request.method == "POST" and path == _GET_URL:
+            body = json.loads(request.content or b"{}")
+            payload = {"success": True, "data": {"url": self.sign(body["file_name"])}}
+            self._network.effects.append(
+                {
+                    "http": f"POST {TOOL_SERVICE_HOST}{path}",
+                    "lane": request.headers.get("x-ctx-lane"),
+                    "request": body,
+                    "status": 200,
+                }
             )
-        payload = {"success": True, "data": {"url": self.sign(body["file_name"])}}
-        self._effects.append(
+            return json_response(request, payload)
+        if request.method == "POST" and path == _TO_TOS:
+            return self._to_tos(request, json.loads(request.content or b"{}"))
+        self._network.refuse(
+            request,
+            "tool-service path not served; add it to tests/replay/harness/objects.py",
+        )
+
+    def _to_tos(self, request: httpx.Request, body: dict[str, Any]) -> httpx.Response:
+        source_type, data = body.get("source_type"), body.get("data")
+        if source_type == "base64":
+            image = _decoded(data, request, self._network)
+        elif source_type == "url":
+            image = self._web.take(data, request)
+        else:
+            self._network.refuse(request, f"to-tos of source_type {source_type!r}")
+        self._uploads += 1
+        file_id = hashlib.md5(image.data).hexdigest()[:16]
+        file_name = f"temp/tos_{file_id}_{self._uploads:08x}.jpg"
+        self._objects[file_name] = image
+        self._network.effects.append(
             {
-                "http": f"POST {TOOL_SERVICE_HOST}{path}",
+                "http": f"POST {TOOL_SERVICE_HOST}{request.url.path}",
                 "lane": request.headers.get("x-ctx-lane"),
                 "request": body,
                 "status": 200,
+                "stored": f"{file_name}: {image.describe()}",
             }
         )
-        return httpx.Response(200, json=payload, request=request)
+        payload = {
+            "success": True,
+            "data": {"url": self.sign(file_name), "file_name": file_name},
+            "message": "ok",
+        }
+        return json_response(request, payload)
 
-    def _store(self, request: httpx.Request) -> httpx.Response:
+    async def _store(self, request: httpx.Request) -> httpx.Response:
         if request.method != "GET":
-            raise UnservedRequest(
-                f"replay: object store {request.method} is not served; add it to "
-                f"tests/replay/harness/objects.py"
+            self._network.refuse(
+                request,
+                "object store method not served; add it to tests/replay/harness/objects.py",
             )
         status, file_name, stored = self._look_up(request.url)
         event: dict[str, Any] = {
@@ -178,7 +229,7 @@ class ObjectStore:
         }
         if stored is not None:
             event["served"] = stored.describe()
-        self._effects.append(event)
+        self._network.effects.append(event)
         if stored is None:
             return httpx.Response(status, request=request)
         return httpx.Response(
@@ -188,21 +239,21 @@ class ObjectStore:
             request=request,
         )
 
-    def install(self, monkeypatch) -> None:
-        real = httpx.AsyncHTTPTransport.handle_async_request
-        store = self
 
-        async def handle(transport, request: httpx.Request) -> httpx.Response:
-            host = request.url.host
-            if host == TOOL_SERVICE_HOST:
-                store._effects.alive()
-                return await store._tool_service(request)
-            if host == STORE_HOST:
-                store._effects.alive()
-                return store._store(request)
-            return await real(transport, request)
-
-        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle)
+def _decoded(data: Any, request: httpx.Request, network: Network) -> StoredObject:
+    """The bytes of a ``to-tos`` base64 upload: a ``data:`` URI or bare base64, as tool-service
+    takes it (everything after the first comma)."""
+    if not isinstance(data, str):
+        network.refuse(request, "to-tos base64 upload without data")
+    head, payload = data.split(",", 1) if "," in data else ("", data)
+    content_type = (
+        head.removeprefix("data:").split(";")[0] or "application/octet-stream"
+    )
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        network.refuse(request, "to-tos base64 upload that does not decode")
+    return StoredObject(raw, content_type)
 
 
 def _signed_until(value: str) -> datetime:

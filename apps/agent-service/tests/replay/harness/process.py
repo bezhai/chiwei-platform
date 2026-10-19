@@ -6,8 +6,8 @@ lock), then the app's plugin host (``Host.for_app``, the manifest in ``app.deplo
 with the broker phases only: every plugin's setup, the graph compiled, the broker connected, and
 messaging (inboxes, question queues, scheduled delivery). Not started: the schema step (the replay builds the schema once, :func:`create_schema`), the interval
 clocks, the HTTP routes, the skill reload task. Rounds run when the scenario calls them. The skills
-plugin loads ``SKILLS_DIR``, which the replay points at an empty directory, so the skill registry is
-empty (no guides on hand).
+plugin loads ``SKILLS_DIR``, which the replay points at a directory of its own: empty, so no guides
+on hand, unless the scenario put one there first (``Replay.guide``).
 
 Stop is the host's stop: messaging, then every registration taken back. A
 restart is stop + start with the database, the broker's queues and the volume left as they were,
