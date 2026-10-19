@@ -215,14 +215,27 @@ def test_the_command_fails_on_a_new_cycle_and_passes_when_clean(tmp_path):
 # 禁止的边：不管成不成环，这几条 import 一出现就失败
 # ---------------------------------------------------------------------------
 
-THE_THREE_FORBIDDEN_EDGES = [("messaging", "runtime"), ("messaging", "host"), ("runtime", "messaging")]
+THE_FORBIDDEN_EDGES = [
+    ("messaging", "runtime"),
+    ("messaging", "host"),
+    ("runtime", "messaging"),
+    ("agent", "host"),
+]
 
 
 def test_the_list_forbids_messaging_and_runtime_reaching_each_other_and_messaging_reaching_the_host():
-    assert set(THE_THREE_FORBIDDEN_EDGES) <= set(FORBIDDEN_EDGES)
+    assert {("messaging", "runtime"), ("messaging", "host"), ("runtime", "messaging")} <= set(
+        FORBIDDEN_EDGES
+    )
 
 
-@pytest.mark.parametrize(("source", "target"), THE_THREE_FORBIDDEN_EDGES)
+def test_the_list_forbids_the_agent_layer_reaching_the_host():
+    """The contract types a round is built from live in ``app/agent/contracts.py``: the host
+    imports them and does the assembling; the agent layer never imports the host."""
+    assert ("agent", "host") in FORBIDDEN_EDGES
+
+
+@pytest.mark.parametrize(("source", "target"), THE_FORBIDDEN_EDGES)
 def test_a_forbidden_edge_names_the_import_that_makes_it(tmp_path, source, target):
     root = _tree(
         tmp_path,

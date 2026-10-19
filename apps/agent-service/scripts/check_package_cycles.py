@@ -33,11 +33,13 @@ KNOWN_CYCLES: list[frozenset[str]] = [
 
 # 不管成不成环都不许出现的边（从哪个包，到哪个包）。消息机制是宿主下面的一层：宿主启停它，
 # 插件经宿主开设收件箱，所以它不依赖宿主；它也不依赖 dataflow 的 runtime（出站边和 ``@node``），
-# runtime 也不依赖它。
+# runtime 也不依赖它。一轮的契约类型（``app/agent/contracts.py``）放在 agent 层，宿主 import 它们、
+# 负责组装，所以 agent 层不依赖宿主。
 FORBIDDEN_EDGES: list[tuple[str, str]] = [
     ("messaging", "runtime"),
     ("messaging", "host"),
     ("runtime", "messaging"),
+    ("agent", "host"),
 ]
 
 # 一条边：import 它的那一处，``app/<包>/<文件>.py:<行号>``。
