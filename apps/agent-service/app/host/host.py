@@ -2,7 +2,8 @@
 and takes back everything they registered.
 
 **Setup only registers.** Each plugin's ``setup`` gets a :class:`Context` and registers through
-it: clocks, tasks, admin routes, inboxes, outbound queues, services, things to undo at stop.
+it: queues of turns and the clocks that signal them, clocks, tasks, admin routes, inboxes,
+outbound queues, services, things to undo at stop.
 Every registration returns a disposer that takes it back; :meth:`Host.stop` calls them all,
 plugins in reverse order, each plugin's in reverse order of registration. Registering outside
 setup is refused: the host has nothing that would start a late registration.
@@ -22,16 +23,17 @@ setup is refused: the host has nothing that would start a late registration.
 7. ``tasks``: every task starts.
 8. ``mq``: messaging (inboxes, the at-start openers, scheduled delivery).
 9. ``http``: the routes go onto the app.
-10. ``clocks``: the clocks start, outside prod only with ``DATAFLOW_ENABLE_TIME_SOURCES=1``.
+10. ``clocks``: the clocks start, the ones signalling queues of turns (``ctx.wake``) included,
+    outside prod only with ``DATAFLOW_ENABLE_TIME_SOURCES=1``.
 
 A phase that fails stops the phases already started, takes back every registration, and the
 error is raised again.
 
 **Stop** keeps today's shutdown order: clocks first (their ticks still running are cancelled,
-rounds included), then the messaging drain, tasks, the broker connection; registrations last. A
-stop phase that fails is logged and the rest still run; the first error is raised at the end. A
-stop that is cancelled raises the cancellation and leaves what it had not reached to the next
-stop; the piece it interrupted is not run again.
+the turns their wakes run included, with no grace), then the messaging drain, tasks, the broker
+connection; registrations last. A stop phase that fails is logged and the rest still run; the
+first error is raised at the end. A stop that is cancelled raises the cancellation and leaves
+what it had not reached to the next stop; the piece it interrupted is not run again.
 
 **What T1 does not do yet.** Inboxes start and stop as a whole with messaging
 (:mod:`app.messaging`): their disposers remove the registration, the consumers stop at the host's
@@ -50,7 +52,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import FastAPI
@@ -71,6 +73,8 @@ from app.host.errors import (
 )
 from app.host.http import METHODS, Handler, RouteSpec, bind_route, unbind_route
 from app.host.plugin import Disposer, Plugin, Registration
+from app.host.turns import Signal, Turns, WakeSource
+from app.infra.cst_time import now_cst
 from app.infra.lane_policy import (
     current_deployment_lane,
     time_sources_enabled_by_default,
@@ -112,11 +116,64 @@ class Context:
     def app_name(self) -> str:
         return self._host.app_name
 
+    def turns(
+        self, participant: str, line: str = "round", *, hold_limit: timedelta | None = None
+    ) -> Turns:
+        """A queue of turns for ``participant`` on ``line`` (:mod:`app.host.turns`), new each time
+        the host starts. One participant has one queue per line. The queue hands its wake sources
+        the host's clock (Beijing time) to read when they decide on a round."""
+        turns = Turns(participant, line, hold_limit=hold_limit, clock=now_cst)
+        self._register("turns", f"{participant}/{line}", lambda: {"turns": turns}, _nothing)
+        return turns
+
+    def wake(self, turns: Turns, source: WakeSource, *, every: timedelta) -> Disposer:
+        """Every ``every``, signal ``turns`` for ``source`` with ``Signal(at=<the tick's time>)``.
+
+        Registrations of one source name with one interval share one clock: each tick signals
+        every queue registered for it at once, and one queue's error is logged as a warning
+        without keeping the others from their turn. The turns run in the clock's work, so a stop
+        cancels them first, with no grace (:meth:`Host.stop`). Like every clock, it runs outside
+        prod only with ``DATAFLOW_ENABLE_TIME_SOURCES=1``, and its first tick comes one interval
+        after the clock starts. A source driven by deliveries does not register here: its inbox
+        handler calls ``turns.take`` itself.
+        """
+        seconds = every.total_seconds()
+        if seconds <= 0:
+            raise ValueError(f"wake {source.name!r}: every must be positive, got {every!r}")
+        host = self._host
+        key = (source.name, seconds)
+        target = (turns, source)
+
+        def add() -> None:
+            host._wakes.setdefault(key, []).append(target)
+
+        async def undo() -> None:
+            targets = host._wakes.get(key, [])
+            for i, registered in enumerate(targets):
+                if registered is target:
+                    del targets[i]
+                    break
+            if not targets:
+                host._wakes.pop(key, None)
+                if host._clocks is not None:
+                    await host._clocks.remove(_wake_clock_name(*key))
+
+        return self._register(
+            "wake",
+            f"{source.name} -> {turns.participant}/{turns.line}",
+            lambda: {"turns": turns, "source": source, "every": every},
+            undo,
+            add=add,
+        )
+
     def clock(self, name: str, seconds: float, tick: Tick) -> Disposer:
         """Every ``seconds``, call ``tick(ts)`` in the clock loop and run what it returns.
 
-        ``tick`` should build its work (the payload) before returning it, so a payload that
-        cannot be built stops the process instead of failing quietly. See :mod:`app.host.clock`.
+        For periodic background work that puts no participant's round on a queue (matching what
+        she said against what landed); a source of a participant's rounds registers with
+        :meth:`wake`. ``tick`` should build its work (the payload) before returning it, so a
+        payload that cannot be built stops the process instead of failing quietly. See
+        :mod:`app.host.clock`.
         """
         if seconds <= 0:
             raise ValueError(f"clock {name!r}: seconds must be positive, got {seconds!r}")
@@ -360,6 +417,9 @@ class Host:
         self._entries: list[_Entry] = []
         self._services: dict[str, object] = {}
         self._clock_specs: dict[str, Clock] = {}
+        # (source name, seconds) -> the queues one wake clock signals, with the source each is
+        # signalled for.
+        self._wakes: dict[tuple[str, float], list[tuple[Turns, WakeSource]]] = {}
         self._task_runs: dict[str, Callable[[], Awaitable[None]]] = {}
         self._routes: dict[str, RouteSpec] = {}
         self._phases: set[str] = set()
@@ -479,7 +539,11 @@ class Host:
             self._phases.add("clocks")
             self._clocks = Clocks(self._app_name)
             await self._clocks.start(
-                self._clock_specs.values(), enabled=time_sources_enabled_by_default()
+                [
+                    *self._clock_specs.values(),
+                    *(_wake_clock(*key, targets) for key, targets in self._wakes.items()),
+                ],
+                enabled=time_sources_enabled_by_default(),
             )
 
     def _set_up(self, plugin: Plugin) -> None:
@@ -671,6 +735,43 @@ def _unwire(spec: WireSpec) -> Callable[[], Awaitable[None]]:
         reset_emit_runtime()
 
     return undo
+
+
+def _wake_clock_name(source_name: str, seconds: float) -> str:
+    return f"clock[wake {source_name} every {seconds:g}s]"
+
+
+def _wake_clock(
+    source_name: str, seconds: float, targets: list[tuple[Turns, WakeSource]]
+) -> Clock:
+    """The one clock of the wakes registered for ``source_name`` every ``seconds``. It reads
+    ``targets`` at each tick, so a wake taken back stops being signalled."""
+
+    def tick(ts: datetime) -> Awaitable[None]:
+        return _signal_each(list(targets), Signal(at=ts))
+
+    return Clock(name=_wake_clock_name(source_name, seconds), seconds=seconds, tick=tick)
+
+
+async def _signal_each(targets: list[tuple[Turns, WakeSource]], signal: Signal) -> None:
+    """Signal every queue at once; one queue's error does not keep the others from their turn."""
+    outcomes = await asyncio.gather(
+        *(turns.take(source, signal) for turns, source in targets), return_exceptions=True
+    )
+    for (turns, source), outcome in zip(targets, outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            logger.warning(
+                "host: wake %s -> %s/%s raised %r; the other queues took their turns",
+                source.name,
+                turns.participant,
+                turns.line,
+                outcome,
+                exc_info=outcome,
+            )
+
+
+async def _nothing() -> None:
+    return None
 
 
 def _async(fn: Callable[[], object]) -> Callable[[], Awaitable[None]]:
