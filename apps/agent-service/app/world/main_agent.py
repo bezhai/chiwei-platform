@@ -33,8 +33,8 @@
 （``wake.woken_by``，按到达的先后，每条是谁的、什么时候的、原文）；里面没有它给自己排的醒来时，
 它原来定的下次醒来，提醒它这一轮结束前要重新定（``wake.planned``）；之前有一轮没跑完时，那一轮
 里已经发生的事和补发告知的结果（``unfinished.happenings``）。它的记录目录是状态段
-（``records.listing``），只在上下文清理时写进那条带时刻的标记消息（:mod:`app.agent.continuity`；
-每轮都一样的东西不每轮重发）。prompt 在 Langfuse（:data:`ROUND`），正文不引用任何变量。
+（``records.listing``，插件 ``record_keeping`` 登记），只在上下文清理时写进那条带时刻的标记消息
+（:mod:`app.agent.continuity`；每轮都一样的东西不每轮重发）。prompt 在 Langfuse（:data:`ROUND`），正文不引用任何变量。
 
 **它手里有什么。** 清单 ``world`` 排的工具：三个知识来源插件的查询工具（records、reality、told，
 关掉的来源由一轮开始时读的开关拿掉），加上只有它才有的动作（:mod:`app.world.actions`）。来源的
@@ -53,7 +53,7 @@ from datetime import datetime, timedelta
 from app.agent.continuity import TrimPolicy
 from app.agent.round import AssembledProfile, Round, run_round
 from app.messaging.message import Kind, Message
-from app.world import records, unfinished
+from app.world import unfinished
 from app.world.actions import RoundScope
 from app.world.agents import when, world_agent
 from app.world.perception import Told, render_told, send_notices
@@ -153,17 +153,6 @@ async def resend_left_over(round: Round) -> None:
     round.state(LeftOver).happenings = left_over
 
 
-async def records_listing(round: Round) -> str:
-    """状态段（``records.listing``）：它有哪些记录。只写进上下文清理的那条标记消息。"""
-    entries = records.listing()
-    if not entries:
-        return "你还没有任何记录。"
-    return "\n".join(
-        [f"你的记录（{len(entries)} 份）："]
-        + [f"- {e.path}（{e.chars} 字）" for e in entries]
-    )
-
-
 def _render_message(message: Message) -> str:
     """一轮带着的一条消息：谁的、什么时候的，下一行起是原文。"""
     if message.kind is Kind.NOT_DELIVERED:
@@ -259,10 +248,9 @@ async def run_inbox_round(
     )
     chosen = result.round.state(Scheduled).wake
     logger.info(
-        "world: round %s taking %s done; wrote %d record(s); next wake %s at %s; said: %s",
+        "world: round %s taking %s done; next wake %s at %s; said: %s",
         round_id,
         _listed(due.messages),
-        len(result.round.state(RoundScope).written),
         chosen.message_id,
         chosen.at.isoformat(),
         result.reply.text().strip()[:200],

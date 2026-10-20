@@ -1,6 +1,6 @@
-"""world 的清单：world 的核心插件和三个知识来源插件（records、reality、told），所以 world 的进程
-不加载 living 的任何代码。插件按这里的顺序起来，来源也按这个顺序登记：感知判断、NPC、应答的查询
-工具和收件处理按这个顺序看到它们。
+"""world 的清单：world 的核心插件，记录的两个插件（``records`` 是查询工具，``record_keeping`` 是写
+记录、记录目录和人工读写接口），和另外两个知识来源插件（reality、told），所以 world 的进程不加载
+living 的任何代码。插件按这里的顺序起来，来源也按这个顺序登记，收件处理按这个顺序看到它们。
 
 主 agent 的一轮按 ``world`` 组成（各段各步见 :mod:`app.world.main_agent`）：一轮开始前补发没跑完的
 一轮的告知；状态段是记录目录，只进上下文清理的标记消息；三个输入段用一个换行拼；检查它定了下次
@@ -69,7 +69,8 @@ WORLD = Profile(
 MANIFEST = App(
     plugins=(
         "app.plugins.world",
-        "app.world.sources.records",
+        "app.world.records.reading",
+        "app.world.records.keeping",
         "app.world.sources.reality",
         "app.world.sources.told",
     ),

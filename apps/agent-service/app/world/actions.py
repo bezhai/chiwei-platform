@@ -1,8 +1,7 @@
 """world 主 agent 才有的动作。别的几类 agent 只拿知识来源的只读工具（:mod:`app.world.sources`），
 这些只给主 agent：
 
-* :func:`write_record` —— 整份写下一份记录（:mod:`app.world.records`）。没有删除：一样东西
-  没了，改写那份记录说它没了。人工接口可以删。
+* 写记录（``write_record``）由插件 ``record_keeping`` 登记（:mod:`app.world.records.keeping`）。
 * :func:`wake_me_at` —— 定下次醒来的时刻。每一轮必须调，没调的一轮算失败
   （:mod:`app.world.main_agent`）。
 * 报告世界里发生的一个变化（``report_change``，:meth:`app.world.perception.Perceiving.report_change`）
@@ -13,33 +12,23 @@
 排在知识来源的查询工具后面。它们的返回是它自己做过的事，跟着它自己的话一起留（``trim="kept"``；
 只有来源的查询结果当材料裁）。
 
-一轮里动作之间共享的东西是这一轮的状态 :class:`RoundScope`：这一轮写下了哪几份记录、定下的下次
-醒来。
-
-**改写一份已有的记录，必须在这一轮里读过它现在的样子。** 模型不用自己搬指纹：读记录的工具
-（:func:`app.world.sources.records.read_record`）把读到的指纹记进这一次调用的
-:class:`app.world.sources.records.RecordsRead`，写的时候拿它去做 :func:`app.world.records.write`
-的指纹检查。它读过之后别人（人工接口）又改过，这次写就不落盘，告诉它重新读。
+一轮里动作之间共享的东西是这一轮的状态 :class:`RoundScope`：这一轮定下的下次醒来。
 """
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
 
 from pydantic import Field
 
-from app.agent.round import current_call, current_round
+from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg
 from app.infra.cst_time import CST, now_cst
-from app.world import records
 from app.world.agents import when
-from app.world.sources.records import RecordPath, RecordsRead
 
-logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class WakeChoice:
@@ -51,50 +40,12 @@ class WakeChoice:
 class RoundScope:
     """一轮里工具之间共享的东西：这一轮的状态（``current_round().state(RoundScope)``）。"""
 
-    # 这一轮写下的记录，按写的先后（只用来记日志）。
-    written: list[str] = field(default_factory=list)
     # 这一轮定下的下次醒来；调过几次以最后一次为准。
     next_wake: WakeChoice | None = None
 
 
 def _scope() -> RoundScope:
     return current_round().state(RoundScope)
-
-
-# ---------------------------------------------------------------------------
-# 写记录
-# ---------------------------------------------------------------------------
-
-
-@tool
-@tool_error("写记录失败")
-async def write_record(
-    path: RecordPath,
-    text: Annotated[str, Field(description="这一份记录的全文，整份替换原来的")],
-) -> str:
-    """整份写下一份记录：没有就新建，有就整份替换。
-
-    改写一份已经有的记录之前，要在这一轮里读过它现在的样子。
-    """
-    scope = _scope()
-    reads = current_call().state(RecordsRead).fingerprints
-    try:
-        written = records.write(path, text, expected=reads.get(path))
-    except (records.InvalidRecordPath, records.InvalidRecordText) as exc:
-        raise CapabilityInvalidArg(str(exc)) from exc
-    except records.RecordConflict:
-        if path in reads:
-            return (
-                f"没有写：「{path}」在你读过之后被改过了。重新读一遍（read_record）"
-                f"再决定怎么写。"
-            )
-        return (
-            f"没有写：「{path}」已经有了，你这一轮还没读过它现在的样子。先读一遍"
-            f"（read_record）再写。"
-        )
-    reads[written.path] = written.fingerprint
-    scope.written.append(written.path)
-    return f"写好了：「{written.path}」（{len(written.text)} 字）。"
 
 
 # ---------------------------------------------------------------------------

@@ -264,7 +264,8 @@ async def test_what_every_source_returns_is_trimmed_as_material_even_when_it_is_
     from inner_shared.dynamic_config import dynamic_config
 
     import app.agent.round as agent_round
-    from app.world.sources import ENABLED_SOURCES_KEY, reality, records, told
+    from app.manifests.world import QUERY_TOOLS
+    from app.world.sources import ENABLED_SOURCES_KEY
 
     monkeypatch.setattr(
         dynamic_config,
@@ -284,11 +285,7 @@ async def test_what_every_source_returns_is_trimmed_as_material_even_when_it_is_
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
-    assert seen["material_tools"] == frozenset(
-        t.name
-        for source in (records.SOURCE, reality.SOURCE, told.SOURCE)
-        for t in source.tools
-    )
+    assert seen["material_tools"] == frozenset(QUERY_TOOLS)
     assert "write_record" not in seen["material_tools"]
 
 

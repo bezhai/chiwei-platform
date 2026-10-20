@@ -42,13 +42,14 @@ def _rounds_now() -> Rounds:
 # ---------------------------------------------------------------------------
 
 
-def test_the_world_app_runs_the_world_plugin_and_its_three_sources_in_order():
-    """来源插件的顺序就是来源登记的顺序：感知判断、NPC、应答和收件处理按它看到来源。"""
+def test_the_world_app_runs_the_world_plugin_the_two_record_plugins_and_two_sources_in_order():
+    """来源插件的顺序就是来源登记的顺序：收件处理按它看到来源。"""
     from app.manifests.world import MANIFEST
 
     assert MANIFEST.plugins == (
         "app.plugins.world",
-        "app.world.sources.records",
+        "app.world.records.reading",
+        "app.world.records.keeping",
         "app.world.sources.reality",
         "app.world.sources.told",
     )
@@ -101,15 +102,16 @@ async def test_a_world_delivery_fits_inside_the_delivery_deadline(app_host):
 
 
 async def test_the_four_record_routes_carry_all_three_checks(app_host):
-    """记录的人工读写接口：四条都要内网凭据、核对泳道、回答带泳道（行为在 ``test_admin.py``）。"""
-    from app.world import admin
+    """记录的人工读写接口：四条都由 ``record_keeping`` 登记，都要内网凭据、核对泳道、回答带泳道
+    （行为在 ``test_admin.py``）。"""
+    from app.world.records import admin
 
     host = await app_host("world")
 
     routes = {
         r.name: (r.detail["request"], r.detail["handler"])
         for r in host.registered()
-        if r.kind == "route"
+        if r.kind == "route" and r.plugin == "record_keeping"
     }
     assert routes == {
         "GET /admin/world/records": (admin.RecordListRequest, admin.record_listing_node),
@@ -176,7 +178,7 @@ async def test_stop_takes_back_the_sources_the_inbox_and_the_routes(app_host, mo
 
     monkeypatch.setattr(dynamic_config, "get", lambda k, default="": default)
     host = await app_host("world")
-    assert [s.name for s in await enabled_sources()] == ["records", "reality", "told"]
+    assert [s.name for s in await enabled_sources()] == ["reality", "told"]
 
     await host.stop()
 

@@ -26,7 +26,6 @@ SHARED = frozenset({"services", "agents", "volume"})
 KNOWN_CROSSINGS = frozenset(
     {
         "world/agents.py -> app.world.wake",
-        "world/sources/records.py -> app.world.records",
         "world/sources/told.py -> app.world.wake",
     }
 )

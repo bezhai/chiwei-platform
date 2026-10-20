@@ -1,15 +1,15 @@
-"""world App 的核心插件：主 agent 的一轮、``world`` 收件箱、记录的人工读写接口。world 的清单
-（:mod:`app.manifests.world`）只有它和三个知识来源的插件（:mod:`app.world.sources`，各自登记来源和
-查询工具），所以 world 的进程不加载 life 的任何代码。
+"""world App 的核心插件：主 agent 的一轮、``world`` 收件箱。world 的清单（:mod:`app.manifests.world`）
+只有它、记录的两个插件（:mod:`app.world.records`：查询工具一个，写记录、记录目录和人工读写接口一个）
+和另外两个知识来源的插件（:mod:`app.world.sources`，各自登记来源和查询工具），所以 world 的进程不
+加载 life 的任何代码。
 
 **主 agent 的一轮**（:mod:`app.world.main_agent`），清单 ``world`` 排它们的位置：
 
   segments (``ctx.segment``)   world_round，和一轮里调的 world_perception、world_npc，以及
                                一轮之外调的 world_answer
-  tools (``ctx.tool``)         write_record、wake_me_at、report_change、let_npc_appear，以及
+  tools (``ctx.tool``)         wake_me_at、report_change、let_npc_appear，以及
                                感知判断记判断的 someone_notices（都 kept）
   before the round             unfinished.resend        按原 id 补发没跑完的一轮的告知
-  state section                records.listing          记录目录（只进清理标记）
   input sections               wake.woken_by、wake.planned、unfinished.happenings
   check                        wake.chosen              没定下次醒来，这一轮失败
   after the commit             history、unfinished.clear、wake.next（都 FailRound）
@@ -30,9 +30,6 @@
 和排着的下一轮。宿主每次起来都相当于一个新的 world 进程：同一个 Python 进程里停了再起（回放里的
 重启、被杀之后再起），也要拿到一条空的队列，不能去等上一次起来时没跑完的那一轮。放在模块级就做
 不到这一点，因为模块只 import 一次。
-
-**记录的人工读写接口**（:mod:`app.world.admin`）：四条路由都要内网凭据；请求要去的泳道不是这个
-进程的泳道，就一步都不做；回答都带上这个进程的泳道。
 """
 from __future__ import annotations
 
@@ -42,27 +39,16 @@ from app.agent.contracts import FailRound
 from app.agent.round import store_history
 from app.agent.tooling import tool
 from app.host import Context, Plugin
-from app.world.actions import wake_me_at, write_record
-from app.world.admin import (
-    RecordDeleteRequest,
-    RecordListRequest,
-    RecordReadRequest,
-    RecordWriteRequest,
-    record_delete_node,
-    record_listing_node,
-    record_read_node,
-    record_write_node,
-)
+from app.world.actions import wake_me_at
 from app.world.agents import world_segments
 from app.world.answer import ANSWER, Answering
 from app.world.main_agent import (
-    ROUND_SEGMENTS,
+    ROUND,
     ROUND_TIMEOUT,
     clear_unfinished,
     left_over,
     next_wake_chosen,
     planned_wake,
-    records_listing,
     resend_left_over,
     run_inbox_round,
     set_the_next_wake,
@@ -74,14 +60,10 @@ from app.world.rounds import Rounds
 from app.world.volume import writer_lock
 from app.world.wake import WORLD, retry_latest_wake_without_limit, wake_on_start
 
-_RECORDS = "/admin/world/records"
-_DOCUMENT = f"{_RECORDS}/document"
-
-ROUTES = (
-    ("GET", _RECORDS, RecordListRequest, record_listing_node),
-    ("GET", _DOCUMENT, RecordReadRequest, record_read_node),
-    ("PUT", _DOCUMENT, RecordWriteRequest, record_write_node),
-    ("DELETE", _DOCUMENT, RecordDeleteRequest, record_delete_node),
+# 主 agent 的 prompt 里由这个插件登记的那几段；别的段（写记录）由各自的插件登记。
+_ROUND_SEGMENTS = tuple(
+    f"{ROUND}/{name}"
+    for name in ("core", "reality", "report-change", "npc", "wake", "unfinished", "order")
 )
 
 
@@ -103,26 +85,14 @@ def setup(ctx: Context) -> None:
         retry_without_limit=retry_latest_wake_without_limit,
     )
 
-    for method, path, request, handler in ROUTES:
-        ctx.route(
-            method,
-            path,
-            request,
-            handler,
-            inner_secret=True,
-            lane_match=True,
-            answers_with_lane=True,
-        )
-
 
 def _the_round(ctx: Context) -> None:
     """主 agent 的一轮由什么组成；清单 ``world`` 排它们的位置。"""
-    for segment in world_segments(*ROUND_SEGMENTS, PERCEPTION, NPC, ANSWER).values():
+    for segment in world_segments(*_ROUND_SEGMENTS, PERCEPTION, NPC, ANSWER).values():
         ctx.segment(segment)
     perceiving = Perceiving(ctx.agent(PERCEPTION))
     npcs = Npcs(ctx.agent(NPC), perceiving)
     for action in (
-        write_record,
         wake_me_at,
         tool(perceiving.report_change),
         tool(npcs.let_npc_appear),
@@ -130,7 +100,6 @@ def _the_round(ctx: Context) -> None:
     ):
         ctx.tool(action, trim="kept")
     ctx.round_start("unfinished.resend", resend_left_over)
-    ctx.section("records.listing", records_listing)
     ctx.section("wake.woken_by", woken_by)
     ctx.section("wake.planned", planned_wake)
     ctx.section("unfinished.happenings", left_over)

@@ -7,7 +7,7 @@ from __future__ import annotations
 from app.manifests.world import QUERY_TOOLS
 from app.messaging.message import Kind, new_message
 from app.world import answer, records
-from app.world.sources import records as records_source
+from app.world.records import reading
 from app.world.sources import told
 
 from .conftest import LANE, ScriptedAgent, ask, spec_called, tools_built_for
@@ -27,7 +27,7 @@ def _volume_state(volume) -> dict[str, tuple[str, int]]:
 
 def looks_up_the_kitchen():
     async def plan(_input):
-        shown = await records_source.read_record.invoke({"path": "地方/厨房.md"})
+        shown = await reading.read_record.invoke({"path": "地方/厨房.md"})
         return f"厨房现在是这样：{shown.split(chr(10), 2)[-1]}"
 
     return ScriptedAgent(plan)

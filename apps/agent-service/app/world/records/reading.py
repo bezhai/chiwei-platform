@@ -1,7 +1,9 @@
-"""知识来源"记录"：world 的记录里写着什么。只有读的那一半：列目录、读一份。
+"""插件 ``records``：知识来源"记录"，world 的记录里写着什么。只有读的那一半：列目录、读一份，
+两个查询工具（返回的都是读到的材料）。
 
-记录（:mod:`app.world.records`）是 world 自己对这个世界的认识。写记录只有主 agent 能做
-（:func:`app.world.actions.write_record`），不在这里。
+记录（:mod:`app.world.records`）是 world 自己对这个世界的认识。它是开关（``world_sources``）能关掉
+的那个插件，关掉它只拿掉这两个查询工具：写记录（只有主 agent 能做）、主 agent 的记录目录和人工读写
+接口在插件 ``record_keeping``（:mod:`app.world.records.keeping`），不随它关掉。
 
 **读到的指纹记在这一次调用里。** 主 agent 改写一份已有的记录之前，必须在这一轮里读过它现在的
 样子（指纹规矩见 :mod:`app.world.records`）：:func:`read_record` 把读到的指纹记进这一次 agent
@@ -19,9 +21,9 @@ from app.agent.round import current_call
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg, CapabilityNotFound
+from app.host import Context, Plugin
 from app.world import records
 from app.world.agents import when
-from app.world.sources import Source, source_plugin
 
 
 @dataclass
@@ -71,7 +73,9 @@ async def read_record(path: RecordPath) -> str:
     )
 
 
-SOURCE = Source(name="records", tools=(list_records, read_record))
+def setup(ctx: Context) -> None:
+    for query in (list_records, read_record):
+        ctx.tool(query, trim="material")
 
 
-PLUGIN = source_plugin(SOURCE)
+PLUGIN = Plugin(name="records", setup=setup)

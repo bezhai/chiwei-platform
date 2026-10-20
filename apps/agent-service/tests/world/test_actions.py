@@ -1,4 +1,4 @@
-"""主 agent 才有的动作：写记录、定下次醒来的时刻。
+"""主 agent 才有的动作：写记录（插件 ``record_keeping``）、定下次醒来的时刻。
 
 动作在 world 的一轮里跑（这一轮的状态 :class:`app.world.actions.RoundScope`，这次调用的状态里
 记着读过什么），这里直接在绑好的一轮里调它们，不起模型。
@@ -13,7 +13,8 @@ from app.infra.cst_time import CST, now_cst
 from app.messaging.message import Kind, new_message
 from app.world import actions, records
 from app.world.actions import RoundScope
-from app.world.sources.records import read_record
+from app.world.records.keeping import write_record
+from app.world.records.reading import read_record
 
 from .conftest import in_world_round
 
@@ -35,7 +36,7 @@ async def _call(t, **arguments):
 
 
 async def test_a_new_record_can_be_written_without_reading_first(scope):
-    result = await _call(actions.write_record, path="人/乙.md", text="一个新来的人。")
+    result = await _call(write_record, path="人/乙.md", text="一个新来的人。")
 
     assert "写好了" in result
     assert records.read("人/乙.md").text == "一个新来的人。"
@@ -44,17 +45,17 @@ async def test_a_new_record_can_be_written_without_reading_first(scope):
 async def test_an_existing_record_is_rewritten_only_after_reading_it_this_round(scope):
     records.write("地方/甲.md", "旧的样子。", expected=None)
 
-    refused = await _call(actions.write_record, path="地方/甲.md", text="没读就改。")
+    refused = await _call(write_record, path="地方/甲.md", text="没读就改。")
     assert "先读" in str(refused)
     assert records.read("地方/甲.md").text == "旧的样子。"
 
     shown = await _call(read_record, path="地方/甲.md")
     assert "旧的样子。" in shown
-    await _call(actions.write_record, path="地方/甲.md", text="新的样子。")
+    await _call(write_record, path="地方/甲.md", text="新的样子。")
     assert records.read("地方/甲.md").text == "新的样子。"
 
     # 自己刚写过的，同一轮里接着改不用再读一遍。
-    await _call(actions.write_record, path="地方/甲.md", text="又改了一次。")
+    await _call(write_record, path="地方/甲.md", text="又改了一次。")
     assert records.read("地方/甲.md").text == "又改了一次。"
 
 
@@ -63,14 +64,14 @@ async def test_a_record_changed_by_someone_else_after_reading_is_not_overwritten
     await _call(read_record, path="地方/甲.md")
     records.write("地方/甲.md", "人工改过的。", expected=first.fingerprint)
 
-    refused = await _call(actions.write_record, path="地方/甲.md", text="拿旧的改。")
+    refused = await _call(write_record, path="地方/甲.md", text="拿旧的改。")
 
     assert "重新读" in str(refused)
     assert records.read("地方/甲.md").text == "人工改过的。"
 
 
 async def test_a_bad_path_is_reported_not_raised(scope):
-    result = await _call(actions.write_record, path="../越界.md", text="x")
+    result = await _call(write_record, path="../越界.md", text="x")
 
     assert "记录路径" in str(result) or "走出" in str(result)
 

@@ -14,13 +14,21 @@ import pytest
 
 from app.agent.continuity import TranscriptConflict
 from app.agent.contracts import CostSpec, FailRound, Switches
+from app.agent.round import current_round
 from app.infra.cst_time import CST, now_cst
 from app.messaging.message import Kind, new_message
-from app.world import main_agent, unfinished, wake
+from app.world import main_agent, records, unfinished, wake
 from app.world.agents import when
 from app.world.services import Notice
 
-from .conftest import LANE, run_round_taking, self_message, sets_nothing
+from .conftest import (
+    LANE,
+    run_round_taking,
+    self_message,
+    sets_nothing,
+    sets_wake,
+    tools_built_for,
+)
 
 NOW = datetime(2026, 7, 25, 14, 3, tzinfo=CST)
 
@@ -47,7 +55,7 @@ async def test_the_world_profile_places_what_world_and_its_three_sources_registe
         ("search_web", "reality", "material"),
         ("list_senders", "told", "material"),
         ("read_messages_from", "told", "material"),
-        ("write_record", "world", "kept"),
+        ("write_record", "record_keeping", "kept"),
         ("wake_me_at", "world", "kept"),
         ("report_change", "world", "kept"),
         ("let_npc_appear", "world", "kept"),
@@ -57,7 +65,8 @@ async def test_the_world_profile_places_what_world_and_its_three_sources_registe
         ["world_npc", "world_perception", *main_agent.ROUND_SEGMENTS]
     )
     assert [s.name for s in p.round_start] == ["unfinished.resend"]
-    assert [s.name for s in p.state] == ["records.listing"]
+    assert [(s.name, s.plugin) for s in p.state] == [("records.listing", "record_keeping")]
+    assert p.segments["world_round/write-record"].plugin == "record_keeping"
     assert [s.name for s in p.input] == [
         "wake.woken_by",
         "wake.planned",
@@ -78,6 +87,36 @@ async def test_the_world_profile_places_what_world_and_its_three_sources_registe
     assert p.profile.switches == Switches(
         "world_sources", ("records", "reality", "told")
     )
+
+
+async def test_switching_records_off_leaves_writing_the_listing_and_its_segment_in_the_round(
+    world, monkeypatch
+):
+    """关掉 ``records`` 只拿掉两个查询工具：写记录、记录目录（状态段）和写记录那一段 prompt 都在
+    ``record_keeping``，照旧在这一轮里。"""
+    from inner_shared.dynamic_config import dynamic_config
+
+    monkeypatch.setattr(
+        dynamic_config,
+        "get",
+        lambda k, default="": "reality,told" if k == "world_sources" else default,
+    )
+    records.write("地方/甲.md", "一二三。", expected=None)
+    world.history = []
+    segments: list[str] = []
+
+    async def plan():
+        segments.extend(p for p, _, _ in current_round().prompts.versions("world_round"))
+        return await sets_wake()()
+
+    world.runner.plan = plan
+    await run_round_taking(world, [self_message("m-1")], now=NOW)
+
+    tools = tools_built_for(world, main_agent.ROUND)
+    assert "write_record" in tools
+    assert not {"list_records", "read_record"} & set(tools)
+    assert "world_round/write-record" in segments
+    assert "你的记录（1 份）" in world.runner.runs[-1][0].content
 
 
 async def test_the_three_input_sections_joined_by_a_newline_are_the_rounds_input(world):

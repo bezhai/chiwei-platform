@@ -129,7 +129,7 @@ async def test_oversized_text_is_a_bad_request(client):
 
 
 async def test_writes_and_deletes_are_logged_with_the_operator(client, caplog):
-    caplog.set_level(logging.INFO, logger="app.world.admin")
+    caplog.set_level(logging.INFO, logger="app.world.records.admin")
 
     r = await client.put(
         DOC, json={"path": "甲.md", "text": "一。"}, headers={"X-Operator": "bezhai"}
@@ -140,7 +140,7 @@ async def test_writes_and_deletes_are_logged_with_the_operator(client, caplog):
         headers={"X-Operator": "bezhai"},
     )
 
-    lines = [rec.getMessage() for rec in caplog.records if rec.name == "app.world.admin"]
+    lines = [rec.getMessage() for rec in caplog.records if rec.name == "app.world.records.admin"]
     assert len(lines) == 2
     assert all("bezhai" in line and "甲.md" in line for line in lines)
 

@@ -1,4 +1,4 @@
-"""知识来源：怎么登记、启用哪些、四个 agent 拿到的只读工具从哪来，以及记录、现实这两个来源。
+"""知识来源：怎么登记、启用哪些，以及现实这个来源。
 
 工具在绑好的一次调用里直接调，不起模型。
 """
@@ -8,12 +8,10 @@ import re
 
 import pytest
 
-from app.agent.round import Call, in_call
 from app.agent.tooling import tool
 from app.messaging.message import Kind, new_message
 from app.world import records, sources
 from app.world.sources import Source, private_dir, reality
-from app.world.sources import records as records_source
 from tests.capabilities import qweather as qw
 
 from .conftest import LANE
@@ -54,31 +52,31 @@ async def _call(t, **arguments):
 async def test_without_dynamic_config_every_registered_source_is_enabled(registered):
     names = [s.name for s in await sources.enabled_sources()]
 
-    assert names[:2] == ["records", "reality"]
+    assert names == ["reality", "told"]
     tools = [spec for s in await sources.enabled_sources() for spec in s.query_tools]
-    assert {"list_records", "read_record", "search_web", *WEATHER_TOOLS} <= {
+    assert {"search_web", "list_senders", "read_messages_from", *WEATHER_TOOLS} <= {
         t.tool.name for t in tools
     }
     assert {t.trim for t in tools} == {"material"}
 
 
 async def test_the_enabled_list_keeps_only_the_named_sources_in_registration_order(registered):
-    registered[sources.ENABLED_SOURCES_KEY] = " reality , records ,没有这个"
+    registered[sources.ENABLED_SOURCES_KEY] = " told , reality ,没有这个"
 
-    assert [s.name for s in await sources.enabled_sources()] == ["records", "reality"]
+    assert [s.name for s in await sources.enabled_sources()] == ["reality", "told"]
 
 
 async def test_a_source_left_out_of_the_enabled_list_is_not_enabled(registered):
-    registered[sources.ENABLED_SOURCES_KEY] = "records"
+    registered[sources.ENABLED_SOURCES_KEY] = "reality"
 
-    assert [s.name for s in await sources.enabled_sources()] == ["records"]
+    assert [s.name for s in await sources.enabled_sources()] == ["reality"]
 
 
 def test_two_sources_cannot_share_a_name_or_a_tool_name(registered):
     with pytest.raises(ValueError):
-        sources.register(Source(name="records", tools=(look_up_tides,)))
+        sources.register(Source(name="reality", tools=(look_up_tides,)))
     with pytest.raises(ValueError):
-        sources.register(Source(name="copy", tools=(records_source.read_record,)))
+        sources.register(Source(name="copy", tools=(reality.check_current_weather,)))
 
 
 async def test_intake_goes_to_each_enabled_source_that_has_one(registered):
@@ -92,7 +90,7 @@ async def test_intake_goes_to_each_enabled_source_that_has_one(registered):
 
     sources.register(Source(name="a", tools=(), intake=keeper("a")))
     sources.register(Source(name="b", tools=(), intake=keeper("b")))
-    registered[sources.ENABLED_SOURCES_KEY] = "records,a"
+    registered[sources.ENABLED_SOURCES_KEY] = "reality,a"
     message = new_message(sender="ayana", recipient="world", body="x", kind=Kind.MESSAGE)
 
     await sources.take_in(message)
@@ -103,64 +101,6 @@ async def test_intake_goes_to_each_enabled_source_that_has_one(registered):
 def test_each_source_keeps_its_own_directory_next_to_the_records(bare_volume):
     assert private_dir("tides") == bare_volume / LANE / "sources" / "tides"
     assert records.records_root() == bare_volume / LANE / "records"
-
-
-# ---------------------------------------------------------------------------
-# 来源：记录（读的那一半）
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def reads(volume):
-    """主 agent 一轮里那样：这一次调用的状态记着读过什么。"""
-    call = Call(agent="world_round", session=None, round=None)
-    with in_call(call):
-        yield call.state(records_source.RecordsRead).fingerprints
-
-
-async def test_list_records_shows_paths_and_sizes(reads):
-    assert "还没有任何记录" in await _call(records_source.list_records)
-
-    records.write("地方/甲.md", "一二三。", expected=None)
-    shown = await _call(records_source.list_records)
-
-    assert "地方/甲.md" in shown and "4 字" in shown
-
-
-async def test_reading_a_record_notes_its_fingerprint_for_this_call(reads):
-    written = records.write("地方/甲.md", "旧的样子。", expected=None)
-
-    shown = await _call(records_source.read_record, path="地方/甲.md")
-
-    assert "旧的样子。" in shown
-    assert reads == {"地方/甲.md": written.fingerprint}
-
-
-async def test_what_another_call_reads_is_noted_on_that_call_only(volume):
-    """感知判断、NPC、应答读到的记在它们自己那次调用上，不落到主 agent 那次调用里。"""
-    records.write("地方/甲.md", "旧的样子。", expected=None)
-    main = Call(agent="world_round", session=None, round=None)
-    perception = Call(agent="world_perception", session=None, round=None)
-
-    with in_call(main):
-        with in_call(perception):
-            shown = await _call(records_source.read_record, path="地方/甲.md")
-
-    assert "旧的样子。" in shown
-    assert main.state(records_source.RecordsRead).fingerprints == {}
-    assert list(perception.state(records_source.RecordsRead).fingerprints) == ["地方/甲.md"]
-
-
-async def test_reading_a_missing_record_says_so(reads):
-    result = await _call(records_source.read_record, path="没有/这份.md")
-
-    assert "没有" in str(result)
-    assert reads == {}
-
-
-def test_the_records_source_only_reads():
-    assert [t.name for t in records_source.SOURCE.tools] == ["list_records", "read_record"]
-    assert records_source.SOURCE.intake is None
 
 
 # ---------------------------------------------------------------------------

@@ -3,11 +3,12 @@
 
 它和三姐妹的 life 互不 import（CI 规则 ``scripts/check_world_life_imports.py``），运行时
 也不加载 life 的代码：它是同一个镜像上的另一个 App，进程只起 world 的插件
-（:mod:`app.plugins.world` 和三个知识来源的插件，清单是 :mod:`app.manifests.world`）。它和别的参与者之间唯一的连接是通信机制
+（:mod:`app.plugins.world`、记录的两个插件和另外两个知识来源的插件，清单是 :mod:`app.manifests.world`）。它和别的参与者之间唯一的连接是通信机制
 （:mod:`app.messaging`）。
 
 * :mod:`app.world.volume` —— 私有卷上按泳道分的那个目录；
-* :mod:`app.world.records` —— 记录：那个目录下的一棵自然语言文档树；
+* :mod:`app.world.records` —— 记录：那个目录下的一棵自然语言文档树，和它的两个插件（读的查询
+  工具 ``records``；写记录、记录目录和人工读写接口 ``record_keeping``）；
 * :mod:`app.world.wake` —— 下次醒来的时刻（私有状态）和醒来规则；
 * :mod:`app.world.sources` —— 知识来源：agent 能查到的东西从哪来，每个来源一个模块、一个插件；
 * :mod:`app.world.agents` —— world 的几类 agent 怎么调模型（模型、trace、成本）；
@@ -18,9 +19,8 @@
 * :mod:`app.world.perception` —— 感知判断 agent：谁会察觉、察觉到什么，以及告知他们；
 * :mod:`app.world.npc` —— NPC agent：扮演一个 NPC 完成一次互动；
 * :mod:`app.world.answer` —— 应答 agent：回答问 world 的问题，只读；
-* :mod:`app.world.unfinished` —— 没跑完的一轮里已经发生、收不回来的事；
-* :mod:`app.world.admin` —— 记录的人工读写接口。
+* :mod:`app.world.unfinished` —— 没跑完的一轮里已经发生、收不回来的事。
 
-主 agent 的一轮、收件箱和人工接口由 world 的插件（:mod:`app.plugins.world`）登记，来源和它们的
-查询工具由各自的插件登记。
+主 agent 的一轮和收件箱由 world 的插件（:mod:`app.plugins.world`）登记，记录、来源和它们的
+查询工具、人工接口由各自的插件登记。
 """
