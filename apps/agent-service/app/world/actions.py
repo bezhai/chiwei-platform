@@ -47,7 +47,8 @@ from app.messaging.message import Message, message_body
 from app.world import records, unfinished
 from app.world.agents import when
 from app.world.npc import play_npc
-from app.world.perception import Notice, judge_who_notices, render_told, tell
+from app.world.perception import judge_who_notices, render_told, tell
+from app.world.services import Notice
 from app.world.sources.records import RecordPath, RecordsRead
 
 logger = logging.getLogger(__name__)

@@ -22,7 +22,7 @@
 出去"），日志里记一条 error 点明试了几次、最后为什么失败；每一次失败的调用在 Langfuse 里各是
 一条标成 ERROR 的 trace。
 
-**告知居民只有这一条路。** 每一条判断变成一条 :class:`Notice`，消息 id 在判断完那一刻就定下；
+**告知居民只有这一条路。** 每一条判断变成一条 :class:`~app.world.services.Notice`，消息 id 在判断完那一刻就定下；
 :func:`tell` 把它原样按通信机制发给那个参与者（``send``，发送方是 world，用的就是这个 id）。
 主 agent 没有直接给谁发消息的工具，所以"谁知道这件事"只由这一次判断决定，告知的内容也是判断
 写下的那段话。
@@ -64,6 +64,7 @@ from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, Message, message_body, participant
 from app.messaging.sending import send
 from app.world.agents import lane, run_agent, when, world_agent
+from app.world.services import Notice
 from app.world.sources import query_tools
 from app.world.wake import WORLD, is_own_wake
 
@@ -139,20 +140,6 @@ async def someone_notices(
         )
     current_call().state(Judgments).by_name[name] = (body, right_away)
     return f"记下了：{name} 会察觉到。"
-
-
-@dataclass(frozen=True)
-class Notice:
-    """一条判断出来的告知：发给谁、发什么、要不要叫醒他、用哪个消息 id。
-
-    id 在判断完那一刻定下，之后不管发几次都用它，接收方按它去重。要不要叫醒也在那一刻定下，
-    补发时原样带着。
-    """
-
-    who: str
-    what: str
-    wakes_recipient: bool
-    message_id: str
 
 
 @dataclass(frozen=True)

@@ -18,7 +18,7 @@ from app.infra.cst_time import CST, now_cst
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, unfinished, wake
 from app.world.agents import when
-from app.world.perception import Notice
+from app.world.services import Notice
 
 from .conftest import LANE, run_round_taking, self_message, sets_nothing
 

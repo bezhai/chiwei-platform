@@ -41,7 +41,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.infra.cst_time import now_cst
-from app.world.perception import Notice
+from app.world.services import Notice
 from app.world.volume import lane_dir, require_writer_lock, set_aside, write_atomically
 
 logger = logging.getLogger(__name__)
