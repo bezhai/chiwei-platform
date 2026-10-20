@@ -231,7 +231,7 @@ def _source():
     """world 收件箱的唤醒来源，跟 world 插件建的一样（一个新的 ``Rounds`` 就是一个新进程）。"""
     from app.world.rounds import Rounds
 
-    async def never_runs(messages):  # pragma: no cover - due 不跑一轮
+    async def never_runs(due):  # pragma: no cover - due 不跑一轮
         raise AssertionError
 
     return Rounds(never_runs, round_timeout=main_agent.ROUND_TIMEOUT).source

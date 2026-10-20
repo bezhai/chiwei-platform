@@ -18,10 +18,9 @@ from __future__ import annotations
 import logging
 import uuid
 
-from app.agent.context import AgentContext
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
-from app.agent.round import open_call
+from app.agent.round import current_round, open_call
 from app.infra.cst_time import now_cst
 from app.world.agents import lane, run_agent, when, world_agent
 from app.world.sources import query_tools
@@ -44,12 +43,13 @@ async def play_npc(npc: str, situation: str) -> str:
     模型调用失败原样往外抛。
     """
     call_id = uuid.uuid4().hex
+    # 扮演是在主 agent 这一轮里做的。
+    call = open_call(NPC, NPC_AGENT, lane=lane(), round=current_round())
     reply = await run_agent(
-        open_call(NPC, NPC_AGENT, lane=lane()),
+        call,
         NPC_AGENT,
         [Turn(role=Role.USER, content=_npc_input(npc, situation))],
         tools=await query_tools(),
-        context=AgentContext(),
         call_id=call_id,
     )
     acted = reply.text().strip()

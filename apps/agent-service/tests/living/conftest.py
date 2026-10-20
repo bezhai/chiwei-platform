@@ -309,26 +309,16 @@ def pinned(monkeypatch):
 
 @pytest.fixture
 def in_a_moment():
-    """把一个工具放进"她的某个 moment"里跑 —— 绑上工具体要读的那四样 ambient 事实。
+    """把一个工具放进"她的某个 moment"里跑 —— 绑上她这一轮（:class:`app.agent.round.Round`）。
 
-    工具体一律走 :func:`app.living.scope.moment_scope`，没绑 context 直接
-    ``LookupError``。用例只想验一个工具（看手机、发消息）时不必真跑一整轮，但
-    **必须走真的 context 绑定**，不然 lane 隔离、派生 id、moment 的身份全是假的。
+    工具体一律从 :func:`app.agent.round.current_round` 读她是谁、哪个泳道、几点、是哪一轮，没绑就
+    ``LookupError``。用例只想验一个工具（看手机、发消息）时不必真跑一整轮，但**必须走真的绑定**，
+    不然 lane 隔离、派生 id、moment 的身份全是假的。交回的就是这一轮。
     """
     import datetime as dt
     from contextlib import asynccontextmanager
 
-    from app.agent.context import AgentContext
-    from app.agent.runtime_context import agent_context
-    from app.living.scope import (
-        FEATURE_GLANCES,
-        FEATURE_LANE,
-        FEATURE_MOMENT,
-        FEATURE_NOW,
-        FEATURE_PERSONA,
-        FEATURE_RECORDED,
-        FEATURE_SWITCHES,
-    )
+    from app.agent.round import Round, in_round
 
     cst = dt.timezone(dt.timedelta(hours=8))
 
@@ -347,26 +337,24 @@ def in_a_moment():
         所以"这一轮跑完没有"是它的输入，不能不给。
         """
         at = now or dt.datetime(2026, 7, 25, 21, 30, tzinfo=cst)
-        ctx = AgentContext(
-            persona_id=persona_id,
-            features={
-                FEATURE_LANE: lane,
-                FEATURE_NOW: at.isoformat(),
-                FEATURE_PERSONA: persona_id,
-                FEATURE_MOMENT: moment_id,
-                FEATURE_SWITCHES: [],
-                FEATURE_RECORDED: [],
-                FEATURE_GLANCES: [],
-            },
+        her_round = Round(
+            app="agent-service",
+            lane=lane,
+            participant=persona_id,
+            profile="resident",
+            round_id=moment_id,
+            now=at,
+            reason="test",
+            due=object(),
         )
-        with agent_context(ctx):
-            yield ctx
+        with in_round(her_round):
+            yield her_round
         if finishes:
             from app.data.tx import tx
-            from app.living.phone import commit_glances
+            from app.living.phone import Glances, commit_glances
 
             async with tx():
-                await commit_glances(glances=ctx.features[FEATURE_GLANCES])
+                await commit_glances(glances=her_round.state(Glances).pending)
 
     return bind
 

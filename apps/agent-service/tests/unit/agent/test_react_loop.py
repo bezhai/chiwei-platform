@@ -25,7 +25,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.agent.client import ModelClient
-from app.agent.context import AgentContext
 from app.agent.neutral import (
     ContentBlock,
     Message,
@@ -35,7 +34,6 @@ from app.agent.neutral import (
     ToolDef,
     TurnPart,
 )
-from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 
 pytestmark = pytest.mark.unit
@@ -106,17 +104,6 @@ async def echo_tool(text: str) -> str:
 
 
 @tool
-async def ctx_tool(x: str) -> str:
-    """Read the ambient persona id from the agent context.
-
-    Args:
-        x: in.
-    """
-    ctx = get_context()
-    return f"persona={ctx.persona_id};x={x}"
-
-
-@tool
 async def dict_tool(x: str) -> dict:
     """A tool that returns a dict (like recall / notes / a tool_error outcome).
 
@@ -171,7 +158,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="hello")],
             tools=[],
-            context=None,
             recursion_limit=12,
         )
         assert isinstance(result, Message)
@@ -191,7 +177,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=12,
         )
         assert result.text() == "done"
@@ -217,7 +202,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[no_reply, echo_tool],
-            context=None,
             recursion_limit=12,
         )
         assert result.text() == ""
@@ -241,7 +225,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[real_no_reply, echo_tool],
-            context=None,
             recursion_limit=12,
         )
         assert result.text() == ""
@@ -265,7 +248,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[real_no_reply, echo_tool],
-            context=None,
             recursion_limit=12,
         )
         assert result.text() == ""
@@ -287,35 +269,12 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=12,
         )
         assert result.text() == "fin"
         second_msgs = fake.complete_calls[1][0]
         tool_msgs = [m for m in second_msgs if m.role == Role.TOOL]
         assert {m.tool_call_id for m in tool_msgs} == {"c1", "c2"}
-
-    async def test_context_is_bound_during_dispatch(self):
-        _run_loop, _ = _import_loops()
-        call = ToolCall(id="c1", name="ctx_tool", arguments={"x": "v"})
-        fake = FakeModelClient(
-            complete_script=[
-                Message(role=Role.ASSISTANT, content="", tool_calls=[call]),
-                Message(role=Role.ASSISTANT, content="ok"),
-            ]
-        )
-        ctx = AgentContext(message_id="m", chat_id="c", persona_id="luna")
-        await _run_loop(
-            fake,
-            messages=[Message(role=Role.USER, content="go")],
-            tools=[ctx_tool],
-            context=ctx,
-            recursion_limit=12,
-        )
-        tool_msg = next(
-            m for m in fake.complete_calls[1][0] if m.role == Role.TOOL
-        )
-        assert tool_msg.text() == "persona=luna;x=v"
 
     async def test_a_terminal_tool_leaves_no_empty_message_in_the_sink(self):
         """A terminal tool ends the run; the empty assistant message it returns
@@ -338,7 +297,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[no_reply, echo_tool],
-            context=None,
             recursion_limit=12,
             transcript_sink=sink,
         )
@@ -371,7 +329,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[no_reply, echo_tool],
-            context=None,
             recursion_limit=12,
             transcript_sink=sink,
         )
@@ -411,7 +368,6 @@ class TestRunLoop:
                 fake,
                 messages=[Message(role=Role.USER, content="go")],
                 tools=[echo_tool],
-                context=None,
                 recursion_limit=3,
                 transcript_sink=sink,
             )
@@ -449,7 +405,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=2,
             transcript_sink=sink,
         )
@@ -484,7 +439,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=2,
             transcript_sink=sink,
         )
@@ -504,7 +458,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="hello")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=12,
         )
         _msgs, tools = fake.complete_calls[0]
@@ -528,7 +481,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[dict_tool],
-            context=None,
             recursion_limit=12,
         )
         tool_msg = next(
@@ -556,7 +508,6 @@ class TestRunLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[blocks_tool],
-            context=None,
             recursion_limit=12,
         )
         tool_msg = next(
@@ -592,7 +543,6 @@ class TestStreamLoop:
             fake,
             messages=[Message(role=Role.USER, content="hi")],
             tools=[],
-            context=None,
             recursion_limit=12,
         ):
             out.append(chunk)
@@ -615,7 +565,6 @@ class TestStreamLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=12,
         ):
             out.append(chunk)
@@ -644,7 +593,6 @@ class TestStreamLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[no_reply, echo_tool],
-            context=None,
             recursion_limit=12,
         ):
             out.append(chunk)
@@ -666,33 +614,11 @@ class TestStreamLoop:
                 fake,
                 messages=[Message(role=Role.USER, content="hi")],
                 tools=[echo_tool],
-                context=None,
                 recursion_limit=12,
             )
         ]
         assert len(fake.stream_calls) == 1
         assert "".join(c.text or "" for c in out) == "just text"
-
-    async def test_context_bound_during_stream_dispatch(self):
-        _, _stream_loop = _import_loops()
-        call = ToolCall(id="c1", name="ctx_tool", arguments={"x": "v"})
-        fake = FakeModelClient(
-            stream_script=[
-                [StreamChunk(tool_call=call), StreamChunk(finish_reason="tool_calls")],
-                [StreamChunk(text="ok"), StreamChunk(finish_reason="stop")],
-            ]
-        )
-        ctx = AgentContext(message_id="m", chat_id="c", persona_id="sol")
-        async for _ in _stream_loop(
-            fake,
-            messages=[Message(role=Role.USER, content="go")],
-            tools=[ctx_tool],
-            context=ctx,
-            recursion_limit=12,
-        ):
-            pass
-        tool_msg = next(m for m in fake.stream_calls[1][0] if m.role == Role.TOOL)
-        assert tool_msg.text() == "persona=sol;x=v"
 
     async def test_recursion_limit_caps_stream_tool_loop(self):
         _, _stream_loop = _import_loops()
@@ -704,7 +630,6 @@ class TestStreamLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=3,
         ):
             pass
@@ -725,7 +650,6 @@ class TestStreamLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[dict_tool],
-            context=None,
             recursion_limit=12,
         ):
             out.append(chunk)
@@ -764,7 +688,6 @@ class TestStreamLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=12,
         ):
             pass
@@ -809,7 +732,6 @@ class TestStreamLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=12,
         ):
             pass
@@ -865,7 +787,6 @@ class TestToolSpanOutput:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=12,
         )
         assert len(spans) == 1
@@ -888,7 +809,6 @@ class TestToolSpanOutput:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[blocks_tool],
-            context=None,
             recursion_limit=12,
         )
         output = spans[0].update.call_args.kwargs["output"]
@@ -916,7 +836,6 @@ class TestToolSpanOutput:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=12,
         ):
             pass
@@ -941,7 +860,6 @@ class TestSessionIdPassthrough:
             fake,
             messages=[Message(role=Role.USER, content="hello")],
             tools=[],
-            context=None,
             recursion_limit=12,
             session_id="coe-world-life2:world:2026-06-06",
         )
@@ -959,7 +877,6 @@ class TestSessionIdPassthrough:
             fake,
             messages=[Message(role=Role.USER, content="hello")],
             tools=[],
-            context=None,
             recursion_limit=12,
         )
         assert fake.complete_kwargs[0].get("session_id") is None
@@ -975,7 +892,6 @@ class TestSessionIdPassthrough:
             fake,
             messages=[Message(role=Role.USER, content="hi")],
             tools=[],
-            context=None,
             recursion_limit=12,
             session_id="sess-1",
         ):
@@ -993,7 +909,6 @@ class TestSessionIdPassthrough:
             fake,
             messages=[Message(role=Role.USER, content="hello")],
             tools=[],
-            context=None,
             recursion_limit=12,
             session_id="real",
             model_kwargs={"session_id": "stale", "reasoning_effort": "low"},
@@ -1027,7 +942,6 @@ class TestRunLoopEmptyTurnRetry:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[],
-            context=None,
             recursion_limit=12,
         )
         assert result.text() == "real reply"
@@ -1051,7 +965,6 @@ class TestRunLoopEmptyTurnRetry:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[],
-            context=None,
             recursion_limit=12,
         )
         assert result.text() == "ok"
@@ -1070,7 +983,6 @@ class TestRunLoopEmptyTurnRetry:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[],
-            context=None,
             recursion_limit=12,
         )
         assert result.text() == "ok"
@@ -1093,7 +1005,6 @@ class TestRunLoopEmptyTurnRetry:
                 fake,
                 messages=[Message(role=Role.USER, content="go")],
                 tools=[],
-                context=None,
                 recursion_limit=12,
             )
         assert isinstance(result, Message)
@@ -1117,7 +1028,6 @@ class TestRunLoopEmptyTurnRetry:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=12,
         )
         assert result.text() == "done"
@@ -1134,7 +1044,6 @@ class TestRunLoopEmptyTurnRetry:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[],
-            context=None,
             recursion_limit=12,
         )
         assert result.text() == "hi there"
@@ -1156,7 +1065,6 @@ class TestStreamLoopEmptyTurnRetry:
                 fake,
                 messages=[Message(role=Role.USER, content="go")],
                 tools=[],
-                context=None,
                 recursion_limit=12,
             )
         ]
@@ -1180,7 +1088,6 @@ class TestStreamLoopEmptyTurnRetry:
                 fake,
                 messages=[Message(role=Role.USER, content="go")],
                 tools=[],
-                context=None,
                 recursion_limit=12,
             )
         ]
@@ -1200,7 +1107,6 @@ class TestStreamLoopEmptyTurnRetry:
                     fake,
                     messages=[Message(role=Role.USER, content="go")],
                     tools=[],
-                    context=None,
                     recursion_limit=12,
                 )
             ]
@@ -1223,7 +1129,6 @@ class TestStreamLoopEmptyTurnRetry:
                 fake,
                 messages=[Message(role=Role.USER, content="go")],
                 tools=[echo_tool],
-                context=None,
                 recursion_limit=12,
             )
         ]
@@ -1243,7 +1148,6 @@ class TestStreamLoopEmptyTurnRetry:
                 fake,
                 messages=[Message(role=Role.USER, content="go")],
                 tools=[],
-                context=None,
                 recursion_limit=12,
             )
         ]
@@ -1279,7 +1183,6 @@ class TestStreamLoopEmptyTurnRetry:
                 fake,
                 messages=[Message(role=Role.USER, content="go")],
                 tools=[],
-                context=None,
                 recursion_limit=12,
             )
         ]
@@ -1313,7 +1216,6 @@ class TestStreamLoopEmptyTurnRetry:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[],
-            context=None,
             recursion_limit=12,
         )
         first = await gen.__anext__()
@@ -1361,7 +1263,6 @@ class TestTheTurnSequenceSurvivesTheLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=2,
             transcript_sink=sink,
         )
@@ -1391,7 +1292,6 @@ class TestTheTurnSequenceSurvivesTheLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=2,
             transcript_sink=sink,
         )
@@ -1426,7 +1326,6 @@ class TestTheTurnSequenceSurvivesTheLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=4,
         ):
             pass
@@ -1457,7 +1356,6 @@ class TestTheTurnSequenceSurvivesTheLoop:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=4,
         ):
             pass
@@ -1493,7 +1391,6 @@ class TestARetriedTurnKeepsWhatItThought:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[],
-            context=None,
             recursion_limit=12,
             transcript_sink=sink,
         )
@@ -1530,7 +1427,6 @@ class TestARetriedTurnKeepsWhatItThought:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[],
-            context=None,
             recursion_limit=12,
             transcript_sink=sink,
         )
@@ -1558,7 +1454,6 @@ class TestARetriedTurnKeepsWhatItThought:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[],
-            context=None,
             recursion_limit=12,
             transcript_sink=sink,
         )
@@ -1590,7 +1485,6 @@ class TestARetriedTurnKeepsWhatItThought:
             fake,
             messages=[Message(role=Role.USER, content="go")],
             tools=[echo_tool],
-            context=None,
             recursion_limit=2,
             transcript_sink=sink,
         )
@@ -1622,7 +1516,6 @@ class TestARetriedTurnKeepsWhatItThought:
                 fake,
                 messages=[Message(role=Role.USER, content="go")],
                 tools=[echo_tool],
-                context=None,
                 recursion_limit=4,
             )
         ]

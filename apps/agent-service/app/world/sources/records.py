@@ -5,17 +5,17 @@
 
 **读到的指纹记在这一次调用里。** 主 agent 改写一份已有的记录之前，必须在这一轮里读过它现在的
 样子（指纹规矩见 :mod:`app.world.records`）：:func:`read_record` 把读到的指纹记进这一次 agent
-调用的 :data:`RECORDS_READ`（放在 ``AgentContext.features`` 里的一个"路径 → 指纹"字典），写的
-时候拿它做指纹检查。只有主 agent 的一轮放这个字典；感知判断、NPC、应答不写记录，不放，读了
-也不记。
+调用的 :class:`RecordsRead`（调用自己的状态，"路径 → 指纹"），写的时候拿它做指纹检查。感知
+判断、NPC、应答也会记进它们各自那次调用的状态里，但它们不写记录，调用结束就没了。
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Annotated
 
 from pydantic import Field
 
-from app.agent.runtime_context import get_context
+from app.agent.round import current_call
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg, CapabilityNotFound
@@ -23,8 +23,13 @@ from app.world import records
 from app.world.agents import when
 from app.world.sources import Source
 
-# ``AgentContext.features`` 里那个"这一次调用读过的记录 → 读到时的指纹"字典的键。
-RECORDS_READ = "world_records_read"
+
+@dataclass
+class RecordsRead:
+    """这一次调用读过的记录 → 读到时的指纹。调用自己的状态（``current_call().state``）。"""
+
+    fingerprints: dict[str, str] = field(default_factory=dict)
+
 
 RecordPath = Annotated[
     str, Field(description="记录的路径，相对记录根目录，形如 目录/名字.md")
@@ -59,9 +64,7 @@ async def read_record(path: RecordPath) -> str:
         raise CapabilityNotFound(str(exc)) from exc
     except records.InvalidRecordPath as exc:
         raise CapabilityInvalidArg(str(exc)) from exc
-    reads = get_context().features.get(RECORDS_READ)
-    if reads is not None:
-        reads[record.path] = record.fingerprint
+    current_call().state(RecordsRead).fingerprints[record.path] = record.fingerprint
     return (
         f"《{record.path}》（{len(record.text)} 字，最后改动 {when(record.updated_at)}）"
         f"\n\n{record.text}"

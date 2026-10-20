@@ -69,6 +69,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 
@@ -78,7 +79,6 @@ from app.agent.tools.search import search_web
 # 刷那只手用的是下面那一层：它只做"搜一批命中回来"，没有那道按问题筛的重排。
 from app.capabilities.web_search import SearchHit, web_search
 from app.living.records import esc
-from app.living.scope import moment_scope
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,9 @@ def _note(hand: str, what: str) -> None:
     记，这一趟挂了也留得下痕。顺带，读 moment 身份本身就是 fail-fast：没绑进 moment
     的调用当场就报错，不会安静地照跑。
     """
-    lane, _now, persona_id, moment_id = moment_scope()
+    this_round = current_round()
+    lane, persona_id = this_round.lane, this_round.participant
+    moment_id = this_round.round_id
     logger.info(
         "living web lane=%s persona=%s moment=%s %s：%s",
         lane,

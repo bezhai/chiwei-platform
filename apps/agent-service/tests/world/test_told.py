@@ -9,8 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.agent.context import AgentContext
-from app.agent.runtime_context import agent_context
+from app.agent.round import Call, in_call
 from app.messaging.message import Kind, Message, new_message
 from app.world import main_agent, records
 from app.world.agents import when
@@ -33,7 +32,7 @@ def _said(sender: str, body: str, *, minutes_ago: int = 0, message_id: str | Non
 
 
 async def _call(t, **arguments):
-    with agent_context(AgentContext()):
+    with in_call(Call(agent="world_answer", session=None, round=None)):
         return await t.invoke(arguments)
 
 

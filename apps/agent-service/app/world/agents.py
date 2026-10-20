@@ -23,7 +23,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from app.agent.context import AgentContext
 from app.agent.contracts import AgentSpec, FromConfig
 from app.agent.neutral import Message as Turn
 from app.agent.round import Call
@@ -92,7 +91,6 @@ async def run_agent(
     messages: list[Turn],
     *,
     tools: list[Tool],
-    context: AgentContext | None,
     call_id: str,
     transcript_sink: list[Turn] | None = None,
 ) -> Turn:
@@ -104,12 +102,7 @@ async def run_agent(
     started = now_cst()
     runner = build_runner(spec, tools)
     with collect_usage() as usage:
-        reply = await runner.run(
-            messages,
-            call=call,
-            context=context,
-            transcript_sink=transcript_sink,
-        )
+        reply = await runner.run(messages, call=call, transcript_sink=transcript_sink)
     await record_round_cost(
         lane=lane(),
         actor=WORLD,

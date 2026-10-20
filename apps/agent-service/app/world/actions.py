@@ -16,12 +16,13 @@
 :mod:`app.world.unfinished`，再按这些 id 发。告知收不回来，这一轮要是没跑完，下一轮开始时按原 id
 补发，并且看得见它们。
 
-一轮里动作之间共享的东西放在 :class:`RoundScope` 里，由这一轮的 ``AgentContext`` 带着：这一轮处理
-的消息（报告变化、让 NPC 出场都把它们交给感知判断）、这一轮写下了哪几份记录、定下的下次醒来。
+一轮里动作之间共享的东西是这一轮的状态 :class:`RoundScope`：这一轮写下了哪几份记录、定下的下次
+醒来。这一轮处理的消息（报告变化、让 NPC 出场都把它们交给感知判断）是这一轮自己带着的
+（``current_round().due``）。
 
 **改写一份已有的记录，必须在这一轮里读过它现在的样子。** 模型不用自己搬指纹：读记录的工具
-（:func:`app.world.sources.records.read_record`）把读到的指纹记进这一轮的
-:data:`app.world.sources.records.RECORDS_READ`，写的时候拿它去做 :func:`app.world.records.write`
+（:func:`app.world.sources.records.read_record`）把读到的指纹记进这一次调用的
+:class:`app.world.sources.records.RecordsRead`，写的时候拿它去做 :func:`app.world.records.write`
 的指纹检查。它读过之后别人（人工接口）又改过，这次写就不落盘，告诉它重新读。
 """
 from __future__ import annotations
@@ -33,7 +34,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from app.agent.runtime_context import get_context
+from app.agent.round import current_call, current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg
@@ -43,12 +44,9 @@ from app.world import records, unfinished
 from app.world.agents import when
 from app.world.npc import play_npc
 from app.world.perception import Notice, judge_who_notices, render_told, tell
-from app.world.sources.records import RECORDS_READ, RecordPath
+from app.world.sources.records import RecordPath, RecordsRead
 
 logger = logging.getLogger(__name__)
-
-ROUND_SCOPE = "world_round"
-
 
 @dataclass(frozen=True)
 class WakeChoice:
@@ -58,11 +56,8 @@ class WakeChoice:
 
 @dataclass
 class RoundScope:
-    """一轮里工具之间共享的东西。每一轮新建一个，放进 ``AgentContext.features``。"""
+    """一轮里工具之间共享的东西：这一轮的状态（``current_round().state(RoundScope)``）。"""
 
-    # 这一轮处理的消息，按到达的先后：感知判断要知道这一轮是谁的什么消息叫醒的
-    # （:func:`app.world.perception.judge_who_notices`）。
-    messages: tuple[Message, ...]
     # 这一轮写下的记录，按写的先后（只用来记日志）。
     written: list[str] = field(default_factory=list)
     # 这一轮定下的下次醒来；调过几次以最后一次为准。
@@ -70,7 +65,13 @@ class RoundScope:
 
 
 def _scope() -> RoundScope:
-    return get_context().features[ROUND_SCOPE]
+    return current_round().state(RoundScope)
+
+
+def _round_messages() -> tuple[Message, ...]:
+    """这一轮处理的消息，按到达的先后：感知判断要知道这一轮是谁的什么消息叫醒的
+    （:func:`app.world.perception.judge_who_notices`）。"""
+    return current_round().due.messages
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +90,7 @@ async def write_record(
     改写一份已经有的记录之前，要在这一轮里读过它现在的样子。
     """
     scope = _scope()
-    reads: dict[str, str] = get_context().features[RECORDS_READ]
+    reads = current_call().state(RecordsRead).fingerprints
     try:
         written = records.write(path, text, expected=reads.get(path))
     except (records.InvalidRecordPath, records.InvalidRecordText) as exc:
@@ -208,7 +209,7 @@ async def report_change(
     except ValueError as exc:
         return f"没有报告：这段话里有记不下来的东西，改一下再报告（{exc}）。"
     try:
-        notices = await judge_who_notices(change, round_messages=_scope().messages)
+        notices = await judge_who_notices(change, round_messages=_round_messages())
     except Exception as exc:
         return _not_done("没有报告出去，感知判断没有做成", exc)
     return await _tell_and_keep(f"你报告了一个变化：{change}", notices)
@@ -241,7 +242,7 @@ async def let_npc_appear(
         if not acted:
             return f"{name} 这一次没有说话，也没有做什么。没有告知任何人。"
         notices = await judge_who_notices(
-            message_body(acted), round_messages=_scope().messages
+            message_body(acted), round_messages=_round_messages()
         )
     except Exception as exc:
         return _not_done(f"{name} 没有出场，扮演或者感知判断没有做成", exc)

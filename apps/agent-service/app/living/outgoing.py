@@ -8,7 +8,7 @@ world 的三轮，每一轮只看到一部分。她这一段在世界里什么�
 
 手机上发的消息、撤回消息照常记在她的经历里（:mod:`app.living.mouth`、:mod:`app.living.takeback`），
 她自己回看得到，但隔着设备，不进汇总：判据是经历上的 ``medium``，不是这一轮记下了哪些
-（:data:`app.living.scope.FEATURE_RECORDED` 里两种都有）。
+（这一轮的 :class:`app.living.happening.Recorded` 里两种都有）。
 
 **只对姐妹说的话直接发给姐妹**，一位一条，不经过 world。同时还对别人说的，姐妹照样收到直达的
 那条，这句话也进汇总，别人听没听见由 world 判断。姐妹按她们在世界里的名字认

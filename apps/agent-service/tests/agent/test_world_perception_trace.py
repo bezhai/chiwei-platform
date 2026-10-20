@@ -1,8 +1,8 @@
 """world 的感知判断遇到模型的临时失败会整次重来；试完了还是失败时，每一次失败的调用在 Langfuse 里
 都是一条单独的、标成 ERROR 的 trace，看得出这次判断没做成、为什么。
 
-走真的那条路：:func:`app.world.perception.judge_who_notices` → :func:`app.world.agents.run_agent` →
-``AgentRunner`` → ``Agent.run``，根 span 是真的，导出到内存（conftest 的 ``exported_spans``）。模型
+走真的那条路（在 world 的一轮里）：:func:`app.world.perception.judge_who_notices` →
+:func:`app.world.agents.run_agent` → ``AgentRunner`` → ``Agent.run``，根 span 是真的，导出到内存（conftest 的 ``exported_spans``）。模型
 换成一直返回 500 的替身，prompt 跳过按泳道取那一步，Dynamic Config 用默认值。
 """
 
@@ -19,8 +19,11 @@ from openai import InternalServerError
 
 from app.agent.client import ModelClient
 from app.agent.neutral import Message, ToolDef
+from app.agent.round import Round, in_round
+from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, new_message
 from app.world import perception
+from app.world.rounds import InboxRound
 
 LEVEL = LangfuseOtelSpanAttributes.OBSERVATION_LEVEL
 STATUS = LangfuseOtelSpanAttributes.OBSERVATION_STATUS_MESSAGE
@@ -78,8 +81,18 @@ async def test_an_exhausted_perception_retry_leaves_one_error_trace_per_attempt(
     monkeypatch.setattr(dynamic_config, "get_int", lambda k, default=0: default)
     monkeypatch.setattr(perception, "RETRY_BASE_SECONDS", 0.0)
     woke = new_message(sender="赤尾", recipient="world", body="我把窗关上了。", kind=Kind.MESSAGE)
+    world_round = Round(
+        app="world",
+        lane="coe-world",
+        participant="world",
+        profile="world",
+        round_id="r1",
+        now=now_cst(),
+        reason="test",
+        due=InboxRound(reason="test", messages=(woke,)),
+    )
 
-    with pytest.raises(InternalServerError):
+    with in_round(world_round), pytest.raises(InternalServerError):
         await perception.judge_who_notices("窗关上之后，屋里的雨声小了。", round_messages=[woke])
 
     roots = [

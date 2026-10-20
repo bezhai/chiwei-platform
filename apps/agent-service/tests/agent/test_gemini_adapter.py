@@ -2408,7 +2408,6 @@ async def test_two_thought_parts_in_one_chunk_stay_two_parts_on_replay(mock_sdk)
         adapter,
         messages=[Message(role=Role.USER, content="q")],
         tools=[look_around],
-        context=None,
         recursion_limit=4,
     ):
         pass
@@ -2460,7 +2459,6 @@ async def test_one_part_cut_across_chunks_is_still_one_part_on_replay(mock_sdk):
         adapter,
         messages=[Message(role=Role.USER, content="q")],
         tools=[look_around],
-        context=None,
         recursion_limit=4,
     ):
         pass

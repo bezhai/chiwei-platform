@@ -70,6 +70,7 @@ from pydantic import Field, field_validator
 
 # module-level 引入，测试从这里换替身（真跑起来要调生图模型、搜图服务和对象存储）。
 from app.agent.image_gen import generate_image
+from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error, upload_image
 from app.capabilities.image_search import image_search
@@ -78,7 +79,6 @@ from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import to_cst_dated
 from app.infra.image import image_client
 from app.living.records import _require_aware, esc
-from app.living.scope import moment_scope
 
 logger = logging.getLogger(__name__)
 
@@ -407,7 +407,8 @@ async def draw_a_picture(
     Returns:
         画出来的那张图本身，连着它那串 pic=…；这一趟没画成时一句如实说明。
     """
-    lane, now, persona_id, _moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
     wanted = what.strip()
     if not wanted:
         raise ValueError("你没说要画什么：写一句你想画的东西。")
@@ -463,7 +464,8 @@ async def find_a_picture_online(
     Returns:
         捞回来的那几张图本身，每张连着它那串 pic=…；一张都没捞着时一句如实说明。
     """
-    lane, now, persona_id, _moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
     wanted = what.strip()
     if not wanted:
         raise ValueError("你没说要找什么图：写一句你想找的东西。")
@@ -548,7 +550,8 @@ async def look_through_your_pictures(
     Returns:
         你手上那些图，每张带一串 pic=…；一张都没有时如实说明。
     """
-    lane, now, persona_id, _moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
 
     # 她抄回来的那串指的是"翻到这儿了"，落脚点是它的时刻。指不到的串**当没填**而不是
     # 报错：她翻到底那一屏的最后一张，下一次再抄它是很自然的动作。
@@ -612,7 +615,8 @@ async def look_at_a_picture(
     Returns:
         那张图本身；没有对得上的 / 对上好几张 / 现在取不出来时一句如实说明。
     """
-    lane, now, persona_id, _moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
     wanted = which.strip()
     if not wanted:
         raise ValueError("你没说要看哪张：抄一串 pic=… 进来，或者说那张图是什么。")

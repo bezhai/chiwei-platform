@@ -15,10 +15,10 @@
 
 **模型的临时失败重试，失败那一次的判断作废。** 感知判断那次模型调用遇到 5xx、超时这类临时失败
 （:data:`app.agent.core.RETRYABLE_EXCEPTIONS`），整次判断重来，最多 :data:`PERCEPTION_ATTEMPTS`
-次。:func:`someone_notices` 只把判断记在这一次调用自己的字典里，不发任何东西，所以失败那一次
-判断过谁、写了什么，都随那个字典丢掉；重来的那一次从空的开始，发出去的只有成功那一次的判断。
-不在 Agent 层重试（``max_retries``）：那一层重放整个工具循环时用的是同一个 context，失败那一次
-记下的判断会留到重放的那一次里。试完了还是失败，交回调用方照旧处理（主 agent 看到"没有报告
+次。:func:`someone_notices` 只把判断记在这一次调用自己的状态里（:class:`Judgments`），不发任何
+东西，所以失败那一次判断过谁、写了什么，都随那次调用丢掉；重来的那一次是一次新的调用，从空的
+开始，发出去的只有成功那一次的判断。重来不交给 Agent 层（``max_retries``）：每一次尝试在这里
+开一次新的调用、记一行自己的成本。试完了还是失败，交回调用方照旧处理（主 agent 看到"没有报告
 出去"），日志里记一条 error 点明试了几次、最后为什么失败；每一次失败的调用在 Langfuse 里各是
 一条标成 ERROR 的 trace。
 
@@ -46,17 +46,15 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated
 
 from pydantic import Field
 
-from app.agent.context import AgentContext
 from app.agent.core import RETRYABLE_EXCEPTIONS
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
-from app.agent.round import open_call
-from app.agent.runtime_context import get_context
+from app.agent.round import current_call, current_round, open_call
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg
@@ -73,8 +71,13 @@ logger = logging.getLogger(__name__)
 PERCEPTION = "world_perception"
 PERCEPTION_AGENT = world_agent(PERCEPTION, "world-perception", "world_perception_model")
 
-# ``AgentContext.features`` 里这一次判断的结果：参与者名字 → (他察觉到的那段话, 要不要现在就叫他来看)。
-_JUDGMENTS = "world_perception_judgments"
+@dataclass
+class Judgments:
+    """一次感知判断调用的结果：参与者名字 → (他察觉到的那段话, 要不要现在就叫他来看)。调用自己的
+    状态，调用方在调用返回之后从它持有的那次调用上读。"""
+
+    by_name: dict[str, tuple[str, bool]] = field(default_factory=dict)
+
 
 # 感知判断那次模型调用遇到临时失败（5xx、超时、连不上、限流，跟 Agent 层自己重试的是同一组：
 # :data:`app.agent.core.RETRYABLE_EXCEPTIONS`）时最多试几次，两次之间等多久（翻倍，有上限）。
@@ -133,7 +136,7 @@ async def someone_notices(
         raise CapabilityInvalidArg(
             f"要不要现在就叫他来看，写 true 或 false，不是 {right_away!r}"
         )
-    get_context().features[_JUDGMENTS][name] = (body, right_away)
+    current_call().state(Judgments).by_name[name] = (body, right_away)
     return f"记下了：{name} 会察觉到。"
 
 
@@ -196,6 +199,8 @@ async def judge_who_notices(
     """
     perception_input = _perception_input(change, round_messages)
     tools = [*await query_tools(), someone_notices]
+    # 判断是在主 agent 这一轮里做的。
+    world_round = current_round()
 
     @retry(
         attempts=PERCEPTION_ATTEMPTS,
@@ -204,17 +209,16 @@ async def judge_who_notices(
         retry_on=RETRYABLE_EXCEPTIONS,
     )
     async def judge() -> tuple[str, dict[str, tuple[str, bool]]]:
-        judgments: dict[str, tuple[str, bool]] = {}
         call_id = uuid.uuid4().hex
+        call = open_call(PERCEPTION, PERCEPTION_AGENT, lane=lane(), round=world_round)
         await run_agent(
-            open_call(PERCEPTION, PERCEPTION_AGENT, lane=lane()),
+            call,
             PERCEPTION_AGENT,
             [Turn(role=Role.USER, content=perception_input)],
             tools=tools,
-            context=AgentContext(features={_JUDGMENTS: judgments}),
             call_id=call_id,
         )
-        return call_id, judgments
+        return call_id, call.state(Judgments).by_name
 
     try:
         call_id, judgments = await judge()

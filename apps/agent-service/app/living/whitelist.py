@@ -41,8 +41,7 @@
 
 **一次 moment 之内是同一份。** 名单跟"此刻几点"同性质：一次 moment 里多处各算一次，她看到的会话集合
 会在这次 moment 中途变化 —— 信封上没有的会话，后半程突然搜得到、发得出去。所以算过一次就锚
-在这次 moment 的 ambient 状态上（:data:`app.living.scope.FEATURE_IN_SIGHT`），键是"谁 + 哪
-一刻"，不同 moment 之间不会互相串。nudge 那条钟不在任何一次 moment 里，它现算现用：它算出来的名单
+在这一轮的状态上（:class:`InSight`），键是"谁 + 哪一刻"，不同 moment 之间不会互相串。nudge 那条钟不在任何一次 moment 里，它现算现用：它算出来的名单
 跟随后被唤醒的那次 moment 是**两次独立计算**，中间隔着模型调用的时间。
 
 **名单只用来收窄视野，不用来放行动作。** 她真要把话发出去时查的是实时的 presence
@@ -56,11 +55,12 @@ import asyncio
 import json
 import logging
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from inner_shared.dynamic_config import dynamic_config
 
-from app.agent.runtime_context import get_context
+from app.agent.round import current_round
 from app.data.queries.messages import (
     count_summons_since,
     find_conversations_others_spoke_in,
@@ -69,7 +69,6 @@ from app.data.queries.persona import (
     find_bot_names_for_persona,
     find_bot_user_ids_for_persona,
 )
-from app.living.scope import FEATURE_IN_SIGHT
 
 logger = logging.getLogger(__name__)
 
@@ -261,33 +260,36 @@ def _anchor_key(persona_id: str, now: datetime) -> str:
     return f"{persona_id}\x1f{now.isoformat()}"
 
 
-def _anchored(*, persona_id: str, now: datetime) -> frozenset[str] | None:
-    """这次 moment 已经定下的那份名单；不在 moment 里、或者还没算过返回 ``None``。
+@dataclass
+class InSight:
+    """这一轮定下的那份"她看得见哪些会话"：``key`` 是谁 + 哪一刻（:func:`_anchor_key`），
+    ``channels`` 是那时算出来的名单。这一轮的状态；没算过时 ``key`` 是 ``None``。"""
 
-    不在 moment 里就没有"本次 moment 定下的"这回事（同
-    :func:`app.living.phone._pending_cursor`），**不能**跟着
-    :func:`app.living.scope.moment_scope` 一起 fail-fast：nudge 那条钟和运维查一眼
-    本来就在 moment 之外。
+    key: str | None = None
+    channels: list[str] = field(default_factory=list)
+
+
+def _anchored(*, persona_id: str, now: datetime) -> frozenset[str] | None:
+    """这次 moment 已经定下的那份名单；不在她的一轮里、或者还没算过返回 ``None``。
+
+    不在一轮里就没有"本次 moment 定下的"这回事（同
+    :func:`app.living.phone._pending_cursor`），**不能**跟着工具体一起 fail-fast：nudge
+    那条钟和运维查一眼本来就在她的一轮之外。
     """
     try:
-        ctx = get_context()
+        settled = current_round().state(InSight)
     except LookupError:
         return None
-    settled = ctx.features.get(FEATURE_IN_SIGHT)
-    if not isinstance(settled, dict):
+    if settled.key != _anchor_key(persona_id, now):
         return None
-    if settled.get("key") != _anchor_key(persona_id, now):
-        return None
-    return frozenset(settled["channels"])
+    return frozenset(settled.channels)
 
 
 def _anchor(*, persona_id: str, now: datetime, channels: frozenset[str]) -> None:
-    """把这次 moment 的名单定下来。不在 moment 里就什么都不记。"""
+    """把这次 moment 的名单定下来。不在她的一轮里就什么都不记。"""
     try:
-        ctx = get_context()
+        settled = current_round().state(InSight)
     except LookupError:
         return
-    ctx.features[FEATURE_IN_SIGHT] = {
-        "key": _anchor_key(persona_id, now),
-        "channels": sorted(channels),
-    }
+    settled.key = _anchor_key(persona_id, now)
+    settled.channels = sorted(channels)

@@ -23,9 +23,8 @@ from pydantic import BaseModel, Field
 
 from app.agent.contracts import AgentSpec
 from app.agent.core import Agent
-from app.agent.round import open_call
+from app.agent.round import current_round, open_call
 from app.capabilities import banned_words
-from app.infra.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +83,10 @@ def build_guard() -> Agent:
 
 
 async def _ask_guard(text: str) -> _OutputSafetyResult:
+    # 判的是她这一轮要发出去的话：这次调用在她这一轮里。
+    her_round = current_round()
     call = open_call(
-        GUARD_OUTPUT, GUARD_OUTPUT_AGENT, lane=current_deployment_lane() or "prod"
+        GUARD_OUTPUT, GUARD_OUTPUT_AGENT, lane=her_round.lane, round=her_round
     )
     return await build_guard().extract(
         _OutputSafetyResult, messages=[], call=call, prompt_vars={"response": text}

@@ -15,6 +15,9 @@ life 判断：当面做的事一轮一条汇总发给 world，只对姐妹说的
 游标是 ``seq``（提交序），不是 ``occurred_at``。理由见 :class:`app.living.records.Happening`，
 号由 :func:`app.data.ordered.insert_in_commit_order` 分配。
 
+**这一轮她做了几件事也记在这里**（:class:`Recorded`，她这一轮的状态）：她的工具每真的落下一件事
+就记一笔（:func:`note_recorded`），这一轮落地时数。
+
 **一条记录长什么样也归这里**（:func:`own_line`）：同一条记录在她每一轮里和在日记材料里必须
 长得一样，两份各写各的必然漂移。放在这里而不是 :mod:`app.living.snapshot`，是因为 snapshot
 要读日记那一页，日记反过来 import snapshot 就绕成环。
@@ -23,8 +26,10 @@ life 判断：当面做的事一轮一条汇总发给 world，只对姐妹说的
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 
+from app.agent.round import current_round
 from app.data.ordered import insert_in_commit_order
 from app.data.persist import fetch_all, from_row
 from app.data.schema import table_name
@@ -37,6 +42,20 @@ from app.living.records import (
 )
 
 _TABLE = table_name(Happening)
+
+
+@dataclass
+class Recorded:
+    """这一轮她真的落库的事（``happening_id``，去重后就是"她这一轮说 / 做了几件事"）。当面说的、
+    手机上发出去的都算——对她自己来说都是"我刚才说了这句话"。这一轮的状态
+    （``current_round().state(Recorded)``），由这一轮落地时数。"""
+
+    happening_ids: list[str] = field(default_factory=list)
+
+
+def note_recorded(happening_id: str) -> None:
+    """记下这一轮她又做了一件事（当面说的、手机上发的，一视同仁）。"""
+    current_round().state(Recorded).happening_ids.append(happening_id)
 
 
 async def record_happening(

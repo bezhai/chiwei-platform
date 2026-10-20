@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import pytest
 
-from app.agent.context import AgentContext
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
 from app.agent.round import open_call
@@ -82,8 +81,8 @@ class Recorder:
         self.reply = reply
         self.calls: list[dict] = []
 
-    async def run(self, messages, *, call, context, transcript_sink, **_):
-        self.calls.append({"messages": list(messages), "call": call, "context": context})
+    async def run(self, messages, *, call, transcript_sink, **_):
+        self.calls.append({"messages": list(messages), "call": call})
         reply = Turn(role=Role.ASSISTANT, content=self.reply)
         if transcript_sink is not None:
             transcript_sink.append(reply)
@@ -111,12 +110,9 @@ def calling(config, monkeypatch):
 async def test_a_call_runs_its_kinds_spec_with_the_tools_it_was_given(calling):
     runner, built, _ = calling
     question = Turn(role=Role.USER, content="潮水到哪了？")
-    context = AgentContext()
     call = open_call("world_tides", KIND, lane=agents.lane())
 
-    reply = await agents.run_agent(
-        call, KIND, [question], tools=["t1", "t2"], context=context, call_id="c1"
-    )
+    reply = await agents.run_agent(call, KIND, [question], tools=["t1", "t2"], call_id="c1")
 
     assert reply.content == "好。"
     [(spec, tools)] = built
@@ -124,7 +120,6 @@ async def test_a_call_runs_its_kinds_spec_with_the_tools_it_was_given(calling):
     assert tools == ["t1", "t2"]
     assert runner.calls[0]["messages"] == [question]
     assert runner.calls[0]["call"] is call
-    assert runner.calls[0]["context"] is context
 
 
 async def test_each_call_records_its_cost_under_world_by_kind(calling):
@@ -135,7 +130,6 @@ async def test_each_call_records_its_cost_under_world_by_kind(calling):
         KIND,
         [Turn(role=Role.USER, content="x")],
         tools=[],
-        context=AgentContext(),
         call_id="c1",
     )
 

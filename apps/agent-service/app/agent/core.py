@@ -68,7 +68,6 @@ from openai import (
 from pydantic import BaseModel
 
 from app.agent.client import ModelClient, build_model_client
-from app.agent.context import AgentContext
 from app.agent.contracts import AgentSpec, FromConfig
 from app.agent.neutral import (
     ContentBlock,
@@ -83,7 +82,6 @@ from app.agent.neutral import (
 )
 from app.agent.prompts import compile_to_messages, get_prompt
 from app.agent.round import Call, in_call
-from app.agent.runtime_context import agent_context
 from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
     TURN_TRACE_NAME,
@@ -564,7 +562,6 @@ async def _run_loop(
     *,
     messages: list[Message],
     tools: list[Tool],
-    context: AgentContext | None,
     recursion_limit: int,
     session_id: str | None = None,
     model_kwargs: dict[str, Any] | None = None,
@@ -573,9 +570,10 @@ async def _run_loop(
     """Drive ``model.complete`` until the assistant stops calling tools.
 
     Each iteration: call the model with the running transcript + tool defs.
-    If the assistant requested tools, dispatch each (under ``agent_context`` so
-    tool bodies can read the ambient context), append the assistant turn and one
-    tool message per result, and loop. Otherwise return the assistant message.
+    If the assistant requested tools, dispatch each (a tool reads its call and
+    round with ``current_call()`` / ``current_round()``, bound by the agent and
+    the round's runner), append the assistant turn and one tool message per
+    result, and loop. Otherwise return the assistant message.
 
     ``model_kwargs`` (e.g. ``reasoning_effort`` for the safety guard) are
     forwarded to every model call — dropping them silently changes behaviour.
@@ -635,8 +633,7 @@ async def _run_loop(
             transcript_sink.append(last)
         for at, call in enumerate(last.tool_calls):
             with _tool_span(name=call.name, input=call.arguments) as span:
-                with agent_context(context) if context is not None else _nullctx():
-                    result = await dispatch(tools, call)
+                result = await dispatch(tools, call)
                 normalised = _normalise_tool_result(result)
                 _record_tool_output(span, normalised)
             tool_msg = normalised.to_message()
@@ -706,7 +703,6 @@ async def _stream_loop(
     *,
     messages: list[Message],
     tools: list[Tool],
-    context: AgentContext | None,
     recursion_limit: int,
     session_id: str | None = None,
     model_kwargs: dict[str, Any] | None = None,
@@ -715,7 +711,7 @@ async def _stream_loop(
 
     Each turn streams from the model, forwarding every chunk downstream while
     accumulating the assistant's text + any tool calls. If the turn ended with
-    tool calls, dispatch them (under ``agent_context``), emit a ``tool_result``
+    tool calls, dispatch them, emit a ``tool_result``
     chunk per result (so the consumer can count them), feed the assistant turn +
     tool messages back into the transcript, and stream another turn. A turn with
     no tool calls ends the loop.
@@ -796,8 +792,7 @@ async def _stream_loop(
         convo.append(assistant_turn)
         for call in turn_calls:
             with _tool_span(name=call.name, input=call.arguments) as span:
-                with agent_context(context) if context is not None else _nullctx():
-                    result = await dispatch(tools, call)
+                result = await dispatch(tools, call)
                 result = _normalise_tool_result(result)
                 _record_tool_output(span, result)
             tool_msg = result.to_message()
@@ -805,11 +800,6 @@ async def _stream_loop(
             yield StreamChunk(tool_result=result)
             if _is_terminal_tool_call(call):
                 return
-
-
-@contextmanager
-def _nullctx():
-    yield None
 
 
 # ---------------------------------------------------------------------------
@@ -888,7 +878,6 @@ class Agent:
         *,
         call: Call,
         prompt_vars: dict[str, Any] | None = None,
-        context: AgentContext | None = None,
         transcript_sink: list[Message] | None = None,
     ) -> Message:
         """Execute the ReAct loop and return the final assistant ``Message``.
@@ -927,7 +916,6 @@ class Agent:
                         model,
                         messages=full_messages,
                         tools=self._tools,
-                        context=context,
                         recursion_limit=recursion_limit,
                         session_id=call.session,
                         model_kwargs=dict(spec.model_kwargs),
@@ -947,7 +935,6 @@ class Agent:
         *,
         call: Call,
         prompt_vars: dict[str, Any] | None = None,
-        context: AgentContext | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream neutral ``StreamChunk``s through the ReAct loop.
 
@@ -982,7 +969,6 @@ class Agent:
                             model,
                             messages=full_messages,
                             tools=self._tools,
-                            context=context,
                             recursion_limit=recursion_limit,
                             session_id=call.session,
                             model_kwargs=dict(spec.model_kwargs),

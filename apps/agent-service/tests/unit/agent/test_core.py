@@ -21,7 +21,6 @@ import pytest
 from openai import APITimeoutError
 from pydantic import BaseModel
 
-from app.agent.context import AgentContext
 from app.agent.contracts import AgentSpec, FromConfig
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role, StreamChunk
@@ -761,21 +760,21 @@ class TestRun:
             )
         assert mock_deps["model"].complete.call_count == 2
 
-    async def test_passes_context_to_tool_dispatch(self, mock_deps):
+    async def test_tools_run_in_the_call_being_run(self, mock_deps):
         from app.agent.neutral import ToolCall
-        from app.agent.runtime_context import get_context
+        from app.agent.round import current_call
         from app.agent.tooling import tool
 
         seen: dict = {}
 
         @tool
         async def ctx_tool(x: str) -> str:
-            """Reads context.
+            """Reads its call.
 
             Args:
                 x: in.
             """
-            seen["persona"] = get_context().persona_id
+            seen["call"] = current_call()
             return "done"
 
         # first completion requests the tool, second finishes
@@ -789,12 +788,11 @@ class TestRun:
                 Message(role=Role.ASSISTANT, content="ok"),
             ]
         )
-        ctx = AgentContext(message_id="m", chat_id="c", persona_id="luna")
+        call = _call()
         await Agent(_CFG, tools=[ctx_tool]).run(
-            messages=[Message(role=Role.USER, content="go")],
-            context=ctx, call=_call(),
+            messages=[Message(role=Role.USER, content="go")], call=call
         )
-        assert seen["persona"] == "luna"
+        assert seen["call"] is call
 
 
 # ---------------------------------------------------------------------------

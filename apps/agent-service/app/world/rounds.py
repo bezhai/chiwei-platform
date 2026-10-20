@@ -77,7 +77,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -91,7 +91,7 @@ from app.world.wake import WORLD, is_own_wake, is_stale_wake
 
 logger = logging.getLogger(__name__)
 
-RunRound = Callable[[Sequence[Message]], Awaitable[None]]
+RunRound = Callable[["InboxRound"], Awaitable[None]]
 
 # 一次投递等完两轮之后，把结果交回通信机制还要一点时间（记成处理完、排重试）。
 _SETTLING = timedelta(minutes=1)
@@ -117,7 +117,8 @@ class InboxRound:
 
 
 class Rounds:
-    """world 的一轮接一轮。``run`` 带着一轮的消息（按到达的先后）跑一轮，失败就抛异常。
+    """world 的一轮接一轮。``run`` 带着判出来的这一轮（:class:`InboxRound`，消息按到达的先后）跑
+    一轮，失败就抛异常。
 
     ``turns`` 是 world 的轮次队列，world 插件从宿主拿（``ctx.turns``）；不给就用一条自己的，
     单独用一个 ``Rounds`` 时（不经过宿主）就是这样。"""
@@ -219,7 +220,7 @@ class Rounds:
         ids = [m.message_id for m in taking]
         try:
             async with asyncio.timeout(self._round_timeout.total_seconds()):
-                await self._run(taking)
+                await self._run(due)
         except Exception:
             pending.failed(ids, give_up_at=receiving.PROCESSING_RETRY.n)
             raise

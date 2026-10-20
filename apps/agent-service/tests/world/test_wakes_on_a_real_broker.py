@@ -11,7 +11,7 @@ import pytest
 
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
-from app.agent.runtime_context import agent_context
+from app.agent.round import in_call
 from app.infra.cst_time import now_cst
 from app.messaging.lifecycle import start_messaging
 from app.messaging.record import read_record
@@ -31,16 +31,16 @@ pytestmark = pytest.mark.usefixtures("messaging_db")
 
 
 class ScriptedRunner:
-    """每轮按顺序取一个"再过几秒醒"，在这一轮的 context 里真调 ``wake_me_at``。"""
+    """每轮按顺序取一个"再过几秒醒"，在这一轮、这次调用上真调 ``wake_me_at``。"""
 
     def __init__(self, wake_in_seconds: list[float]):
         self.plan = list(wake_in_seconds)
         self.round_inputs: list[str] = []
 
-    async def run(self, messages, *, context, transcript_sink, **_):
+    async def run(self, messages, *, call, transcript_sink, **_):
         self.round_inputs.append(messages[-1].content)
         seconds = self.plan.pop(0)
-        with agent_context(context):
+        with in_call(call):
             at = now_cst() + timedelta(seconds=seconds)
             await wake_me_at.invoke({"at": at.isoformat(), "reason": f"{seconds} 秒后"})
         reply = Turn(role=Role.ASSISTANT, content="好。")
@@ -138,13 +138,13 @@ class RunnerFailingOn:
         self.plan = list(wake_in_seconds)
         self.round_inputs: list[str] = []
 
-    async def run(self, messages, *, context, transcript_sink, **_):
+    async def run(self, messages, *, call, transcript_sink, **_):
         round_input = messages[-1].content
         self.round_inputs.append(round_input)
         if self.fails(round_input):
             raise RuntimeError("这一轮跑不完")
         seconds = self.plan.pop(0)
-        with agent_context(context):
+        with in_call(call):
             at = now_cst() + timedelta(seconds=seconds)
             await wake_me_at.invoke({"at": at.isoformat(), "reason": f"{seconds} 秒后"})
         reply = Turn(role=Role.ASSISTANT, content="好。")
@@ -241,11 +241,11 @@ class HeldFirstRound:
         self.release = asyncio.Event()
         self.round_inputs: list[str] = []
 
-    async def run(self, messages, *, context, transcript_sink, **_):
+    async def run(self, messages, *, call, transcript_sink, **_):
         self.round_inputs.append(messages[-1].content)
         if len(self.round_inputs) == 1:
             await self.release.wait()
-        with agent_context(context):
+        with in_call(call):
             at = now_cst() + timedelta(days=1)
             await wake_me_at.invoke({"at": at.isoformat(), "reason": "明天再看。"})
         reply = Turn(role=Role.ASSISTANT, content="好。")
@@ -309,9 +309,9 @@ class WakesTomorrow:
     def __init__(self):
         self.round_inputs: list[str] = []
 
-    async def run(self, messages, *, context, transcript_sink, **_):
+    async def run(self, messages, *, call, transcript_sink, **_):
         self.round_inputs.append(messages[-1].content)
-        with agent_context(context):
+        with in_call(call):
             at = now_cst() + timedelta(days=1)
             await wake_me_at.invoke({"at": at.isoformat(), "reason": "明天再看。"})
         reply = Turn(role=Role.ASSISTANT, content="好。")

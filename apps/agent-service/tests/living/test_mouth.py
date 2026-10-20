@@ -392,7 +392,7 @@ async def test_a_handoff_that_blew_up_is_unknown_not_a_confirmed_failure(
     assert await recent_own_happenings(lane=LANE, persona_id="akao") == [], (
         "结果不知道却记成说过了 —— 她从此不会再说这句话"
     )
-    row = await latest_outbound(lane=LANE, moment_id=ctx.features["living_moment"])
+    row = await latest_outbound(lane=LANE, moment_id=ctx.round_id)
     assert row is not None and row.state == STATE_CLAIMED, (
         "emit 抛错被判成「确定没发出去」了 —— 那就允许自动重试，而 broker 可能已经"
         f"收件，真人会收到两条。拿到：{row}"

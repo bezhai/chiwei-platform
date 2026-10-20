@@ -30,14 +30,38 @@ class _FakeGuard:
         self.boom = boom
         self.hang = hang
         self.asked: list[str] = []
+        self.calls: list = []
 
     async def extract(self, schema, *, messages, call, prompt_vars):
         self.asked.append(prompt_vars["response"])
+        self.calls.append(call)
         if self.hang:
             await asyncio.sleep(3600)
         if self.boom is not None:
             raise self.boom
         return schema(is_unsafe=self.unsafe, confidence=self.confidence)
+
+
+@pytest.fixture(autouse=True)
+def her_round():
+    """判的是她这一轮要发出去的话：判词那次调用开在她这一轮里。"""
+    from datetime import datetime
+
+    from app.agent.round import Round, in_round
+    from app.infra.cst_time import CST
+
+    this_round = Round(
+        app="agent-service",
+        lane="coe-living",
+        participant="akao",
+        profile="resident",
+        round_id="2026-07-25T14:00+08:00",
+        now=datetime(2026, 7, 25, 14, tzinfo=CST),
+        reason="test",
+        due=object(),
+    )
+    with in_round(this_round):
+        yield this_round
 
 
 @pytest.fixture
@@ -200,3 +224,12 @@ async def test_nothing_to_say_is_not_an_unchecked_line(guard, word_list):
     assert verdict.checked is True
     assert guard.asked == []
     assert word_list["asked"] == []
+
+
+async def test_the_check_is_a_call_in_her_round_without_a_session(guard, word_list, her_round):
+    await audit_output("随便一句话")
+
+    [call] = guard.calls
+    assert call.agent == "guard_output_safety"
+    assert call.round is her_round
+    assert call.session is None

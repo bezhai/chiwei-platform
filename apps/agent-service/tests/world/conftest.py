@@ -6,6 +6,8 @@ runner，替身从那里换：按这次调用的名字（它的 prompt id）分�
 """
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
@@ -13,14 +15,36 @@ import pytest
 
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
-from app.agent.runtime_context import agent_context
+from app.agent.round import Call, Round, in_call, in_round
 from app.infra.cst_time import now_cst
 from app.messaging import receiving
 from app.messaging.message import Delivery, Kind, SendFailed, new_message
 from app.world import agents, main_agent, perception, wake
 from app.world.actions import wake_me_at
+from app.world.rounds import InboxRound
 
 LANE = "coe-world"
+
+
+@contextmanager
+def in_world_round(
+    messages: Sequence = (), *, agent: str = "world_round"
+) -> Iterator[tuple[Round, Call]]:
+    """把工具放进 world 的一轮、主 agent 的一次调用里直接调，不起模型：绑上这一轮（带着
+    ``messages``）和这次调用，交回两者。"""
+    world_round = Round(
+        app="world",
+        lane=LANE,
+        participant="world",
+        profile="world",
+        round_id="round-under-test",
+        now=now_cst(),
+        reason="test",
+        due=InboxRound(reason="test", messages=tuple(messages)),
+    )
+    call = Call(agent=agent, session=None, round=world_round)
+    with in_round(world_round), in_call(call):
+        yield world_round, call
 
 
 @pytest.fixture
@@ -44,15 +68,15 @@ def volume(bare_volume) -> Path:
 
 
 class FakeRunner:
-    """替身模型：每轮按 ``plan`` 在这一轮的 context 里调工具，记下它看到的输入。"""
+    """替身模型：每轮按 ``plan`` 在这一轮里、这次调用上调工具，记下它看到的输入。"""
 
     def __init__(self, plan):
         self.plan = plan
         self.runs: list[list[Turn]] = []
 
-    async def run(self, messages, *, call, context, transcript_sink, **_):
+    async def run(self, messages, *, call, transcript_sink, **_):
         self.runs.append(list(messages))
-        with agent_context(context):
+        with in_call(call):
             said = await self.plan()
         reply = Turn(role=Role.ASSISTANT, content=said)
         transcript_sink.append(reply)
@@ -60,19 +84,19 @@ class FakeRunner:
 
 
 class ScriptedAgent:
-    """主 agent 之外那几类的替身：每次调用按 ``plan(输入那段话)`` 在这次调用的 context 里调
-    工具，``plan`` 交回的话就是它最后说的。记下每次看到的输入和 context。"""
+    """主 agent 之外那几类的替身：每次调用按 ``plan(输入那段话)`` 在这次调用上调工具，``plan``
+    交回的话就是它最后说的。记下每次看到的输入和调用。"""
 
     def __init__(self, plan):
         self.plan = plan
         self.inputs: list[str] = []
-        self.contexts: list = []
+        self.calls: list = []
 
-    async def run(self, messages, *, call, context, transcript_sink=None, **_):
+    async def run(self, messages, *, call, transcript_sink=None, **_):
         text = messages[-1].content
         self.inputs.append(text)
-        self.contexts.append(context)
-        with agent_context(context):
+        self.calls.append(call)
+        with in_call(call):
             said = await self.plan(text)
         return Turn(role=Role.ASSISTANT, content=said)
 

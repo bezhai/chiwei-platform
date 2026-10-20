@@ -1,6 +1,6 @@
 """知识来源：怎么登记、启用哪些、四个 agent 拿到的只读工具从哪来，以及记录、现实这两个来源。
 
-工具在 ``agent_context`` 里直接调，不起模型。
+工具在绑好的一次调用里直接调，不起模型。
 """
 from __future__ import annotations
 
@@ -8,8 +8,7 @@ import re
 
 import pytest
 
-from app.agent.context import AgentContext
-from app.agent.runtime_context import agent_context
+from app.agent.round import Call, in_call
 from app.agent.tooling import tool
 from app.messaging.message import Kind, new_message
 from app.world import records, sources
@@ -123,10 +122,10 @@ def test_each_source_keeps_its_own_directory_next_to_the_records(bare_volume):
 
 @pytest.fixture
 def reads(volume):
-    """主 agent 一轮里那样：这一次调用带着记读过什么的字典。"""
-    seen: dict[str, str] = {}
-    with agent_context(AgentContext(features={records_source.RECORDS_READ: seen})):
-        yield seen
+    """主 agent 一轮里那样：这一次调用的状态记着读过什么。"""
+    call = Call(agent="world_round", session=None, round=None)
+    with in_call(call):
+        yield call.state(records_source.RecordsRead).fingerprints
 
 
 async def test_list_records_shows_paths_and_sizes(reads):
@@ -147,14 +146,19 @@ async def test_reading_a_record_notes_its_fingerprint_for_this_call(reads):
     assert reads == {"地方/甲.md": written.fingerprint}
 
 
-async def test_a_call_that_writes_nothing_reads_without_noting(volume):
-    """感知判断、NPC、应答不放那个字典：读照常，什么都不记。"""
+async def test_what_another_call_reads_is_noted_on_that_call_only(volume):
+    """感知判断、NPC、应答读到的记在它们自己那次调用上，不落到主 agent 那次调用里。"""
     records.write("地方/甲.md", "旧的样子。", expected=None)
+    main = Call(agent="world_round", session=None, round=None)
+    perception = Call(agent="world_perception", session=None, round=None)
 
-    with agent_context(AgentContext()):
-        shown = await _call(records_source.read_record, path="地方/甲.md")
+    with in_call(main):
+        with in_call(perception):
+            shown = await _call(records_source.read_record, path="地方/甲.md")
 
     assert "旧的样子。" in shown
+    assert main.state(records_source.RecordsRead).fingerprints == {}
+    assert list(perception.state(records_source.RecordsRead).fingerprints) == ["地方/甲.md"]
 
 
 async def test_reading_a_missing_record_says_so(reads):

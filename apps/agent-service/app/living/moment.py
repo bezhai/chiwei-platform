@@ -105,14 +105,13 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Annotated
 
 from inner_shared.dynamic_config import dynamic_config
 from pydantic import Field, field_validator
 
-from app.agent.context import AgentContext
 from app.agent.continuity import (
     TrimPolicy,
     commit_transcript,
@@ -122,8 +121,7 @@ from app.agent.continuity import (
 )
 from app.agent.contracts import AgentSpec
 from app.agent.neutral import Message, Role
-from app.agent.round import open_call
-from app.agent.runtime_context import agent_context, get_context
+from app.agent.round import Round, current_round, in_round, open_call
 from app.agent.session import load_session
 from app.agent.tooling import tool
 from app.agent.tools._common import get_or_create_counter, tool_error
@@ -139,7 +137,7 @@ from app.infra.cst_time import CST
 # 她手边那几份写好的说明：两只手，外加"有哪些可读"那一份清单（清单只能从 prompt
 # 变量进，见本模块最后一段 docstring）。
 from app.living.guides import GUIDE_TOOLS, GUIDES_VAR, guides_she_can_read
-from app.living.happening import record_happening
+from app.living.happening import Recorded, note_recorded, record_happening
 from app.living.loose_ends import (
     format_entry,
     list_open_loose_ends,
@@ -156,6 +154,7 @@ from app.living.participants import WORLD, residents
 from app.living.persona import persona_prompt_vars
 from app.living.phone import (
     PHONE_TOOLS,
+    Glances,
     commit_glances,
     envelopes_for,
     render_arrived,
@@ -172,20 +171,6 @@ from app.living.records import (
     _require_aware,
     esc,
     legacy_null_is,
-)
-
-# 一个 moment 里每个工具都要读的那四样 ambient 事实，定义在 scope 里（手机和嘴的工具用的
-# 是同一份；放在这里会让它们反过来 import 本模块，成环）。
-from app.living.scope import (
-    FEATURE_GLANCES,
-    FEATURE_LANE,
-    FEATURE_MOMENT,
-    FEATURE_NOW,
-    FEATURE_PERSONA,
-    FEATURE_RECORDED,
-    FEATURE_SWITCHES,
-    moment_scope,
-    note_recorded,
 )
 from app.living.snapshot import read_snapshot
 from app.living.takeback import TAKEBACK_TOOLS
@@ -225,6 +210,19 @@ LIFE_MOMENT_AGENT = AgentSpec(
     session="living-life:{lane}:{participant}",
 )
 
+# 她的一轮属于哪个 App、按哪份 profile 组成（清单里的名字）。
+APP = "agent-service"
+PROFILE = "resident"
+
+
+@dataclass
+class Switched:
+    """这一轮她换过的事（每次 :func:`switch_to` 追加一条 ``{"doing", "because"}``）。数它而不是
+    数"有没有调过工具"：换事情和说话是两回事，而"换的理由"要能逐次查出来。这一轮的状态。"""
+
+    changes: list[dict[str, str]] = field(default_factory=list)
+
+
 # Dynamic Config key：两个 moment 之间至少隔多少分钟。改它不用重新部署。
 LIVING_LIFE_MOMENT_MINUTES_KEY = "living_life_moment_minutes"
 DEFAULT_LIFE_MOMENT_MINUTES = 10
@@ -242,7 +240,7 @@ class LifeMoment(Data):
 
     **``began_at`` 和 ``seq`` 回答的是两个问题，别互相顶替。**
 
-      * ``began_at`` = **她这个 moment 的『现在』**：喂给快照、手机信封和 ``FEATURE_NOW``
+      * ``began_at`` = **她这个 moment 的『现在』**：喂给快照、手机信封和这一轮的 ``now``
         的那个时刻，也是她这一轮记下的事、发出去的消息上的时刻。两种 moment 都取拿到占用
         那一刻的钟（:class:`DueMoment`）；常规 moment 的身份是它落在的那一格，不是这个时刻。
       * ``seq`` = **这个 moment 在这条轴上第几个落地**，(lane, persona) 各一条轴，在落地那次
@@ -434,7 +432,9 @@ async def switch_to(
     Returns:
         一句确认文本。
     """
-    lane, now, persona_id, moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+    moment_id = this_round.round_id
     what, where = doing.strip(), place.strip()
     if not what:
         raise ValueError("doing 不能是空的：说一句你改去做什么。")
@@ -451,9 +451,7 @@ async def switch_to(
         doing=what,
         noted_at=now,
     )
-    get_context().features.setdefault(FEATURE_SWITCHES, []).append(
-        {"doing": what, "because": because.strip()}
-    )
+    this_round.state(Switched).changes.append({"doing": what, "because": because.strip()})
     return f"你在 {where}，{what}。"
 
 
@@ -478,7 +476,9 @@ async def move_to(
     Returns:
         一句确认文本。
     """
-    lane, now, persona_id, moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+    moment_id = this_round.round_id
     where = place.strip()
     if not where:
         raise ValueError(PLACE_CANNOT_BE_EMPTY)
@@ -501,7 +501,7 @@ async def move_to(
         doing=current.doing,
         noted_at=now,
     )
-    # **不进 FEATURE_SWITCHES**：走一步不是"什么把你从这件事里带走了"。混进去会让
+    # **不进 Switched**：走一步不是"什么把你从这件事里带走了"。混进去会让
     # 逐个 moment 复盘里的换事率把单纯的走动也算成换事情。
     return f"你在 {where}，还在{current.doing}。"
 
@@ -547,7 +547,9 @@ async def keep_in_mind(
     Returns:
         一句确认文本。
     """
-    lane, now, persona_id, moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+    moment_id = this_round.round_id
     open_now = await rewrite_loose_ends(
         lane=lane,
         persona_id=persona_id,
@@ -659,7 +661,9 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     那些，id 就是按原样算的：那一轮没跑完就赶上发版，新版本重跑同一轮、她说了同一句，id 对得上
     才认得出是同一件事。按换好的名字算，同一句话就成了另一件事，多记一条，姐妹多收一条。
     """
-    lane, now, persona_id, moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+    moment_id = this_round.round_id
     said = content.strip()
     if not said:
         raise ValueError("内容不能是空的：说一句真的话 / 写清楚你做了什么。")
@@ -759,7 +763,8 @@ async def look_around() -> str:
     Returns:
         此刻这里的样子；没人回答时如实说没人回答。
     """
-    lane, _now, persona_id, _moment_id = moment_scope()
+    this_round = current_round()
+    lane, persona_id = this_round.lane, this_round.participant
     try:
         me = await current_whereabouts(lane=lane, persona_id=persona_id)
         if me is None:
@@ -1255,32 +1260,32 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
         **await persona_prompt_vars(lane=lane, persona_id=persona_id),
         GUIDES_VAR: guides_she_can_read(),
     }
-    context = AgentContext(
-        persona_id=persona_id,
-        features={
-            FEATURE_LANE: lane,
-            FEATURE_NOW: now.isoformat(),
-            FEATURE_PERSONA: persona_id,
-            FEATURE_MOMENT: moment_id,
-            FEATURE_SWITCHES: [],
-            FEATURE_RECORDED: [],
-            FEATURE_GLANCES: [],
-        },
+    # 这一轮：工具和手机信封都从它读她是谁、哪个泳道、几点、是哪一轮，这一轮的状态（她换过的事、
+    # 她做了几件事、她看过的手机、她看得见哪些会话）也记在它上面。
+    this_round = Round(
+        app=APP,
+        lane=lane,
+        participant=persona_id,
+        profile=PROFILE,
+        round_id=moment_id,
+        now=now,
+        reason=due.reason,
+        due=due,
+        previous_at=previous_at,
     )
     # 手机上只给通知（谁、多少条、多密、你上次在那儿开口是什么时候），按时间排、
     # 只给最新那几条。内容要她自己调 look_at_phone，整张会话名单要她自己调
     # look_through_your_phone —— 白送进来的话，"她没看见"这个状态就再也不会发生。
     #
-    # **通知在这个 moment 的 context 里算**，所以"她看得见哪些会话"这份名单在她看到第
-    # 一眼时就定下来，之后整个 moment（看手机、找人、发消息、找可读文件）用的都是那一份
-    # （:mod:`app.living.whitelist`）。摆在 context 外面算的话名单会被算两遍，
-    # 而两遍之间到达的消息会让一条会话半路出现在她眼前。
+    # **通知在这一轮里算**，所以"她看得见哪些会话"这份名单在她看到第一眼时就定下来，之后整个
+    # moment（看手机、找人、发消息、找可读文件）用的都是那一份（:mod:`app.living.whitelist`）。
+    # 摆在这一轮外面算的话名单会被算两遍，而两遍之间到达的消息会让一条会话半路出现在她眼前。
     #
     # **查一次，渲两次**：摆到她眼前的只有这一轮新到的
     # （:func:`app.living.phone.render_arrived`），还没看的全貌铺在界桩上
     # （:func:`app.living.phone.render_unread`）。两次渲染是纯函数，查库那一遍
     # 一条会话一次往返，不能为了两段文本走两遍。
-    with agent_context(context):
+    with in_round(this_round):
         unread = await envelopes_for(
             lane=lane, persona_id=persona_id, now=now
         )
@@ -1334,14 +1339,14 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
     call = open_call(
         LIFE_MOMENT_PROMPT_ID, LIFE_MOMENT_AGENT, lane=lane, participant=persona_id
     )
-    with collect_usage() as usage:
+    with in_round(this_round), collect_usage() as usage:
         reply = await build_moment_runner().run(
             [*history, stimulus],
             call=call,
             prompt_vars=prompt_vars,
-            context=context,
             transcript_sink=produced,
         )
+    this_round.reply = reply
 
     # 记成本是旁路：落库失败只 log 不抛（swallow 在 record_round_cost 里），
     # 绝不能因为记账失败把一个 moment 真实的生活搞成失败。
@@ -1353,7 +1358,7 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
         observed_at=now.isoformat(),
     )
 
-    switches = context.features[FEATURE_SWITCHES]
+    switches = this_round.state(Switched).changes
     where = await current_whereabouts(lane=lane, persona_id=persona_id)
     moment = LifeMoment(
         lane=lane,
@@ -1362,7 +1367,7 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
         began_at=now,
         switched=bool(switches),
         pulled_by=switches[-1]["because"] if switches else "",
-        recorded=len(set(context.features[FEATURE_RECORDED])),
+        recorded=len(set(this_round.state(Recorded).happening_ids)),
         doing=where.doing if where is not None else "",
         open_ends=len(
             await list_open_loose_ends(lane=lane, persona_id=persona_id)
@@ -1390,7 +1395,7 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
     )
     async with tx():
         moment = await insert_in_commit_order(moment)
-        await commit_glances(glances=context.features[FEATURE_GLANCES])
+        await commit_glances(glances=this_round.state(Glances).pending)
         await mark_read(received, moment_id=moment_id)
     await _remember_this_round(
         transcript_id,

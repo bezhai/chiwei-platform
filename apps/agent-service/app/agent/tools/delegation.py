@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 
-from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 
@@ -49,7 +48,6 @@ async def deep_research(task: str) -> str:
     result = await agent.run(
         [Message(role=Role.USER, content=task)],
         call=call,
-        context=get_context(),
     )
 
     text = result.text()

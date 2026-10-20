@@ -45,7 +45,6 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 
-from app.agent.context import AgentContext
 from app.agent.continuity import (
     TrimPolicy,
     commit_transcript,
@@ -54,19 +53,23 @@ from app.agent.continuity import (
 )
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
-from app.agent.round import open_call
+from app.agent.round import Round, in_round, open_call
 from app.agent.session import load_session
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, Message
 from app.world import records, unfinished
-from app.world.actions import ACTIONS, ROUND_SCOPE, RoundScope
+from app.world.actions import ACTIONS, RoundScope
 from app.world.agents import lane, run_agent, session_key, when, world_agent
 from app.world.perception import Told, render_told, tell
+from app.world.rounds import InboxRound
 from app.world.sources import material_tools, query_tools
-from app.world.sources.records import RECORDS_READ
-from app.world.wake import NextWake, is_own_wake, read_next_wake, set_next_wake
+from app.world.wake import WORLD, NextWake, is_own_wake, read_next_wake, set_next_wake
 
 logger = logging.getLogger(__name__)
+
+# world 的一轮属于哪个 App、按哪份 profile 组成（清单里的名字）。
+APP = "world"
+PROFILE = "world"
 
 # 主 agent 这一类：名字就是它的 Langfuse prompt（泳道 label 取不到时退回 production，见
 # :func:`app.agent.prompts.get_prompt`），模型用主 agent 的键。
@@ -178,9 +181,10 @@ async def _resend_left_over() -> list[tuple[unfinished.Happening, list[Told]]]:
     return left_over
 
 
-async def run_round(messages: Sequence[Message]) -> None:
-    """带着 ``messages``（按到达的先后）跑一轮。没定下次醒来的时刻抛 :class:`NoNextWake`；别的
+async def run_round(due: InboxRound) -> None:
+    """带着 ``due`` 的消息（按到达的先后）跑一轮。没定下次醒来的时刻抛 :class:`NoNextWake`；别的
     失败原样往外抛。"""
+    messages = due.messages
     now = now_cst()
     round_id = uuid.uuid4().hex
     key = session_key()
@@ -200,18 +204,30 @@ async def run_round(messages: Sequence[Message]) -> None:
             messages, now=now, planned=read_next_wake(), left_over=left_over
         ),
     )
-    scope = RoundScope(messages=tuple(messages))
-    context = AgentContext(features={ROUND_SCOPE: scope, RECORDS_READ: {}})
-    produced: list[Turn] = []
-    reply = await run_agent(
-        open_call(ROUND, ROUND_AGENT, lane=lane()),
-        ROUND_AGENT,
-        [*history, round_input],
-        tools=[*await query_tools(), *ACTIONS],
-        context=context,
-        call_id=round_id,
-        transcript_sink=produced,
+    # 这一轮：动作之间共享的东西（写了哪几份记录、定下的下次醒来）是它的状态，带着的消息是它的
+    # ``due``；感知判断和 NPC 在这一轮里调。
+    world_round = Round(
+        app=APP,
+        lane=lane(),
+        participant=WORLD,
+        profile=PROFILE,
+        round_id=round_id,
+        now=now,
+        reason=due.reason,
+        due=due,
     )
+    produced: list[Turn] = []
+    with in_round(world_round):
+        reply = await run_agent(
+            open_call(ROUND, ROUND_AGENT, lane=world_round.lane, round=world_round),
+            ROUND_AGENT,
+            [*history, round_input],
+            tools=[*await query_tools(), *ACTIONS],
+            call_id=round_id,
+            transcript_sink=produced,
+        )
+    world_round.reply = reply
+    scope = world_round.state(RoundScope)
 
     choice = scope.next_wake
     if choice is None:

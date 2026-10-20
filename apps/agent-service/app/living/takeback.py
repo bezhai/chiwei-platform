@@ -86,16 +86,16 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.data.persist import fetch_one, from_row, insert_append, select_latest
 from app.data.schema import table_name
 from app.domain.safety import Recall
-from app.living.happening import record_happening
+from app.living.happening import note_recorded, record_happening
 from app.living.mouth import SpokenOutbound
 from app.living.phone import conversation_her_bot_is_in, medium_for
 from app.living.records import KIND_ACT
-from app.living.scope import moment_scope, note_recorded
 from app.runtime.emit import emit
 
 logger = logging.getLogger(__name__)
@@ -275,7 +275,8 @@ async def take_back_message(
     Returns:
         你去撤了哪一句的一句确认；没有这个编号时一句如实说明。
     """
-    lane, now, persona_id, _moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
     outbound_id = message_id.strip()
     if not outbound_id:
         raise ValueError("你没说要撤哪一条：把那条消息后面方括号里那串编号写进来。")

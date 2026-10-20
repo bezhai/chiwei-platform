@@ -588,8 +588,8 @@ async def test_a_round_over_its_time_fails_every_delivery_it_took(world):
     gate = asyncio.Event()
     taken: list[list[str]] = []
 
-    async def run(messages):
-        taken.append([m.body for m in messages])
+    async def run(due):
+        taken.append([m.body for m in due.messages])
         if len(taken) == 1:
             await gate.wait()
             return
@@ -613,7 +613,7 @@ async def test_a_round_over_its_time_fails_every_delivery_it_took(world):
 
 
 def test_a_delivery_may_wait_for_the_round_ahead_and_then_its_own():
-    async def run(messages):
+    async def run(due):
         return None
 
     rounds = Rounds(run, round_timeout=timedelta(minutes=30))

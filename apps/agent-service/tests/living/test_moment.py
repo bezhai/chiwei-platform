@@ -23,7 +23,7 @@ import pytest
 
 from app.agent.core import _normalise_tool_result
 from app.agent.neutral import Message, Role, ToolCall, ToolResult
-from app.agent.runtime_context import agent_context
+from app.agent.round import in_call
 from app.data.schema import pg_type
 from app.living.loose_ends import LooseEnd, list_open_loose_ends
 from app.living.moment import (
@@ -104,7 +104,7 @@ class FakeMoment:
     async def run(self, messages, **kwargs):
         self.runs.append((messages, kwargs))
         sink = kwargs.get("transcript_sink")
-        with agent_context(kwargs["context"]):
+        with in_call(kwargs["call"]):
             for i, (name, args) in enumerate(self.calls):
                 result = await _TOOLS[name].invoke(args)
                 self.results.append(result)

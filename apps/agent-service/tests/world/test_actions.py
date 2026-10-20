@@ -1,7 +1,7 @@
 """主 agent 才有的动作：写记录、定下次醒来的时刻。
 
-动作在一轮的 ambient context 里跑（:class:`app.world.actions.RoundScope`，加上记录来源记
-读过什么的那个字典），这里直接在 ``agent_context`` 里调它们，不起模型。
+动作在 world 的一轮里跑（这一轮的状态 :class:`app.world.actions.RoundScope`，这次调用的状态里
+记着读过什么），这里直接在绑好的一轮里调它们，不起模型。
 """
 from __future__ import annotations
 
@@ -9,25 +9,20 @@ from datetime import timedelta
 
 import pytest
 
-from app.agent.context import AgentContext
-from app.agent.runtime_context import agent_context
 from app.infra.cst_time import CST, now_cst
 from app.messaging.message import Kind, new_message
 from app.world import actions, records
-from app.world.actions import ROUND_SCOPE, RoundScope
-from app.world.sources.records import RECORDS_READ, read_record
+from app.world.actions import RoundScope
+from app.world.sources.records import read_record
+
+from .conftest import in_world_round
 
 
 @pytest.fixture
 def scope(volume) -> RoundScope:
-    s = RoundScope(
-        messages=(
-            new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE),
-        )
-    )
-    ctx = AgentContext(features={ROUND_SCOPE: s, RECORDS_READ: {}})
-    with agent_context(ctx):
-        yield s
+    taking = (new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE),)
+    with in_world_round(taking) as (world_round, _call):
+        yield world_round.state(RoundScope)
 
 
 async def _call(t, **arguments):

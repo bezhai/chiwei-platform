@@ -25,7 +25,7 @@ import pytest
 from sqlalchemy import text
 
 from app.agent.neutral import Message, Role
-from app.agent.runtime_context import agent_context
+from app.agent.round import in_call
 from app.data.persist import fetch_all, fetch_value, from_row
 from app.data.tx import current_session, tx
 from app.host import Signal
@@ -179,7 +179,7 @@ class FakeLife:
         self.prompts.append(messages[-1].content)
         if self.meanwhile is not None:
             await self.meanwhile()
-        with agent_context(kwargs["context"]):
+        with in_call(kwargs["call"]):
             from app.living.moment import MOMENT_TOOLS
 
             tools = {t.name: t for t in MOMENT_TOOLS}

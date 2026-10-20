@@ -79,6 +79,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 
@@ -87,7 +88,6 @@ from app.agent.tools._common import tool_error
 from app.capabilities.sandbox import OUTPUT_CUT_MARK
 from app.capabilities.sandbox import run as _sandbox_run
 from app.living.records import esc
-from app.living.scope import moment_scope
 from app.skills.registry import SkillRegistry
 from app.skills.renderer import render_skill
 
@@ -159,7 +159,9 @@ async def read_a_guide(
     Returns:
         那份说明的正文；没有这一份时，一句实话加上你能读的都有哪些。
     """
-    lane, _now, persona_id, moment_id = moment_scope()
+    this_round = current_round()
+    lane, persona_id = this_round.lane, this_round.participant
+    moment_id = this_round.round_id
     name = which.strip()
     if not name:
         raise ValueError(f"你没说要读哪一份。{_which_ones_she_can_read()}")
@@ -244,7 +246,9 @@ async def run_a_script(
     Returns:
         命令打出来的东西；没跑通时退出码、打出来的和报错一起原样交给你。
     """
-    lane, _now, persona_id, moment_id = moment_scope()
+    this_round = current_round()
+    lane, persona_id = this_round.lane, this_round.participant
+    moment_id = this_round.round_id
     line = command.strip()
     if not line:
         raise ValueError("你没说要跑什么：写一条命令。")

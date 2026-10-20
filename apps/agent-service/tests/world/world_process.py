@@ -32,15 +32,15 @@ class _EventsHandler(logging.Handler):
 
 
 class _Runner:
-    async def run(self, messages, *, context, transcript_sink, **_):
+    async def run(self, messages, *, call, transcript_sink, **_):
         from app.agent.neutral import Message as Turn
         from app.agent.neutral import Role
-        from app.agent.runtime_context import agent_context
+        from app.agent.round import in_call
         from app.infra.cst_time import now_cst
         from app.world.actions import wake_me_at
 
         _append(ROUNDS, " | ".join(messages[-1].content.splitlines()))
-        with agent_context(context):
+        with in_call(call):
             at = now_cst() + timedelta(days=1)
             await wake_me_at.invoke({"at": at.isoformat(), "reason": "明天再看。"})
         reply = Turn(role=Role.ASSISTANT, content="好。")

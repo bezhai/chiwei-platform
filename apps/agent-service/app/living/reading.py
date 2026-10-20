@@ -69,6 +69,7 @@ from pydantic import BaseModel, Field, field_validator
 
 # module-level 引入，测试从这里换替身（一程真跑起来要取字节 + 几轮模型调用）
 from app.agent.reading import run_reading_round
+from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.data.persist import fetch_all, from_row, insert_append, select_latest
@@ -80,7 +81,6 @@ from app.infra.cst_time import CST, to_cst_dated
 from app.living.participants import READING, residents
 from app.living.phone import Sender, _who_tag, reachable_conversations
 from app.living.records import _require_aware, esc
-from app.living.scope import moment_scope
 from app.messaging.message import Delivery, Kind, Message, SendFailed
 
 # module-level 引入，测试从这里换替身（不碰 broker）
@@ -358,7 +358,8 @@ async def look_for_something_to_read() -> str:
     Returns:
         有人发给你的那些文件，能拿到的各带一串 file=…；一个都没有时如实说明。
     """
-    lane, now, persona_id, _moment_id = moment_scope()
+    her_round = current_round()
+    lane, now, persona_id = her_round.lane, her_round.now, her_round.participant
     files = await files_sent_to(persona_id=persona_id, now=now)
     if not files:
         return "没有谁给你发过什么可以读的东西。"
@@ -422,7 +423,9 @@ async def read_a_bit(
         你拿起了哪个文件的一句确认；没有对得上的 / 对上好几份 / 已经拿不到时一句
         如实说明。
     """
-    lane, now, persona_id, moment_id = moment_scope()
+    her_round = current_round()
+    lane, now, persona_id = her_round.lane, her_round.now, her_round.participant
+    moment_id = her_round.round_id
     wanted = which.strip()
     if not wanted:
         raise ValueError("你没说要读哪个：写一个名字，或者原样抄一串 file=… 进来。")

@@ -66,6 +66,13 @@ async def _a_round(world, plan):
 # ---------------------------------------------------------------------------
 
 
+def _taking(messages):
+    """world 收件箱判出来的一轮，带着 ``messages``（按到达的先后）。"""
+    from app.world.rounds import InboxRound
+
+    return InboxRound(reason="test", messages=tuple(messages))
+
+
 async def test_a_reported_change_is_judged_once_and_each_judged_recipient_is_told_once(world):
     judge = judges(("ayana", "你听见楼下的门响了一声。"), ("akao", "厨房的灯闪了一下。"))
     world.agents[perception.PERCEPTION] = judge
@@ -343,7 +350,7 @@ async def test_perception_sees_every_message_of_the_round_with_sender_and_time(w
         sender="world", recipient="world", body="你发给千凪的消息没有送达。", kind=Kind.NOT_DELIVERED
     )
 
-    await main_agent.run_round([akao, own, ayana, bounced])
+    await main_agent.run_round(_taking([akao, own, ayana, bounced]))
 
     [seen] = judge.inputs
     assert seen.split("\n")[1:] == [

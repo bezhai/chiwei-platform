@@ -187,13 +187,13 @@ import json
 import logging
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Any
 
 from pydantic import Field, field_validator
 
-from app.agent.runtime_context import get_context
+from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities.concurrency import fan_out_wait
@@ -222,7 +222,6 @@ from app.living.records import (
     _require_aware,
     esc,
 )
-from app.living.scope import FEATURE_GLANCES, moment_scope
 from app.living.whitelist import channels_in_sight
 
 logger = logging.getLogger(__name__)
@@ -503,19 +502,32 @@ async def read_through(
     return int(row["read_through_ms"]), str(row["read_through_message_id"])
 
 
+@dataclass
+class Glances:
+    """这一轮她看过的手机（每次 ``look_at_phone`` 追加一条待落库的游标）。这一轮的状态。
+
+    **攒在这儿不当场写**：工具返回不等于她看见了——工具结果还要进模型的上下文，这一轮才算真的
+    把内容送到她眼前。当场推游标的话，崩在中间那几条消息就此永久消失、而且一句报错都没有。所以
+    游标跟 ``LifeMoment`` 在同一个事务里落库（:func:`commit_glances`）：这一轮没跑完就一条都
+    不算已读，她下次醒来原样再看到。宁可重看，不可漏看。
+    """
+
+    pending: list[dict] = field(default_factory=list)
+
+
 def _pending_cursor(channel_id: str) -> tuple[int, str] | None:
     """本轮已经看过、但还没落库的水位（同一轮里看两次时用得着）。
 
-    不在 moment 里（运维查一眼信封、离线盘点）就没有"本轮攒的"这回事，返回 ``None``。
-    这里**不能**跟着 :func:`app.living.scope.moment_scope` 一起 fail-fast：那条是给
-    工具体用的，工具体没绑 context 是 wiring bug；而信封本身在 moment 外面读是正当的。
+    不在她的一轮里（运维查一眼信封、离线盘点）就没有"本轮攒的"这回事，返回 ``None``。
+    这里**不能**跟着工具体一起 fail-fast：工具体找不到这一轮是 wiring bug；而信封本身在
+    一轮外面读是正当的。
     """
     try:
-        ctx = get_context()
+        this_round = current_round()
     except LookupError:
         return None
     best: tuple[int, str] | None = None
-    for g in ctx.features.get(FEATURE_GLANCES, []):
+    for g in this_round.state(Glances).pending:
         if g["channel_id"] != channel_id:
             continue
         here = (g["read_through_ms"], g["read_through_message_id"])
@@ -1233,7 +1245,8 @@ async def look_up_contact(
     Returns:
         名字对得上的会话，每条带 channel_id；一条都没有时如实说明。
     """
-    _, now, persona_id, _ = moment_scope()
+    this_round = current_round()
+    now, persona_id = this_round.now, this_round.participant
     wanted = name.strip()
     if not wanted:
         raise ValueError("name 不能是空的：写一个你要找的名字。")
@@ -1309,7 +1322,8 @@ async def look_through_your_phone(
     Returns:
         手机上的会话，最近说过话的在前面，每条带一串 channel_id。
     """
-    _lane, now, persona_id, _moment_id = moment_scope()
+    this_round = current_round()
+    now, persona_id = this_round.now, this_round.participant
     edge = (before or "").strip() or None
 
     # 会话集合从 reachable_conversations 来，跟通知那条路同一个来源 —— 这只手列得出
@@ -1451,7 +1465,9 @@ async def look_at_phone(
     Returns:
         这条会话上的一页往来、其中几条是新到的、前后各还剩多少，以及别人在里面发过的图。
     """
-    lane, now, persona_id, moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+    moment_id = this_round.round_id
     conv = await reachable_conversation(
         persona_id=persona_id, channel_id=channel_id.strip(), now=now
     )
@@ -1540,7 +1556,7 @@ async def look_at_phone(
     # 的收尾跟 ``LifeMoment`` 一个事务落库（:func:`commit_glances`）。
     newest_shown_unread = next((r for r in rows if r["is_unread"]), None)
     if newest_shown_unread is not None:
-        get_context().features.setdefault(FEATURE_GLANCES, []).append(
+        this_round.state(Glances).pending.append(
             {
                 "lane": lane,
                 "persona_id": persona_id,

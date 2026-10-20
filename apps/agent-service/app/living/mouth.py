@@ -96,6 +96,7 @@ from typing import Annotated
 
 from pydantic import Field, field_validator
 
+from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities.output_safety import audit_output
@@ -111,7 +112,7 @@ from app.domain.chat_dataflow import (
     PROACTIVE_MESSAGE_ID_PREFIX,
     ChatResponseSegment,
 )
-from app.living.happening import printed_handle, record_happening
+from app.living.happening import note_recorded, printed_handle, record_happening
 from app.living.phone import medium_for, reachable_conversation
 from app.living.pictures import her_picture, picture_id_in
 from app.living.records import (
@@ -119,7 +120,6 @@ from app.living.records import (
     OUTBOUND_HAPPENING_PREFIX,
     _require_aware,
 )
-from app.living.scope import moment_scope, note_recorded
 from app.runtime.emit import emit
 
 logger = logging.getLogger(__name__)
@@ -438,7 +438,9 @@ async def send_message(
         发出去了，也别当成没发。也可能这句话过不了、压根没发出去，那就换个说法或者换件
         事说。
     """
-    lane, now, persona_id, moment_id = moment_scope()
+    this_round = current_round()
+    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+    moment_id = this_round.round_id
     said = what.strip()
     if not said:
         raise ValueError("说点什么：这句话不能是空的。")

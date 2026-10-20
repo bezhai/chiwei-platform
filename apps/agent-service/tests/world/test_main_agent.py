@@ -30,6 +30,13 @@ def _round_input(world_handle, run: int = -1) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _taking(messages):
+    """world 收件箱判出来的一轮，带着 ``messages``（按到达的先后）。"""
+    from app.world.rounds import InboxRound
+
+    return InboxRound(reason="test", messages=tuple(messages))
+
+
 async def test_a_message_from_someone_wakes_it(world):
     message = new_message(
         sender="operator", recipient="world", body="有人把窗户打开了。", kind=Kind.MESSAGE
@@ -94,7 +101,7 @@ async def test_a_round_shows_each_of_its_messages_with_sender_time_and_text_in_o
     own = self_message(current.message_id, "该看看外面了。")
     bounced = _not_delivered("你发给千凪的消息没有送达。")
 
-    await main_agent.run_round([resident, own, bounced])
+    await main_agent.run_round(_taking([resident, own, bounced]))
 
     lines = _round_input(world).split("\n")
     assert lines[1:8] == [
@@ -112,7 +119,7 @@ async def test_a_round_that_takes_its_own_wake_is_not_told_its_planned_wake_is_r
     current = await wake.set_next_wake(now_cst(), "该看看外面了。")
     resident = new_message(sender="赤尾", recipient="world", body="我出门了。", kind=Kind.MESSAGE)
 
-    await main_agent.run_round([resident, self_message(current.message_id, "该看看外面了。")])
+    await main_agent.run_round(_taking([resident, self_message(current.message_id, "该看看外面了。")]))
 
     assert "【你原来定的下次醒来】" not in _round_input(world)
 
@@ -120,12 +127,10 @@ async def test_a_round_that_takes_its_own_wake_is_not_told_its_planned_wake_is_r
 async def test_a_round_of_others_messages_only_is_told_the_wake_it_had_planned(world):
     await wake.set_next_wake(now_cst() + timedelta(hours=6), "傍晚再看。")
 
-    await main_agent.run_round(
-        [
+    await main_agent.run_round(_taking([
             new_message(sender="赤尾", recipient="world", body="我出门了。", kind=Kind.MESSAGE),
             _not_delivered("你发给千凪的消息没有送达。"),
-        ]
-    )
+        ]))
 
     round_input = _round_input(world)
     assert "【你原来定的下次醒来】" in round_input and "傍晚再看。" in round_input
