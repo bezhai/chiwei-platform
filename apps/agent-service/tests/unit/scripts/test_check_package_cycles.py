@@ -180,7 +180,7 @@ def test_the_real_code_tree_has_only_the_listed_cycles():
 
     assert cycle_problems(root, known=KNOWN_CYCLES) == []
     groups = _groups(root)
-    assert groups == [frozenset({"agent", "capabilities", "living", "memory", "skills"})]
+    assert groups == [frozenset({"agent", "living", "memory"})]
     in_a_cycle = set().union(*groups)
     assert {"data", "messaging", "host"}.isdisjoint(in_a_cycle)
 
@@ -292,11 +292,9 @@ def test_the_real_code_tree_has_no_forbidden_edge():
 
 # KNOWN_CYCLES 里那一组，写成一个环：命令在临时树上只因为禁止的边失败，不因为名单上的环不在了失败。
 _THE_LISTED_RING = {
-    "agent/__init__.py": "from app import capabilities\n",
-    "capabilities/__init__.py": "from app import living\n",
+    "agent/__init__.py": "from app import living\n",
     "living/__init__.py": "from app import memory\n",
-    "memory/__init__.py": "from app import skills\n",
-    "skills/__init__.py": "from app import agent\n",
+    "memory/__init__.py": "from app import agent\n",
 }
 
 

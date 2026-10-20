@@ -60,8 +60,7 @@
 
 **交出去之前先过一道检查，不合格就不发。** 真人问她、她答的那条链是"先发后撤"（流式
 回复没有同步检查的窗口）；她主动开口没有这个压力，所以检查放得进发送之前 —— 拦下的话
-真人一个字都没看见，不用撤。判据在 :mod:`app.capabilities.output_safety`，两条链共用
-同一份。
+真人一个字都没看见，不用撤。判据在 :mod:`app.living.output_safety`。
 
   * 位置在**认领之前**：拦下时不占那个 id，否则同一轮里她再说同一件事会撞上"你已经
     说过了"——而那是假话，她一个字都没说出去。判的那一串就是 ``what``，也就是真人会
@@ -100,7 +99,6 @@ from app.agent.contracts import ToolSpec
 from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
-from app.capabilities.output_safety import audit_output
 from app.data.persist import (
     fetch_all,
     fetch_one,
@@ -115,6 +113,7 @@ from app.domain.chat_dataflow import (
 )
 from app.infra.outbound import publish
 from app.living.happening import note_recorded, printed_handle, record_happening
+from app.living.output_safety import audit_output
 from app.living.phone import medium_for, reachable_conversation
 from app.living.pictures import her_picture, picture_id_in
 from app.living.records import (

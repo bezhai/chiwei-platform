@@ -151,7 +151,7 @@ def spoken(monkeypatch):
 @pytest.fixture
 def guard(monkeypatch):
     """交出去之前那一关的替身。默认放行，而且是**判过之后**放行的。"""
-    from app.capabilities.output_safety import OutputVerdict
+    from app.living.output_safety import OutputVerdict
     from app.living import mouth as mouth_mod
 
     class FakeGuard:
@@ -709,7 +709,7 @@ async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
     条缝，它是一次要等的模型调用），版本链真的往前走了一版，不是让替身报一个假的
     失败。
     """
-    from app.capabilities.output_safety import OutputVerdict
+    from app.living.output_safety import OutputVerdict
     from app.living import mouth as mouth_mod
     from app.living.mouth import SpokenOutbound, latest_outbound
     from tests.data.read_back import all_versions
@@ -854,7 +854,7 @@ async def test_words_that_do_not_pass_never_reach_anyone(
     她主动开口没有实时性压力（不像真人在等一条流式回复），所以这一关放得进"交出去
     之前"。放在之后就只剩"先发后撤"，而那意味着真人已经看见了。
     """
-    from app.capabilities.output_safety import OutputVerdict
+    from app.living.output_safety import OutputVerdict
     from app.living.mouth import latest_outbound
 
     guard.verdict = OutputVerdict(
@@ -922,7 +922,7 @@ async def test_being_stopped_does_not_burn_the_id_for_that_sentence(
     认领是从 ``(moment_id, 她那句话)`` 派生的：被拦时如果占住了，同一轮里再说同一件
     事就会撞上"你已经说过了"，而那是假话 —— 她一个字都没说出去。
     """
-    from app.capabilities.output_safety import OutputVerdict
+    from app.living.output_safety import OutputVerdict
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
@@ -977,7 +977,7 @@ async def test_a_guard_that_could_not_judge_does_not_make_her_go_quiet(
     """
     import logging
 
-    from app.capabilities.output_safety import OutputVerdict
+    from app.living.output_safety import OutputVerdict
 
     guard.verdict = OutputVerdict(ok=True, checked=False)
     await note_whereabouts(
@@ -1050,7 +1050,7 @@ async def test_a_line_that_lost_the_claim_race_is_not_counted_as_unchecked(
     """
     import logging
 
-    from app.capabilities.output_safety import OutputVerdict
+    from app.living.output_safety import OutputVerdict
     from app.living import mouth as mouth_mod
 
     await note_whereabouts(
@@ -1093,7 +1093,7 @@ async def test_being_stopped_over_and_over_never_leaks_a_line(
     守的是那条路的另一端：只要每次都判不合格，就一次都不会漏出去。**这里没有重试
     预算**，因为"还要不要再说一次"是她的判断；能保证的是每个候选都被判过。
     """
-    from app.capabilities.output_safety import OutputVerdict
+    from app.living.output_safety import OutputVerdict
 
     guard.verdict = OutputVerdict(ok=False, reason="output_unsafe")
     await note_whereabouts(

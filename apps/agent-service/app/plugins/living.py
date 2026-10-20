@@ -102,7 +102,6 @@ from functools import partial
 
 from app.agent.contracts import Continue
 from app.agent.round import AssembledProfile
-from app.capabilities.output_safety import GUARD_OUTPUT_SEGMENT
 from app.domain.chat_dataflow import ChatResponseSegment
 from app.domain.safety import Recall
 from app.host import Batch, Coalesce, Context, Plugin, WakeSource
@@ -136,6 +135,7 @@ from app.living.moment import (
 )
 from app.living.mouth import MOUTH_TOOLS
 from app.living.nudge import nudged_moment_due
+from app.living.output_safety import GUARD_OUTPUT_SEGMENT
 from app.living.participants import READING
 from app.living.persona import LIVING_PERSONAS, PersonaVersion
 from app.living.persona_review import DueReview, persona_review_due, write_due_review

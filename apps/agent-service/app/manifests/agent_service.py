@@ -16,9 +16,9 @@ agent 的定义（:class:`~app.agent.contracts.AgentSpec`）在它们原来的�
 from __future__ import annotations
 
 from app.agent.contracts import CostSpec, HistorySpec, Profile
-from app.capabilities.output_safety import GUARD_OUTPUT_AGENT
 from app.host.manifest import App, Participant
 from app.living.moment import HISTORY_KEY, LIFE_MOMENT_AGENT, MOMENT_TRIM_POLICY
+from app.living.output_safety import GUARD_OUTPUT_AGENT
 from app.manifests.history import HISTORY_TEXTS
 
 RESIDENT = Profile(
