@@ -14,6 +14,7 @@ Langfuse folder) goes on the wire. Nothing here reaches a real Langfuse.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -32,6 +33,7 @@ from app.agent.neutral import Role
 from app.agent.prompts import PromptConfigError, PromptSet
 from app.agent.round import Round
 from app.infra.cst_time import CST
+from app.infra.propagation import Context, bind_context
 
 
 def _text(name: str, body: str, *, version: int = 1, label: str = "production"):
@@ -277,6 +279,46 @@ async def test_a_lane_takes_its_own_label_and_falls_back_to_production(
         ("rules", "coe-world", 12),
         ("voice", "production", 9),
     ]
+
+
+class _BlockingLangfuse(_Langfuse):
+    """Each fetch blocks until ``loop_went_on`` is set or two seconds pass, and records which."""
+
+    def __init__(self, loop_went_on: threading.Event) -> None:
+        super().__init__()
+        self.loop_went_on = loop_went_on
+        self.waited: list[bool] = []
+
+    def get_prompt(self, name: str, *, label: str | None = None, **kwargs: Any):
+        self.waited.append(self.loop_went_on.wait(timeout=2))
+        return super().get_prompt(name, label=label, **kwargs)
+
+
+async def test_a_fetch_blocks_a_worker_thread_not_the_loop_and_sees_the_bound_lane(
+    monkeypatch,
+):
+    """The SDK's ``get_prompt`` is a blocking network round trip on a cold cache, and on every
+    fetch of a lane with no label of its own (the miss is not cached). It runs off the event
+    loop, so the loop's other work goes on meanwhile, and the lane bound on the loop reaches it:
+    here the lane's label is tried first, then production."""
+    loop_went_on = threading.Event()
+    client = _BlockingLangfuse(loop_went_on)
+    monkeypatch.setattr("app.agent.prompts._get_client", lambda: client)
+    client.prompts[("rules", "production")] = _text("rules", "规则。")
+
+    async def other_work() -> None:
+        loop_went_on.set()
+
+    async with bind_context(Context(trace_id=None, lane="coe-world")):
+        other = asyncio.create_task(other_work())
+        prompts = await PromptSet.resolve(
+            {"moment": _agent("rules")}, {"rules": Segment("rules", "rules")}, None
+        )
+        await other
+
+    assert client.waited == [True, True]
+    assert client.fetched == [("rules", "coe-world"), ("rules", None)]
+    assert prompts.versions("moment") == [("rules", "production", 1)]
 
 
 # ---------------------------------------------------------------------------

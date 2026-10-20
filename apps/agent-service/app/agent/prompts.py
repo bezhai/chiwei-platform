@@ -2,10 +2,11 @@
 
 **A set of prompts is resolved once** (:meth:`PromptSet.resolve`): every segment the given agents
 are made of is fetched (the lane's own label first outside prod, production when the lane has
-none), each segment once however many agents list it, and checked: the variables its template
-declares must be exactly the ones its plugin gives (:attr:`app.agent.contracts.Segment.variables`).
-One missing or one too many is a configuration error (:class:`PromptConfigError`), raised before
-any model is called; only what the template declares counts, ``{{...}}`` inside a value is text.
+none), each segment once however many agents list it, one after another in a worker thread since
+the SDK's fetch blocks, and checked: the variables its template declares must be exactly the ones
+its plugin gives (:attr:`app.agent.contracts.Segment.variables`). One missing or one too many is
+a configuration error (:class:`PromptConfigError`), raised before any model is called; only what
+the template declares counts, ``{{...}}`` inside a value is text.
 A segment whose values are worked out from the round (``Segment.values``) gets them here.
 
 **Rendering** (:meth:`PromptSet.messages`): an agent's text segments are compiled in its order
@@ -24,6 +25,7 @@ rendered from the next round on.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -73,7 +75,9 @@ def _fetch(prompt_id: str) -> tuple[PromptClient, str]:
     """The prompt ``prompt_id`` this process renders, and the label it was served under.
 
     Outside prod the lane's own label is tried first; a lane with no label of its own falls back
-    to production.
+    to production. Blocking: the SDK makes a network round trip on a cold cache, and on every
+    fetch of a lane with no label of its own (the miss is not cached), so it is called in a
+    worker thread (:meth:`PromptSet.resolve`), which sees the lane bound on the loop.
     """
     lane = get_lane() or settings.lane
     if lane and lane != "prod":
@@ -197,7 +201,7 @@ class PromptSet:
                     raise ValueError(
                         f"agent {agent!r} lists segment {name!r}, which nobody registered"
                     ) from None
-                prompt, label = _fetch(segment.prompt_id)
+                prompt, label = await asyncio.to_thread(_fetch, segment.prompt_id)
                 wanted, declared = frozenset(segment.variables), _declared(prompt)
                 if declared != wanted:
                     error = PromptConfigError(
