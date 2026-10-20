@@ -34,6 +34,7 @@ from langfuse.model import ChatPromptClient, PromptClient, TextPromptClient
 
 from app.agent.contracts import AgentSpec, Segment
 from app.agent.neutral import Message, Role
+from app.agent.tools._common import get_or_create_counter
 from app.api.middleware import get_lane
 from app.infra.config import settings
 
@@ -47,6 +48,13 @@ _PROMPT_CACHE_TTL_SECONDS: int = 10
 
 # The label Langfuse serves when none is asked for.
 PRODUCTION = "production"
+
+PROMPT_CONFIG_ERRORS = get_or_create_counter(
+    "prompt_config_errors_total",
+    "Segments whose template does not declare exactly the variables their plugin gives; the "
+    "round or call that resolved them failed before any model call",
+    ["prompt", "label", "participant"],
+)
 
 
 def _get_client() -> Langfuse:
@@ -169,11 +177,15 @@ class PromptSet:
         agents: Mapping[str, AgentSpec],
         segments: Mapping[str, Segment],
         round: Round | None,
+        *,
+        participant: str | None = None,
     ) -> PromptSet:
         """Fetch and check every segment of ``agents`` (by name). A template that does not declare
-        exactly its segment's variables raises :class:`PromptConfigError`. A segment nobody
-        registered, a chat prompt listed with other segments, or values worked out from the round
-        when there is no round, is a code error (``ValueError``)."""
+        exactly its segment's variables raises :class:`PromptConfigError`, after an ERROR log
+        line and a count of ``prompt_config_errors_total`` for the participant the set is
+        resolved for: the round's, or ``participant`` for a call outside any round. A segment
+        nobody registered, a chat prompt listed with other segments, or values worked out from
+        the round when there is no round, is a code error (``ValueError``)."""
         resolved: dict[str, _Resolved] = {}
         for agent, spec in agents.items():
             for name in spec.segments:
@@ -188,7 +200,7 @@ class PromptSet:
                 prompt, label = _fetch(segment.prompt_id)
                 wanted, declared = frozenset(segment.variables), _declared(prompt)
                 if declared != wanted:
-                    raise PromptConfigError(
+                    error = PromptConfigError(
                         segment=name,
                         prompt_id=segment.prompt_id,
                         label=label,
@@ -196,6 +208,18 @@ class PromptSet:
                         missing=wanted - declared,
                         unexpected=declared - wanted,
                     )
+                    who = round.participant if round is not None else participant
+                    PROMPT_CONFIG_ERRORS.labels(
+                        prompt=segment.prompt_id, label=label, participant=who or ""
+                    ).inc()
+                    logger.error(
+                        "prompt configuration error for %s, agent %r: %s; nothing is called, "
+                        "run or committed, the next attempt fetches the segments again",
+                        who or "-",
+                        agent,
+                        error,
+                    )
+                    raise error
                 values = None
                 if segment.values is not None:
                     if round is None:

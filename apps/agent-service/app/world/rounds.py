@@ -83,6 +83,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
+from app.agent.prompts import PromptConfigError
 from app.host import Batch, Coalesce, JoinedTurnFailed, Signal, Turns, WakeSource
 from app.infra.cst_time import now_cst
 from app.messaging import receiving
@@ -220,13 +221,17 @@ class Rounds:
 
     async def _run_round(self, due: InboxRound) -> None:
         """带着这一轮的消息跑一轮：这一刻读钟、生成这一轮的 id（每次尝试一个新的，只用于成本和
-        日志），交给 ``run``。跑完记成处理完，没跑完给每条记一次失败。"""
+        日志），交给 ``run``。跑完记成处理完，没跑完给每条记一次失败；因为段落配置错误没跑完的不记。"""
         now, round_id = now_cst(), uuid.uuid4().hex
         taking = list(due.messages)
         ids = [m.message_id for m in taking]
         try:
             async with asyncio.timeout(self._round_timeout.total_seconds()):
                 await self._run(due, round_id=round_id, now=now)
+        except PromptConfigError:
+            # 配置错误不是这些消息的问题：不给它们记失败，配置错多久也不放弃哪一条（设计第 5 节
+            # 问题 3）。投递照样按通信机制重试；每次重试重新取段落，修好之后的下一轮全部带上。
+            raise
         except Exception:
             pending.failed(ids, give_up_at=receiving.PROCESSING_RETRY.n)
             raise

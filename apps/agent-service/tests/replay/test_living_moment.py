@@ -18,6 +18,10 @@
 * ``killed_before_history_is_written`` — the process dies right after the round's transaction
   commits, before her history is written. The next process's next round notices the gap and lays
   her state out again.
+* ``prompt_config_error`` — a release of one of her round's segments declares a variable no plugin
+  gives. The round fails when it fixes its prompts, after the steps before the round and before
+  any model call: no tool, no cost, nothing lands. Once the prompt is fixed, the same cell runs
+  again under the same identity.
 """
 
 from __future__ import annotations
@@ -28,10 +32,12 @@ from datetime import datetime
 import pytest
 from sqlalchemy.exc import OperationalError
 
+from app.agent.prompts import PromptConfigError
 from app.capabilities._errors import CapabilityTimeout
 from app.infra.cst_time import CST
 from tests.replay import seeds
 from tests.replay.harness import Fail, ProcessKilled, Reply, Request, ToolUse
+from tests.replay.harness.prompts import config_errors
 
 pytestmark = pytest.mark.integration
 
@@ -265,3 +271,36 @@ async def test_killed_before_history_is_written(replay):
     )
 
     replay.check("living_moment/killed_before_history_is_written")
+
+
+async def test_prompt_config_error(replay):
+    await _her_household_is_up(replay)
+    rules = "living_life_moment/rules"
+    errors_before = config_errors(rules, "production", "akao")
+
+    replay.misconfigure_prompt(rules, "mood")
+    await replay.step(
+        "a release of her rules declares a variable no plugin gives",
+        _moment(replay),
+        at=_at(14, 0),
+        raises=PromptConfigError,
+    )
+    failed = replay.steps[-1]
+    assert failed["model_calls"] == []
+    assert not {
+        "data_life_moment",
+        "data_session_transcript",
+        "data_thinking_tokens_spent",
+    } & set(failed["rows"]), "no cost, nothing lands"
+    assert config_errors(rules, "production", "akao") == errors_before + 1
+
+    replay.fix_prompt(rules)
+    replay.model.script(MOMENT, Reply(tools=(ToolUse("stop_for_now", {}),)))
+    await replay.step(
+        "the prompt is fixed; the same cell runs again", _moment(replay), at=_at(14, 1)
+    )
+    assert replay.steps[-1]["outcome"]["returned"]["moment_id"] == (
+        "2026-07-25T14:00+08:00"
+    )
+
+    replay.check("living_moment/prompt_config_error")

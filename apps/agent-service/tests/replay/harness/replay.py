@@ -95,6 +95,7 @@ class Replay:
         self.sandbox = Sandbox(self.network)
         self.weather = Weather(self.network)
         self.model = model.ModelScript(self.effects, objects=self.objects)
+        self.langfuse = prompts.FixtureLangfuse()
         self.broker = FakeBroker(self.effects)
         self.ids = DeterministicIds()
         # Dynamic Config as this scenario sees it: key -> raw string value. Unset keys read as
@@ -180,8 +181,7 @@ class Replay:
         import app.agent.prompts as prompts_mod
         import app.agent.trace as trace
 
-        fixtures = prompts.FixtureLangfuse()
-        mp.setattr(prompts_mod, "_get_client", lambda: fixtures)
+        mp.setattr(prompts_mod, "_get_client", lambda: self.langfuse)
         mp.setattr(trace, "_get_client", _no_langfuse)
         mp.setattr(core, "_get_trace_client", _no_langfuse)
 
@@ -288,6 +288,16 @@ class Replay:
         (folder / "SKILL.md").write_text(text, encoding="utf-8")
 
     # ------------------------------------------------------------------ faults
+
+    def misconfigure_prompt(self, prompt_id: str, variable: str) -> None:
+        """Langfuse serves ``prompt_id`` declaring ``variable`` too, which no plugin gives (a
+        release that added a variable the code does not know): every round that fetches it fails
+        on a configuration error before its first model call, until :meth:`fix_prompt`."""
+        self.langfuse.misconfigure(prompt_id, variable)
+
+    def fix_prompt(self, prompt_id: str) -> None:
+        """Langfuse serves ``prompt_id`` as its fixture again."""
+        self.langfuse.fix(prompt_id)
 
     def fail_commits(
         self, matches: Callable[[list[str]], bool], *, times: int = 1

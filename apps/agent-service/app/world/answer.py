@@ -26,6 +26,7 @@ from app.infra.cst_time import now_cst
 from app.messaging.message import Message
 from app.world.agents import lane, run_agent, when, world_agent, world_segments
 from app.world.sources import query_tools
+from app.world.wake import WORLD
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ async def answer_question(question: Message) -> str | None:
     tools = await query_tools()
     # 应答不在主 agent 的哪一轮里：prompt 在这次调用开始时取。
     prompts = await PromptSet.resolve(
-        {ANSWER: ANSWER_AGENT}, world_segments(ANSWER), None
+        {ANSWER: ANSWER_AGENT}, world_segments(ANSWER), None, participant=WORLD
     )
     reply = await run_agent(
         open_call(ANSWER, ANSWER_AGENT, lane=lane()),

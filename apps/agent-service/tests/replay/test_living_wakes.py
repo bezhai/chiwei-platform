@@ -27,6 +27,10 @@ Phone (``phone_wake``): a message in a private chat, or one in a group that name
   second message arrives; the next tick runs the begun round again under the first message's
   identity (it shows both messages on the envelope), and the tick after that is woken by the
   second message, still unread, although that round has nothing new on the phone to show.
+* ``prompt_config_error`` — bezhai's message wakes her while a release of one of her round's
+  segments declares a variable no plugin gives. The round is recorded as begun, then fails when
+  it fixes its prompts, before any model call. Once the prompt is fixed, the next tick runs the
+  begun round under the same identity.
 """
 
 from __future__ import annotations
@@ -37,11 +41,13 @@ from datetime import datetime
 import pytest
 from sqlalchemy import text
 
+from app.agent.prompts import PromptConfigError
 from app.capabilities._errors import CapabilityTimeout
 from app.data.tx import current_session, tx
 from app.infra.cst_time import CST
 from tests.replay import seeds
 from tests.replay.harness import Fail, Reply, ToolUse
+from tests.replay.harness.prompts import config_errors
 
 pytestmark = pytest.mark.integration
 
@@ -383,3 +389,39 @@ async def test_phone_model_call_fails(replay):
     )
 
     replay.check("phone_wake/model_call_fails")
+
+
+async def test_phone_prompt_config_error(replay):
+    await _her_household_is_up(replay)
+    await seeds.bezhai_says("在吗？", at=_at(13, 58), name="dm-1")
+    rules = "living_life_moment/rules"
+    errors_before = config_errors(rules, "production", "akao")
+
+    replay.misconfigure_prompt(rules, "mood")
+    await replay.step(
+        "his message wakes her; the round is recorded as begun and fails on her rules",
+        _nudge(replay),
+        at=_at(13, 59),
+        raises=PromptConfigError,
+    )
+    failed = replay.steps[-1]
+    assert failed["model_calls"] == []
+    assert "data_nudge_begun" in failed["rows"], "the begun round is recorded first"
+    assert not {
+        "data_life_moment",
+        "data_session_transcript",
+        "data_thinking_tokens_spent",
+    } & set(failed["rows"]), "no cost, nothing lands"
+    assert config_errors(rules, "production", "akao") == errors_before + 1
+
+    replay.fix_prompt(rules)
+    replay.model.script(MOMENT, _stops())
+    await replay.step(
+        "the prompt is fixed; the next tick runs the begun round under its identity",
+        _nudge(replay),
+        at=_at(14, 1),
+    )
+    assert "data_nudge_begun" not in replay.steps[-1]["rows"]
+    assert replay.steps[-1]["outcome"]["returned"]["moment_id"].startswith("nudge:")
+
+    replay.check("phone_wake/prompt_config_error")

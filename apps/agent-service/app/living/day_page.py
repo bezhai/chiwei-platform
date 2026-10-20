@@ -378,7 +378,10 @@ async def write_due_page(due: DuePage) -> LivingDayPage | None:
     prompt_vars = await persona_prompt_vars(lane=lane, persona_id=persona_id)
     call = open_call(DAY_PAGE_PROMPT_ID, DAY_PAGE_AGENT, lane=lane, participant=persona_id)
     prompts = await PromptSet.resolve(
-        {DAY_PAGE_PROMPT_ID: DAY_PAGE_AGENT}, {DAY_PAGE_PROMPT_ID: DAY_PAGE_SEGMENT}, None
+        {DAY_PAGE_PROMPT_ID: DAY_PAGE_AGENT},
+        {DAY_PAGE_PROMPT_ID: DAY_PAGE_SEGMENT},
+        None,
+        participant=persona_id,
     )
     # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
     # 会系统性丢 trace，"这一天花了多少"只能从 PG 数。

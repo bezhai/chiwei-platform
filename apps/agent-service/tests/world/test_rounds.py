@@ -15,6 +15,7 @@ from uuid import UUID
 
 import pytest
 
+from app.agent.prompts import PromptConfigError
 from app.host import Turns
 from app.infra.cst_time import CST, now_cst
 from app.messaging import receiving
@@ -561,6 +562,41 @@ async def test_a_retry_queued_while_its_message_is_given_up_fails_and_is_not_ack
     await world.deliver(stuck)  # 通信机制再投的那一次
     assert "跑不完的那条。" in _round_input(world)
     assert pending.read() == []
+
+
+def _a_prompt_configuration_error() -> PromptConfigError:
+    """一段 prompt 声明了插件不给的变量（一次发布加了代码不认识的变量）。"""
+    return PromptConfigError(
+        segment="world_round/order",
+        prompt_id="world_round/order",
+        label="coe-world",
+        version=7,
+        missing=frozenset(),
+        unexpected=frozenset({"mood"}),
+    )
+
+
+async def test_a_round_failing_on_a_prompt_configuration_error_gives_up_no_message(
+    world, caplog
+):
+    """配置错误不是这一轮带着的消息的问题：这一轮照样失败、投递照样按通信机制重试，但不给这些消息
+    记失败，配置错多久也不放弃哪一条（设计第 5 节问题 3 定 A）；修好之后的下一轮全部带上。"""
+    world.runner.plan = raises(_a_prompt_configuration_error())
+    stuck = _from("赤尾", "我出门了。")
+
+    for _ in range(receiving.PROCESSING_RETRY.n + 1):
+        with pytest.raises(PromptConfigError):
+            await world.deliver(stuck)
+
+    assert [m.message_id for m in pending.read()] == [stuck.message_id]
+    assert _give_up_logs(caplog) == []
+
+    world.runner.plan = sets_wake()  # 配置修好了
+    await world.deliver(_from("绫奈", "我在看书。"))
+    assert _shown(_round_input(world), ["我出门了。", "我在看书。"]) == [
+        "我出门了。",
+        "我在看书。",
+    ]
 
 
 async def test_its_own_wake_is_never_given_up(world):

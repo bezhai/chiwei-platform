@@ -168,7 +168,11 @@ replay.check("living_moment/continuation")
   (a send is not confirmed), `replay.kill_after(lambda effect: ...)` (the process dies right
   after that effect: the next boundary it touches raises `ProcessKilled`; run the step with
   `raises=ProcessKilled`, then `await replay.restart()`). Each fault fires once by default
-  (`times=`).
+  (`times=`). `replay.misconfigure_prompt(prompt_id, variable)` has Langfuse serve that text
+  prompt declaring one more variable, which no plugin gives (a configuration error for every
+  round that fetches it), until `replay.fix_prompt(prompt_id)`;
+  `harness.prompts.config_errors(prompt_id, label, participant)` reads what
+  `prompt_config_errors_total` has counted.
 - `replay.config[key] = "value"` for Dynamic Config; `replay.redis` for Redis.
 - `replay.objects.put(file_name, data, content_type)`: an object in the store (an attachment the
   inbound pipeline cached, a picture she made). A name nothing was put under signs fine and

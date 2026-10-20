@@ -22,6 +22,9 @@ record: the round under test reads it.
 * ``commit_fails`` — the page's own transaction fails at commit after the model answered and the
   cost was recorded. The next tick asks the model again and writes the page; again its cost row is
   not added.
+* ``prompt_config_error`` — a release of the diary prompt declares a variable no plugin gives:
+  the call fails when it fixes its prompt, before the model; the tick does not raise it and
+  nothing is written, no cost either. Once the prompt is fixed, the next tick writes the page.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from app.living.records import (
 )
 from tests.replay import seeds
 from tests.replay.harness import Fail, Reply
+from tests.replay.harness.prompts import config_errors
 
 pytestmark = pytest.mark.integration
 
@@ -236,3 +240,29 @@ async def test_commit_fails(replay):
     await replay.step("the next tick writes the page", _tick(replay), at=_at(26, 4, 5))
 
     replay.check("day_page/commit_fails")
+
+
+async def test_prompt_config_error(replay):
+    await _her_household_is_up(replay)
+    await _her_saturday(replay)
+    errors_before = config_errors(DAY_PAGE, "production", "akao")
+
+    replay.misconfigure_prompt(DAY_PAGE, "mood")
+    await replay.step(
+        "a release of the diary prompt declares a variable no plugin gives; the tick swallows it",
+        _tick(replay),
+        at=_at(26, 4),
+    )
+    failed = replay.steps[-1]
+    assert failed["model_calls"] == []
+    assert failed["rows"] == {}, "no cost, no page"
+    assert config_errors(DAY_PAGE, "production", "akao") == errors_before + 1
+
+    replay.fix_prompt(DAY_PAGE)
+    replay.model.script(DAY_PAGE, Reply(text=SATURDAY_PAGE))
+    await replay.step(
+        "the prompt is fixed; the next tick writes the page", _tick(replay), at=_at(26, 4, 5)
+    )
+    assert "data_living_day_page" in replay.steps[-1]["rows"]
+
+    replay.check("day_page/prompt_config_error")

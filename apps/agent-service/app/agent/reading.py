@@ -259,7 +259,7 @@ async def run_reading_round(
     async def read_on() -> Message:
         # prompt 在这一程开始时取齐，跟这一程一起受时限和"失败就不算这一程"管着。
         prompts = await PromptSet.resolve(
-            {READING: READING_AGENT}, {READING: READING_SEGMENT}, None
+            {READING: READING_AGENT}, {READING: READING_SEGMENT}, None, participant=persona_id
         )
         return await Agent(READING_AGENT, tools=tools).run(
             [Message(role=Role.USER, content=user_content)],

@@ -34,6 +34,10 @@ the message is acknowledged.
   restarted process a minute later, while the dead process's claim on it is still live: the copy
   is put back to look again in a second and acknowledged. Once the claim has run out, that copy
   is delivered, takes the claim over, and the round is read.
+* ``prompt_config_error`` — a release of the reading prompt declares a variable no plugin gives:
+  the stretch fails when it fixes its prompt, before any model call, the way a failed model call
+  does: nothing is written and the message is acknowledged, nothing queued for a retry. Once the
+  prompt is fixed, her next moment picks the book up again and that stretch is read.
 """
 
 from __future__ import annotations
@@ -48,6 +52,7 @@ from app.infra.cst_time import CST
 from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, lane_queue
 from tests.replay import seeds
 from tests.replay.harness import Fail, ProcessKilled, Reply, ToolUse
+from tests.replay.harness.prompts import config_errors
 
 pytestmark = pytest.mark.integration
 
@@ -285,3 +290,39 @@ async def test_killed_mid_round(replay):
     )
 
     replay.check("reading/killed_mid_round")
+
+
+async def test_prompt_config_error(replay):
+    await _bezhai_sent_her_a_book(replay)
+    await _she_picks_it_up(replay)
+    errors_before = config_errors(READING, replay.lane, "akao")
+
+    replay.misconfigure_prompt(READING, "mood")
+    await replay.step(
+        "a release of the reading prompt declares a variable no plugin gives",
+        lambda: replay.broker.deliver(_queue(replay)),
+        at=_at(14, 2),
+    )
+    failed = replay.steps[-1]
+    assert failed["model_calls"] == []
+    assert not {"data_file_read", "data_thinking_tokens_spent"} & set(
+        failed["rows"]
+    ), "no cost, nothing written"
+    assert config_errors(READING, replay.lane, "akao") == errors_before + 1
+    await _nothing_queued(replay)
+
+    replay.fix_prompt(READING)
+    replay.model.script(MOMENT, _picks_it_up(), _done())
+    await replay.step(
+        "the prompt is fixed; her next moment picks the book up again",
+        _moment(replay),
+        at=_at(14, 10),
+    )
+    replay.model.script(READING, *_reads_the_first_page())
+    await replay.step(
+        "that stretch is read",
+        lambda: replay.broker.deliver(_queue(replay)),
+        at=_at(14, 12),
+    )
+
+    replay.check("reading/prompt_config_error")

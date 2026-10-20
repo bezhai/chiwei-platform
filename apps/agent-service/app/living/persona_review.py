@@ -286,6 +286,7 @@ async def write_due_review(due: DueReview) -> PersonaVersion | None:
         {PERSONA_REVIEW_PROMPT_ID: PERSONA_REVIEW_AGENT},
         {PERSONA_REVIEW_PROMPT_ID: PERSONA_REVIEW_SEGMENT},
         None,
+        participant=persona_id,
     )
     # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
     # 会系统性丢 trace，"这一周花了多少"只能从 PG 数。

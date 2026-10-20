@@ -15,6 +15,15 @@
   (``check_hourly_forecast``, ``check_daily_forecast``) and searches the web (``search_web``:
   search, read each page, rerank). QWeather and the web answer what the scenario gives
   (``replay.weather``, ``replay.web``).
+* ``prompt_config_error_own_wake`` — a release of one of the round's segments declares a variable
+  no plugin gives. The start-up wake (world's latest own wake) runs a round that fails when it
+  fixes its prompts, before any model call: no tool, no cost, no history. Its delivery is retried
+  as an own wake always is; once the prompt is fixed, the retry runs the round.
+* ``prompt_config_error_digest`` — the same release, when 赤尾's digest arrives. The digest is taken
+  in (pending, the told source's copy) and the round it wakes fails before any model call. A
+  round that fails on a configuration error counts against none of its messages (question 3 of
+  the phase-two design): the digest stays pending with no failed round. Once the prompt is fixed,
+  the redelivered digest runs the round, which takes it.
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ import pytest
 from app.capabilities._errors import CapabilityTimeout
 from app.infra.cst_time import CST
 from tests.replay.harness import Fail, Reply, ToolUse
+from tests.replay.harness.prompts import config_errors
 from tests.replay.harness.web import Hit
 
 pytestmark = pytest.mark.integration
@@ -380,3 +390,85 @@ async def test_reality_and_told(replay):
     )
 
     replay.check("world_round/reality_and_told")
+
+
+ORDER = "world_round/order"
+
+
+def _nothing_ran(step: dict) -> None:
+    """A round that failed on its prompts: no model call, so no tool, no cost, no history."""
+    assert step["model_calls"] == []
+    assert not {"data_session_transcript", "data_thinking_tokens_spent"} & set(step["rows"])
+
+
+def _sets_its_next_wake() -> tuple[Reply, Reply]:
+    return (
+        Reply(
+            tools=(
+                ToolUse(
+                    "wake_me_at", {"at": "2026-07-25T16:00", "reason": "过两个小时再看看"}
+                ),
+            ),
+        ),
+        Reply(text="这一轮看完了。"),
+    )
+
+
+async def test_prompt_config_error_own_wake(replay):
+    await _world_is_up(replay)
+    inbox = replay.inbox("world")
+    errors_before = config_errors(ORDER, replay.lane, "world")
+
+    replay.misconfigure_prompt(ORDER, "mood")
+    await replay.step(
+        "the scheduled queue hands over the start-up wake",
+        lambda: replay.broker.deliver(replay.scheduled()),
+        at=_at(14, 0),
+    )
+    await replay.step(
+        "its own wake runs a round that fails on the order of a round",
+        lambda: replay.broker.deliver(inbox),
+    )
+    _nothing_ran(replay.steps[-1])
+    assert config_errors(ORDER, replay.lane, "world") == errors_before + 1
+
+    replay.fix_prompt(ORDER)
+    replay.model.script(ROUND, *_sets_its_next_wake())
+    await replay.step(
+        "the prompt is fixed; the retry runs the round",
+        lambda: replay.broker.deliver(inbox),
+        at=_at(14, 2),
+    )
+
+    replay.check("world_round/prompt_config_error_own_wake")
+
+
+async def test_prompt_config_error_digest(replay):
+    await _world_is_up(replay)
+    inbox = _akaos_digest_arrives(replay)
+    errors_before = config_errors(ORDER, replay.lane, "world")
+
+    replay.misconfigure_prompt(ORDER, "mood")
+    await replay.step(
+        "赤尾's digest is taken in; the round it wakes fails on the order of a round",
+        lambda: replay.broker.deliver(inbox),
+        at=_at(14, 1),
+    )
+    failed = replay.steps[-1]
+    _nothing_ran(failed)
+    [waiting] = failed["files"][f"{replay.lane}/pending.json"]["added"]["pending"]
+    assert (waiting["message"]["message_id"], waiting["failed_rounds"]) == (
+        "akao-digest-1",
+        0,
+    ), "a configuration error counts against no message"
+    assert config_errors(ORDER, replay.lane, "world") == errors_before + 1
+
+    replay.fix_prompt(ORDER)
+    replay.model.script(ROUND, *_sets_its_next_wake())
+    await replay.step(
+        "the prompt is fixed; the redelivered digest runs the round, which takes it",
+        lambda: replay.broker.deliver(inbox),
+        at=_at(14, 2),
+    )
+
+    replay.check("world_round/prompt_config_error_digest")

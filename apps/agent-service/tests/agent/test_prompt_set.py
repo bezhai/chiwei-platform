@@ -15,6 +15,7 @@ Langfuse folder) goes on the wire. Nothing here reaches a real Langfuse.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Iterator
 from datetime import datetime
@@ -138,6 +139,48 @@ async def test_a_variable_the_template_declares_and_no_plugin_gives_is_an_error(
 
     assert raised.value.missing == frozenset()
     assert raised.value.unexpected == frozenset({"currDate", "currTime"})
+
+
+def _config_errors(prompt: str, label: str, participant: str) -> float:
+    from prometheus_client import REGISTRY
+
+    sample = REGISTRY.get_sample_value(
+        "prompt_config_errors_total",
+        {"prompt": prompt, "label": label, "participant": participant},
+    )
+    return sample or 0.0
+
+
+async def test_a_configuration_error_is_logged_and_counted_for_whom_it_was_resolved(
+    langfuse, caplog
+):
+    """Before it is raised, a configuration error is an ERROR log line naming the segment, the
+    prompt, its label and version and what does not match, and a count of
+    ``prompt_config_errors_total{prompt, label, participant}``: the participant is the round's,
+    or the one a call outside any round is resolved for."""
+    langfuse.prompts[("diary", "production")] = _text(
+        "diary", "你是 {{persona_name}}，{{mood}}。", version=4
+    )
+    langfuse.prompts[("moment", "production")] = _text("moment", "此刻 {{weather}}。")
+    diary = {"diary": Segment("diary", "diary", variables=("persona_name",))}
+    moment = {"moment": Segment("moment", "moment")}
+    diary_before = _config_errors("diary", "production", "ayana")
+    moment_before = _config_errors("moment", "production", "akao")
+
+    with caplog.at_level(logging.ERROR, logger="app.agent.prompts"):
+        with pytest.raises(PromptConfigError):
+            await PromptSet.resolve(
+                {"diary": _agent("diary")}, diary, None, participant="ayana"
+            )
+        with pytest.raises(PromptConfigError):
+            await PromptSet.resolve({"moment": _agent("moment")}, moment, _round())
+
+    assert _config_errors("diary", "production", "ayana") == diary_before + 1
+    assert _config_errors("moment", "production", "akao") == moment_before + 1
+    logged = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(logged) == 2
+    assert "'diary'" in logged[0] and "version 4" in logged[0] and "mood" in logged[0]
+    assert "weather" in logged[1]
 
 
 async def test_braces_inside_a_value_are_text_not_a_declaration(langfuse):

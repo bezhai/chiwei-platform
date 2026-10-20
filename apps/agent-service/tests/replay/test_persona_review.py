@@ -15,6 +15,10 @@ they are not part of the record: the round under test reads them.
 * ``model_call_fails`` — the model call fails after the chain was seeded; the tick does not raise
   it.
   The next tick does not seed again and writes the review.
+* ``prompt_config_error`` — a release of the review prompt declares a variable no plugin gives.
+  The first tick in the window seeds her chain, as it always does before fixing the prompt, then
+  fails on it before the model; the tick does not raise it. Once the prompt is fixed, the next
+  tick does not seed again and writes the review.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from app.infra.cst_time import CST
 from app.living.day_page import LivingDayPage
 from tests.replay import seeds
 from tests.replay.harness import Fail, Reply
+from tests.replay.harness.prompts import config_errors
 
 pytestmark = pytest.mark.integration
 
@@ -140,3 +145,30 @@ async def test_model_call_fails(replay):
     )
 
     replay.check("persona_review/model_call_fails")
+
+
+async def test_prompt_config_error(replay):
+    await _her_household_is_up(replay)
+    await _her_pages(replay, LAST_WEEK)
+    errors_before = config_errors(REVIEW, "production", "akao")
+
+    replay.misconfigure_prompt(REVIEW, "mood")
+    await replay.step(
+        "the chain is seeded, then the review prompt fails its check; the tick swallows it",
+        _tick(replay),
+        at=_at(7, 27, 6),
+    )
+    failed = replay.steps[-1]
+    assert failed["model_calls"] == []
+    assert list(failed["rows"]) == ["data_persona_version"], "only the seed"
+    assert config_errors(REVIEW, "production", "akao") == errors_before + 1
+
+    replay.fix_prompt(REVIEW)
+    replay.model.script(REVIEW, Reply(text=FIRST_REVIEW))
+    await replay.step(
+        "the prompt is fixed; the next tick writes the review without seeding again",
+        _tick(replay),
+        at=_at(7, 27, 6, 5),
+    )
+
+    replay.check("persona_review/prompt_config_error")
