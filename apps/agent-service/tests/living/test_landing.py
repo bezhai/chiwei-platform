@@ -34,7 +34,7 @@ from sqlalchemy import text
 from app.data.persist import insert_append, select_latest
 from app.data.tx import current_session, tx
 from app.infra.cst_time import CST
-from app.living.landing import LandingTick, reconcile_landings, reconcile_recalls
+from app.living.landing import reconcile_landings, reconcile_recalls
 from app.living.mouth import STATE_CLAIMED, STATE_HANDED_OFF, SpokenOutbound
 from tests.data.read_back import all_versions
 
@@ -453,26 +453,36 @@ async def test_another_lane_is_none_of_this_lane_business(living_db):
 # ---------------------------------------------------------------------------
 
 
-def test_the_landing_clock_carries_nothing_but_a_timestamp():
-    """单字段 ``ts``：框架源循环固定按 ``data_type(ts=<iso>)`` 造 payload，多一个
-    必填字段就是每一拍 ValidationError 直接杀 Pod。顺带也是"钟当不了信箱"那条。
-    """
-    assert set(LandingTick.model_fields) == {"ts"}, sorted(LandingTick.model_fields)
+async def _the_clock_ticks(app_host, monkeypatch) -> None:
+    """对账那条钟响一拍：agent-service 的宿主上 living 登记的那条钟，交回的工作跑完。进程部署在
+    :data:`LANE` 上。"""
+    monkeypatch.setenv("LANE", LANE)
+    host = await app_host("agent-service")
+    (clock,) = [r for r in host.registered() if r.kind == "clock" and r.name == "landing"]
+    await clock.detail["tick"](_at(21, 35))
+
+
+async def test_the_landing_clock_is_registered_by_the_living_plugin(app_host):
+    """忘了登记的症状是静默的：账永远对不上，而她那边一切照常。"""
+    host = await app_host("agent-service")
+
+    clocks = [r for r in host.registered() if r.kind == "clock"]
+
+    assert [(c.plugin, c.name, c.detail["seconds"]) for c in clocks] == [
+        ("living", "landing", 300.0)
+    ]
 
 
 @pytest.mark.integration
 async def test_the_tick_reconciles_the_lane_this_process_is_deployed_on(
-    living_db, monkeypatch
+    living_db, app_host, monkeypatch
 ):
-    """钟不携带泳道 —— 节点自己从进程环境读，跟另外四条钟同一个分工。"""
-    from app.living import landing as landing_mod
-
+    """钟不携带泳道：对的是登记这条钟的进程所在的泳道。"""
     outbound_id = _derived("via-the-clock")
     await _she_spoke(outbound_id=outbound_id)
     message_id = await _the_channel_wrote(outbound_id=outbound_id, at=_at(21, 31))
 
-    monkeypatch.setattr(landing_mod, "living_lane", lambda: LANE)
-    await landing_mod.landing_tick(LandingTick(ts=_at(21, 35).isoformat()))
+    await _the_clock_ticks(app_host, monkeypatch)
 
     row = await select_latest(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
@@ -774,14 +784,12 @@ async def test_a_lost_recall_race_is_left_for_the_next_tick(living_db, monkeypat
 
 @pytest.mark.integration
 async def test_the_tick_brings_back_both_the_landing_and_the_recall(
-    living_db, monkeypatch
+    living_db, app_host, monkeypatch
 ):
     """一条钟两件事：同一拍里落地补上、撤回也确认上。
 
     不为撤回另起一条钟 —— 它追的是同一条 id、同一批记录，节奏也没有另一套理由。
     """
-    from app.living import landing as landing_mod
-
     landing_only = _derived("tick-landing-only")
     recalled = _derived("tick-recalled")
     landing_row = await _the_channel_wrote(outbound_id=landing_only, at=_at(21, 31))
@@ -796,8 +804,7 @@ async def test_the_tick_brings_back_both_the_landing_and_the_recall(
     )
     await _the_channel_recalled_it(recalled_row, at=_at(21, 34))
 
-    monkeypatch.setattr(landing_mod, "living_lane", lambda: LANE)
-    await landing_mod.landing_tick(LandingTick(ts=_at(21, 35).isoformat()))
+    await _the_clock_ticks(app_host, monkeypatch)
 
     landed = await select_latest(
         SpokenOutbound, {"lane": LANE, "outbound_id": landing_only}

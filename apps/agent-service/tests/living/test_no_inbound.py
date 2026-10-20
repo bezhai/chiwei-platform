@@ -20,11 +20,12 @@
     能做到的只有读一程：处理函数 :func:`app.living.reading.read_a_round` 所在的模块连同它 import
     的一切，碰不到她的一轮（:mod:`app.living.moment`）；
   * ``app.living`` 的源码里一次都没有出现旧 chat 入站那几个名字；
-  * living 自己登记的钟只有那一条，钟上那条 Data 除了 ``ts`` 什么都装不下；她的轮次、日记和
-    回看由宿主的钟给她的队列发信号，信号里只有钟响的时刻——装不下内容的钟，天然没法当入站口用。
+  * living 自己登记的钟只有对账那一条；她的轮次、日记和回看由宿主的钟给她的队列发信号。钟给出去
+    的只有钟响的时刻：对账那条钟每一拍对一次这个进程泳道的账，她的队列收到的信号里也只有时刻
+    （宿主造的 ``app.host.Signal``）——装不下内容的钟，天然没法当入站口用。
 
-最后一条是最要紧的一条：只要哪天有人给 tick 加一个 ``content`` 字段，"钟"就变成了
-"信箱"，而这一步在 code review 里看起来毫无杀伤力。
+最后一条是最要紧的一条：只要哪天有人让钟带上内容（给钟的信号加一个 ``content`` 字段），"钟"
+就变成了"信箱"，而这一步在 code review 里看起来毫无杀伤力。
 
 第一条判的是**路由通向谁**，不是**路由长什么样**。判长相的版本（"Data 叫什么"、"路径是不是
 /admin/ 开头"）挡得住"给 living 的 Data 挂一条路由"，挡不住反过来那一半：把一条已经在白名单里的
@@ -45,7 +46,6 @@ from typing import NamedTuple
 import pytest
 
 import app.living as living_pkg
-from app.living.landing import LandingTick
 from tests.hosting import in_a_fresh_process
 
 LANE = "coe-living"
@@ -85,9 +85,9 @@ print(json.dumps({
 """
 
 # 宿主能登记的每一种东西，按"能不能把外面的东西送进这个进程"分。能的那几种下面逐种查；钟不能：
-# 每一拍只造一个只装得下 ``ts`` 的 Data（最后两条）。轮次队列（``turns``）和给它发信号的钟
-# （``wake``）也不能：每一拍交给她队列的只有钟响的时刻（宿主造的 ``app.host.Signal``），判不判、
-# 判出哪一轮由来源读库决定。宿主多出一种登记，这里先红，要重新判断它算哪一边。
+# 每一拍交出去的只有钟响的时刻（最后一条）。轮次队列（``turns``）和给它发信号的钟（``wake``）
+# 也不能：每一拍交给她队列的只有钟响的时刻（宿主造的 ``app.host.Signal``），判不判、判出哪一轮
+# 由来源读库决定。宿主多出一种登记，这里先红，要重新判断它算哪一边。
 _INBOUND_KINDS = frozenset({"route", "inbox", "inboxes_at_start"})
 _NOT_INBOUND_KINDS = frozenset(
     {"clock", "task", "outbound", "service", "on_stop", "turns", "wake"}
@@ -381,29 +381,11 @@ def test_no_living_module_ever_mentions_the_old_inbound_chain():
     )
 
 
-@pytest.mark.parametrize(
-    "cls",
-    [
-        LandingTick,
-    ],
-)
-def test_a_clock_cannot_be_turned_into_a_mailbox(cls):
-    """钟上那条 Data 只有 ``ts``：装不下内容的钟没法当入站口。
-
-    顺带也是那条杀 Pod 的约定（钟的循环每一拍固定按 ``data_type(ts=<iso>)`` 造 payload，
-    :func:`app.plugins.living._ticker`）。
-    """
-    assert set(cls.model_fields) == {"ts"}, (
-        f"{cls.__name__} 多了字段 {sorted(set(cls.model_fields) - {'ts'})} —— "
-        f"钟一旦能携带内容，它就是个信箱了（而且钟的循环每一拍会 ValidationError 杀 Pod）"
-    )
-
-
-def test_the_only_clocks_are_livings_one_and_her_wakes():
-    """宿主上的钟只有 living 那一条，名字就是上面那个只装得下 ``ts`` 的 tick；她的轮次只由
-    常规节奏和提前叫醒这两个来源的钟叫醒，日记、回看各由自己的钟叫醒，每人各一条队列。"""
+def test_the_only_clocks_are_livings_landing_and_her_wakes():
+    """宿主上的钟只有 living 对账那一条；她的轮次只由常规节奏和提前叫醒这两个来源的钟叫醒，日记、
+    回看各由自己的钟叫醒，每人各一条队列。"""
     registered = _registered(LANE)
-    assert registered["clocks"] == [["living", "LandingTick"]]
+    assert registered["clocks"] == [["living", "landing"]]
     assert registered["wakes"] == sorted(
         [
             *(

@@ -52,30 +52,17 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import Annotated
 
 from app.data.persist import fetch_all, from_row, insert_append
 from app.data.queries.messages import (
     find_messages_by_outbound_ids,
     find_recall_state_by_outbound_ids,
 )
-from app.data.schema import Data, Key, table_name
+from app.data.schema import table_name
 from app.infra.cst_time import CST
 from app.living.mouth import SpokenOutbound
-from app.living.records import living_lane
-from app.runtime.node import node
 
 logger = logging.getLogger(__name__)
-
-# 五分钟一拍。对账不赶时间：两件事都没有人等着它。她这一轮不读这张台账；撤回那只手
-# 也不读（投递侧按 ``agent_outbound_id`` 直接反查公共层去撤），而"她还看不看得见那条
-# 撤掉的消息"是直接看 ``common_message.recalled_at`` 的（:mod:`app.living.phone`），
-# 跟这条钟对没对上账无关。它要追的那两次写入都发生在动作之后的几秒到几十秒内——所以
-# 间隔只要远大于那几秒，快慢对"能不能对上"没有区别。选五分钟而不是更密，是因为每一拍
-# 的真实成本是把**永远对不上**的那些（emit 结果未知的、投递方没写成的、撤回始终没成功
-# 的）重新扫一遍，那部分不会随时间减少；选五分钟而不是更疏，是让一条落地的记录在她下
-# 一次常规醒来（十分钟）之前一定已经对上账。
-LANDING_TICK_SECONDS = 300
 
 _OUTBOUND_TABLE = table_name(SpokenOutbound)
 
@@ -105,20 +92,6 @@ _UNCONFIRMED_RECALLS = (
     f") latest WHERE took_back_at IS NOT NULL AND recalled_at IS NULL "
     f"ORDER BY took_back_at ASC"
 )
-
-class LandingTick(Data):
-    """对账那一拍。
-
-    单字段 ``ts``——框架源循环固定按 ``data_type(ts=<iso>)`` 造 payload，多一个必填
-    字段就是每一拍 ValidationError **直接杀 Pod**。这条约定顺带也是"chat 没有入口"
-    的物理保证：钟装不下内容，就当不了信箱。
-    """
-
-    ts: Annotated[str, Key]
-
-    class Meta:
-        transient = True
-
 
 async def _pending(sql: str, *, lane: str) -> list[SpokenOutbound]:
     """这条泳道上某一份待办（两条 SELECT 的形状一样，只有 WHERE 不同）。"""
@@ -278,16 +251,15 @@ async def reconcile_recalls(*, lane: str) -> int:
     return confirmed
 
 
-@node
-async def landing_tick(tick: LandingTick) -> None:
-    """把渠道那边关于她这次开口的事实取回来：落地一遍，撤回一遍。
+async def reconcile_what_she_said(*, lane: str) -> None:
+    """对账那条钟的一拍：把渠道那边关于她这次开口的事实取回来，落地一遍，撤回一遍。
 
     两件事都可能这一拍一条都没有（她可能根本没撤过任何东西），那是正常的 —— 记
     info，不是错误。
 
-    泳道由节点自己从进程环境读（钟不携带内容），跟另外四条钟同一个分工。
+    ``lane`` 是登记这条钟的进程所在的泳道（:mod:`app.plugins.living`）：钟只给出钟响的时刻，
+    不携带任何内容。
     """
-    lane = living_lane()
     filled = await reconcile_landings(lane=lane)
     if filled:
         logger.info("living landing lane=%s 对上了 %d 次开口", lane, filled)

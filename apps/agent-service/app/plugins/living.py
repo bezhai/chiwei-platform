@@ -1,7 +1,7 @@
 """Living: the three sisters' life engine — for each sister a queue of rounds with two wakes on it
-and a queue each for her diary and her weekly look back with one, a clock, the reading inbox, the
-two outbound queues, the sisters' inboxes, and a one-off admin route that empties the old reading
-queue.
+and a queue each for her diary and her weekly look back with one, the landing clock, the reading
+inbox, the two outbound queues, the sisters' inboxes, and a one-off admin route that empties the
+old reading queue.
 
   each sister's queue of rounds ("round", ``ctx.turns``), signalled by two wakes (``ctx.wake``):
   every  60 s  regular   -> regular_moment_due / run_due_moment   her regular rhythm
@@ -11,7 +11,7 @@ queue.
   every 300 s  day-page        -> day_page_due / write_due_page          yesterday's page (04:00-06:00)
   every 300 s  persona-review  -> persona_review_due / write_due_review  last week's "who I am" (06:00-08:00)
 
-  every 300 s  LandingTick  -> landing_tick  match what she said with what landed
+  every 300 s  landing  -> reconcile_what_she_said  match what she said with what landed
 
   ChatResponseSegment -> chat_response_{channel}          what she says
   Recall              -> recall_{channel}                 what she takes back
@@ -38,13 +38,14 @@ counts is judged by when it ticked (the window), what it writes by when it got i
 
 **Clocks tick denser than the work they drive.** A clock's seconds are fixed when it is
 registered, so the intervals that are business parameters (ten minutes between rounds, the
-diary and review windows) are judged on every tick, in the wake's ``due`` or in the node; most
-ticks run nothing. Her early wake ticks every minute so that someone calling her waits at most a
+diary and review windows) are judged on every tick, in the wake's ``due``; most ticks run
+nothing. Her early wake ticks every minute so that someone calling her waits at most a
 minute.
 
-**A tick builds its payload in the clock loop** (:func:`_ticker`): a tick Data that grew a
-required field fails there, and the clock's watchdog stops the process. The node's run is the
-tick's work and runs on its own.
+**The landing clock is not a wake.** Matching what she said with what landed puts nothing on her
+queues: it takes no turn, and its writes are compare-and-set on the version chain, so it may run
+while one of her turns does (:mod:`app.living.landing`). Its tick gets only the time and runs the
+reconcile of this process's lane.
 
 **She has no inbound edge.** Messages on her phone she reads from ``common_message`` in her own
 rounds; what world and her sisters tell her arrives in her inbox, which only stores it
@@ -76,16 +77,15 @@ that chain. The other living Data classes come in with the modules below.
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
-from app.data.schema import Data
 from app.domain.chat_dataflow import ChatResponseSegment
 from app.domain.safety import Recall
-from app.host import Batch, Coalesce, Context, Plugin, Tick, WakeSource
+from app.host import Batch, Coalesce, Context, Plugin, WakeSource
 from app.living import pictures, records  # noqa: F401
 from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
-from app.living.landing import LANDING_TICK_SECONDS, LandingTick, landing_tick
+from app.living.landing import reconcile_what_she_said
 from app.living.moment import DueMoment, LifeMoment, regular_moment_due, run_due_moment
 from app.living.nudge import nudged_moment_due
 from app.living.participants import READING
@@ -108,19 +108,15 @@ PERSONA_REVIEW_EVERY = timedelta(minutes=5)
 # How long a turn may hold one of her queues (:mod:`app.host.turns`).
 HOLD_LIMIT = timedelta(seconds=HELD_SECONDS)
 
-# (tick Data, seconds, node). The clock is named after its tick Data.
-CLOCKS: tuple[tuple[type[Data], float, Callable[[Data], Awaitable[None]]], ...] = (
-    (LandingTick, LANDING_TICK_SECONDS, landing_tick),
-)
-
-
-def _ticker(data_type: type[Data], node: Callable[[Data], Awaitable[None]]) -> Tick:
-    """Build ``data_type(ts=<iso>)`` now, in the clock loop; hand it to ``node`` as the work."""
-
-    def tick(ts: datetime) -> Awaitable[None]:
-        return node(data_type(ts=ts.isoformat()))
-
-    return tick
+# Five minutes between two matchings of what she said with what landed. Nobody waits for it: her
+# rounds do not read that record, taking a message back looks the message up by its outbound id,
+# and whether she still sees a message she took back is read from the channel's own row. The two
+# writes it follows land seconds to tens of seconds after she acts, so any interval well above that
+# matches them as well. Not denser, because every tick rescans the ones that will never match (a
+# send whose outcome is unknown, a row the channel never wrote, a take-back that never succeeded),
+# and that part does not shrink with time; not sparser, so that what landed is matched before her
+# next regular round (ten minutes).
+LANDING_EVERY = timedelta(minutes=5)
 
 
 def regular(lane: str) -> WakeSource[DueMoment, LifeMoment]:
@@ -178,8 +174,11 @@ def setup(ctx: Context) -> None:
         ctx.wake(diary, pages, every=DAY_PAGE_EVERY)
         look_back = ctx.turns(persona_id, "persona-review", hold_limit=HOLD_LIMIT)
         ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
-    for data_type, seconds, node in CLOCKS:
-        ctx.clock(data_type.__name__, seconds, _ticker(data_type, node))
+    ctx.clock(
+        "landing",
+        LANDING_EVERY.total_seconds(),
+        lambda ts: reconcile_what_she_said(lane=lane),
+    )
     ctx.inbox(
         READING,
         on_message=read_a_round,
