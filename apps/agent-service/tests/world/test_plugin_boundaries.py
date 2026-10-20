@@ -23,12 +23,7 @@ from scripts.check_world_life_imports import imported_names, module_name
 SHARED = frozenset({"services", "agents", "volume"})
 
 # 拆分还没做完、现在还越界的 import：``文件 -> 它 import 的 world 模块``。拆完是空的。
-KNOWN_CROSSINGS = frozenset(
-    {
-        "world/agents.py -> app.world.wake",
-        "world/sources/told.py -> app.world.wake",
-    }
-)
+KNOWN_CROSSINGS: frozenset[str] = frozenset()
 
 
 def _world_part(target: str) -> str | None:

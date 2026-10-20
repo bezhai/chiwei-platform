@@ -40,7 +40,7 @@ from app.agent.round import store_history
 from app.agent.tooling import tool
 from app.host import Context, Plugin
 from app.world.actions import wake_me_at
-from app.world.agents import world_segments
+from app.world.agents import WORLD, world_segments
 from app.world.answer import ANSWER, Answering
 from app.world.main_agent import (
     ROUND,
@@ -58,7 +58,7 @@ from app.world.npc import NPC, Npcs
 from app.world.perception import PERCEPTION, Perceiving, someone_notices
 from app.world.rounds import Rounds
 from app.world.volume import writer_lock
-from app.world.wake import WORLD, retry_latest_wake_without_limit, wake_on_start
+from app.world.wake import retry_latest_wake_without_limit, wake_on_start
 
 # 主 agent 的 prompt 里由这个插件登记的那几段；别的段（写记录、现实）由各自的插件登记。
 _ROUND_SEGMENTS = tuple(

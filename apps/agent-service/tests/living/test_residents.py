@@ -135,7 +135,7 @@ async def test_every_problem_is_reported_at_once_and_nothing_is_kept(persona_tab
 
 def test_life_knows_world_by_the_name_world_gives_itself():
     """life 和 world 互不 import，world 的名字两边各写一份；这里把两份钉在一起。"""
-    from app.world.wake import WORLD as world_calls_itself
+    from app.world.agents import WORLD as world_calls_itself
 
     assert WORLD == world_calls_itself
 

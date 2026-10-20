@@ -55,10 +55,10 @@ from app.agent.round import AssembledProfile, Round, run_round
 from app.messaging.message import Kind, Message
 from app.world import unfinished
 from app.world.actions import RoundScope
-from app.world.agents import when, world_agent
+from app.world.agents import WORLD, is_own_wake, when, world_agent
 from app.world.perception import Told, render_told, send_notices
 from app.world.rounds import InboxRound
-from app.world.wake import WORLD, NextWake, is_own_wake, read_next_wake, set_next_wake
+from app.world.wake import NextWake, read_next_wake, set_next_wake
 
 logger = logging.getLogger(__name__)
 

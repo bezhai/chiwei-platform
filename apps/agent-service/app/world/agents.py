@@ -20,6 +20,10 @@ prompt id。主 agent 的一轮由固定循环跑（:func:`app.agent.round.run_r
 
 工具按声明交给它（:class:`~app.agent.contracts.ToolSpec`）：知识来源的查询工具是读到的材料，
 主 agent 的动作和感知判断记判断的那只手留着。
+
+world 的几个插件都要用、又不属于哪一个插件的小东西也在这里：world 在通信机制里的名字
+（:data:`WORLD`）、一条消息是不是它给自己排的醒来（:func:`is_own_wake`）、摆到 agent 眼前的时刻
+（:func:`when`），以及一个动作调的 agent 没做成时交给主 agent 的那句话（:func:`not_done`）。
 """
 from __future__ import annotations
 
@@ -36,7 +40,7 @@ from app.agent.trace import collect_usage
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import now_cst, to_cst_full
 from app.infra.lane_policy import current_deployment_lane
-from app.world.wake import WORLD
+from app.messaging.message import Kind, Message
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,20 @@ WORLD_RECURSION_LIMIT_KEY = "world_recursion_limit"
 # 定时刻。一次模型调用可以同时调好几个工具，12 次留了余量；另外三类做的事更少，同一个上限
 # 够用。
 DEFAULT_WORLD_RECURSION_LIMIT = 12
+
+
+# world 在通信机制里的名字：它的收件箱，也是它给自己排消息时的发送方和接收方。
+WORLD = "world"
+
+
+def is_own_wake(message: Message) -> bool:
+    """这是 world 给自己排的一次醒来吗：自己发给自己的普通消息。
+
+    "没有送达"告知的发送方也是 world（通信机制把退回的告知记成原发送方发给自己），但它的
+    类型不是普通消息。
+    """
+    return message.kind is Kind.MESSAGE and message.sender == WORLD
+
 
 
 def lane() -> str:

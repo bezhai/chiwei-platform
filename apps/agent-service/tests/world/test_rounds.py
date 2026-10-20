@@ -22,6 +22,7 @@ from app.messaging import receiving
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, pending, wake
 from app.world.actions import wake_me_at
+from app.world.agents import WORLD
 from app.world.rounds import InboxRound, RoundFailed, Rounds
 from tests.messaging.helpers import eventually
 
@@ -30,7 +31,7 @@ from .conftest import LANE, restart, self_message, sets_nothing, sets_wake
 
 def _world_turns() -> Turns:
     """world 的一条轮次队列，跟宿主给 world 插件的一样（``ctx.turns``），不经过宿主。"""
-    return Turns(wake.WORLD, "round", hold_limit=None, clock=now_cst)
+    return Turns(WORLD, "round", hold_limit=None, clock=now_cst)
 
 
 class Crash(BaseException):

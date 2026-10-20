@@ -89,8 +89,9 @@ from app.infra.cst_time import now_cst
 from app.messaging import receiving
 from app.messaging.message import Message
 from app.world import pending
+from app.world.agents import WORLD, is_own_wake
 from app.world.sources import take_in
-from app.world.wake import WORLD, is_own_wake, is_stale_wake
+from app.world.wake import is_stale_wake
 
 logger = logging.getLogger(__name__)
 

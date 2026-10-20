@@ -26,8 +26,7 @@ from app.agent.prompts import PromptSet
 from app.agent.round import AssembledAgent, open_call, switched_off
 from app.infra.cst_time import now_cst
 from app.messaging.message import Message
-from app.world.agents import lane, run_agent, when, world_agent
-from app.world.wake import WORLD
+from app.world.agents import WORLD, lane, run_agent, when, world_agent
 
 logger = logging.getLogger(__name__)
 

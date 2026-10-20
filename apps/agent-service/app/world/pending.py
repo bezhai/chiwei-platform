@@ -64,8 +64,8 @@ from pathlib import Path
 
 from app.infra.cst_time import now_cst
 from app.messaging.message import Message
+from app.world.agents import is_own_wake
 from app.world.volume import lane_dir, set_aside, write_atomically
-from app.world.wake import is_own_wake
 
 logger = logging.getLogger(__name__)
 

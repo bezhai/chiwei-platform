@@ -73,9 +73,16 @@ from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, Message, message_body, participant
 from app.messaging.sending import send
 from app.world import unfinished
-from app.world.agents import lane, not_done, run_agent, when, world_agent
+from app.world.agents import (
+    WORLD,
+    is_own_wake,
+    lane,
+    not_done,
+    run_agent,
+    when,
+    world_agent,
+)
 from app.world.services import Notice
-from app.world.wake import WORLD, is_own_wake
 
 logger = logging.getLogger(__name__)
 

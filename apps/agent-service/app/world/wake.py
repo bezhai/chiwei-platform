@@ -55,14 +55,12 @@ from datetime import datetime, timedelta
 from inner_shared.dynamic_config import dynamic_config
 
 from app.infra.cst_time import now_cst, to_cst_full
-from app.messaging.message import Kind, Message
+from app.messaging.message import Message
 from app.messaging.sending import send_at
+from app.world.agents import WORLD, is_own_wake
 from app.world.volume import lane_dir, require_writer_lock, write_atomically
 
 logger = logging.getLogger(__name__)
-
-# world 在通信机制里的名字：它的收件箱，也是它给自己排消息时的发送方和接收方。
-WORLD = "world"
 
 _STATE_FILE = "next_wake.json"
 
@@ -152,15 +150,6 @@ async def set_next_wake(
     _record_next_wake(wake)
     logger.info("world: next wake %s at %s", wake.message_id, at.isoformat())
     return wake
-
-
-def is_own_wake(message: Message) -> bool:
-    """这是 world 给自己排的一次醒来吗：自己发给自己的普通消息。
-
-    "没有送达"告知的发送方也是 world（通信机制把退回的告知记成原发送方发给自己），但它的
-    类型不是普通消息。
-    """
-    return message.kind is Kind.MESSAGE and message.sender == WORLD
 
 
 def is_stale_wake(message: Message) -> bool:
