@@ -31,20 +31,20 @@
 **「她说过」和「真交出去了」的先后语义（崩在中间时哪一边留下）。** 这一段跨了 broker
 和数据库，做不到原子；做得到的是**可预期、可查**。顺序钉死为：
 
-  1. 认领（``claimed``）→ 2. ``emit`` 交给投递 → 3. 落 ``Happening``（她的记忆）→
+  1. 认领（``claimed``）→ 2. ``publish`` 交给投递 → 3. 落 ``Happening``（她的记忆）→
   4. 收口（``handed_off``）。
 
-  * ``emit`` **返回**了 → 3、4 照走，收口成 ``handed_off``。
+  * ``publish`` **返回**了 → 3、4 照走，收口成 ``handed_off``。
   * 其余全部落进同一格：**结果未知**，行停在 ``claimed``、不留记忆、不重发。
     :func:`unsettled_outbound` 一句查询就能捞出来给人看。
 
-**``emit`` 抛错不是「确定没发出去」，是「不知道」。** 这一条曾经判反过：抛错记
+**``publish`` 抛错不是「确定没发出去」，是「不知道」。** 这一条曾经判反过：抛错记
 ``handoff_failed`` 然后允许重试。但 publisher confirm 超时、连接断在确认之前，
 **broker 都可能已经收件了**；而下游 chat-response-worker 出站失败照样 ack、MQ 重投
 也没有发送级去重（下面那两处行号）。所以"抛错就自动重试"= 可能重复发给真人。
 
 **重复发给真人比丢一条更糟**——这是设计决定，不是疏忽。所以未知的时候选不发：崩在
-2 和 4 之间是这样，``emit`` 抛错也是这样，同一格，同一个待遇。
+2 和 4 之间是这样，``publish`` 抛错也是这样，同一格，同一个待遇。
 
 **不重发不等于把这句话判死。** ``outbound_id`` 从 ``(lane, persona, moment_id, 会话,
 她那句话)`` 派生 —— 下一轮是新的 ``moment_id``、就是新的 ``outbound_id``，认领表
@@ -113,6 +113,7 @@ from app.domain.chat_dataflow import (
     PROACTIVE_MESSAGE_ID_PREFIX,
     ChatResponseSegment,
 )
+from app.infra.outbound import publish
 from app.living.happening import note_recorded, printed_handle, record_happening
 from app.living.phone import medium_for, reachable_conversation
 from app.living.pictures import her_picture, picture_id_in
@@ -121,7 +122,6 @@ from app.living.records import (
     OUTBOUND_HAPPENING_PREFIX,
     _require_aware,
 )
-from app.runtime.emit import emit
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ class SpokenOutbound(Data):
     **存在的理由只有一个：下游不去重。** chat-response-worker 对 MQ redeliver 不做
     发送级去重（chat-response-handler.ts:193-207 的自述），而且无条件 ack
     （同文件 :332）——同一段投两次，真人就收到两条。所以那道闸只能在这边，而且必须
-    挡在 ``emit`` **之前**。
+    挡在 ``publish`` **之前**。
 
     自然键 ``(lane, outbound_id)``；``outbound_id`` 从 ``(lane, persona, moment_id,
     会话, 她那句话)`` 派生，所以工具重试、整轮 ``@retry`` 重放、这次醒来重跑全撞同
@@ -163,7 +163,7 @@ class SpokenOutbound(Data):
     **有版本链**，因为它有真实的状态变化（认领 → 收口）。用 framework 的 ``Version`` +
     ``insert_append`` CAS，不另起一张影子表——"收口了没有"是这条记录的状态，不是另一件事。
 
-    **认领过就不再交第二次，一种状态都不例外。** ``emit`` 抛错也算认领过 —— 抛错
+    **认领过就不再交第二次，一种状态都不例外。** ``publish`` 抛错也算认领过 —— 抛错
     只说明我们没等到确认，不说明 broker 没收到（见模块 docstring）。这一轮里她那句
     话从此只对应这一条记录；要再说一次，得是下一轮（新的 ``moment_id`` = 新的
     ``outbound_id``），而那是**她**的决定。
@@ -198,7 +198,7 @@ class SpokenOutbound(Data):
     # **必须可空、且不能有 DB 默认值**：migrator 加列生成的是可空无默认的
     # ``ADD COLUMN``，已有行读回来就是 NULL；声明成不可空的话，加列之后这张表上每
     # 一条旧记录一读就 ValidationError。NULL 的含义只有一个：还没对上账 —— 可能是
-    # 渠道还没写、可能是那次 ``emit`` 的结果本来就未知。
+    # 渠道还没写、可能是那次 ``publish`` 的结果本来就未知。
     landed_common_message_id: str | None = None
     # 渠道那一行自己的 ``event_time``（即她那句话真正落地的时刻），不是对账这一拍
     # 跑的时刻——后者只是钟的节拍，不是关于她那句话的事实。
@@ -302,7 +302,7 @@ async def _settle(claim: SpokenOutbound, *, at: datetime) -> None:
     """收口：把 ``state`` 这一轴合到版本链**最新那一版**上。
 
     :mod:`app.living.landing` 那条对账钟是这条链上的第二个写者，而且下面这个时序
-    是可达的：认领写下 v1 → ``emit`` → 渠道落账 → **对账钟先跑**，基于 v1 追了 v2
+    是可达的：认领写下 v1 → ``publish`` → 渠道落账 → **对账钟先跑**，基于 v1 追了 v2
     （补上落地那两列，``state`` 仍是 ``claimed``）→ 收口这才走到，手里那个版本号
     已经过期。
 
@@ -318,7 +318,7 @@ async def _settle(claim: SpokenOutbound, *, at: datetime) -> None:
     所以循环一定收敛，而"放弃"在这里根本没有对应的事实 —— 话已经交出去了，收口这
     一笔要么写下，要么这条记录就永远是错的。
 
-    **一个字都不许往外抛。** 走到这里 ``emit`` 已经返回了，抛出去会被
+    **一个字都不许往外抛。** 走到这里 ``publish`` 已经返回了，抛出去会被
     :func:`tool_error` 转成"这条消息没发出去"喂回给她 —— 那是假话，而且会让她重
     发。丢一个状态比重复打扰真人轻。
     """
@@ -572,7 +572,7 @@ async def send_message(
         claimed_at=now,
     )
     if await insert_append(claim, expected_current_ver=0) != 1:
-        # **认领没抢到就绝对不能 ``emit``。** 有人在预检查之后、这一步之前认领了
+        # **认领没抢到就绝对不能 ``publish``。** 有人在预检查之后、这一步之前认领了
         # 同一句话（同一轮的重入、同一泳道的两个进程），而他可能已经交出去了 ——
         # 下游没有发送级去重，这里照发就是真人收到两条。这道闸存在的全部意义就是
         # 挡住这一格，所以返回值必须看。
@@ -581,7 +581,7 @@ async def send_message(
         )
         if taken is None:
             # CAS 说这个键上已经有版本了，所以一定读得回来。真读不回来只能是有人
-            # 把整条链删了 —— 那一格还没走到 ``emit``，说"没发出去"是真话，照抛。
+            # 把整条链删了 —— 那一格还没走到 ``publish``，说"没发出去"是真话，照抛。
             raise RuntimeError(
                 f"认领 {outbound_id} 被别人抢走了，但抢走的那一版又读不回来"
             )
@@ -600,8 +600,8 @@ async def send_message(
         # 代价是它**静默**，所以欠的这一笔必须留得下来：``living_mouth_unchecked``
         # 是数"那段时间漏了多少条"的唯一锚，改措辞前先想清楚谁在数它。
         #
-        # **记在认领之后、``emit`` 之前**：认领抢输的那次一个字都没发出去，记进去
-        # 这本账就虚了；而 ``emit`` 抛错的那次算数 —— 抛错只说明我们没等到确认，
+        # **记在认领之后、``publish`` 之前**：认领抢输的那次一个字都没发出去，记进去
+        # 这本账就虚了；而 ``publish`` 抛错的那次算数 —— 抛错只说明我们没等到确认，
         # broker 可能已经收件，那句没判过的话可能已经到了真人手上。
         logger.warning(
             "living_mouth_unchecked lane=%s persona=%s outbound=%s"
@@ -612,7 +612,7 @@ async def send_message(
         )
 
     try:
-        await emit(
+        await publish(
             ChatResponseSegment(
                 channel=conv.channel,
                 message_id=message_id,
@@ -639,7 +639,7 @@ async def send_message(
     except Exception:
         # **抛错 = 不知道，不是"确定没发出去"。** publisher confirm 超时、连接断在
         # 确认之前，broker 都可能已经收件了；而下游出站失败照样 ack、MQ 重投也没有
-        # 发送级去重。所以这一格跟"崩在 emit 和收口之间"是同一件事：行停在
+        # 发送级去重。所以这一格跟"崩在 publish 和收口之间"是同一件事：行停在
         # ``claimed``（:func:`unsettled_outbound` 捞得出来）、不留记忆、不重发。
         #
         # 不重发不是把这句话判死：``outbound_id`` 从 ``moment_id`` 派生，下一轮就是

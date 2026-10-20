@@ -13,10 +13,10 @@ import aio_pika
 import pytest
 
 from app.host import Host
+from app.infra import outbound
 from app.infra.rabbitmq import lane_queue, mq
 from app.messaging import receiving
 from app.messaging.broker import SCHEDULED, inbox_route, question_route
-from app.runtime.wire import WIRING_REGISTRY
 from tests.messaging.conftest import LANE
 from tests.messaging.helpers import eventually
 
@@ -52,7 +52,7 @@ def _nothing_left(host: Host) -> None:
     assert host.registered() == ()
     assert receiving.INBOX_REGISTRY == {}
     assert receiving.INBOXES_AT_START == []
-    assert WIRING_REGISTRY == []
+    assert outbound.registered() == {}
     assert receiving._consumers == []
 
 

@@ -148,9 +148,9 @@ class TestKnownChannelsRegistry:
                 assert route in ALL_ROUTES, f"{route.queue} would never be declared"
 
     def test_partitioned_base_names_stay_registered(self):
-        # base 名是 Sink.mq("chat_response") / Sink.mq("recall") 的标识：不在
-        # ALL_ROUTES 里 compile_graph 就会在启动时 GraphError，进程起不来。真实 rk
-        # 由 dispatch 按 payload 的 channel 现算，跟这两条 Route 的 rk 无关。
+        # base 名是 ctx.outbound(..., "chat_response") / ctx.outbound(..., "recall") 的标识：
+        # 不在 ALL_ROUTES 里，登记时就 ValueError，进程起不来。真实 rk 由
+        # app.infra.outbound.publish 按 payload 的 channel 现算，跟这两条 Route 的 rk 无关。
         assert CHAT_RESPONSE in ALL_ROUTES
         assert RECALL in ALL_ROUTES
 

@@ -137,7 +137,7 @@ def channel_route_for(base_queue: str, channel: str) -> Route:
 def channel_route_for_payload(base_queue: str, payload: Any) -> Route:
     """Resolve the partitioned Route for ``base_queue`` off the payload's channel.
 
-    分区队列的 rk 只有消息自己知道，所以一律现算。出站（sink dispatch）和 DLQ 重放
+    分区队列的 rk 只有消息自己知道，所以一律现算。出站（app.infra.outbound.publish）和 DLQ 重放
     共用这一条规则 —— 重放要是照着 base 名发，消息会落在一条没有消费者的队列上静默
     滞留，而审计写着 published 成功。
 
@@ -156,18 +156,17 @@ def channel_route_for_payload(base_queue: str, payload: Any) -> Route:
 # ALL_ROUTES 身兼两职，删东西之前先看清是哪一职：
 #
 #   声明面   declare_topology 遍历它建队列 + 绑定
-#   注册面   Sink.mq(name) 的合法队列名从它来
-#            （compile_graph 的 known_queues、sink_dispatch._route_by_queue、
-#            dlq_admin 的重放目标查表）
+#   注册面   ctx.outbound(T, name) 的合法队列名从它来
+#            （app.infra.outbound.register 的查表、dlq_admin 的重放目标查表）
 #
 # base 的 chat_response / recall 在声明面上已经是死的：出站早就按 channel 分区，
 # 生产者只发 chat.response.{channel} / action.recall.{channel}，消费者也只订
 # {queue}_{channel}，两条 base 队列没有生产者也没有消费者。
 #
-# 但它们在注册面上是活的：wiring 里写的是 Sink.mq("chat_response") /
-# Sink.mq("recall")，**base 名就是逻辑 sink 的标识**，真实 rk 由 _dispatch_mq_sink
-# 按 payload 的 channel 现算（channel_route_for）。从 ALL_ROUTES 里摘掉它们，
-# compile_graph 会在启动时直接 GraphError（"queue not in ALL_ROUTES"），进程起不来。
+# 但它们在注册面上是活的：插件登记的是 ctx.outbound(..., "chat_response") /
+# ctx.outbound(..., "recall")，**base 名就是逻辑出站队列的标识**，真实 rk 由
+# app.infra.outbound.publish 按 payload 的 channel 现算（channel_route_for）。从 ALL_ROUTES
+# 里摘掉它们，登记时就 ValueError（"no route in ALL_ROUTES declares that queue"），进程起不来。
 #
 # 所以这两条留着，代价是两条空队列。要真正去掉得先把注册面从声明面里拆出来。
 #

@@ -5,10 +5,7 @@ Each function is paired with an admin route registered by
 dlq_requeue_impl below; see spec §3.2.
 
 Runtime-internal primitives are accessed through ``DLQAdminCapability``
-(plan B6 — public facade) so this module does not import from
-``app.runtime.*`` private submodules. The only ``app.runtime`` import is
-``node``, which is the framework's public decorator (re-exported from
-``app.runtime.__init__``).
+(plan B6 — public facade).
 """
 from __future__ import annotations
 
@@ -38,7 +35,6 @@ from app.infra.rabbitmq import (
     current_lane,
     mq,
 )
-from app.runtime import node
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +205,7 @@ async def dlq_requeue_impl(body: dict[str, Any], *, operator: str | None) -> dic
         # step 4: publish-with-confirm to original queue
         #
         # 出站队列按 channel 分区之后，origin_queue 记的 base 名（chat_response /
-        # recall）不再是投递目标：base Route 仍在 ALL_ROUTES 里（它兼作 Sink.mq(name)
+        # recall）不再是投递目标：base Route 仍在 ALL_ROUTES 里（它兼作 ctx.outbound(..., name)
         # 的合法名字白名单），照着它发 publish 会成功，但那条队列没有任何消费者——
         # 消息静默滞留，审计还写着 requeued。所以重放跟正常出站走同一条规则：按被重放
         # payload 自己的 channel 现算真实的分区 route。
@@ -270,9 +266,8 @@ async def dlq_requeue_impl(body: dict[str, Any], *, operator: str | None) -> dic
 
 
 # ---------------------------------------------------------------------------
-# @node wrappers — the handlers of the ops plugin's routes (app/plugins/ops.py)
+# The handlers of the ops plugin's routes (app/plugins/ops.py)
 
-@node
 async def dlq_inspect_node(req: DlqInspectRequest) -> DlqInspectResponse:
     rows = await dlq_inspect_impl(
         queue=req.queue, limit=req.limit, queue_kind=req.queue_kind,
@@ -280,7 +275,6 @@ async def dlq_inspect_node(req: DlqInspectRequest) -> DlqInspectResponse:
     return DlqInspectResponse(request_id=req.request_id, rows=rows)
 
 
-@node
 async def dlq_clear_idempotent_node(
     req: DlqClearIdempotentRequest,
 ) -> DlqClearIdempotentResponse:
@@ -303,7 +297,6 @@ async def dlq_clear_idempotent_node(
     )
 
 
-@node
 async def dlq_dry_run_node(req: DlqDryRunRequest) -> DlqDryRunResponse:
     body = {
         "queue": req.queue, "limit": req.limit, "queue_kind": req.queue_kind,
@@ -312,7 +305,6 @@ async def dlq_dry_run_node(req: DlqDryRunRequest) -> DlqDryRunResponse:
     return DlqDryRunResponse(request_id=req.request_id, plan=resp["plan"])
 
 
-@node
 async def dlq_requeue_node(req: DlqRequeueRequest) -> DlqRequeueResponse:
     from app.api.middleware import operator_var
     body = {

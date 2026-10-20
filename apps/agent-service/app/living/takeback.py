@@ -46,16 +46,16 @@
 条、当面说的话本来就没有编号），这一刻分不出是哪一种，所以只说确定的那一件。绝不排个
 序取最近的顶上：撤掉一句她没想撤的话，比撤不掉更糟。
 
-**顺序：先 ``emit``，成功之后才写台账。** 反过来的话，台账写下了而撤回没发出去 ——
+**顺序：先 ``publish``，成功之后才写台账。** 反过来的话，台账写下了而撤回没发出去 ——
 她下一轮看台账以为自己撤过了，那句话还好端端留在会话里。
 
-**``emit`` 失败的判法跟她开口那侧相反，这是刻意的。** :mod:`app.living.mouth` 那边
-"``emit`` 抛错 = 不知道，所以不重发"，理由是**重复发一条消息会打扰真人**。撤回反过
+**``publish`` 失败的判法跟她开口那侧相反，这是刻意的。** :mod:`app.living.mouth` 那边
+"``publish`` 抛错 = 不知道，所以不重发"，理由是**重复发一条消息会打扰真人**。撤回反过
 来：重复撤同一条是幂等的、无害的（删一条已经删掉的消息，真人一个字都看不到）。所以
 这边抛错就如实说没撤成、台账留空，她想再撤就再撤。两侧的判法不一致不是疏忽，是因为
 "重复"这个动作在两边的后果本来就不一样 —— 谁要把它们改成一致，先想清楚这一条。
 
-**``emit`` 成功之后，写台账失败不许往外抛。** 撤回请求已经在路上了，这时候告诉她
+**``publish`` 成功之后，写台账失败不许往外抛。** 撤回请求已经在路上了，这时候告诉她
 "没撤成"是假话，而她会据此以为那句话还在。
 
 **这里有一个明确接受的缺口，别当它不存在。** ``took_back_at`` 没写下去的话，
@@ -93,11 +93,11 @@ from app.agent.tools._common import tool_error
 from app.data.persist import fetch_one, from_row, insert_append, select_latest
 from app.data.schema import table_name
 from app.domain.safety import Recall
+from app.infra.outbound import publish
 from app.living.happening import note_recorded, record_happening
 from app.living.mouth import SpokenOutbound
 from app.living.phone import conversation_her_bot_is_in, medium_for
 from app.living.records import KIND_ACT
-from app.runtime.emit import emit
 
 logger = logging.getLogger(__name__)
 
@@ -316,7 +316,7 @@ async def take_back_message(
     # 这里**不吞异常**：撤回重复投是幂等的（删一条已经删掉的消息，真人一个字都看不
     # 到），所以"没撤成"照实说、台账留空，她想再撤就再撤。这跟她开口那侧的判法相反，
     # 理由见模块 docstring —— 那边重复的后果是真人收到两条。
-    await emit(
+    await publish(
         Recall(
             outbound_id=line.outbound_id,   # 她主动开口那条链，投递侧按它反查公共层
             session_id=None,                # 主动开口没有会话

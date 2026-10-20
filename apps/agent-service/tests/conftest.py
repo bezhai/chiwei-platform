@@ -48,28 +48,23 @@ def _clear_model_cache():
 
 
 # ---------------------------------------------------------------------------
-# Runtime 注册表清理 (autouse)
+# 进程级登记清理 (autouse)
 # ---------------------------------------------------------------------------
-# WIRING_REGISTRY (list) / 收件箱登记 / emit graph cache 都是 module-level
-# mutables。前一个测试登记的 wire 会污染后续测试 —— 下一个 emit() 触发的
-# compile_graph 看到残留的 wire，可能直接 GraphError。autouse 把每个测试都重置
-# 回干净状态。
+# 出站队列的登记 / 收件箱登记都是 module-level mutables。前一个测试登记的会污染
+# 后续测试 —— 同一个类型再登记一次直接 ValueError。autouse 把每个测试都重置回干净状态。
 #
 # 要真实插件登记的测试用 ``app_host``（下面），它在测试结束时停掉起过的宿主，
 # 宿主停下时撤掉自己登记的一切。
 @pytest.fixture(autouse=True)
 def _reset_runtime_registries():
+    from app.infra import outbound
     from app.messaging.receiving import clear_inboxes
-    from app.runtime.emit import reset_emit_runtime
-    from app.runtime.wire import clear_wiring
 
-    clear_wiring()
+    outbound.clear()
     clear_inboxes()
-    reset_emit_runtime()
     yield
-    clear_wiring()
+    outbound.clear()
     clear_inboxes()
-    reset_emit_runtime()
 
 
 # ---------------------------------------------------------------------------
@@ -191,39 +186,6 @@ def model_info_factory():
         return info
 
     return _factory
-
-
-# ---------------------------------------------------------------------------
-# capture_emit — Phase 5a node-level test helper
-# ---------------------------------------------------------------------------
-@pytest.fixture
-def capture_emit(monkeypatch):
-    """Capture every emit() call into a list. Returns the list.
-
-    Phase 5a helper: most node-level tests want a uniform way to assert
-    "what segments / requests this @node emitted." This fixture patches
-    BOTH `emit` attribute surfaces so callers using either import style
-    get the fake:
-      * ``from app.runtime import emit`` (reexport on the package object)
-      * ``import app.runtime.emit as X; X.emit(...)`` (module attribute lookup)
-
-    Callers using ``from app.runtime.emit import emit`` bind the function
-    locally at import time and cannot be intercepted by this fixture —
-    those tests must monkeypatch the caller module's own ``emit`` symbol.
-    """
-    seen: list = []
-
-    async def _fake_emit(data):
-        seen.append(data)
-
-    import sys
-
-    import app.runtime
-
-    emit_mod = sys.modules["app.runtime.emit"]
-    monkeypatch.setattr(emit_mod, "emit", _fake_emit)
-    monkeypatch.setattr(app.runtime, "emit", _fake_emit)
-    return seen
 
 
 # ---------------------------------------------------------------------------

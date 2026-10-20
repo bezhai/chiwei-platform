@@ -385,11 +385,9 @@ async def test_declare_route_takes_an_explicit_lane():
 
 def test_x_delay_upper_bound_lives_with_the_broker_client():
     """x-delay 是 int32 毫秒，这个上限只在一处定义。"""
-    import app.runtime.emit as emit_mod
     from app.infra.rabbitmq import X_DELAY_MAX_MS
 
     assert X_DELAY_MAX_MS == 2_147_483_647
-    assert not hasattr(emit_mod, "_X_DELAY_MAX_MS")
 
 
 def test_a_dead_lettered_isolated_message_knows_where_it_was_headed():

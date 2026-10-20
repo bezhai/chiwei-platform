@@ -64,7 +64,7 @@ fixture and the segments together.
 
 Everything between these boundaries runs for real: the agent loop, tool dispatch, retries,
 prompt compilation, transcript storage, the messaging layer's records, claims and retries, the
-plugins' setup and the dataflow graph.
+plugins' setup and the outbound publishes.
 
 | Boundary | Where | What the replay does |
 |---|---|---|

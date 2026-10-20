@@ -144,7 +144,7 @@ def spoken(monkeypatch):
     async def fake_emit(data):
         out.append(data)
 
-    monkeypatch.setattr(mouth_mod, "emit", fake_emit)
+    monkeypatch.setattr(mouth_mod, "publish", fake_emit)
     return out
 
 
@@ -380,7 +380,7 @@ async def test_a_handoff_that_blew_up_is_unknown_not_a_confirmed_failure(
     async def boom(_data):
         raise RuntimeError("MQ 连不上")
 
-    monkeypatch.setattr(mouth_mod, "emit", boom)
+    monkeypatch.setattr(mouth_mod, "publish", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -416,7 +416,7 @@ async def test_she_is_told_the_outcome_is_unknown_not_told_to_try_again(
     async def boom(_data):
         raise RuntimeError("MQ 连不上")
 
-    monkeypatch.setattr(mouth_mod, "emit", boom)
+    monkeypatch.setattr(mouth_mod, "publish", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -449,7 +449,7 @@ async def test_a_blown_up_handoff_is_never_handed_off_again_in_the_same_seam(
         attempts.append(data)
         raise RuntimeError("MQ 连不上")
 
-    monkeypatch.setattr(mouth_mod, "emit", boom)
+    monkeypatch.setattr(mouth_mod, "publish", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -487,7 +487,7 @@ async def test_the_next_seam_is_a_new_seam_so_she_can_say_it_again(
             raise RuntimeError("MQ 连不上")
         spoken.append(data)
 
-    monkeypatch.setattr(mouth_mod, "emit", flaky)
+    monkeypatch.setattr(mouth_mod, "publish", flaky)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),

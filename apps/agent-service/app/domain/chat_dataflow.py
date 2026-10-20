@@ -1,6 +1,6 @@
 """她开口那一侧的 Data 契约。
 
-ChatResponseSegment: 她说的每一段，经 sink.mq(chat_response) 出 graph。
+ChatResponseSegment: 她说的每一段，经出站队列 chat_response 发出（:func:`app.infra.outbound.publish`）。
 
 **这个模块里没有入站契约。** 原先还有 ChatTrigger（消息队列入口的原始 body）和
 ChatRequest（fan-out 之后 per-persona 的请求），它们随那条队列一起删了：她不从队列
@@ -29,10 +29,10 @@ PROACTIVE_MESSAGE_ID_PREFIX = "proactive:"
 
 
 class ChatResponseSegment(Data):
-    """她说的每一段，经 sink.mq(chat_response) 出 graph。
+    """她说的每一段，经出站队列 chat_response 发出（:func:`app.infra.outbound.publish`）。
 
     (message_id, persona_id, part_index) 联合 Key 用于段内去重；
-    lane 必须显式带在 body —— sink dispatch 拿它当 ``outbound_context`` 的
+    lane 必须显式带在 body —— 出站发布拿它当 ``outbound_context`` 的
     fallback，最终写进 AMQP header，而消费侧（chat_response_{channel} 的订阅方）
     只认 header。transient=True：段是事件流，不落 agent-service 自己的表。
 
@@ -55,7 +55,7 @@ class ChatResponseSegment(Data):
     钉着这条）—— 写进正文的图就这么静默消失，不报错。所以
     :attr:`picture_file_names` 是图唯一的通道。
 
-    ``channel`` 必填：sink dispatch 按它现算 routing key（``chat_response_{channel}``）。
+    ``channel`` 必填：出站发布按它现算 routing key（``chat_response_{channel}``）。
     ``channel_route_for_payload`` 已经对缺字段 fail-closed，但那道校验跑在 pydantic
     填完默认值之后 —— 有默认值时它永远看到 "lark"，拦不住错投，只有把默认值去掉
     才真的生效（同 :class:`app.domain.safety.Recall`）。

@@ -32,16 +32,14 @@ def _fresh_process_state(monkeypatch) -> None:
     import app.messaging.receiving as receiving
     import app.messaging.sending as sending
     import app.world.volume as volume
+    from app.infra import outbound
     from app.messaging.receiving import clear_inboxes
-    from app.runtime.emit import reset_emit_runtime
-    from app.runtime.wire import clear_wiring
     from app.skills.registry import SkillRegistry
     from app.world.sources import clear_sources
 
-    clear_wiring()
+    outbound.clear()
     clear_inboxes()
     clear_sources()
-    reset_emit_runtime()
     for module, name, value in (
         (receiving, "_consumers", []),
         (receiving, "_in_flight", set()),

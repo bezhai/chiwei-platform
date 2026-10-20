@@ -3,8 +3,8 @@
 Messages cross processes via RabbitMQ. Every transport hop reads inbound
 headers into contextvars before invoking business code, and writes
 contextvars back into outbound headers before publishing. The hops are
-messaging (:mod:`app.messaging`), the outbound queues' sink dispatch
-(:mod:`app.runtime.sink_dispatch`) and the host's clocks (:mod:`app.host.clock`).
+messaging (:mod:`app.messaging`), the outbound queues' publish
+(:mod:`app.infra.outbound`) and the host's clocks (:mod:`app.host.clock`).
 
 Five primitives:
 
@@ -86,7 +86,7 @@ def outbound_context(*, fallback_lane: str | None = None) -> Context:
     """Build the Context for an outbound publish.
 
     Lane resolution order: contextvar → ``fallback_lane`` (a lane the Data
-    itself carries, used by sink dispatch) → ``current_lane()``, which is the
+    itself carries, used by the outbound publish) → ``current_lane()``, which is the
     ``LANE`` env of the running Deployment. That last step is the whole point:
     ``mq.publish`` picks the queue with ``current_lane()``, so a producer that
     injected the bare contextvar would stamp ``lane: ""`` on a message it just

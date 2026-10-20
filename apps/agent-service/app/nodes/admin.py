@@ -1,8 +1,7 @@
-"""Admin / public API @nodes.
+"""Admin / public API handlers.
 
-Each node corresponds to one HTTP endpoint; the route is in app/plugins/ops.py.
-Return types are left un-annotated so the @node decorator skips Data-only
-validation — these nodes return dict / list[dict] for sync HTTP RPC.
+Each handler corresponds to one HTTP endpoint; the route is in app/plugins/ops.py.
+They return dict / list[dict] for sync HTTP RPC.
 
 旧 life-tick / glimpse / schedule 触发 + schedule CRUD 的 admin 节点已随
 world/life 重写删除（那套活法不再存在）；voice 触发随 voice 子系统拆除删除。
@@ -15,10 +14,8 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.domain.admin import AdminSearchRequest
-from app.runtime import node
 
 
-@node
 async def admin_search_node(r: AdminSearchRequest):
     from app.agent.tools.search import _you_search
     from app.infra.config import settings

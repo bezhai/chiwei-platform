@@ -32,12 +32,6 @@ class Recorder:
         if name == self.fail_at:
             raise RuntimeError(f"{name} failed")
 
-    def sync(self, name: str):
-        def call(*_args, **_kwargs):
-            self.note(name)
-
-        return call
-
     def coro(self, name: str):
         async def call(*_args, **_kwargs):
             self.note(name)
@@ -94,7 +88,6 @@ def recorded_phases(monkeypatch) -> Recorder:
         rec.note(f"unbind_route:{route}")
 
     monkeypatch.setattr(host_module, "dynamic_config", _DynamicConfig())
-    monkeypatch.setattr(host_module, "compile_graph", rec.sync("compile_graph"))
     monkeypatch.setattr(host_module, "ensure_business_schema", rec.coro("ensure_business_schema"))
     monkeypatch.setattr(host_module, "migrate_schema", rec.coro("migrate_schema"))
     monkeypatch.setattr(host_module, "start_messaging", rec.coro("start_messaging"))

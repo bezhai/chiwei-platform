@@ -16,9 +16,9 @@ setup is refused: the host has nothing that would start a late registration.
 2. Every plugin's ``setup``, in order; right after each one, what it provided must match its
    ``provides``. Then the manifest is checked against what the plugins registered for the rounds
    (tools, segments, sections, steps) and the profiles are filled in (:mod:`app.host.assembly`).
-3. The dataflow graph is reset and compiled, so a mis-wired outbound edge fails here.
-   Nothing so far touched the database or the broker: a manifest the host cannot run fails
-   before any IO.
+3. Nothing so far touched the database or the broker: a manifest the host cannot run, or an
+   outbound queue no route declares (checked when ``ctx.outbound`` registers it), fails before
+   any IO.
 4. ``schema``: the business tables of coe lanes (:func:`app.data.bootstrap.ensure_business_schema`).
 5. ``mq``: the broker connection and its main exchange, which the outbound queues publish on.
 6. ``schema``: the Data tables (:func:`app.data.migrator.migrate_schema`), and messaging's own
@@ -89,6 +89,7 @@ from app.host.http import METHODS, Handler, RouteSpec, bind_route, unbind_route
 from app.host.manifest import App
 from app.host.plugin import Disposer, Plugin, Registration
 from app.host.turns import Signal, Turns, WakeSource
+from app.infra import outbound
 from app.infra.cst_time import now_cst
 from app.infra.lane_policy import (
     current_deployment_lane,
@@ -99,10 +100,6 @@ from app.messaging import receiving
 from app.messaging.claims import RUNTIME_INFLIGHT_DDL
 from app.messaging.dead_letter_audit import RUNTIME_DLQ_AUDIT_DDL
 from app.messaging.lifecycle import start_messaging, stop_messaging
-from app.runtime.emit import reset_emit_runtime
-from app.runtime.graph import compile_graph
-from app.runtime.sink import Sink
-from app.runtime.wire import WIRING_REGISTRY, WireSpec
 
 logger = logging.getLogger(__name__)
 
@@ -419,14 +416,16 @@ class Context:
             ) from None
 
     def outbound(self, data_type: type[Data], queue: str) -> Disposer:
-        """An emit of ``data_type`` is published to the outbound ``queue`` (``Sink.mq``)."""
-        spec = WireSpec(data_type=data_type, sinks=[Sink.mq(queue)])
+        """A :func:`app.infra.outbound.publish` of a ``data_type`` goes to the outbound ``queue``.
+        A queue no route declares, a queue partitioned by channel for a type with no ``channel``,
+        or a type that already goes to a queue is refused here, in setup."""
+        taken_back: list[Callable[[], None]] = []
         return self._register(
             "outbound",
             f"{data_type.__name__}->{queue}",
             lambda: {"data_type": data_type, "queue": queue},
-            _unwire(spec),
-            add=lambda: WIRING_REGISTRY.append(spec),
+            _async(lambda: taken_back.pop()()),
+            add=lambda: taken_back.append(outbound.register(data_type, queue)),
         )
 
     def provide(self, name: str, service: object) -> None:
@@ -612,7 +611,6 @@ class Host:
             await cleanup.run(
                 f"taking back {entry.kind} {entry.name!r} of plugin {entry.plugin}", entry.dispose
             )
-        reset_emit_runtime()
         self._phases.clear()
         self._http = None
         if cleanup.errors:
@@ -634,8 +632,6 @@ class Host:
             self._profiles,
             lane=current_deployment_lane() or "prod",
         )
-        reset_emit_runtime()
-        compile_graph()
 
         if schema:
             await ensure_business_schema()
@@ -848,17 +844,6 @@ def _cycles(plugins: list[Plugin], needs: dict[str, set[str]], done: set[str]) -
             + " -> ".join(map(repr, [*cycle, cycle[0]]))
         )
     return found
-
-
-def _unwire(spec: WireSpec) -> Callable[[], Awaitable[None]]:
-    async def undo() -> None:
-        for i, w in enumerate(WIRING_REGISTRY):
-            if w is spec:
-                del WIRING_REGISTRY[i]
-                break
-        reset_emit_runtime()
-
-    return undo
 
 
 def _wake_clock_name(source_name: str, seconds: float) -> str:

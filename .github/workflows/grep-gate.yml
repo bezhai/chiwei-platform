@@ -64,24 +64,25 @@ jobs:
           c=$(grep -rn 'headers\["trace_id"\]\|headers\["lane"\]' apps/agent-service/app/ \
               2>/dev/null | grep -v "infra/propagation.py\|__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c raw header reads"; exit 1; }
-      - name: Gap 8 — business `await emit(` count == 2 reviewed call sites
+      - name: Gap 8 — business `publish(` count == 2 reviewed call sites
         shell: bash
         run: |
           set -e
-          # 出站 emit 一律经 wire 的出站队列（Sink.mq）；裸 `await emit(` 每一处都要有
-          # 独立理由，并且数在这里钉死。当前 2 处全在 app/living/，各自的
-          # docstring 写明为什么不能进事务（takeback / mouth：都是
-          # "交给外面之后才知道下场"的那一跳）。读一程那一处改成了发给读书
-          # 收件箱的消息（app/living/reading.py）。旧的 10 处随上一版实现删除，
-          # 它们所在的 nodes/agent/life/memory 现在是 0。
+          # 出站一律经宿主登记的出站队列（ctx.outbound 登记类型 -> 队列，业务调
+          # app.infra.outbound.publish）；每一处 `publish(` 都要有独立理由，并且数在这里
+          # 钉死。当前 2 处全在 app/living/，各自的 docstring 写明为什么不能进事务
+          # （takeback / mouth：都是"交给外面之后才知道下场"的那一跳）。读一程那一处
+          # 改成了发给读书收件箱的消息（app/living/reading.py）。旧的 10 处随上一版
+          # 实现删除，它们所在的 nodes/agent/life/memory 现在是 0。
           #
           # 加一处新的就要更新这个数，否则 gate 抓回归。
-          c=$(grep -rn '\bawait emit(' \
+          c=$(grep -rn '\bpublish(' \
               apps/agent-service/app/agent/ apps/agent-service/app/living/ \
               apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
               apps/agent-service/app/skills/ apps/agent-service/app/world/ \
               --include='*.py' 2>/dev/null | wc -l || true)
-          [ "$c" -eq 2 ] || { echo "Gap 8 violation: business await emit count=$c, expected 2"; exit 1; }
+          [ "$c" -eq 2 ] || { echo "Gap 8 violation: business publish( count=$c, expected 2"; exit 1; }
+
       - name: Gap 15 — no arq imports, no arq dependency
         shell: bash
         run: |

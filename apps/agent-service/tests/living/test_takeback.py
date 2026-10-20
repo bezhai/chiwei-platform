@@ -119,7 +119,7 @@ def recalls(monkeypatch):
     async def fake_emit(data):
         out.append(data)
 
-    monkeypatch.setattr(takeback_mod, "emit", fake_emit)
+    monkeypatch.setattr(takeback_mod, "publish", fake_emit)
     return out
 
 
@@ -142,7 +142,7 @@ def her_mouth(monkeypatch):
     async def fake_audit(said: str, *, timeout_s: float | None = None):
         return OutputVerdict(ok=True)
 
-    monkeypatch.setattr(mouth_mod, "emit", fake_emit)
+    monkeypatch.setattr(mouth_mod, "publish", fake_emit)
     monkeypatch.setattr(mouth_mod, "audit_output", fake_audit)
     return sent
 
@@ -481,7 +481,7 @@ async def test_the_ledger_is_written_only_after_the_recall_is_handed_off(
     async def emit_and_look(data):
         seen_at_handoff.append((await _latest(spoke)).took_back_at)
 
-    monkeypatch.setattr(takeback_mod, "emit", emit_and_look)
+    monkeypatch.setattr(takeback_mod, "publish", emit_and_look)
 
     async with in_a_moment("akao", moment_id=_MOMENT):
         await take_back_message.invoke({"message_id": spoke.outbound_id})
@@ -539,7 +539,7 @@ async def test_a_recall_that_never_went_out_leaves_the_ledger_alone(
     async def boom(_data):
         raise RuntimeError("MQ 连不上")
 
-    monkeypatch.setattr(takeback_mod, "emit", boom)
+    monkeypatch.setattr(takeback_mod, "publish", boom)
     await _she_is_home()
     spoke = await _she_spoke()
 

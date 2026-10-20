@@ -30,7 +30,6 @@ from pydantic import Field
 from app.api.middleware import get_header_var
 from app.data.schema import Data, Key
 from app.infra.lane_policy import current_deployment_lane
-from app.runtime import node
 from app.world import records
 from app.world.volume import VolumeUnavailable, WriterLockNotHeld
 
@@ -139,7 +138,6 @@ def _operator() -> str:
     return get_header_var("operator") or "unknown"
 
 
-@node
 async def record_listing_node(req: RecordListRequest) -> RecordListResponse:
     with _as_http_errors():
         entries = records.listing()
@@ -157,7 +155,6 @@ async def record_listing_node(req: RecordListRequest) -> RecordListResponse:
     )
 
 
-@node
 async def record_read_node(req: RecordReadRequest) -> RecordReadResponse:
     with _as_http_errors():
         record = records.read(req.path)
@@ -170,7 +167,6 @@ async def record_read_node(req: RecordReadRequest) -> RecordReadResponse:
     )
 
 
-@node
 async def record_write_node(req: RecordWriteRequest) -> RecordWriteResponse:
     with _as_http_errors():
         written = records.write(req.path, req.text, expected=req.fingerprint)
@@ -190,7 +186,6 @@ async def record_write_node(req: RecordWriteRequest) -> RecordWriteResponse:
     )
 
 
-@node
 async def record_delete_node(req: RecordDeleteRequest) -> RecordDeleteResponse:
     with _as_http_errors():
         records.delete(req.path, expected=req.fingerprint)

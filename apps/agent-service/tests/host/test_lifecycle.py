@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Annotated
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -15,8 +16,8 @@ from fastapi import FastAPI
 
 from app.data.schema import Data, Key
 from app.host import Host, HostError
+from app.infra import outbound
 from app.messaging import receiving
-from app.runtime.wire import WIRING_REGISTRY
 from tests.hosting import start_without_io
 
 from .conftest import plugin
@@ -99,7 +100,6 @@ async def test_start_runs_the_phases_in_order(recorded_phases):
             "lane_provider",
             "setup:a",
             "setup:b",
-            "compile_graph",
             "ensure_business_schema",
             "mq.connect",
             "mq.declare_topology",
@@ -141,7 +141,7 @@ async def test_each_phase_runs_only_when_its_flag_is_set(recorded_phases):
     recorded_phases.calls.clear()
     await host.stop()
 
-    assert started == ["lane_provider", "setup:a", "setup:b", "compile_graph"]
+    assert started == ["lane_provider", "setup:a", "setup:b"]
     assert recorded_phases.calls == ["on_stop:b", "on_stop:a"]
 
 
@@ -550,7 +550,7 @@ async def test_stop_revokes_every_registration():
     assert "/everything" in _paths(app)
     assert set(receiving.INBOX_REGISTRY) == {"probe"}
     assert len(receiving.INBOXES_AT_START) == 1
-    assert [w.data_type for w in WIRING_REGISTRY] == [_Said]
+    assert outbound.registered() == {_Said: "recall"}
     app.openapi()
 
     await host.stop()
@@ -561,27 +561,22 @@ async def test_stop_revokes_every_registration():
     assert "/everything" not in app.openapi()["paths"]
     assert receiving.INBOX_REGISTRY == {}
     assert receiving.INBOXES_AT_START == []
-    assert WIRING_REGISTRY == []
+    assert outbound.registered() == {}
     assert ran == ["setup", "on_stop"]
 
 
-async def test_the_outbound_wires_carry_emits_only_while_registered(monkeypatch):
-    import app.runtime.sink_dispatch as sink_mod
-    from app.runtime.emit import emit
-    published: list[tuple[str, object]] = []
-
-    async def dispatch_mq_sink(spec, data) -> None:
-        published.append(("outbound", spec.params["queue"]))
-
-    monkeypatch.setattr(sink_mod, "_dispatch_mq_sink", dispatch_mq_sink)
+async def test_an_outbound_type_is_published_only_while_its_plugin_runs(monkeypatch):
+    sent = AsyncMock()
+    monkeypatch.setattr("app.infra.outbound.mq.publish", sent)
     host = Host("agent-service", [_everything_plugin([])])
     await start_without_io(host)
 
-    await emit(_Said(sid="1", channel="lark"))
+    await outbound.publish(_Said(sid="1", channel="lark"))
     await host.stop()
-    await emit(_Said(sid="2", channel="lark"))
+    with pytest.raises(LookupError):
+        await outbound.publish(_Said(sid="2", channel="lark"))
 
-    assert published == [("outbound", "recall")]
+    assert [call.args[0].queue for call in sent.await_args_list] == ["recall_lark"]
 
 
 async def test_a_disposer_takes_back_its_registration_while_the_host_runs():

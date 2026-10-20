@@ -3,7 +3,7 @@
 ``mq.publish`` picks the queue with ``current_lane()`` — contextvar first,
 ``LANE`` env second. ``inject_context`` (no explicit Context) reads the
 contextvar only. On a lane pod there is a window where those two disagree:
-a background task / startup-time emit has no contextvar, so the message
+a background task / startup-time publish has no contextvar, so the message
 lands in ``xxx_ppe-x`` while its header says ``lane: ""``.
 
 That combination is exactly the bug this module guards. The consuming side
@@ -25,10 +25,9 @@ from typing import Annotated
 import pytest
 
 from app.data.schema import Data, Key
-from app.infra.rabbitmq import Route
-from app.runtime import Sink, emit, wire
+from app.infra import outbound
 from app.infra.propagation import Context, bind_context
-from app.runtime.wire import clear_wiring
+from app.infra.rabbitmq import Route
 
 LANE = "ppe-lanecheck"
 
@@ -53,14 +52,10 @@ class _SinkProbe(Data):
 
 
 @pytest.fixture(autouse=True)
-def _isolate():
-    clear_wiring()
-    from app.runtime.emit import reset_emit_runtime
-
-    reset_emit_runtime()
+def _registered():
+    take_back = outbound.register(_SinkProbe, "recall")
     yield
-    clear_wiring()
-    reset_emit_runtime()
+    take_back()
 
 
 @pytest.fixture
@@ -130,18 +125,16 @@ def assert_header_lane_drives_the_queue(broker, route: Route) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# emit() -> Sink.mq dispatch
+# outbound.publish
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_sink_dispatch_header_lane_matches_queue_lane(broker, lane_env):
+async def test_an_outbound_publish_puts_the_header_lane_and_the_queue_lane_together(broker, lane_env):
     from app.infra.rabbitmq import RECALL, channel_route
 
-    wire(_SinkProbe).to(Sink.mq("recall"))
-
     async with bind_context(Context(trace_id=None, lane=None)):
-        await emit(_SinkProbe(session_id="s1"))
+        await outbound.publish(_SinkProbe(session_id="s1"))
 
     # 加了 channel 维度之后泳道后缀仍然加在最后：recall_lark_{lane} / action.recall.lark.{lane}
     expected = channel_route(RECALL, "lark")
