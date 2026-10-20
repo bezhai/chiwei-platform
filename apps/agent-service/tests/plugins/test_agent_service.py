@@ -25,6 +25,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         "operator",
         "skills",
         "persona",
+        "residents",
         "loose_ends",
         "web",
         "guides",
@@ -38,6 +39,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("skills", "task"): 1,
         ("persona", "service"): 1,
         ("persona", "segment"): 1,  # who she is, the first segment of her round
+        ("residents", "service"): 1,
         ("loose_ends", "service"): 1,
         ("loose_ends", "tool"): 1,
         ("loose_ends", "section"): 2,

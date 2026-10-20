@@ -18,13 +18,13 @@ import datetime as dt
 import pytest
 
 from app.living import moment as moment_mod
-from app.living import participants as participants_mod
 from app.living.common import esc
-from app.living.participants import WORLD
+from app.living.services import WORLD, Residents
 from app.living.whereabouts import note_whereabouts
 from app.messaging.message import Answer, SendFailed
 from tests.living.conftest import (
     RESIDENT_NAMES,
+    NamesRead,
     clock_at,
     her_queue,
     her_round_runs,
@@ -48,6 +48,13 @@ from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture
 )
 
 look_around = her_tool("look_around")
+
+
+class _NamesNotRead:
+    """``residents`` 服务还没读名字的样子（开始接收之前）。"""
+
+    def residents(self):
+        raise RuntimeError("三姐妹的名字还没读")
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -109,9 +116,9 @@ def world(monkeypatch) -> World:
     return stand_in
 
 
-async def _look(in_a_moment, persona: str = "akao") -> object:
+async def _look(in_a_moment, persona: str = "akao", *, hand=look_around) -> object:
     async with in_a_moment(persona, lane=LANE, now=_at(21, 30)):
-        return await look_around.invoke({})
+        return await hand.invoke({})
 
 
 # ---------------------------------------------------------------------------
@@ -138,10 +145,10 @@ async def test_the_names_on_the_question_come_from_the_residents_mapping(
 ):
     """名字就是地址，取自启动时读好的那份对照；代码里不写任何一个名字。"""
     renamed = {persona_id: f"{name}2" for persona_id, name in RESIDENT_NAMES.items()}
-    monkeypatch.setattr(participants_mod, "_known", participants_mod.Residents(renamed))
+    hand = her_tool("look_around", residents=NamesRead(Residents(renamed)))
     await _stand("ayana", "家/二楼", "画画", _at(21))
 
-    await _look(in_a_moment, "ayana")
+    await _look(in_a_moment, "ayana", hand=hand)
 
     (asked,) = world.asked
     assert (asked["sender"], asked["recipient"]) == ("绫奈2", WORLD)
@@ -288,6 +295,7 @@ async def test_failing_before_the_question_goes_out_tells_her_nobody_answered(
 ):
     """问之前那一步（查她在哪、查她在世界里叫什么）出错，对她来说也是这一眼没看到。"""
     await _stand("akao", "家/客厅", "看书", _at(21))
+    hand = look_around
     if fails == "her place cannot be read":
 
         async def db_down(**_kwargs):
@@ -296,9 +304,9 @@ async def test_failing_before_the_question_goes_out_tells_her_nobody_answered(
         monkeypatch.setattr(moment_mod, "current_whereabouts", db_down)
     else:
         # 通信机制开始接收之前，三姐妹的名字还没读进来。
-        monkeypatch.setattr(participants_mod, "_known", None)
+        hand = her_tool("look_around", residents=_NamesNotRead())
 
-    _nobody_answered(await _look(in_a_moment))
+    _nobody_answered(await _look(in_a_moment, hand=hand))
     assert world.asked == []
 
 

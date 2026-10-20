@@ -75,6 +75,76 @@ class Persona(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# residents：谁住在这儿（residents 插件提供）
+# ---------------------------------------------------------------------------
+
+# world 在通信机制里的名字。它发来的是她察觉到的事，不是谁对她说的话。life 和 world 互不 import，
+# 这个名字两边各写一份（``tests/living/test_residents.py`` 把两份钉在一起）。
+WORLD = "world"
+
+# 读书收件箱的名字：她拿起一个文件时发一条消息到这里，读那一程由收件箱的处理函数做。收件方是
+# 代码，不是谁的人设。写在这里是因为姐妹的显示名不许跟它撞（residents 插件检查）。
+READING = "reading"
+
+
+@dataclass(frozen=True)
+class Residents:
+    """三姐妹的 persona_id 和她们在世界里的名字，一一对应。"""
+
+    by_persona: dict[str, str]
+
+    def persona_of(self, name: str) -> str | None:
+        """叫这个名字的是谁；不是三姐妹之一返回 ``None``。"""
+        for persona_id, known in self.by_persona.items():
+            if known == name:
+                return persona_id
+        return None
+
+    def names_for(self, who: list[str]) -> list[str]:
+        """"说给谁"里三姐妹的 id 换成她在世界里的名字，其余原样。id 和名字的对照只在这里。
+
+        两处用它：
+
+          * ``say`` 记下这句话时（:func:`app.living.moment._record`）。她在 ``to`` 里写了姐妹的
+            id，记下来的就是姐妹的名字，发消息时按名字认出是姐妹、直接送到她那里，跟写名字
+            一样。
+          * 她记下的"说给谁"摆到她眼前时（:func:`app.living.happening.own_line`）。``say`` 以前
+            原样记 id，那些旧记录里是 ``chinagi`` 这种；她看到它，下一次就照着它去叫人。
+
+        不是三姐妹的（世界里的人、写错的名字、写错的 id）原样留着，那是她写下的，她想叫的是谁
+        life 不猜。同一个人写了两种叫法只留一次，按出现的先后。
+        """
+        return list(dict.fromkeys(self.by_persona.get(w, w) for w in who))
+
+    def sisters_in(self, names: list[str], *, speaker: str) -> list[str]:
+        """``names`` 里哪几个是 ``speaker``（persona_id）的姐妹：三姐妹之一、又不是她自己。
+
+        按出现的先后，同一个名字只留一次。不是姐妹名字的（世界里别的人、写错的名字）都不在
+        里面——那是"世界里的某个人"，由 world 判断有没有这个人、听没听见。她写的姐妹 id 在
+        记下时已经换成了名字（:meth:`names_for`），到这里的就是名字。
+        """
+        found: list[str] = []
+        for name in names:
+            persona_id = self.persona_of(name)
+            if persona_id is not None and persona_id != speaker and name not in found:
+                found.append(name)
+        return found
+
+
+class WhoLivesHere(Protocol):
+    """谁住在这儿：三姐妹和她们在世界里的名字。名字取自人设表，开收件箱时读一次、检查一次，之后
+    开收件箱、查地址、认出她对谁说话用的都是那一份。"""
+
+    async def load(self) -> Residents:
+        """从人设表读名字、逐条检查；全部合格才记下这份对照并交回，否则抛 ``RuntimeError``。"""
+        ...
+
+    def residents(self) -> Residents:
+        """读好的那份对照；还没读就抛 ``RuntimeError``。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
 # loose_ends：她心里挂着没了结的事（loose_ends 插件提供）
 # ---------------------------------------------------------------------------
 

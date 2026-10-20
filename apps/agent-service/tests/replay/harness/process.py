@@ -28,7 +28,6 @@ def _fresh_process_state(monkeypatch) -> None:
     layer is reset here because a test process has run other suites before this one."""
     from inner_shared.dynamic_config import dynamic_config
 
-    import app.living.participants as participants
     import app.messaging.receiving as receiving
     import app.messaging.sending as sending
     import app.world.volume as volume
@@ -53,7 +52,6 @@ def _fresh_process_state(monkeypatch) -> None:
         (sending, "_reply_channel", None),
         (sending, "_reply_lock", None),
         (sending, "_waiting", {}),
-        (participants, "_known", None),
         (volume, "_held", None),
     ):
         monkeypatch.setattr(module, name, value)

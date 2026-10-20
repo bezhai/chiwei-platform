@@ -21,7 +21,6 @@ import pytest
 from sqlalchemy import text
 
 from app.data.tx import current_session, tx
-from app.living.participants import READING
 from app.living.persona.chain import PersonaChain
 from app.living.reading import (
     FILE_LIST_LIMIT,
@@ -30,6 +29,7 @@ from app.living.reading import (
     read_a_round,
     read_so_far,
 )
+from app.living.services import READING
 from app.messaging.message import Kind, Message, new_message
 from tests.hosting import in_a_fresh_process
 from tests.living.conftest import RESIDENT_NAMES, Post, her_tool

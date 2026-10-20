@@ -33,14 +33,15 @@ from app.living.moment import (
     latest_moment,
     life_moment_minutes,
 )
-from app.living.participants import LIVING_PERSONAS
 from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from tests.hosting import in_a_fresh_process
 from tests.living.conftest import (
+    RESIDENTS,
     Calls,
     clock_at,
     her_queue,
+    her_residents,
     her_round_runs,
     her_tool,
     regular_round,
@@ -339,7 +340,7 @@ async def test_a_sister_called_by_her_id_is_written_down_by_her_name(
 
     (said,) = await recent_own_happenings(lane=LANE, persona_id="akao", limit=5)
     assert said.audience == ["绫奈", "千凪", "许阿姨"]
-    assert own_line(said) == "你对 绫奈、千凪、许阿姨 说：「抹茶好了。」"
+    assert own_line(said, residents=RESIDENTS) == "你对 绫奈、千凪、许阿姨 说：「抹茶好了。」"
 
 
 @pytest.mark.integration
@@ -391,7 +392,7 @@ async def test_she_can_speak_to_someone_the_code_never_heard_of(
 ):
     """这个世界里住着谁由 world 写，不由代码里的名单说了算。
 
-    旧行为是拿 :data:`~app.living.participants.LIVING_PERSONAS` 当收件人白名单：``to`` 里
+    旧行为是拿一份写死的三姐妹名单当收件人白名单：``to`` 里
     出现三姐妹之外的任何名字直接报错。于是 world 可以写"许阿姨下午来敲门"，而她物理
     上对许阿姨开不了口 —— 代码里存着一份"世界上有谁"的断言，越写越不是世界的样子。
     """
@@ -1058,14 +1059,14 @@ async def test_each_sister_has_a_queue_of_rounds_with_both_wakes_on_it(app_host)
         if r.kind == "wake" and r.detail["turns"].line == "round"
     ]
 
-    assert sorted(queues) == sorted(f"{p}/round" for p in LIVING_PERSONAS)
+    assert sorted(queues) == sorted(f"{p}/round" for p in her_residents())
     assert {q.hold_limit for q in queues.values()} == {dt.timedelta(seconds=900)}
     assert sorted(
         (w.plugin, w.detail["turns"].participant, w.detail["source"].name, w.detail["every"])
         for w in wakes
     ) == sorted(
         ("living", p, name, dt.timedelta(seconds=60))
-        for p in LIVING_PERSONAS
+        for p in her_residents()
         for name in ("nudge", "regular")
     )
     for w in wakes:

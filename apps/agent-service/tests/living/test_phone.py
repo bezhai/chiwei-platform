@@ -35,7 +35,7 @@ from app.living.phone import (
     read_through,
     render_unread,
 )
-from tests.living.conftest import glance_text, her_tool
+from tests.living.conftest import RESIDENTS, glance_text, her_tool
 
 look_at_phone = her_tool("look_at_phone")
 look_through_your_phone = her_tool("look_through_your_phone")
@@ -884,7 +884,8 @@ async def test_the_handle_here_is_the_same_value_the_snapshot_printed(
             occurred_at=_at(21, 30),
             audience=["bezhai"],
             channel_id=str(_DM),
-        )
+        ),
+        residents=RESIDENTS,
     )
 
     # 两侧各自摆出来的那串，不管它被印在方括号里还是属性里。

@@ -12,7 +12,7 @@ world 的三轮，每一轮只看到一部分。她这一段在世界里什么�
 
 **只对姐妹说的话直接发给姐妹**，一位一条，不经过 world。同时还对别人说的，姐妹照样收到直达的
 那条，这句话也进汇总，别人听没听见由 world 判断。姐妹按她们在世界里的名字认
-（:meth:`app.living.participants.Residents.sisters_in`）；她在 ``to`` 里写的姐妹 id，``say`` 记下
+（:meth:`app.living.services.Residents.sisters_in`）；她在 ``to`` 里写的姐妹 id，``say`` 记下
 时已经换成了名字。不是姐妹名字的，一律是世界里的某个人。
 
 **汇总从她存下的经历里取，不从这一轮的内存里取**（:class:`~app.living.records.Happening`、
@@ -66,8 +66,8 @@ from app.data.schema import CommitOrder, Data, Key, table_name
 from app.data.tx import tx
 from app.infra.cst_time import dated_clock
 from app.living.common import require_aware
-from app.living.participants import WORLD, residents
 from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON, Happening, Whereabouts
+from app.living.services import WORLD, Residents
 from app.messaging.sending import send
 
 logger = logging.getLogger(__name__)
@@ -169,17 +169,19 @@ def _derive(*parts: str) -> str:
     return uuid.uuid5(_ID_NS, "\x1f".join(parts)).hex
 
 
-async def send_what_she_did(*, lane: str, persona_id: str) -> None:
+async def send_what_she_did(*, lane: str, persona_id: str, residents: Residents) -> None:
     """把她经历里还没讲出去的那一段变成要发的消息，再把还没有结果的逐条发出去。
 
     **调用方必须在她的一轮里调**（她的轮次队列上一次只跑一轮，:mod:`app.plugins.living`）：讲到
     哪了靠的是"她的经历这一刻全都落了库"，两处同时讲会把同一段讲两遍。
     """
-    await compose(lane=lane, persona_id=persona_id)
+    await compose(lane=lane, persona_id=persona_id, residents=residents)
     await send_unsent(lane=lane, persona_id=persona_id)
 
 
-async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
+async def compose(
+    *, lane: str, persona_id: str, residents: Residents
+) -> list[OutgoingMessage]:
     """她上次讲到的地方之后的经历，变成要发的消息；跟新的"讲到哪了"一个事务落地。交回落库的那几条。
 
     还没讲过的话，只记下从她现在最新的经历讲起，什么都不生成（见模块说明最后一段）。
@@ -197,8 +199,7 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
     if not moves and not deeds:
         return []
 
-    known = residents()
-    sender = known.by_persona[persona_id]
+    sender = residents.by_persona[persona_id]
     messages: list[OutgoingMessage] = []
     # (落库的先后, 同一刻时位置在前, 发生的时刻, 那一行)。两张表的 seq 不在一条轴上，跨表的
     # 先后只有落库时刻说得清：她的手是一只一只用的，每一只都是自己的事务。
@@ -217,7 +218,7 @@ async def compose(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
         if deed.kind != KIND_SPEECH:
             lines.append((created_at, 1, deed.occurred_at, deed.content))
             continue
-        sisters = known.sisters_in(deed.audience, speaker=persona_id)
+        sisters = residents.sisters_in(deed.audience, speaker=persona_id)
         for name in sisters:
             messages.append(
                 OutgoingMessage(

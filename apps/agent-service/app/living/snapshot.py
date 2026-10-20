@@ -62,6 +62,7 @@ from app.infra.cst_time import dated_clock, to_cst_full
 from app.living.day_page import LivingDayPage, living_day_of, read_day_page_before
 from app.living.happening import own_line
 from app.living.records import Happening, Whereabouts
+from app.living.services import Residents
 from app.living.whereabouts import current_whereabouts
 
 # 她自己最近做过 / 说过的多少条。按**条数**而不是按时间窗：安静一整天的时候，她
@@ -145,7 +146,7 @@ class MomentSnapshot:
             head = f"你上一次写下的是 {when}："
         return f"{head}\n{self.day_page.text}"
 
-    def render_own_recent(self) -> str:
+    def render_own_recent(self, residents: Residents) -> str:
         """她自己最近做过、说过的那几条。
 
         这一段带不带由组装那一层判（这一轮的历史接不接得住她最近说过的话，
@@ -155,7 +156,7 @@ class MomentSnapshot:
         if not self.own_recent:
             return "你刚做过、说过：（还没有）"
         lines = [
-            f"- {dated_clock(h.occurred_at, now=self.now)} {own_line(h)}"
+            f"- {dated_clock(h.occurred_at, now=self.now)} {own_line(h, residents=residents)}"
             for h in self.own_recent
         ]
         return "你刚做过、说过：\n" + "\n".join(lines)

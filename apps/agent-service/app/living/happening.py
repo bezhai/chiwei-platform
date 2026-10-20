@@ -33,13 +33,13 @@ from app.agent.round import current_round
 from app.data.ordered import insert_in_commit_order
 from app.data.persist import fetch_all, from_row
 from app.data.schema import table_name
-from app.living.participants import residents
 from app.living.records import (
     KIND_SPEECH,
     MEDIUM_IN_PERSON,
     OUTBOUND_HAPPENING_PREFIX,
     Happening,
 )
+from app.living.services import Residents
 
 _TABLE = table_name(Happening)
 
@@ -148,7 +148,7 @@ def printed_handle(happening_id: str) -> str:
     return f"［{handle}］" if handle is not None else ""
 
 
-def own_line(h: Happening) -> str:
+def own_line(h: Happening, *, residents: Residents) -> str:
     """她自己那条记录的样子；发出去的消息末尾带上它的编号。
 
     带编号是**给她一个消息级句柄**。没有它的时候她只能拿原话去指要撤哪一条，于是
@@ -161,7 +161,7 @@ def own_line(h: Happening) -> str:
     **``content`` 不过 :func:`app.living.common.esc`，这是有意的。** 这一段印的全是
     她自己这一侧的模型写下的字：她说的话（``say`` / 嘴发出去的那句）、她做的事
     （``act``）、她去撤的那句原话，``audience`` 里也是她自己在 ``say`` 的 ``to`` 里写下的
-    名字（三姐妹的 id 换成她们的名字，见 :meth:`app.living.participants.Residents.names_for`）。
+    名字（三姐妹的 id 换成她们的名字，见 :meth:`app.living.services.Residents.names_for`）。
     没有任何一条逐字通道让第三方决定这里的字节。别的参与者写下的字（她收到的消息）
     过，见 :func:`app.living.received.received_line`。给她自己的话套上 ``&quot;`` 是拿她读
     自己记忆的清晰度，换一个这条路上根本不存在的威胁。完整判据写在
@@ -171,6 +171,6 @@ def own_line(h: Happening) -> str:
     if h.kind != KIND_SPEECH:
         return f"你 {h.content}{tail}"
     if h.audience:
-        to = "、".join(residents().names_for(h.audience))
+        to = "、".join(residents.names_for(h.audience))
         return f"你对 {to} 说：「{h.content}」{tail}"
     return f"你说：「{h.content}」{tail}"

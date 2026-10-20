@@ -77,6 +77,7 @@ MANIFEST = App(
         "app.plugins.operator",
         "app.plugins.skills",
         "app.living.persona",
+        "app.living.residents",
         "app.living.loose_ends",
         "app.living.web",
         "app.living.guides",

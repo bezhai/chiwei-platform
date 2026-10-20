@@ -320,7 +320,7 @@ async def test_an_early_moment_in_the_same_minute_is_still_its_own_moment(
 async def test_the_regular_moment_does_not_show_again_what_the_early_one_showed(
     nudge_db, stub_life, named, resident
 ):
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
@@ -472,19 +472,9 @@ async def test_both_people_waiting_on_her_are_in_the_envelope(
 
 
 @pytest.fixture
-async def named(monkeypatch):
-    """三姐妹的名字已经读好，``receive`` 才认得收件人。"""
-    from app.living import participants as participants_mod
-
-    names = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
-
-    async def find_persona(persona_id: str):
-        return SimpleNamespace(persona_id=persona_id, display_name=names[persona_id])
-
+def named(monkeypatch):
+    """收件存在 :data:`LANE` 上；``receive`` 按读好的三姐妹名字认收件人（``tests.living.conftest``）。"""
     monkeypatch.setenv("LANE", LANE)
-    monkeypatch.setattr(participants_mod, "find_persona", find_persona)
-    monkeypatch.setattr(participants_mod, "_known", None)
-    await participants_mod.load_residents()
 
 
 def _to_her(
@@ -512,7 +502,7 @@ def _to_her(
 async def test_a_received_message_brings_her_to_that_moment_once(
     nudge_db, stub_life, named, resident
 ):
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
@@ -539,7 +529,7 @@ async def test_a_woken_round_that_fails_is_the_same_moment_when_it_runs_again(
     身份由那条消息定、不由钟点定，所以重跑时她这一轮里所有派生 id 原样对上，失败之前
     已经做了的事重放一遍写不出第二行（见 :class:`app.living.moment.DueMoment`）。
     """
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
@@ -562,7 +552,7 @@ async def test_a_woken_round_that_fails_is_the_same_moment_when_it_runs_again(
 async def test_the_same_message_delivered_again_does_not_wake_her_again(
     nudge_db, stub_life, named, resident
 ):
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
@@ -580,7 +570,7 @@ async def test_a_message_that_arrived_during_her_round_wakes_her_after_it(
     nudge_db, stub_life, named, resident
 ):
     """一轮跑着的时候到的那条没摆进那一轮，它还没叫醒过她：下一拍叫醒她一次。"""
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
@@ -607,7 +597,7 @@ async def test_a_phone_call_she_ignored_does_not_keep_a_received_message_from_wa
     nudge_db, stub_life, named, resident
 ):
     """手机上那条私聊已经叫醒过她、她没看手机所以一直未读；之后收到的消息照样叫醒她。"""
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     await _incoming(_DM, body="在吗", at=_at(21, 31))
@@ -632,7 +622,7 @@ async def test_a_phone_call_she_ignored_does_not_keep_a_received_message_from_wa
 async def test_a_message_that_does_not_wake_her_waits_for_her_next_round_and_is_read_there(
     nudge_db, stub_life, named, resident
 ):
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     quiet = _to_her("窗外的雨小了一点。", at=_at(21, 31), wakes_her=False)
@@ -654,7 +644,7 @@ async def test_an_earlier_message_that_does_not_wake_her_does_not_hold_back_one_
     nudge_db, stub_life, named, resident
 ):
     """最早那条没看过的不叫醒她，后面那条叫醒她：叫醒她的是后面那条，那一轮里两条都有。"""
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     quiet = _to_her("窗外的雨小了一点。", at=_at(21, 31), wakes_her=False)
@@ -678,7 +668,8 @@ async def test_more_quiet_messages_than_a_round_can_show_do_not_hold_back_one_th
 ):
     """不叫醒的攒得比一轮能摆的还多，后面一条要叫醒她的照样叫醒她，而且在那一轮里。剩下没摆进
     去的不叫醒的，也不会因为还没看过就接着叫醒她：它们等她下一轮。"""
-    from app.living.received import RECEIVED_LIMIT, receive
+    from app.living.received import RECEIVED_LIMIT
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     for i in range(RECEIVED_LIMIT + 1):
@@ -701,7 +692,7 @@ async def test_a_quiet_message_that_arrives_during_her_round_does_not_wake_her_a
     nudge_db, stub_life, named, resident
 ):
     """她一轮跑着时到的不叫醒的那条：那一轮之后不叫醒她，下一个常规轮次里看到它。"""
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
@@ -816,7 +807,8 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_p
 ):
     """她正在跑一轮，这条钟排在后面等；等的时候到了一批发生得更早的消息，多到一轮摆不下。
     醒来的那一轮是谁叫醒的，那条就得在那一轮里，落地后就算看过；剩下的接着一条一条叫醒她。"""
-    from app.living.received import RECEIVED_LIMIT, receive
+    from app.living.received import RECEIVED_LIMIT
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     doorbell = _to_her("楼下有人按门铃。", at=_at(21, 31))
@@ -860,7 +852,7 @@ async def test_a_nudge_that_waited_behind_a_stuck_round_happens_when_it_gets_her
 ):
     """前一轮挂住了，21:32 那一拍的提前叫醒排在后面，21:47 才轮到。被叫醒的那一轮的『现在』是
     21:47：她做的事记在这一刻，发给 world 的汇总也带着这一刻，不是那一拍敲响的 21:32。"""
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
@@ -898,7 +890,7 @@ async def test_two_ticks_queued_behind_her_round_wake_her_once(
     """她正在跑一轮，这条钟的两拍叠在一起赶到（钟每一拍都不等上一拍跑完）。叫醒她的那条
     只叫醒她一次：先到的那一拍排着、轮到时跑那一轮，后到的那一拍什么都不做，也不出错。判"是什么
     叫醒了她"跟跑那一轮不在同一次轮到她的时候的话，两拍会各自判出同一条、各记一遍"开始了"。"""
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     doorbell = _to_her("楼下有人按门铃。", at=_at(21, 31))
@@ -926,7 +918,7 @@ async def test_ticks_while_her_round_is_stuck_do_not_pile_up_behind_it(
 ):
     """她那一轮挂住了（最长占着 15 分钟），这条钟每分钟一拍。排在后面等的只有一拍：后面的拍
     看见已经有一拍在等，直接过去，不再排。等着的那一拍轮到时自己判是什么在叫她。"""
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
@@ -954,7 +946,7 @@ async def test_a_message_that_arrives_while_her_round_holds_her_wakes_her_after_
 ):
     """她那一轮跑着时到了一条，这一拍不排在那一轮后面；那一轮没看到它，那一轮之后的下一拍
     叫醒她。"""
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     rain = _to_her("窗外下起了雨。", at=_at(21, 31))
@@ -995,7 +987,8 @@ async def test_a_tick_that_waited_decides_on_what_is_true_when_it_gets_her(
     她，它不跑、也不记"开始了"。判在轮到她之前的话，它会拿排队之前判的那条再跑一轮。"""
     from app.data.schema import table_name
     from app.living.nudge import NudgeBegun
-    from app.living.received import mark_read, receive, unread_received
+    from app.living.received import mark_read, unread_received
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     await receive(_to_her("窗外下起了雨。", at=_at(21, 31)))
@@ -1019,7 +1012,7 @@ async def test_the_two_clocks_still_queue_behind_each_other(
 ):
     """她的常规节奏和提前叫醒在同一条队列上：各自只排一拍，两条钟之间照样排队、先来先跑、不互相
     顶掉。常规那一拍和提前叫醒那一拍都等到她。"""
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     rain = _to_her("窗外下起了雨。", at=_at(21, 41))
@@ -1053,7 +1046,8 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_a
     """那一轮已经定下是谁叫醒的、还没读收件箱的那一刻，到了一批发生得更早的消息，多到一轮
     摆不下：叫醒她的那条照样在那一轮里。"""
     from app.living import moment as moment_mod
-    from app.living.received import RECEIVED_LIMIT, receive
+    from app.living.received import RECEIVED_LIMIT
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     doorbell = _to_her("楼下有人按门铃。", at=_at(21, 31))
@@ -1081,7 +1075,8 @@ async def test_a_round_a_message_woke_that_failed_is_retried_as_itself_whatever_
 ):
     """收件箱里那条叫醒她，她做了一个动作，这一轮失败了。之后到了一批发生得更早的消息、手机
     上也有人叫她：下一拍重跑的还是那一轮，同一个动作不落第二遍；叫她的那些排在它之后。"""
-    from app.living.received import RECEIVED_LIMIT, receive
+    from app.living.received import RECEIVED_LIMIT
+    from tests.living.conftest import receive
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
@@ -1124,7 +1119,7 @@ async def test_a_round_a_summons_woke_that_failed_is_retried_as_itself_whatever_
 ):
     """手机上那条叫醒她，她做了一个动作，这一轮失败了。之后手机上来了更新的一条叫她、收件箱
     里也到了一条：下一拍重跑的还是那一轮，同一个动作不落第二遍。"""
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m0", place="家/客厅",
@@ -1199,8 +1194,8 @@ async def test_a_round_a_summons_woke_is_named_after_that_chat_message(
 async def test_a_round_a_received_message_woke_is_named_after_that_message(
     nudge_db, stub_life, named, resident
 ):
-    from app.living.received import receive
     from app.messaging.message import Kind, new_message
+    from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
     await receive(
@@ -1265,7 +1260,7 @@ async def test_the_nudge_due_writes_that_the_round_began_before_it_hands_it_back
 ):
     """判出来就记"开始了"，在模型调用之前：之后这一轮失败了，重跑的还是它。"""
     from app.living.nudge import nudged_moment_due
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await receive(_to_her("窗外下起了雨。", at=_at(21, 31), message_id="rain"))
 
@@ -1284,7 +1279,7 @@ async def test_the_nudge_due_writes_that_the_round_began_before_it_hands_it_back
 @pytest.mark.integration
 async def test_a_summons_on_her_phone_comes_before_her_inbox(nudge_db, stub_life, named):
     from app.living.nudge import nudged_moment_due
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await receive(_to_her("窗外下起了雨。", at=_at(21, 30), message_id="rain"))
     summons = await _incoming(_DM, body="在吗", at=_at(21, 31))
@@ -1300,7 +1295,7 @@ async def test_her_inbox_wakes_her_for_the_earliest_message_she_has_not_seen(
     nudge_db, stub_life, named
 ):
     from app.living.nudge import nudged_moment_due
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await receive(_to_her("楼下有人按门铃。", at=_at(21, 31), message_id="doorbell"))
     await receive(_to_her("窗外下起了雨。", at=_at(21, 20), message_id="rain"))
@@ -1317,7 +1312,7 @@ async def test_a_round_that_began_and_never_landed_is_due_again_as_itself_before
     """开始了没落地的那一轮，新进程判出的还是它，不再记一遍"开始了"，也不让手机上更新的那条、
     收件箱里新到的那条插到它前面。"""
     from app.living.nudge import nudged_moment_due
-    from app.living.received import receive
+    from tests.living.conftest import receive
 
     await receive(_to_her("窗外下起了雨。", at=_at(21, 31), message_id="rain"))
     first = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))

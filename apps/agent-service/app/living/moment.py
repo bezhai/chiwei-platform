@@ -130,7 +130,6 @@ from app.infra.cst_time import CST
 from app.living.common import esc, legacy_null_is, require_aware
 from app.living.happening import Recorded, note_recorded, record_happening
 from app.living.outgoing import SEND_SECONDS, send_what_she_did
-from app.living.participants import WORLD, residents
 from app.living.phone import (
     Envelope,
     Glances,
@@ -146,7 +145,7 @@ from app.living.received import (
     unread_received,
 )
 from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, Whereabouts
-from app.living.services import LooseEnds
+from app.living.services import WORLD, LooseEnds, WhoLivesHere
 from app.living.snapshot import MomentSnapshot, read_snapshot
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from app.messaging.sending import ask
@@ -502,7 +501,7 @@ async def say(
         # 这里**不举例**：举出来的名字就是词表，她会逐字抄走（同 switch_to / move_to
         # 的 place 举例事故）。而且一旦举的是"这个家里的三个人"，就等于把"世界上有
         # 谁"重新写回了工具描述里 —— 那正是这只手刚拆掉的那道门。姐妹的名字在人设表里
-        # （:mod:`app.living.participants`），代码里一个都不写。
+        # （:mod:`app.living.residents`），代码里一个都不写。
         Field(
             description=(
                 "说给谁，写这个人在世界里的名字，可以同时对好几个人；"
@@ -526,7 +525,9 @@ async def say(
     Returns:
         一句确认文本。
     """
-    return await _record(kind=KIND_SPEECH, content=what, audience=to)
+    return await _record(
+        kind=KIND_SPEECH, content=what, audience=to, residents=self.residents
+    )
 
 
 @tool_error("做这个动作失败")
@@ -561,10 +562,14 @@ async def act(
     Returns:
         一句确认文本。
     """
-    return await _record(kind=KIND_ACT, content=what, audience=[])
+    return await _record(
+        kind=KIND_ACT, content=what, audience=[], residents=self.residents
+    )
 
 
-async def _record(*, kind: str, content: str, audience: list[str]) -> str:
+async def _record(
+    *, kind: str, content: str, audience: list[str], residents: WhoLivesHere
+) -> str:
     """``say`` / ``act`` 共用的落库：位置必须是真的，说给谁是她的事。
 
     位置这条 fail-loud：当面做的事这一轮结束时汇总给 world，汇总末尾那句她在哪、在做什么，
@@ -572,7 +577,7 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     哪）。没定下位置就做事，world 不知道这件事发生在哪，而她那边一片安静。位置本身不记进
     这件事里：它在她自己的位置记录上（:mod:`app.living.whereabouts`）。
 
-    **收件人不校验，故意的。** 这里曾经拿 :data:`~app.living.participants.LIVING_PERSONAS`
+    **收件人不校验，故意的。** 这里曾经拿一份写死的三姐妹名单
     当白名单挡下"不是这三个人"的名字。那是把"这个世界里住着谁"这条断言存在了代码
     里：world 写得出"许阿姨下午来敲门"，而她对许阿姨物理上开不了口——门一关，世界
     往前走一步，代码就离世界远一步。世界里有谁由 world 说了算。
@@ -582,7 +587,7 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     送到她那里，其余的名字连同这句话交给 world（:mod:`app.living.outgoing`）。说给一个
     没人接的名字，那句话就落在世界里没人接——这本身是真实的，不是错误。
 
-    **只有一处不原样：姐妹的内部 id 记成她的名字**（:meth:`~app.living.participants.Residents.names_for`）。
+    **只有一处不原样：姐妹的内部 id 记成她的名字**（:meth:`~app.living.services.Residents.names_for`）。
     她眼前已经不出现 id，可存下的对话历史里还留着旧的渲染文本，她照着写。id 原样记下的话
     就不算姐妹的地址，这句话绕道 world 转告，对方回话再绕一遍，每句都多花一轮 world。写错的
     id 不猜，原样记：她想叫的是谁，life 说不准。
@@ -612,7 +617,7 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
         kind=kind,
         content=said,
         occurred_at=now,
-        audience=residents().names_for(audience),
+        audience=residents.residents().names_for(audience),
         medium=MEDIUM_IN_PERSON,
     )
     note_recorded(happening_id)
@@ -698,7 +703,7 @@ async def look_around(self) -> str:
         if me is None:
             # 没有"这里"可问：她自己没定下在哪，world 也不知道。
             return "你还没定下自己在哪，所以什么都够不着。先用 switch_to 落个位置。"
-        asker = residents().by_persona[persona_id]
+        asker = self.residents.residents().by_persona[persona_id]
         # 通信机制只给等回答那一段封了顶。问出去那一步（查 world 开没开收件箱、记几行记录、
         # 发给 broker 等确认）跟发一条消息是同一套动作，broker 不应答时会一直挂着，所以整个
         # 提问再按发一条消息的上限（:data:`app.living.outgoing.SEND_SECONDS`）多给一段。
@@ -1058,7 +1063,7 @@ class _Landed:
     moment: LifeMoment | None = None
 
 
-async def send_her_doings(round: Round) -> None:
+async def send_her_doings(round: Round, *, residents: WhoLivesHere) -> None:
     """她做了的事一条发给 world，只对姐妹说的话直接发给那位姐妹（:mod:`app.living.outgoing`）。
 
     登记两次。**一轮开始前**（``outgoing.before``，失败这一轮就失败）：上一轮失败、超时、赶上
@@ -1066,7 +1071,9 @@ async def send_her_doings(round: Round) -> None:
     照样算数）：她做了的事不随这一轮落不落地而改变，读的是她存下的经历；这一步没做完的，下一轮
     开始前那一次接着做。
     """
-    await send_what_she_did(lane=round.lane, persona_id=round.participant)
+    await send_what_she_did(
+        lane=round.lane, persona_id=round.participant, residents=residents.residents()
+    )
 
 
 async def previous_moment_at(round: Round) -> datetime | None:
@@ -1161,14 +1168,14 @@ async def day_page_section(round: Round) -> str:
     return (await _snapshot(round)).render_day_page()
 
 
-async def own_recent_section(round: Round) -> str | None:
+async def own_recent_section(round: Round, *, residents: WhoLivesHere) -> str | None:
     """状态：她刚做过、说过的。只在这份历史接不住她最近说过的话时才带：一根标记消息都没有（冷启动、
     清过库、硬顶全裁掉了），或者上一轮没存下来（:attr:`app.agent.continuity.HistoryView.continues_unbroken`）。
     判据问的是**这份历史**，不是这一轮要立哪种标记消息 —— 缺口撞上清理点、硬顶之后那一轮，立的都是
     清理那根。"""
     if round.history is not None and round.history.continues_unbroken:
         return None
-    return (await _snapshot(round)).render_own_recent()
+    return (await _snapshot(round)).render_own_recent(residents.residents())
 
 
 async def phone_unread_section(round: Round) -> str:

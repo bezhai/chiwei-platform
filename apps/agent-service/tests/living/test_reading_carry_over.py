@@ -19,14 +19,14 @@ import aio_pika
 import pytest
 
 from app.infra.rabbitmq import DLQ_NAME, Route, lane_queue, mq
-from app.living import participants as participants_mod
 from app.living import reading as reading_mod
-from app.living.participants import READING
 from app.living.reading import FileRead
+from app.living.residents import names as names_mod
+from app.living.services import READING
 from app.messaging.lifecycle import start_messaging
 from app.messaging.record import read_record
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
-from tests.living.conftest import RESIDENT_NAMES, her_plugins
+from tests.living.conftest import RESIDENT_NAMES, NamesRead, her_plugins
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
 from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture 名
@@ -132,7 +132,7 @@ async def reading_inbox(broker, messaging_db, living_db, app_host, monkeypatch):
         return SimpleNamespace(persona_id=persona_id, display_name=RESIDENT_NAMES[persona_id])
 
     await migrate(FileRead, living_db)
-    monkeypatch.setattr(participants_mod, "find_persona", find_persona)
+    monkeypatch.setattr(names_mod, "find_persona", find_persona)
     one_round = _Round()
     monkeypatch.setattr(reading_mod, "run_reading_round", one_round)
 
@@ -145,7 +145,7 @@ async def reading_inbox(broker, messaging_db, living_db, app_host, monkeypatch):
 
 
 async def _carry(**fields) -> dict:
-    answer = await carry_over_reading(ReadingCarryOverRequest(**fields))
+    answer = await carry_over_reading(ReadingCarryOverRequest(**fields), residents=NamesRead())
     return answer.model_dump()
 
 

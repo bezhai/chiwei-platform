@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from app.living.services import Residents
 from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
 
 if TYPE_CHECKING:
@@ -32,19 +33,44 @@ if TYPE_CHECKING:
 RESIDENT_NAMES = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
 
 
+
+# 读好的那份对照（``residents`` 服务交出的 :class:`app.living.services.Residents`）。
+RESIDENTS = Residents(dict(RESIDENT_NAMES))
+
+
+class NamesRead:
+    """``residents`` 服务的替身：名字已经读好了，默认就是 :data:`RESIDENTS`。"""
+
+    def __init__(self, residents=RESIDENTS) -> None:
+        self._residents = residents
+
+    async def load(self):
+        return self._residents
+
+    def residents(self):
+        return self._residents
+
+
 @pytest.fixture(autouse=True)
 def residents_named(monkeypatch):
     """三姐妹的名字已经读好了，跟线上一样。
 
-    线上进程开始接收消息时就读好这份对照（:func:`app.living.received.open_inboxes`），
-    在任何一条钟开始拍之前；之后她每一轮发消息查地址、按名字认出她对谁说话，用的都是这一份。
-    验"还没读"和"读的时候出错"的用例自己把它清掉再读。
+    线上进程开始接收消息时就读好这份对照（开收件箱那一下，:func:`app.living.received.open_inboxes`），
+    在任何一条钟开始拍之前；之后她每一轮发消息查地址、按名字认出她对谁说话，用的都是这一份。用例起的
+    宿主只跑 setup、不开收件箱，所以它的 residents 插件对象在这里当成已经读好的。验"还没读"和"读的
+    时候出错"的用例自己覆盖这个 fixture。
     """
-    from app.living import participants as participants_mod
+    from app.living.residents.names import PersonaNames
 
-    monkeypatch.setattr(
-        participants_mod, "_known", participants_mod.Residents(dict(RESIDENT_NAMES))
-    )
+    monkeypatch.setattr(PersonaNames, "residents", lambda self: RESIDENTS)
+
+
+async def receive(message) -> None:
+    """一条消息进了她的收件箱：跟三姐妹收件箱的处理函数一样存下
+    （:func:`app.living.received.receive`），收件人按读好的名字认。"""
+    from app.living.received import receive as store
+
+    await store(message, residents=RESIDENTS)
 
 
 @dataclass(frozen=True)
@@ -101,6 +127,14 @@ def post(monkeypatch) -> Post:
 # 她的一轮跑在哪条泳道上。一轮的泳道取自进程（宿主组装 ``resident`` 时读的 ``LANE``），线上它和
 # 判出这一轮的那条泳道是同一个值；用例里的 ``LANE`` 都是这一条。
 HER_LANE = "coe-living"
+
+
+def her_residents() -> tuple[str, ...]:
+    """住在这儿的那几个人：agent-service 清单里按 ``resident`` 跑的参与者，按清单的顺序（她们的
+    队列按这份开）。"""
+    from app.manifests.agent_service import MANIFEST
+
+    return tuple(p.name for p in MANIFEST.participants if p.profile == "resident")
 
 
 def her_plugins() -> list:
@@ -227,13 +261,14 @@ async def settled() -> None:
         await asyncio.sleep(0)
 
 
-def her_tool(name: str) -> Tool:
+def her_tool(name: str, *, residents=None) -> Tool:
     """她还没拆成插件的一只手：living 插件对象（:class:`app.plugins.living.NotSplitYet`）上的方法，
-    包成跟插件登记给模型的同一种 :class:`~app.agent.tooling.Tool`。"""
+    包成跟插件登记给模型的同一种 :class:`~app.agent.tooling.Tool`。``residents`` 是交给它的
+    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）。"""
     from app.agent.tooling import Tool
     from app.plugins.living import NotSplitYet
 
-    return Tool(getattr(NotSplitYet(), name))
+    return Tool(getattr(NotSplitYet(residents=residents or NamesRead()), name))
 
 
 def glance_text(shown) -> str:

@@ -26,7 +26,7 @@ from app.living.mouth import _SEND_CHECK_TIMEOUT_S
 from app.living.records import MEDIUM_GROUP_CHAT, MEDIUM_PHONE
 from app.living.snapshot import recent_own_happenings
 from app.living.whereabouts import note_whereabouts
-from tests.living.conftest import her_tool
+from tests.living.conftest import RESIDENTS, her_tool
 
 send_message = her_tool("send_message")
 
@@ -800,7 +800,7 @@ async def test_a_sent_line_comes_back_as_its_handle_not_its_words(
         f"回执里没有这条的撤回编号。拿到：{outcome!r}"
     )
     (h,) = await recent_own_happenings(lane=LANE, persona_id="akao")
-    assert f"［{row.outbound_id}］" in own_line(h), (
+    assert f"［{row.outbound_id}］" in own_line(h, residents=RESIDENTS), (
         "回执和「你刚做过、说过」印出来的不是同一个形状 —— 她会以为那是两种编号"
     )
 

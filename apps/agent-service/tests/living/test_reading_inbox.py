@@ -17,10 +17,10 @@ import pytest
 from sqlalchemy import text
 
 from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, lane_queue
-from app.living import participants as participants_mod
 from app.living import reading as reading_mod
-from app.living.participants import READING
 from app.living.reading import FileRead, SentFile, read_so_far
+from app.living.residents import names as names_mod
+from app.living.services import READING
 from app.messaging import receiving
 from app.messaging.broker import inbox_route
 from app.messaging.lifecycle import start_messaging
@@ -86,7 +86,7 @@ async def reading_inbox(broker, messaging_db, living_db, app_host, monkeypatch):
         return [_BOOK]
 
     await migrate(FileRead, living_db)
-    monkeypatch.setattr(participants_mod, "find_persona", find_persona)
+    monkeypatch.setattr(names_mod, "find_persona", find_persona)
     monkeypatch.setattr(reading_mod, "files_sent_to", on_her_phone)
     one_round = _Round()
     monkeypatch.setattr(reading_mod, "run_reading_round", one_round)

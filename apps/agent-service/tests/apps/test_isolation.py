@@ -20,6 +20,7 @@ _LOADED = """
 import json, sys
 from app.messaging.receiving import INBOX_REGISTRY
 rs = host.registered()
+fn = lambda f: getattr(f, 'func', f)  # a functools.partial: the function it calls
 print(json.dumps({
     'living': sorted(m for m in sys.modules if m == 'app.living' or m.startswith('app.living.')),
     'world': sorted(m for m in sys.modules if m == 'app.world' or m.startswith('app.world.')),
@@ -31,7 +32,7 @@ print(json.dumps({
         for r in rs if r.kind == 'outbound'),
     'inboxes': sorted(INBOX_REGISTRY),
     'inboxes_at_start': sorted(
-        r.detail['open'].__module__ + '.' + r.detail['open'].__qualname__
+        fn(r.detail['open']).__module__ + '.' + fn(r.detail['open']).__qualname__
         for r in rs if r.kind == 'inboxes_at_start'),
 }))
 """
@@ -72,6 +73,7 @@ def test_the_agent_service_app_loads_its_own_plugins():
         "operator",
         "skills",
         "persona",
+        "residents",
         "loose_ends",
         "web",
         "guides",

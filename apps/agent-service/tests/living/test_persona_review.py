@@ -509,8 +509,8 @@ async def test_each_sister_has_a_review_queue_the_clock_signals_every_five_minut
     每个信号都排队（``QUEUE_EACH``）。它和她的轮次、她的日记都不在一条队列上。忘了登记的症状是
     静默的：模块写好了、测试全绿，而线上一版都不会有。"""
     from app.host import Coalesce
-    from app.living.participants import LIVING_PERSONAS
     from app.living.persona_review import write_due_review
+    from tests.living.conftest import her_residents
 
     host = await app_host("agent-service")
     queues = {r.name: r.detail["turns"] for r in host.registered() if r.kind == "turns"}
@@ -524,7 +524,7 @@ async def test_each_sister_has_a_review_queue_the_clock_signals_every_five_minut
         (w.plugin, w.detail["turns"].participant, w.detail["turns"].line, w.detail["every"])
         for w in wakes
     ) == sorted(
-        ("living", p, "persona-review", dt.timedelta(minutes=5)) for p in LIVING_PERSONAS
+        ("living", p, "persona-review", dt.timedelta(minutes=5)) for p in her_residents()
     )
     for w in wakes:
         assert w.detail["turns"] is queues[f"{w.detail['turns'].participant}/persona-review"]

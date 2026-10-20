@@ -344,8 +344,9 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
 
     from app.data.persist import fetch_all
     from app.living import moment as moment_mod
-    from app.living import participants as participants_mod
     from app.living.received import open_inboxes
+    from app.living.residents import names as names_mod
+    from app.living.residents.names import PersonaNames
     from app.messaging.message import Kind, new_message
     from app.messaging.receiving import INBOX_REGISTRY, inbox
 
@@ -355,8 +356,7 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
     async def find_persona(persona_id: str):
         return SimpleNamespace(persona_id=persona_id, display_name=names[persona_id])
 
-    monkeypatch.setattr(participants_mod, "find_persona", find_persona)
-    monkeypatch.setattr(participants_mod, "_known", None)
+    monkeypatch.setattr(names_mod, "find_persona", find_persona)
 
     def no_model(*args, **kwargs):
         raise AssertionError("收件处理调到模型了")
@@ -364,7 +364,7 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
     monkeypatch.setattr("app.agent.core.build_model_client", no_model)
     monkeypatch.setattr(moment_mod, "run_due_moment", no_model)
 
-    await open_inboxes(inbox)
+    await open_inboxes(inbox, residents=PersonaNames(tuple(names)))
     for name in names.values():
         await INBOX_REGISTRY[name].on_message(
             new_message(sender="world", recipient=name, body="窗外下起了雨。", kind=Kind.MESSAGE)

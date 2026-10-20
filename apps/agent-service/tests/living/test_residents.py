@@ -3,6 +3,9 @@
 名字就是地址：一个名字错了，发给她的消息就进不了她的收件箱，或者进了别人的。所以每一种
 拒绝情况各有一条用例，而且报错要说得出是哪个人、哪里不对。人设表在这里换成替身——检查
 本身不碰库，库里的那一行长什么样才是输入。
+
+这份对照是 residents 插件交出的 ``residents`` 服务（:class:`app.living.services.WhoLivesHere`），
+检查谁由清单定：清单里按 ``resident`` 跑的那几个人。
 """
 from __future__ import annotations
 
@@ -10,17 +13,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.living import participants as participants_mod
-from app.living.participants import (
-    LIVING_PERSONAS,
-    READING,
-    WORLD,
-    load_residents,
-    residents,
-)
+from app.host import Plugin
+from app.living.residents import names as names_mod
+from app.living.residents.names import PersonaNames
+from app.living.services import READING, WORLD
 from app.messaging.operator import OPERATOR
+from tests.living.conftest import her_plugins
 
 _GOOD = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
+
+
+@pytest.fixture(autouse=True)
+def residents_named():
+    """这里验的就是读名字那一下，不用 conftest 里那份"已经读好了"。"""
 
 
 @pytest.fixture
@@ -34,40 +39,43 @@ def persona_table(monkeypatch):
             return None
         return SimpleNamespace(persona_id=persona_id, display_name=name)
 
-    monkeypatch.setattr(participants_mod, "find_persona", find_persona)
-    monkeypatch.setattr(participants_mod, "_known", None)
+    monkeypatch.setattr(names_mod, "find_persona", find_persona)
     return rows
 
 
+def _names() -> PersonaNames:
+    return PersonaNames(tuple(_GOOD))
+
+
 async def test_each_resident_is_named_after_her_display_name(persona_table):
-    known = await load_residents()
+    names = _names()
+
+    known = await names.load()
 
     assert known.by_persona == _GOOD
     assert known.persona_of("绫奈") == "ayana"
     assert known.persona_of(WORLD) is None
-    assert residents() is known, "开收件箱和以后查地址要用同一份对照"
+    assert names.residents() is known, "开收件箱和以后查地址要用同一份对照"
 
 
 async def test_the_names_are_read_from_the_persona_table_not_written_in_code(persona_table):
     persona_table["akao"] = "赤尾酱"
 
-    known = await load_residents()
+    known = await _names().load()
 
     assert known.by_persona["akao"] == "赤尾酱"
 
 
-def test_the_names_are_unknown_until_they_are_read(monkeypatch):
-    monkeypatch.setattr(participants_mod, "_known", None)
-
+def test_the_names_are_unknown_until_they_are_read():
     with pytest.raises(RuntimeError, match="还没读"):
-        residents()
+        _names().residents()
 
 
 async def test_a_missing_persona_row_refuses_to_start(persona_table):
     persona_table["ayana"] = None
 
     with pytest.raises(RuntimeError, match="ayana") as refused:
-        await load_residents()
+        await _names().load()
 
     assert "没有这一行" in str(refused.value)
 
@@ -77,7 +85,7 @@ async def test_an_empty_display_name_refuses_to_start(persona_table, empty):
     persona_table["chinagi"] = empty
 
     with pytest.raises(RuntimeError, match="chinagi") as refused:
-        await load_residents()
+        await _names().load()
 
     assert "显示名是空的" in str(refused.value)
 
@@ -87,7 +95,7 @@ async def test_a_name_messaging_cannot_carry_refuses_to_start(persona_table, bad
     persona_table["akao"] = bad
 
     with pytest.raises(RuntimeError, match="akao") as refused:
-        await load_residents()
+        await _names().load()
 
     assert "名字规则" in str(refused.value)
 
@@ -96,7 +104,7 @@ async def test_two_residents_with_the_same_name_refuse_to_start(persona_table):
     persona_table["chinagi"] = "绫奈"
 
     with pytest.raises(RuntimeError, match="绫奈") as refused:
-        await load_residents()
+        await _names().load()
 
     assert "ayana" in str(refused.value) and "chinagi" in str(refused.value)
 
@@ -106,7 +114,7 @@ async def test_a_name_another_participant_already_has_refuses_to_start(persona_t
     persona_table["ayana"] = taken
 
     with pytest.raises(RuntimeError, match="ayana") as refused:
-        await load_residents()
+        await _names().load()
 
     assert "已有的参与者" in str(refused.value)
 
@@ -115,13 +123,14 @@ async def test_every_problem_is_reported_at_once_and_nothing_is_kept(persona_tab
     """几处都错时一次报全，改一处、重启、再撞下一处太慢；报错之后也不留半份对照。"""
     persona_table["akao"] = None
     persona_table["chinagi"] = ""
+    names = _names()
 
     with pytest.raises(RuntimeError) as refused:
-        await load_residents()
+        await names.load()
 
     assert "akao" in str(refused.value) and "chinagi" in str(refused.value)
     with pytest.raises(RuntimeError, match="还没读"):
-        residents()
+        names.residents()
 
 
 def test_life_knows_world_by_the_name_world_gives_itself():
@@ -131,6 +140,23 @@ def test_life_knows_world_by_the_name_world_gives_itself():
     assert WORLD == world_calls_itself
 
 
-def test_every_living_persona_is_checked():
-    """检查的范围就是住在这个家里的那几个人，不多不少。"""
-    assert set(_GOOD) == set(LIVING_PERSONAS)
+async def test_the_residents_checked_are_the_ones_the_manifest_lists(app_host, persona_table):
+    """检查的范围就是清单里住在这个家里的那几个人（按 ``resident`` 跑的参与者），不多不少：
+    人设表里多一行也不读进来。"""
+    from app.manifests.agent_service import MANIFEST
+
+    persona_table["npc:someone"] = "路人"
+    taken = []
+    probe = Plugin(
+        name="probe",
+        setup=lambda ctx: taken.append(ctx.service("residents")),
+        requires=("residents",),
+    )
+    await app_host("agent-service", [*her_plugins(), probe])
+
+    known = await taken[0].load()
+
+    assert tuple(known.by_persona) == tuple(
+        p.name for p in MANIFEST.participants if p.profile == "resident"
+    )
+    assert set(known.by_persona) == set(_GOOD)

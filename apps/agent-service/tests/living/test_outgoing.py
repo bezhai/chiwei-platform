@@ -28,6 +28,7 @@ from app.living.records import (
 from app.living.whereabouts import note_whereabouts
 from tests.living.conftest import (
     RESIDENT_NAMES,
+    RESIDENTS,
     clock_at,
     her_queue,
     her_round_runs,
@@ -77,7 +78,7 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
 
 
 async def _tell(persona: str = "akao") -> None:
-    await send_what_she_did(lane=LANE, persona_id=persona)
+    await send_what_she_did(lane=LANE, persona_id=persona, residents=RESIDENTS)
 
 
 async def _within(seconds: float, step) -> None:
@@ -375,11 +376,11 @@ async def test_her_messages_are_numbered_on_from_her_last_one_in_the_order_they_
     """
     async with in_a_moment("akao", now=_at(21, 30), moment_id="m-1"):
         await _do(say, {"what": "饭好了。", "to": ["绫奈", "千凪"]})
-    first = await outgoing_mod.compose(lane=LANE, persona_id="akao")
+    first = await outgoing_mod.compose(lane=LANE, persona_id="akao", residents=RESIDENTS)
     async with in_a_moment("akao", now=_at(21, 40), moment_id="m-2"):
         await _do(say, {"what": "快下来。", "to": ["绫奈"]})
         await _do(act, {"what": "把锅端上桌"})
-    second = await outgoing_mod.compose(lane=LANE, persona_id="akao")
+    second = await outgoing_mod.compose(lane=LANE, persona_id="akao", residents=RESIDENTS)
 
     assert [(m.seq, m.recipient) for m in first] == [(1, "绫奈"), (2, "千凪")]
     assert [(m.seq, m.recipient) for m in second] == [(3, "绫奈"), (4, outgoing_mod.WORLD)]
@@ -931,8 +932,8 @@ async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_othe
     她要发的消息一条不多一条不少：那句话、每件事各进一次；讲到哪了只停在她自己的号上；重跑的
     那几次『现在』一次比一次晚，消息上的时间还是她第一次做那件事的时候。"""
     from app.living.nudge import NudgeBegun
-    from app.living.received import receive
     from app.messaging.message import Kind, new_message
+    from tests.living.conftest import receive
     from tests.runtime.conftest import migrate
 
     post = started
@@ -1014,9 +1015,9 @@ async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_
 
     姐妹那句直接到了绫奈那里，出现在她下一轮的输入里；world 收到一条汇总；记录者里发给 world
     的消息没有那句只对姐妹说的话。"""
-    from app.living import participants as participants_mod
-    from app.living.participants import WORLD
     from app.living.records import living_lane
+    from app.living.residents import names as names_mod
+    from app.living.services import WORLD
     from app.messaging.lifecycle import start_messaging
     from app.messaging.receiving import inbox
     from app.messaging.record import read_record
@@ -1025,8 +1026,7 @@ async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_
     async def find_persona(persona_id: str):
         return SimpleNamespace(persona_id=persona_id, display_name=RESIDENT_NAMES[persona_id])
 
-    monkeypatch.setattr(participants_mod, "find_persona", find_persona)
-    monkeypatch.setattr(participants_mod, "_known", None)
+    monkeypatch.setattr(names_mod, "find_persona", find_persona)
     world = Inbox()
     inbox(WORLD, on_message=world.on_message)
     # 三姐妹的收件箱由宿主上的 living 在通信机制起来时打开（``resident``）。
@@ -1072,10 +1072,10 @@ async def test_through_messaging_her_sister_reads_words_in_the_order_they_were_s
 ):
     """真的通信机制：赤尾 21:30 对绫奈说的那句第一次没发出去，千凪 21:35 对她说的那句先到了，
     赤尾那句之后补发。绫奈读到的还是先赤尾、后千凪：她那边按消息上的时间排，那是说出口的时间。"""
-    from app.living import participants as participants_mod
-    from app.living.participants import WORLD
     from app.living.received import unread_received
     from app.living.records import living_lane
+    from app.living.residents import names as names_mod
+    from app.living.services import WORLD
     from app.messaging.lifecycle import start_messaging
     from app.messaging.message import SendFailed
     from app.messaging.receiving import inbox
@@ -1084,8 +1084,7 @@ async def test_through_messaging_her_sister_reads_words_in_the_order_they_were_s
     async def find_persona(persona_id: str):
         return SimpleNamespace(persona_id=persona_id, display_name=RESIDENT_NAMES[persona_id])
 
-    monkeypatch.setattr(participants_mod, "find_persona", find_persona)
-    monkeypatch.setattr(participants_mod, "_known", None)
+    monkeypatch.setattr(names_mod, "find_persona", find_persona)
     inbox(WORLD, on_message=Inbox().on_message)
     # 三姐妹的收件箱由宿主上的 living 在通信机制起来时打开（``resident``）。
     await start_messaging()
@@ -1107,22 +1106,22 @@ async def test_through_messaging_her_sister_reads_words_in_the_order_they_were_s
             lane=lane, persona_id=persona, moment_id="before", place="家/客厅",
             doing="看书", noted_at=_at(21, 0),
         )
-        await send_what_she_did(lane=lane, persona_id=persona)
+        await send_what_she_did(lane=lane, persona_id=persona, residents=RESIDENTS)
 
     async with in_a_moment("akao", lane=lane, now=_at(21, 30), moment_id="a"):
         await _do(say, {"what": "饭好了，下来吃。", "to": ["绫奈"]})
-    await send_what_she_did(lane=lane, persona_id="akao")
+    await send_what_she_did(lane=lane, persona_id="akao", residents=RESIDENTS)
     assert refused, "前提没造出来：赤尾那句第一次要没发出去"
 
     async with in_a_moment("chinagi", lane=lane, now=_at(21, 35), moment_id="c"):
         await _do(say, {"what": "我先吃了。", "to": ["绫奈"]})
-    await send_what_she_did(lane=lane, persona_id="chinagi")
+    await send_what_she_did(lane=lane, persona_id="chinagi", residents=RESIDENTS)
 
     async def she_has(n: int) -> bool:
         return len(await unread_received(lane=lane, persona_id="ayana")) == n
 
     await eventually(lambda: she_has(1))
-    await send_what_she_did(lane=lane, persona_id="akao")
+    await send_what_she_did(lane=lane, persona_id="akao", residents=RESIDENTS)
     await eventually(lambda: she_has(2))
 
     her_turn = stub_moment(said="继续")

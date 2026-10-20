@@ -57,7 +57,7 @@ from app.infra.cst_time import CST, dated_clock
 from app.living.common import require_aware
 from app.living.happening import own_line, read_her_happenings_between
 from app.living.received import read_received_between, received_line
-from app.living.services import Persona
+from app.living.services import Persona, Residents
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +174,9 @@ def living_day_bounds(day: date) -> tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
-async def day_material(*, lane: str, persona_id: str, day: date) -> list[str]:
+async def day_material(
+    *, lane: str, persona_id: str, day: date, residents: Residents
+) -> list[str]:
     """这一天她自己的经历，一件一行：她做过的事、说过的话，和传到她这里的消息。
 
     **原文照搬，中间没有第二次概括** —— 整个模块存在的理由就是"不折叠原文"，在摆材
@@ -201,7 +203,7 @@ async def day_material(*, lane: str, persona_id: str, day: date) -> list[str]:
         )
     ]
     did = [
-        (h.occurred_at, own_line(h))
+        (h.occurred_at, own_line(h, residents=residents))
         for h in await read_her_happenings_between(
             lane=lane, persona_id=persona_id, since=since, until=until
         )
@@ -314,7 +316,12 @@ class DuePage:
 
 
 async def day_page_due(
-    *, lane: str, persona_id: str, at: datetime, clock: Callable[[], datetime]
+    *,
+    lane: str,
+    persona_id: str,
+    at: datetime,
+    clock: Callable[[], datetime],
+    residents: Residents,
 ) -> DuePage | None:
     """日记的钟在 ``at`` 响的那一拍，轮到她的日记队列时：要写哪一页；不该写返回 ``None``。
 
@@ -343,7 +350,9 @@ async def day_page_due(
     day = living_day_of(now) - timedelta(days=1)
     if await read_day_page(lane=lane, persona_id=persona_id, day=day) is not None:
         return None
-    lines = await day_material(lane=lane, persona_id=persona_id, day=day)
+    lines = await day_material(
+        lane=lane, persona_id=persona_id, day=day, residents=residents
+    )
     if not lines:
         logger.info(
             "living day page lane=%s persona=%s %s 这一天一件事都没有，不写",

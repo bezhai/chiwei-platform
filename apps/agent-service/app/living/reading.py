@@ -14,7 +14,7 @@
 就能开读，所以"让她指"是真指得动的，不是一句空话。
 
 **一程是异步的：她拿起来，然后这次醒来就过去了。** 工具只往读书收件箱
-（:data:`app.living.participants.READING`）发一条消息，读那一程由收件箱的处理函数
+（:data:`app.living.services.READING`）发一条消息，读那一程由收件箱的处理函数
 :func:`read_a_round` 跑（读一页要取字节、解码、几轮模型调用，塞进一轮里会把她卡在网络上）。
 这跟她说出去的话要等下一轮才知道下场是同一个形状。消息的 id 就是这一程的 ``round_id``，
 发送方是她在世界里的名字，正文是 :class:`FilePickedUp` 的 JSON：收件方是代码，不是谁的
@@ -77,10 +77,9 @@ from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
 from app.infra.cst_time import CST, to_cst_dated
 from app.living.common import esc, require_aware
-from app.living.participants import READING, residents
 from app.living.phone import Sender, _who_tag, reachable_conversations
 from app.living.reading_agent import run_reading_round
-from app.living.services import Persona
+from app.living.services import READING, Persona
 from app.messaging.message import Delivery, Kind, Message, SendFailed
 
 # module-level 引入，测试从这里换替身（不碰 broker）
@@ -493,7 +492,9 @@ async def read_a_bit(
         tos_file=picked.tos_file,
     )
     try:
-        delivery = await send_round(this_round, sender=residents().by_persona[persona_id])
+        delivery = await send_round(
+            this_round, sender=self.residents.residents().by_persona[persona_id]
+        )
     except SendFailed as exc:
         raise RuntimeError(_NOT_STARTED) from exc
     if not delivery.delivered:

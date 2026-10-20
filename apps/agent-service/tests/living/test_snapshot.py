@@ -38,6 +38,7 @@ from app.living.records import (
 )
 from app.living.snapshot import OWN_RECENT_LIMIT, read_snapshot
 from app.living.whereabouts import note_whereabouts
+from tests.living.conftest import RESIDENTS
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -104,7 +105,7 @@ async def _state_sections(snap) -> str:
         (
             snap.render_day_page(),
             await _MIND.open_section(_round(snap)),
-            snap.render_own_recent(),
+            snap.render_own_recent(RESIDENTS),
         )
     )
 
@@ -250,7 +251,7 @@ async def test_she_can_be_nowhere_yet_and_the_snapshot_says_so_plainly(snap_db):
         for text in (
             snap.render_day_page(),
             await _MIND.open_section(_round(snap)),
-            snap.render_own_recent(),
+            snap.render_own_recent(RESIDENTS),
         )
     )
 
@@ -287,7 +288,7 @@ async def test_she_can_see_what_she_herself_just_said(snap_db):
     )
 
     assert [h.content for h in snap.own_recent] == ["周末祭典我陪你去。"]
-    assert "周末祭典我陪你去。" in snap.render_own_recent()
+    assert "周末祭典我陪你去。" in snap.render_own_recent(RESIDENTS)
 
 
 @pytest.mark.integration
@@ -314,7 +315,7 @@ async def test_when_her_words_are_already_in_view_the_state_does_not_copy_them(
         assert "你刚做过、说过" not in text and "布丁我吃了。" not in text, text
     assert "你上一次写下的那一天" in page
     assert "周末陪绫奈去祭典" in open_ends
-    own = snap.render_own_recent()
+    own = snap.render_own_recent(RESIDENTS)
     assert "你刚做过、说过" in own and "布丁我吃了。" in own
 
 
@@ -355,7 +356,7 @@ async def test_a_message_she_sent_carries_the_handle_that_takes_it_back(snap_db)
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 40)
     )
-    text = snap.render_own_recent()
+    text = snap.render_own_recent(RESIDENTS)
 
     assert (
         f"- 14:32 CST 你对 bezhai 说：「你去过那家抹茶店吗？」［{oid}］" in text
@@ -374,7 +375,7 @@ async def test_what_she_said_face_to_face_carries_no_handle(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
-    text = snap.render_own_recent()
+    text = snap.render_own_recent(RESIDENTS)
 
     assert "- 14:05 CST 你对 绫奈 说：「布丁我吃了。」" in text
     assert "［" not in text, (
@@ -392,7 +393,7 @@ async def test_a_sister_named_by_id_in_her_records_reads_as_her_name(snap_db):
     await _say("akao", "汤好了。", _at(14, 7), to=["千凪", "chinagi"])
 
     snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 10))
-    text = snap.render_own_recent()
+    text = snap.render_own_recent(RESIDENTS)
 
     assert "- 14:05 CST 你对 绫奈 说：「布丁我吃了。」" in text
     assert "- 14:06 CST 你对 绫奈、千凪、许阿姨 说：「开饭了。」" in text
@@ -446,7 +447,7 @@ async def test_last_nights_line_does_not_read_as_tonight(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(23, 45)
     )
-    text = snap.render_own_recent()
+    text = snap.render_own_recent(RESIDENTS)
 
     assert "07-24 23:41" in text, (
         f"昨晚 23:41 那行渲染成了裸时分，跟今晚 23:41 一个形状 —— "
@@ -462,7 +463,7 @@ async def test_todays_own_lines_stay_undated(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
-    text = snap.render_own_recent()
+    text = snap.render_own_recent(RESIDENTS)
 
     assert "- 14:05 CST 你 把胶片摊在茶几上" in text
     assert "07-25 14:05" not in text, f"当天的行不该带日期。拿到：\n{text}"

@@ -35,7 +35,7 @@ from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
 from app.living.snapshot import read_snapshot, recent_own_happenings
 from app.living.whereabouts import note_whereabouts
 from tests.data.read_back import all_versions
-from tests.living.conftest import her_tool
+from tests.living.conftest import RESIDENTS, her_tool
 
 send_message = her_tool("send_message")
 take_back_message = her_tool("take_back_message")
@@ -328,7 +328,7 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
         shown = await read_snapshot(
             lane=LANE, persona_id="akao", now=_at(21, 30)
         )
-        rendered = shown.render_own_recent()
+        rendered = shown.render_own_recent(RESIDENTS)
         handles = re.findall(r"［([^］]+)］", rendered)
         assert len(handles) == 1, (
             f"快照没把她刚发出去那条的编号印出来（或者印了不止一个）—— "

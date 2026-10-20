@@ -1,7 +1,7 @@
 """一次性的搬运：旧的读书队列里的消息搬进读书收件箱（``POST /admin/reading/carry-over``）。
 
 读书原来走持久边，队列是 ``durable_file_picked_up_read_a_round``（泳道里带 ``_<泳道>`` 后缀）；现在
-走 living 插件开设的读书收件箱（:data:`app.living.participants.READING`），新版本不再消费旧队列。
+走 living 插件开设的读书收件箱（:data:`app.living.services.READING`），新版本不再消费旧队列。
 旧队列里剩下的消息由这条路由处理：先只看（``dry_run``，默认），再搬，最后删掉本泳道的空队列。
 prod 切换完成、旧队列删掉之后，这条路由连同 monitor-dashboard 的转发一起删除。
 
@@ -52,9 +52,9 @@ from app.api.middleware import get_header_var
 from app.data.schema import Data, Key
 from app.infra.lane_policy import current_deployment_lane
 from app.infra.rabbitmq import lane_queue, mq
-from app.living.participants import residents
 from app.living.reading import FilePickedUp, send_round
 from app.living.records import living_lane
+from app.living.services import Residents, WhoLivesHere
 from app.messaging.message import SendFailed
 
 logger = logging.getLogger(__name__)
@@ -164,9 +164,9 @@ def _sort(incoming, here: str) -> tuple[str, FilePickedUp | None]:
     return "unprocessed", picked
 
 
-async def _carry(picked: FilePickedUp, queue: str) -> bool:
+async def _carry(picked: FilePickedUp, queue: str, residents: Residents) -> bool:
     """把这一程发进读书收件箱；送到了交回 ``True``。"""
-    sender = residents().by_persona.get(picked.persona_id)
+    sender = residents.by_persona.get(picked.persona_id)
     if sender is None:
         logger.warning(
             "reading carry-over: round %s in %s belongs to %r, who is not one of the sisters; "
@@ -209,7 +209,7 @@ async def _discard(incoming, queue: str, what: str) -> None:
     await incoming.ack()
 
 
-async def _scan(channel, state: _Queue, req, held: list) -> None:
+async def _scan(channel, state: _Queue, req, held: list, residents: Residents) -> None:
     """打开这条队列，把开始时在里面的每一条分类、处理；要放回的放进 ``held``。"""
     try:
         queue = await channel.declare_queue(state.name, passive=True)
@@ -270,7 +270,7 @@ async def _scan(channel, state: _Queue, req, held: list) -> None:
             state.discarded_dead += 1
             continue
         state.unprocessed += 1
-        if req.dry_run or not await _carry(picked, state.name):
+        if req.dry_run or not await _carry(picked, state.name, residents):
             if not req.dry_run:
                 state.failed += 1
             held.append(incoming)
@@ -330,8 +330,11 @@ async def _delete_if_empty(name: str) -> bool:
             await channel.close()
 
 
-async def carry_over_reading(req: ReadingCarryOverRequest) -> ReadingCarryOverResponse:
-    """看、搬、删旧的读书队列，见模块说明。"""
+async def carry_over_reading(
+    req: ReadingCarryOverRequest, *, residents: WhoLivesHere
+) -> ReadingCarryOverResponse:
+    """看、搬、删旧的读书队列，见模块说明（发件人按 ``residents`` 服务读好的名字认）。"""
+    known = residents.residents()
     lane = current_deployment_lane()
     own = lane_queue(OLD_QUEUE, lane)
     states = [_Queue(own)] if lane is None else [_Queue(own), _Queue(OLD_QUEUE)]
@@ -343,7 +346,7 @@ async def carry_over_reading(req: ReadingCarryOverRequest) -> ReadingCarryOverRe
             channel = await mq.open_channel()
             held: list = []
             scans.append((channel, state, held))
-            await _scan(channel, state, req, held)
+            await _scan(channel, state, req, held, known)
     finally:
         for channel, state, held in scans:
             await _put_back_and_close(channel, state.name, held)

@@ -1,6 +1,6 @@
 """她收到的消息：三姐妹的收件箱，收件只存储；她下一轮醒来时读。
 
-**收件箱开在 agent-service 进程里，名字是她们在世界里的名字**（:mod:`app.living.participants`）。
+**收件箱开在 agent-service 进程里，名字是她们在世界里的名字**（:mod:`app.living.residents`）。
 名字存在人设表里，插件 setup 的时候还不读库，所以 living 插件只声明"开始接收时再开"
 （:func:`app.messaging.receiving.inboxes_at_start`），:func:`open_inboxes` 在那时读名字、检查、
 经宿主交来的声明函数逐个开设。名字有问题就抛，进程起不来。
@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from functools import partial
 from typing import Annotated
 
 from pydantic import field_validator
@@ -50,8 +51,8 @@ from app.data.persist import fetch_all, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import dated_clock
 from app.living.common import esc, legacy_null_is, require_aware
-from app.living.participants import WORLD, load_residents, residents
 from app.living.records import living_lane
+from app.living.services import WORLD, Residents, WhoLivesHere
 from app.messaging.message import Kind, Message
 from app.messaging.receiving import Declare
 
@@ -125,16 +126,18 @@ _RECEIVED_TABLE = table_name(ReceivedMessage)
 _READ_TABLE = table_name(ReceivedRead)
 
 
-async def open_inboxes(declare: Declare) -> None:
-    """读三姐妹的名字，按名字各开一个收件箱：对每个名字调 ``declare``（宿主交来的，参数和
-    :func:`app.messaging.receiving.inbox` 一样）。通信机制开始接收之前调一次。"""
-    known = await load_residents()
+async def open_inboxes(declare: Declare, *, residents: WhoLivesHere) -> None:
+    """读三姐妹的名字（``residents`` 服务，读的时候检查），按名字各开一个收件箱：对每个名字调
+    ``declare``（宿主交来的，参数和 :func:`app.messaging.receiving.inbox` 一样）。通信机制开始接收
+    之前调一次。"""
+    known = await residents.load()
     for name in known.by_persona.values():
-        declare(name, on_message=receive)
+        declare(name, on_message=partial(receive, residents=known))
 
 
-async def receive(message: Message) -> None:
-    """三姐妹收件箱的处理函数：把这条存到收件人名下。只存，不调模型。"""
+async def receive(message: Message, *, residents: Residents) -> None:
+    """三姐妹收件箱的处理函数：把这条存到收件人名下（``residents`` 是开收件箱时读好的那份对照）。
+    只存，不调模型。"""
     if message.kind is not Kind.MESSAGE:
         logger.warning(
             "living: %s 收到一条 %s（%s），不存：她从不定时发消息，这不是她经历的事。原文：%s",
@@ -144,7 +147,7 @@ async def receive(message: Message) -> None:
             message.body,
         )
         return
-    persona_id = residents().persona_of(message.recipient)
+    persona_id = residents.persona_of(message.recipient)
     if persona_id is None:
         raise RuntimeError(
             f"收件人 {message.recipient!r} 不是三姐妹之一，可她的收件箱是按同一份对照开的"
