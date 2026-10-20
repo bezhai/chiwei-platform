@@ -1,7 +1,7 @@
 """读书收件箱，跑在真 broker + 真 Postgres 上：她拿起一个文件 → 一条消息进 ``reading`` 收件箱 →
 读一程 → 写下 ``FileRead``。
 
-收件箱由 living 插件开设：宿主按 agent-service 的清单只起 skills 和 living 两个插件（只跑
+收件箱由 reading 插件开设：宿主按 agent-service 的清单只起 skills 和她的插件（只跑
 setup），之后通信机制照线上那样开始接收。所以这里用的是插件实际登记的选项：最多处理 1 次、
 处理时限 5 分钟。她手机上的文件和读一程本身（取字节、解码、模型调用）换成替身；读一程的替身
 在"模型调用失败"时返回 ``None``，跟 :func:`app.living.reading.agent.run_reading_round` 把失败吞掉
@@ -78,7 +78,7 @@ class _Round:
 
 @pytest.fixture
 async def reading_inbox(broker, messaging_db, living_db, app_host, monkeypatch):  # noqa: F811
-    """living 插件开好的读书收件箱在本泳道上收消息；她手机上有一个文件。交回读一程的替身。"""
+    """reading 插件开好的读书收件箱在本泳道上收消息；她手机上有一个文件。交回读一程的替身。"""
 
     async def find_persona(persona_id: str):
         return SimpleNamespace(persona_id=persona_id, display_name=RESIDENT_NAMES[persona_id])

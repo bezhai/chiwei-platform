@@ -962,7 +962,7 @@ def test_no_reading_tool_ever_asks_her_how_long_something_takes():
 
 
 def test_the_reading_inbox_is_opened_on_every_lane_and_no_route_takes_a_round():
-    """读一程从 living 开设的 ``reading`` 收件箱里来：处理函数是 :func:`read_a_round`，最多处理
+    """读一程从 reading 插件开设的 ``reading`` 收件箱里来：处理函数是 :func:`read_a_round`，最多处理
     1 次（失败一次就进死信，读一程要花钱），处理时限 5 分钟。没有哪条路由收 ``FilePickedUp``。
 
     收件箱在每条泳道上都开设：登记跟泳道名无关。别人能不能往这个收件箱里投、投进来能做到

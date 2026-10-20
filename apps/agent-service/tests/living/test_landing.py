@@ -454,7 +454,7 @@ async def test_another_lane_is_none_of_this_lane_business(living_db):
 
 
 async def _the_clock_ticks(app_host, monkeypatch) -> None:
-    """对账那条钟响一拍：agent-service 的宿主上 living 登记的那条钟，交回的工作跑完。进程部署在
+    """对账那条钟响一拍：agent-service 的宿主上 speaking 插件登记的那条钟，交回的工作跑完。进程部署在
     :data:`LANE` 上。"""
     monkeypatch.setenv("LANE", LANE)
     host = await app_host("agent-service")

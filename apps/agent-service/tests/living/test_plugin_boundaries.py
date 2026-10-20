@@ -2,10 +2,11 @@
 
 ``app/living/<插件>/`` 是一个插件。一个插件目录里的代码只许 import 自己目录里的模块、
 :mod:`app.living.services`（服务的接口和接口里的数据类型）、:mod:`app.living.common`（共用的
-纯函数）和 living 之外的包。另一个插件的模块不行，还没拆成目录的旧模块也不行：要别人的东西，
-就在 setup 里 ``ctx.service`` 取它的服务。``services.py`` 和 ``common.py`` 不 import 任何插件。
+纯函数）和 living 之外的包。另一个插件的模块不行：要别人的东西，就在 setup 里 ``ctx.service`` 取它的
+服务。``services.py`` 和 ``common.py`` 不 import 任何插件。
 
-还没拆成目录的旧模块不在这条规则里，拆出一个目录，它就开始受管。
+``app/living`` 下除了插件目录只有包本身、``services.py`` 和 ``common.py``，每个目录都是插件，所以这条
+规则管着 living 的每一行代码。
 
 认 import 的方式和 CI 的包检查是同一套（:func:`scripts.check_world_life_imports.imported_names`：
 函数里的 import、相对 import、``import_module`` 的字符串字面量都算，docstring 和注释不算）。
@@ -22,12 +23,17 @@ from scripts.check_world_life_imports import imported_names, module_name
 SHARED = ("services", "common")
 
 
+def living_plugins(app_dir: Path) -> list[str]:
+    """``app_dir``（``app`` 目录）下 living 的插件：``app/living`` 里带 ``__init__.py`` 的目录。"""
+    living = app_dir / "living"
+    return sorted(
+        d.name for d in living.iterdir() if d.is_dir() and (d / "__init__.py").is_file()
+    )
+
+
 def boundary_violations(app_dir: Path) -> list[str]:
     """``app_dir``（``app`` 目录）下越过插件边界的每一处 import，一条 ``文件:行号: 说明``。"""
     living = app_dir / "living"
-    plugins = sorted(
-        d.name for d in living.iterdir() if d.is_dir() and (d / "__init__.py").is_file()
-    )
     problems: list[str] = []
 
     def check(path: Path, allowed: set[str], who: str) -> None:
@@ -44,7 +50,7 @@ def boundary_violations(app_dir: Path) -> list[str]:
                         )
                         break
 
-    for plugin in plugins:
+    for plugin in living_plugins(app_dir):
         for path in sorted((living / plugin).rglob("*.py")):
             check(path, {plugin, *SHARED}, f"plugin {plugin}")
     for shared in SHARED:
@@ -56,6 +62,24 @@ def boundary_violations(app_dir: Path) -> list[str]:
 
 def test_living_plugins_import_only_themselves_services_and_common():
     assert boundary_violations(Path(app_pkg.__file__).parent) == []
+
+
+def test_living_is_its_plugins_services_and_common():
+    """``app/living`` 下散放的模块只有包本身、``services`` 和 ``common``，每个目录都是上面那条检查管着的
+    插件。多出一个散放的模块，或者一个没有 ``__init__.py`` 的目录，它的 import 就没人管了。"""
+    app_dir = Path(app_pkg.__file__).parent
+    living = app_dir / "living"
+
+    assert sorted(p.name for p in living.glob("*.py")) == [
+        "__init__.py",
+        "common.py",
+        "services.py",
+    ]
+    directories = sorted(
+        d.name for d in living.iterdir() if d.is_dir() and d.name != "__pycache__"
+    )
+    assert directories, "app/living 下一个插件目录都没有"
+    assert living_plugins(app_dir) == directories
 
 
 def _tree(root: Path, files: dict[str, str]) -> Path:

@@ -1,5 +1,12 @@
-"""agent-service 的清单：运维接口、通信机制的人工入口、guides、「她是谁」（persona）、living
-引擎；三姐妹的一轮按 ``resident`` 组成。
+"""agent-service 的清单：运维接口、通信机制的人工入口、skills（手边那几份说明从它来），和她的插件
+（``app/living/<插件>/``，一个功能一个插件，插件之间只经服务交互，见 :mod:`app.living`）；住在这儿的是
+``participants`` 列的三个人，她们的一轮按 ``resident`` 组成。宿主先起被依赖的插件（一个插件要的服务由
+哪个插件交出，各插件的 ``requires`` / ``provides`` 说了算），互不依赖的按这里列的顺序。
+
+**给她的一轮加一只手或一段输入，只改那个插件和这里。** 插件在 setup 里登记它（``ctx.tool``、
+``ctx.section``），这里把插件加进 ``plugins``、把名字写进 ``resident`` 对应的位置；别的插件、宿主、固定
+循环都不用动（``tests/living/test_a_new_feature.py``）。登记了而 ``resident`` 没列的、列了而没有插件
+登记的，宿主起来时就报错。
 
 她的工具按这里列的顺序给模型（也是请求前缀缓存的一部分，改顺序就是改请求）：``keep_in_mind``
 夹在 life 的几只手中间，所以顺序集中写在这里，不按插件拼。

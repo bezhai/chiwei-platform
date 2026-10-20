@@ -74,7 +74,7 @@ def _reset_runtime_registries():
 async def app_host(monkeypatch):
     """一个函数：``await app_host("world")`` 按 ``app.deployment.APPS`` 的清单起那个 App 的宿主，
     ``app_host("agent-service", [plugin, ...])`` 只起给定的插件（清单还是那个 App 的：插件登记的工具、
-    段落、段和步骤按它校验）；``http=`` 给一个 FastAPI，路由就
+    段落、段和步骤按它校验），``manifest=`` 换一份清单；``http=`` 给一个 FastAPI，路由就
     挂在它上面。只跑 setup，不碰数据库、broker，不起钟和后台任务（:func:`tests.hosting.start_without_io`）。
 
     测试结束时停掉起过的每个宿主，测试失败了也停：宿主停下时撤掉它登记的路由、收件箱、知识来源。
@@ -92,11 +92,12 @@ async def app_host(monkeypatch):
     monkeypatch.setattr(SkillRegistry, "_skills", {})
     hosts: list[Host] = []
 
-    async def start(app_name: str, plugins=None, *, http=None) -> Host:
+    async def start(app_name: str, plugins=None, *, http=None, manifest=None) -> Host:
         if plugins is None:
             host = Host.for_app(app_name)
         else:
-            manifest = importlib.import_module(deployment.APPS[app_name]).MANIFEST
+            if manifest is None:
+                manifest = importlib.import_module(deployment.APPS[app_name]).MANIFEST
             host = Host(app_name, plugins, manifest=manifest)
         hosts.append(host)
         await start_without_io(host, http=http)

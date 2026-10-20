@@ -38,8 +38,8 @@ def test_prefix_matches_contract():
 def test_the_two_spellings_of_one_outbound_id_are_the_same_value():
     """32 位 hex 和标准 uuid 是**同一个值的两种写法**，不是两个编号。
 
-    她眼前只会出现 hex 那一种（``app/living/snapshot.py`` 印「你刚做过、说过」，
-    ``app/living/phone.py`` 印她打开的会话里自己那几行），而库里
+    她眼前只会出现 hex 那一种（``app/living/her_records/`` 印「你刚做过、说过」，
+    ``app/living/phone/`` 印她打开的会话里自己那几行），而库里
     ``common_message.agent_outbound_id`` 是 uuid 列、存的是带短横那一种。中间那步换算
     错了不会报错：她照抄的编号查不到任何行，撤回只会说"没有这条"，看不出是写法错了。
     """

@@ -21,7 +21,7 @@
     能做到的只有读一程：处理函数 :func:`app.living.reading.files.read_a_round` 所在的模块连同它
     import 的一切，碰不到她的一轮（:mod:`app.living.life.moment`）；搬运那条路由的处理函数也一样；
   * ``app.living`` 的源码里一次都没有出现旧 chat 入站那几个名字；
-  * living 自己登记的钟只有对账那一条；她的轮次、日记和回看由宿主的钟给她的队列发信号。钟给出去
+  * 她的插件登记的钟只有对账那一条（speaking 插件）；她的轮次、日记和回看由宿主的钟给她的队列发信号。钟给出去
     的只有钟响的时刻：对账那条钟每一拍对一次这个进程泳道的账，她的队列收到的信号里也只有时刻
     （宿主造的 ``app.host.Signal``）——装不下内容的钟，天然没法当入站口用。
 
@@ -456,7 +456,7 @@ def test_no_living_module_ever_mentions_the_old_inbound_chain():
     )
 
 
-def test_the_only_clocks_are_livings_landing_and_her_wakes():
+def test_the_only_clocks_are_the_landing_and_her_wakes():
     """宿主上的钟只有对账那一条（speaking 插件登记）；她的轮次只由常规节奏和提前叫醒这两个来源的钟叫醒，日记、
     回看各由自己的钟叫醒，每人各一条队列。"""
     registered = _registered(LANE)

@@ -5,7 +5,7 @@
 ``dead_letters``。里面的几种消息也由 broker 自己造出来：泳道队列里过期的、被拒收的，都是 broker
 按这些参数送进不带后缀的那一条的，``x-death`` 头是 broker 写的。
 
-读书收件箱由 living 插件开设，通信机制照线上那样开始接收；读一程本身换成替身，只记下读了哪几程。
+读书收件箱由 reading 插件开设，通信机制照线上那样开始接收；读一程本身换成替身，只记下读了哪几程。
 """
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ async def _the_shared_dead_letter_was_never_taken(broker) -> None:  # noqa: F811
 
 @pytest.fixture
 async def reading_inbox(broker, messaging_db, living_db, app_host, monkeypatch):  # noqa: F811
-    """living 插件开好的读书收件箱在本进程的泳道上收消息。交回读一程的替身。"""
+    """reading 插件开好的读书收件箱在本进程的泳道上收消息。交回读一程的替身。"""
 
     async def find_persona(persona_id: str):
         return SimpleNamespace(persona_id=persona_id, display_name=RESIDENT_NAMES[persona_id])
