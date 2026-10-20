@@ -15,7 +15,8 @@ kind in one message listing every instance:
 
 Then it fills in each profile (:class:`app.agent.round.AssembledProfile`) with what is registered
 under its names, in the profile's order, and each agent (:class:`app.agent.round.AssembledAgent`)
-with the tools registered under the names its spec lists, in the spec's order.
+with the tools and segments registered under the names its spec lists, in the spec's order; each
+with the plugin that registered it, so what a switched-off plugin registered can be left out.
 """
 
 from __future__ import annotations
@@ -146,19 +147,21 @@ def assemble(
             Placed(n, one[(kind, n)].plugin, one[(kind, n)].value) for n in names
         )
 
+    def segments(names: tuple[str, ...]) -> dict[str, Placed]:
+        return {p.name: p for p in at("segment", names)}
+
     for agent in agents.values():
         agent.tools = at("tool", agent.spec.tools)
+        agent.segments = segments(agent.spec.segments)
         agent.assembled = True
     for profile_name, assembled in profiles.items():
         profile = manifest.profiles[profile_name]
-        agents = {n: manifest.agents[n] for n in (profile.agent, *profile.sub_agents)}
+        specs = {n: manifest.agents[n] for n in (profile.agent, *profile.sub_agents)}
         assembled.lane = lane
-        assembled.agents = agents
-        assembled.segments = {
-            s: one[("segment", s)].value
-            for spec in agents.values()
-            for s in spec.segments
-        }
+        assembled.agents = specs
+        assembled.segments = segments(
+            tuple(dict.fromkeys(s for spec in specs.values() for s in spec.segments))
+        )
         assembled.tools = at("tool", profile.tools)
         assembled.round_start = at("round_start", profile.round_start)
         assembled.state = at("section", profile.state)

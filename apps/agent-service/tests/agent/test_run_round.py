@@ -11,13 +11,16 @@ prompt object; the transaction and the history store are in-memory stand-ins.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from langfuse._client.attributes import LangfuseOtelSpanAttributes as Attr
 from langfuse.api import Prompt_Text
 from langfuse.model import TextPromptClient
 
@@ -163,6 +166,10 @@ def _step(log: list[str], name: str, *, fails: bool = False):
     return step
 
 
+def _placed(name: str, value: Any, plugin: str = "life") -> Placed:
+    return Placed(name=name, plugin=plugin, value=value)
+
+
 def _profile(**parts: Any) -> AssembledProfile:
     profile = parts.pop("profile", Profile(agent="main"))
     return AssembledProfile(
@@ -170,15 +177,13 @@ def _profile(**parts: Any) -> AssembledProfile:
         name="resident",
         profile=profile,
         lane="coe-test",
-        agents={"main": MAIN},
-        segments={"main": Segment("main", "main")},
+        agents=parts.pop("agents", {"main": MAIN}),
+        segments=parts.pop(
+            "segments", {"main": _placed("main", Segment("main", "main"))}
+        ),
         assembled=True,
         **parts,
     )
-
-
-def _placed(name: str, value: Any, plugin: str = "life") -> Placed:
-    return Placed(name=name, plugin=plugin, value=value)
 
 
 async def _run(profile: AssembledProfile, **kw: Any):
@@ -707,6 +712,51 @@ async def test_the_switches_are_read_the_same_way_where_no_round_runs(config, ca
     config.values["round_sources"] = " "
     assert await switched_off(SWITCHES) == frozenset()
     assert await switched_off(None) == frozenset()
+
+
+def _with_a_tides_segment() -> AssembledProfile:
+    """The main agent's prompt is its own segment (life) and the tide's (tides)."""
+    return _profile(
+        profile=Profile(agent="main", switches=SWITCHES),
+        agents={"main": replace(MAIN, segments=("main", "tides"))},
+        segments={
+            "main": _placed("main", Segment("main", "main")),
+            "tides": _placed("tides", Segment("tides", "tides"), plugin="tides"),
+        },
+    )
+
+
+def _prompt_segments(exported_spans) -> list[dict[str, Any]]:
+    """The segments the main agent's call recorded on its root span."""
+    key = f"{Attr.OBSERVATION_METADATA}.prompt_segments"
+    (recorded,) = [
+        s.attributes[key]
+        for s in exported_spans.get_finished_spans()
+        if key in s.attributes
+    ]
+    return [segment["prompt_id"] for segment in json.loads(recorded)]
+
+
+async def test_a_switched_off_plugins_segment_leaves_the_system_text_and_the_trace(
+    model, transactions, config, exported_spans
+):
+    config.values["round_sources"] = "weather"
+
+    await _run(_with_a_tides_segment())
+
+    ((messages, _tools),) = model.requests
+    assert messages[0].content == "你是 main。"
+    assert _prompt_segments(exported_spans) == ["main"]
+
+
+async def test_with_its_plugin_on_a_segment_is_joined_and_recorded(
+    model, transactions, config, exported_spans
+):
+    await _run(_with_a_tides_segment())
+
+    ((messages, _tools),) = model.requests
+    assert messages[0].content == "你是 main。\n\n你是 tides。"
+    assert _prompt_segments(exported_spans) == ["main", "tides"]
 
 
 async def test_trimming_counts_a_switched_off_plugins_tools_as_material(

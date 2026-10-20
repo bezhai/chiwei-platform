@@ -274,7 +274,8 @@ class RoundLog:
 class AssembledProfile:
     """A profile as the host assembled it: each name the manifest lists replaced by what a plugin
     registered under it, in the profile's order (``profile`` keeps the names). ``agents`` are the
-    main agent and its sub-agents, ``segments`` every segment they list, ``lane`` the process's.
+    main agent and its sub-agents, ``segments`` every segment they list (with the plugin that
+    registered it, so a switched-off plugin's are left out), ``lane`` the process's.
 
     The host creates it when a plugin asks for the profile in its setup (``ctx.profile``) and fills
     it in once every plugin has registered, before any IO; :func:`run_round` refuses one it has not
@@ -285,7 +286,7 @@ class AssembledProfile:
     profile: Profile
     lane: str = ""
     agents: Mapping[str, AgentSpec] = field(default_factory=dict)
-    segments: Mapping[str, Segment] = field(default_factory=dict)
+    segments: Mapping[str, Placed[Segment]] = field(default_factory=dict)
     tools: tuple[Placed[ToolSpec], ...] = ()
     round_start: tuple[Placed[Step], ...] = ()
     state: tuple[Placed[Section], ...] = ()
@@ -302,6 +303,9 @@ class AssembledAgent:
     """An agent of the manifest as the host assembled it, for the code that calls it: its spec, and
     the tools its spec lists replaced by what a plugin registered under them, in the spec's order
     (``spec`` keeps the names). A participant's main agent takes its tools from its profile instead.
+    ``segments`` are the segments its spec lists, as their plugins registered them: what a call
+    outside any round resolves its prompt from (:meth:`app.agent.prompts.PromptSet.resolve`,
+    with what is switched off).
 
     The host creates it when a plugin asks for the agent in its setup (``ctx.agent``) and fills it
     in once every plugin has registered, before any IO; :meth:`tools_on` refuses one it has not
@@ -311,6 +315,7 @@ class AssembledAgent:
     name: str
     spec: AgentSpec
     tools: tuple[Placed[ToolSpec], ...] = ()
+    segments: Mapping[str, Placed[Segment]] = field(default_factory=dict)
     assembled: bool = False
 
     def tools_on(self, switched_off: frozenset[str]) -> list[ToolSpec]:

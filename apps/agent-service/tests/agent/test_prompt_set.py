@@ -31,7 +31,7 @@ from langfuse.model import ChatPromptClient, TextPromptClient
 from app.agent.contracts import AgentSpec, Segment
 from app.agent.neutral import Role
 from app.agent.prompts import PromptConfigError, PromptSet
-from app.agent.round import Round
+from app.agent.round import Placed, Round
 from app.infra.cst_time import CST
 from app.infra.propagation import Context, bind_context
 
@@ -89,7 +89,7 @@ def _agent(*segments: str) -> AgentSpec:
     return AgentSpec(segments=segments, model="m", trace_name="t")
 
 
-def _round() -> Round:
+def _round(switched_off: frozenset[str] = frozenset()) -> Round:
     return Round(
         app="agent-service",
         lane="coe-living",
@@ -99,6 +99,7 @@ def _round() -> Round:
         now=datetime(2026, 7, 25, 14, tzinfo=CST),
         reason="test",
         due=object(),
+        switched_off=switched_off,
     )
 
 
@@ -376,6 +377,85 @@ async def test_a_chat_prompt_is_a_segment_of_its_own(langfuse):
 
     with pytest.raises(ValueError, match="chat"):
         await PromptSet.resolve({"guard": _agent("guard", "rules")}, segments, None)
+
+
+# ---------------------------------------------------------------------------
+# switched off (a plugin's segment leaves the prompt with its plugin)
+# ---------------------------------------------------------------------------
+
+
+def _three_plugins(langfuse) -> dict[str, Placed[Segment]]:
+    """Her identity and rules (life) and the tide (tides), as the plugins registered them. The
+    tide's template declares a variable its segment does not give: checking it would fail."""
+    langfuse.prompts[("identity", "production")] = _text("identity", "你是赤尾。")
+    langfuse.prompts[("tide", "production")] = _text("tide", "潮水：{{tide}}。")
+    langfuse.prompts[("rules", "production")] = _text("rules", "规则。")
+    return {
+        "identity": Placed("identity", "life", Segment("identity", "identity")),
+        "tide": Placed("tide", "tides", Segment("tide", "tide")),
+        "rules": Placed("rules", "life", Segment("rules", "rules")),
+    }
+
+
+async def test_a_switched_off_plugins_segment_is_not_fetched_checked_or_rendered(
+    langfuse,
+):
+    segments = _three_plugins(langfuse)
+
+    prompts = await PromptSet.resolve(
+        {"moment": _agent("identity", "tide", "rules")},
+        segments,
+        _round(switched_off=frozenset({"tides"})),
+    )
+
+    assert [m.content for m in prompts.messages("moment")] == ["你是赤尾。\n\n规则。"]
+    assert prompts.versions("moment") == [
+        ("identity", "production", 1),
+        ("rules", "production", 1),
+    ]
+    assert ("tide", None) not in langfuse.fetched
+
+
+async def test_outside_a_round_the_caller_says_which_plugins_are_off(langfuse):
+    segments = _three_plugins(langfuse)
+
+    prompts = await PromptSet.resolve(
+        {"answer": _agent("identity", "tide", "rules")},
+        segments,
+        None,
+        switched_off=frozenset({"tides"}),
+    )
+
+    assert [m.content for m in prompts.messages("answer")] == ["你是赤尾。\n\n规则。"]
+
+
+async def test_with_every_plugin_on_a_registered_segment_renders_like_a_plain_one(
+    langfuse,
+):
+    segments = _three_plugins(langfuse)
+    langfuse.prompts[("tide", "production")] = _text("tide", "潮水正在涨。")
+
+    registered = await PromptSet.resolve(
+        {"moment": _agent("identity", "tide", "rules")}, segments, _round()
+    )
+    plain = await PromptSet.resolve(
+        {"moment": _agent("identity", "tide", "rules")},
+        {name: p.value for name, p in segments.items()},
+        None,
+    )
+
+    assert registered.messages("moment") == plain.messages("moment")
+    assert registered.versions("moment") == plain.versions("moment")
+
+
+async def test_a_round_brings_its_own_switches(langfuse):
+    with pytest.raises(ValueError, match="switched_off"):
+        await PromptSet.resolve(
+            {"moment": _agent("identity")},
+            _three_plugins(langfuse),
+            _round(),
+            switched_off=frozenset({"tides"}),
+        )
 
 
 async def test_an_agent_listing_a_segment_nobody_registered_is_a_code_error(langfuse):

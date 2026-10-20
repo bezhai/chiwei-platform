@@ -22,7 +22,13 @@ from langfuse.model import TextPromptClient
 from app.agent.client import ModelClient
 from app.agent.contracts import AgentSpec, Continue, Profile, Segment
 from app.agent.neutral import Message, Role, ToolDef
-from app.agent.round import AssembledAgent, AssembledProfile, Round, run_round
+from app.agent.round import (
+    AssembledAgent,
+    AssembledProfile,
+    Placed,
+    Round,
+    run_round,
+)
 from app.agent.tooling import tool
 from app.host import (
     App,
@@ -216,7 +222,9 @@ async def test_the_profile_a_plugin_asks_for_is_filled_in_when_the_host_starts()
             ("stop_for_now", "life"),
         ]
         assert assembled.agents == {"main": MAIN}
-        assert assembled.segments == {"main": Segment("main", "main")}
+        assert assembled.segments == {
+            "main": Placed("main", "life", Segment("main", "main"))
+        }
         assert assembled.lane == "prod"
     finally:
         await host.stop()
@@ -267,6 +275,9 @@ async def test_the_agent_a_plugin_asks_for_is_filled_in_with_its_tools_when_the_
         assert [t.tool.name for t in helper.tools_on(frozenset({"weather"}))] == [
             "look_around"
         ]
+        assert helper.segments == {
+            "helper": Placed("helper", "life", Segment("helper", "helper"))
+        }
     finally:
         await host.stop()
 

@@ -9,6 +9,13 @@ a configuration error (:class:`PromptConfigError`), raised before any model is c
 the template declares counts, ``{{...}}`` inside a value is text.
 A segment whose values are worked out from the round (``Segment.values``) gets them here.
 
+**A switched-off plugin's segments are left out** (spec decision 8): a segment given as its plugin
+registered it (:class:`app.agent.round.Placed`, as a round's profile and an assembled agent give
+them) whose plugin is switched off for the round (``Round.switched_off``), or for a call outside
+any round (what its caller passes), is not fetched, not checked and not rendered; its agents are
+rendered from the rest of their segments, in their order. A segment given on its own (a call that
+builds its one segment itself) belongs to no plugin that can be switched off.
+
 **Rendering** (:meth:`PromptSet.messages`): an agent's text segments are compiled in its order
 and joined by a blank line into one SYSTEM message, so splitting a prompt at a blank line between
 two sections and rendering the pieces gives back the same text byte for byte. A chat prompt is a
@@ -41,7 +48,7 @@ from app.infra.config import settings
 from app.infra.propagation import current_context
 
 if TYPE_CHECKING:
-    from app.agent.round import Round
+    from app.agent.round import Placed, Round
 
 logger = logging.getLogger(__name__)
 
@@ -179,28 +186,47 @@ class PromptSet:
     async def resolve(
         cls,
         agents: Mapping[str, AgentSpec],
-        segments: Mapping[str, Segment],
+        segments: Mapping[str, Segment | Placed[Segment]],
         round: Round | None,
         *,
         participant: str | None = None,
+        switched_off: frozenset[str] = frozenset(),
     ) -> PromptSet:
-        """Fetch and check every segment of ``agents`` (by name). A template that does not declare
-        exactly its segment's variables raises :class:`PromptConfigError`, after an ERROR log
-        line and a count of ``prompt_config_errors_total`` for the participant the set is
-        resolved for: the round's, or ``participant`` for a call outside any round. A segment
-        nobody registered, a chat prompt listed with other segments, or values worked out from
-        the round when there is no round, is a code error (``ValueError``)."""
+        """Fetch and check every segment of ``agents`` (by name) that is not left out (see the
+        module docstring): a plugin is switched off when the round's ``switched_off`` names it, or,
+        for a call outside any round, ``switched_off``. A template that does not declare exactly
+        its segment's variables raises :class:`PromptConfigError`, after an ERROR log line and a
+        count of ``prompt_config_errors_total`` for the participant the set is resolved for: the
+        round's, or ``participant`` for a call outside any round. A segment nobody registered, a
+        chat prompt listed with other segments, values worked out from the round when there is no
+        round, or ``switched_off`` given with a round (which has its own), is a code error
+        (``ValueError``)."""
+        if round is not None and switched_off:
+            raise ValueError(
+                "a round's switched-off plugins are its own (Round.switched_off); "
+                "switched_off is for a call outside any round"
+            )
+        off = round.switched_off if round is not None else switched_off
         resolved: dict[str, _Resolved] = {}
+        by_agent: dict[str, tuple[_Resolved, ...]] = {}
         for agent, spec in agents.items():
+            names = []
             for name in spec.segments:
-                if name in resolved:
-                    continue
                 try:
-                    segment = segments[name]
+                    given = segments[name]
                 except KeyError:
                     raise ValueError(
                         f"agent {agent!r} lists segment {name!r}, which nobody registered"
                     ) from None
+                if isinstance(given, Segment):
+                    segment = given
+                elif given.plugin in off:
+                    continue
+                else:
+                    segment = given.value
+                names.append(name)
+                if name in resolved:
+                    continue
                 prompt, label = await asyncio.to_thread(_fetch, segment.prompt_id)
                 wanted, declared = frozenset(segment.variables), _declared(prompt)
                 if declared != wanted:
@@ -238,7 +264,7 @@ class PromptSet:
                             f"not its variables {sorted(wanted)}"
                         )
                 resolved[name] = _Resolved(segment, prompt, label, values)
-            parts = [resolved[name] for name in spec.segments]
+            parts = [resolved[name] for name in names]
             if len(parts) > 1 and any(
                 isinstance(p.prompt, ChatPromptClient) for p in parts
             ):
@@ -246,12 +272,8 @@ class PromptSet:
                     f"agent {agent!r}: a chat prompt is a segment of its own, "
                     f"not one of {list(spec.segments)}"
                 )
-        return cls(
-            {
-                agent: tuple(resolved[n] for n in spec.segments)
-                for agent, spec in agents.items()
-            }
-        )
+            by_agent[agent] = tuple(parts)
+        return cls(by_agent)
 
     def messages(
         self, agent: str, values: Mapping[str, str] | None = None
