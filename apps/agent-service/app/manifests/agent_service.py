@@ -85,6 +85,8 @@ MANIFEST = App(
         "app.living.household",
         "app.living.speaking",
         "app.living.reading",
+        "app.living.day_page",
+        "app.living.persona_review",
         "app.living.web",
         "app.living.guides",
         "app.plugins.living",

@@ -1113,11 +1113,6 @@ async def _snapshot(round: Round) -> MomentSnapshot:
     return front.snapshot
 
 
-async def day_page_section(round: Round) -> str:
-    """状态：她上一次写下的那一天。"""
-    return (await _snapshot(round)).render_day_page()
-
-
 async def now_section(round: Round) -> str:
     """输入：几点了、离上一次隔了多久。"""
     return (await _snapshot(round)).render_now(round.previous_at)

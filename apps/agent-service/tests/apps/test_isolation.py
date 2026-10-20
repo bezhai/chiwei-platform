@@ -81,6 +81,8 @@ def test_the_agent_service_app_loads_its_own_plugins():
         "household",
         "speaking",
         "reading",
+        "day_page",
+        "persona_review",
         "web",
         "guides",
         "living",

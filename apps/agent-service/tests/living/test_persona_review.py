@@ -29,9 +29,9 @@ import pytest
 from app.data.persist import insert_idempotent
 from app.data.tx import current_session, tx
 from app.host import Signal
-from app.living.day_page import LivingDayPage
+from app.living.day_page.pages import LivingDayPage
 from app.living.persona.chain import PersonaChain, PersonaVersion
-from app.living.persona_review import (
+from app.living.persona_review.review import (
     PERSONA_REVIEW_FROM,
     PERSONA_REVIEW_UNTIL,
     last_full_week,
@@ -39,7 +39,14 @@ from app.living.persona_review import (
 )
 from app.living.services import PersonaText
 from tests.data.read_back import all_versions
-from tests.living.conftest import Calls, clock_at, her_queue, her_round_runs, settled
+from tests.living.conftest import (
+    Calls,
+    clock_at,
+    her_diary,
+    her_queue,
+    her_round_runs,
+    settled,
+)
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -64,10 +71,11 @@ CHAIN = PersonaChain()
 
 
 def _reviews():
-    """每周回看这个唤醒来源，跟 living 插件给她登记的一样（:mod:`app.plugins.living`）。"""
-    from app.plugins.living import persona_review
+    """每周回看这个唤醒来源，跟 persona_review 插件给她登记的一样（:mod:`app.living.persona_review`）：
+    那一周的几页从 ``day_pages`` 服务（day_page 插件对象）读。"""
+    from app.living.persona_review import persona_review_wake
 
-    return persona_review(LANE, CHAIN)
+    return persona_review_wake(LANE, CHAIN, her_diary())
 
 
 async def _tick(at: dt.datetime, persona_id: str = "akao") -> PersonaText | None:
@@ -121,7 +129,7 @@ def stub_review(monkeypatch, models):
 
     def install(said: str = "她这周开始每天写一页，好像有点上瘾。") -> Calls:
         runner = Calls(said=said)
-        from app.living import persona_review as review_mod
+        from app.living.persona_review import review as review_mod
 
         models[review_mod.PERSONA_REVIEW_PROMPT_ID] = runner.client
         return runner
@@ -194,7 +202,11 @@ async def test_only_last_weeks_pages_are_material(review_db):
     await _page("akao", dt.date(2026, 9, 7), "本周一那页。")
 
     pages = await week_material(
-        lane=LANE, persona_id="akao", since=_LAST_MONDAY, until=_THIS_MONDAY
+        lane=LANE,
+        persona_id="akao",
+        since=_LAST_MONDAY,
+        until=_THIS_MONDAY,
+        day_pages=her_diary(),
     )
 
     assert [p.day for p in pages] == [
@@ -505,11 +517,11 @@ async def test_sisters_do_not_share_a_week(review_db, stub_review):
 
 
 async def test_each_sister_has_a_review_queue_the_clock_signals_every_five_minutes(app_host):
-    """living 给三姐妹每人登记一条回看队列（占用上限 900 秒），回看的钟每 5 分钟给它发一个信号；
+    """persona_review 插件给三姐妹每人登记一条回看队列（占用上限 900 秒），回看的钟每 5 分钟给它发一个信号；
     每个信号都排队（``QUEUE_EACH``）。它和她的轮次、她的日记都不在一条队列上。忘了登记的症状是
     静默的：模块写好了、测试全绿，而线上一版都不会有。"""
     from app.host import Coalesce
-    from app.living.persona_review import write_due_review
+    from app.living.persona_review.review import write_due_review
     from tests.living.conftest import her_residents
 
     host = await app_host("agent-service")
@@ -524,7 +536,7 @@ async def test_each_sister_has_a_review_queue_the_clock_signals_every_five_minut
         (w.plugin, w.detail["turns"].participant, w.detail["turns"].line, w.detail["every"])
         for w in wakes
     ) == sorted(
-        ("living", p, "persona-review", dt.timedelta(minutes=5)) for p in her_residents()
+        ("persona_review", p, "persona-review", dt.timedelta(minutes=5)) for p in her_residents()
     )
     for w in wakes:
         assert w.detail["turns"] is queues[f"{w.detail['turns'].participant}/persona-review"]

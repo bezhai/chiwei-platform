@@ -447,8 +447,8 @@ def test_the_only_clocks_are_livings_landing_and_her_wakes():
                 for persona in ("akao", "ayana", "chinagi")
             ),
             *(
-                ["living", f"{line} -> {persona}/{line}"]
-                for line in ("day-page", "persona-review")
+                [plugin, f"{line} -> {persona}/{line}"]
+                for plugin, line in (("day_page", "day-page"), ("persona_review", "persona-review"))
                 for persona in ("akao", "ayana", "chinagi")
             ),
         ]

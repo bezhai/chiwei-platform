@@ -17,7 +17,8 @@
 
 还有一层「挂着没了结的事」由 loose_ends 插件自己读、自己摆（:mod:`app.living.loose_ends.mind`）；
 「手上正在做的事」「她刚做过 / 说过」两层由 her_records 插件自己读、自己摆
-（:mod:`app.living.her_records.book`）。这里只剩上一次写下的那天和"现在"。
+（:mod:`app.living.her_records.book`）；「上一次写下的那天」由 day_page 插件自己读、自己摆
+（:meth:`app.living.day_page.pages.Diary.last_written_section`）。这里只剩"现在"。
 
 **几层全是她自己的。** 别人做了什么、说了什么，不从这里读：谁会察觉由 world 判断后告诉她，
 姐妹对她说的话直接送到她那里，都进她的收件箱，那一段由 :mod:`app.living.household.received` 读、由
@@ -31,7 +32,7 @@
 **这几层分两半送，因为她的上下文是连续的。** 每层一段，各是她一轮里的一个状态段或输入段
 （:mod:`app.living.moment` 摆进去，清单 ``resident`` 定顺序）：
 
-  * **她此刻的样子**：上一次写下的那天（:meth:`MomentSnapshot.render_day_page`）、刚做过说过
+  * **她此刻的样子**：上一次写下的那天（:meth:`app.living.day_page.pages.Diary.last_written_section`）、刚做过说过
     什么（:meth:`app.living.her_records.book.OwnRecords.recent_section`）。读一百遍字字一样，所以每轮重发就是把同一段话
     抄一遍。只在清理那一下作为新起点重铺（:func:`app.agent.continuity.trim_for_round`），默认
     一小时一次。「刚做过说过什么」那段只在这份历史接不住她最近说过的话时才带（上下文是空的、
@@ -45,7 +46,7 @@
 唯一但决定性的区别：一条原始记录都没被动过，那一页是她另写的一份东西（见
 :mod:`app.living.day_page`）。少了它她跨不过一天——上面几层全是"当下"，滚出窗口的
 东西没有任何一层接得住。这里只负责读和摆，"读哪一页"那条严格早于当前生活日的判据在
-:func:`~app.living.day_page.read_day_page_before` 里。
+:func:`~app.living.day_page.pages.read_day_page_before` 里。
 
 **"她刚做过、说过"那层为什么必须单独存在**：她的上下文会被裁剪，传到她这里的消息也只摆
 一次。上下文连着的时候她说过的话就在上下文里；上下文是空的、断过、上一轮没存下来的那一
@@ -59,7 +60,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from app.infra.cst_time import to_cst_full
-from app.living.day_page import LivingDayPage, living_day_of, read_day_page_before
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,6 @@ class MomentSnapshot:
     lane: str
     persona_id: str
     now: datetime
-    day_page: LivingDayPage | None
 
     # -- 这一轮的实况 ----------------------------------------------------
 
@@ -92,28 +91,6 @@ class MomentSnapshot:
             return f"{now}，上一次就在刚才。"
         return f"{now}，离上一次过了 {_gap(gap)}。"
 
-    # -- 她此刻的样子 ----------------------------------------------------
-    #
-    # 每段空的时候如实说空，不留白洞。**不带时刻**：界桩自己头上就印着这次清理的时刻，这里
-    # 再报一次就是同一份输入里两个"现在"，而且两个数还不一样（界桩取整点，这一轮的 ``now``
-    # 不是）。
-
-    def render_day_page(self) -> str:
-        """她上一次写下的那一天。它是背景，不是此刻正在发生的事。
-
-        **日子必须印出来，而且"昨天"这个词只在真的是昨天时才用。** 服务停过几天、
-        某天她一个字都没写下的时候，最近的一页可能是三天前的；把它说成"昨天"是往她
-        眼前塞一句假话，而她会拿它当今天的前一天去接因果。
-        """
-        if self.day_page is None:
-            return "你上一次写下的那一天：（还没有）"
-        when = self.day_page.day.strftime("%m-%d")
-        if self.day_page.day == living_day_of(self.now) - timedelta(days=1):
-            head = f"昨天（{when}）你写下的："
-        else:
-            head = f"你上一次写下的是 {when}："
-        return f"{head}\n{self.day_page.text}"
-
 
 def _gap(delta: timedelta) -> str:
     """一段时长摆成她读得懂的样子：``10 分钟`` / ``4 小时`` / ``4 小时 30 分钟``。"""
@@ -127,17 +104,5 @@ def _gap(delta: timedelta) -> str:
 async def read_snapshot(
     *, lane: str, persona_id: str, now: datetime
 ) -> MomentSnapshot:
-    """读她这一轮自己的那几层。各层各读各的，谁也不裁谁。
-
-    日记那一页按 ``day < 当前生活日`` 取最新的一页，**不是"最新一页"**：她凌晨写下
-    的那页写的是刚过去那一天，而写完的那一刻已经属于新的生活日了。理由和它错了的样子
-    写在 :func:`~app.living.day_page.read_day_page_before` 里。
-    """
-    return MomentSnapshot(
-        lane=lane,
-        persona_id=persona_id,
-        now=now,
-        day_page=await read_day_page_before(
-            lane=lane, persona_id=persona_id, day=living_day_of(now)
-        ),
-    )
+    """她这一轮自己的那一层：几点了、离上一次隔了多久。"""
+    return MomentSnapshot(lane=lane, persona_id=persona_id, now=now)

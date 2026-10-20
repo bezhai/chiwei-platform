@@ -48,7 +48,7 @@ from app.agent.contracts import AgentSpec, Segment
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
-from app.agent.round import open_call
+from app.agent.round import Round, open_call
 from app.agent.trace import collect_usage
 from app.data.persist import fetch_all, fetch_one, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
@@ -255,7 +255,7 @@ async def read_day_pages_between(
     """``[since, until)`` 这段日子里她写下的每一页，**按 ``day`` 升序**；一页都没有
     返回空列表。
 
-    每周回看（:mod:`app.living.persona_review`）读的就是这个：一整周的日记原文按她
+    每周回看（:mod:`app.living.persona_review`，经 ``day_pages`` 服务）读的就是这个：一整周的日记原文按她
     过日子的顺序摆到她眼前。
 
     **右开**跟 :func:`read_day_page_before` 的"严格早于"是同一条理由：调用方给的
@@ -339,7 +339,7 @@ async def day_page_due(
       2. **那天什么都没发生**（材料一行都没有）就返回：那是服务根本没跑的一天，不该有那一页，
          更不该为一片空白叫一次模型。
 
-    判和写在她日记队列上的同一次轮次里（:mod:`app.plugins.living`）：两拍打到同一个人时，各自读到
+    判和写在她日记队列上的同一次轮次里（:mod:`app.living.day_page`）：两拍打到同一个人时，各自读到
     "这天还没写"就会双双烧一次模型，最后还有一条被 ``insert_idempotent`` 丢掉。队列上每一拍都
     排队，轮到时再判一遍。
     """
@@ -446,3 +446,49 @@ async def write_due_page(due: DuePage, *, persona: Persona) -> LivingDayPage | N
         page.text,
     )
     return page
+
+
+# ---------------------------------------------------------------------------
+# 插件对象：她一轮里"上一次写下的那一天"那一段、day_pages 服务、写一页要用的服务
+# ---------------------------------------------------------------------------
+
+
+class Diary:
+    """day_page 插件对象：她一轮里"上一次写下的那一天"那一段，和 ``day_pages`` 服务
+    （:class:`app.living.services.DayPages`，每周回看经它读一周的日记）。写一页时她是谁问 ``persona``
+    服务，那一天她做过、说过的问 ``her_records`` 服务，传到她这里的问 ``received`` 服务。不带状态。"""
+
+    def __init__(self, *, persona: Persona, her_records: HerRecords, received: Received) -> None:
+        self.persona = persona
+        self.her_records = her_records
+        self.received = received
+
+    async def between(
+        self, *, lane: str, persona_id: str, since: date, until: date
+    ) -> list[LivingDayPage]:
+        """``[since, until)`` 这段日子里她写下的每一页，按日子升序（:func:`read_day_pages_between`）。"""
+        return await read_day_pages_between(
+            lane=lane, persona_id=persona_id, since=since, until=until
+        )
+
+    async def last_written_section(self, round: Round) -> str:
+        """状态：她上一次写下的那一天。它是背景，不是此刻正在发生的事。
+
+        读的是**严格早于**当前生活日的最新一页（:func:`read_day_page_before`，理由写在那儿）。
+
+        **日子必须印出来，而且"昨天"这个词只在真的是昨天时才用。** 服务停过几天、某天她一个字都没
+        写下的时候，最近的一页可能是三天前的；把它说成"昨天"是往她眼前塞一句假话，而她会拿它当今天的
+        前一天去接因果。空的时候如实说空，不留白洞；**不带时刻**：界桩自己头上就印着这次清理的时刻。
+        """
+        today = living_day_of(round.now)
+        page = await read_day_page_before(
+            lane=round.lane, persona_id=round.participant, day=today
+        )
+        if page is None:
+            return "你上一次写下的那一天：（还没有）"
+        when = page.day.strftime("%m-%d")
+        if page.day == today - timedelta(days=1):
+            head = f"昨天（{when}）你写下的："
+        else:
+            head = f"你上一次写下的是 {when}："
+        return f"{head}\n{page.text}"

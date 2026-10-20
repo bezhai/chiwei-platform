@@ -91,6 +91,20 @@ def her_mailbox(residents=None, her_records=None):
     return Mailbox(residents=names, her_records=her_records or own_records(names))
 
 
+def her_diary(her_records=None, received=None):
+    """``day_pages`` 服务：day_page 插件对象本身（不带状态，读写的是用例的库）。「她是谁」是 persona
+    插件对象，``her_records``、``received`` 默认是 :func:`own_records`、:func:`her_mailbox`。"""
+    from app.living.day_page.pages import Diary
+    from app.living.persona.chain import PersonaChain
+
+    records = her_records or own_records()
+    return Diary(
+        persona=PersonaChain(),
+        her_records=records,
+        received=received or her_mailbox(her_records=records),
+    )
+
+
 async def receive(message) -> None:
     """一条消息进了她的收件箱：跟三姐妹收件箱的处理函数一样存下
     （:func:`app.living.household.received.receive`），收件人按读好的名字认。"""
@@ -392,7 +406,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
         CommonUser,
     )
     from app.domain.session_transcript import SessionTranscript
-    from app.living.day_page import LivingDayPage
+    from app.living.day_page.pages import LivingDayPage
     from app.living.her_records.records import Happening, Whereabouts
     from app.living.household.outgoing import (
         OutgoingMessage,
@@ -406,8 +420,8 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     from app.living.speaking.mouth import SpokenOutbound
     from tests.runtime.conftest import migrate
 
-    # ``LivingDayPage`` 跟手机那几张一样建在这里：**每一轮都读那一页**（``read_snapshot``
-    # 把它当第二段摆给她），任何跑她一轮或 ``read_snapshot`` 的用例都要用到，
+    # ``LivingDayPage`` 跟手机那几张一样建在这里：**每一轮都读那一页**（day_page 插件的
+    # ``day_page.last_written`` 那一段），任何跑她一轮的用例都要用到，
     # 各文件各建各的迟早会出现"这个文件建了那个没建"。``PersonaVersion`` 同一个理由：
     # 一轮、日记、开口三条路都要先问一遍"她是谁"（persona 服务读这条链）。
     # ``SessionTranscript`` 也是：每一轮开头读连续上下文、结尾写回下一版

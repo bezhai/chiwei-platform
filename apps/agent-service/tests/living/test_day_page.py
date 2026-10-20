@@ -25,8 +25,9 @@ import datetime as dt
 
 import pytest
 
+from app.agent.round import Round
 from app.host import Signal
-from app.living.day_page import (
+from app.living.day_page.pages import (
     DAY_PAGE_FROM,
     DAY_PAGE_UNTIL,
     LivingDayPage,
@@ -42,10 +43,10 @@ from app.living.her_records.whereabouts import note_whereabouts
 from app.living.household.received import ReceivedMessage
 from app.living.loose_ends.threads import LooseEnd
 from app.living.services import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, MEDIUM_PHONE
-from app.living.snapshot import read_snapshot
 from tests.living.conftest import (
     Calls,
     clock_at,
+    her_diary,
     her_mailbox,
     her_queue,
     her_round_runs,
@@ -67,12 +68,25 @@ def _on(day: int, hour: int, minute: int = 0) -> dt.datetime:
 
 
 def _day_pages():
-    """日记这个唤醒来源，跟 living 插件给她登记的一样（:mod:`app.plugins.living`）：「她是谁」从
+    """日记这个唤醒来源，跟 day_page 插件给她登记的一样（:mod:`app.living.day_page`）：「她是谁」从
     persona 服务取，传到她这里的从 received 服务取。"""
-    from app.living.persona.chain import PersonaChain
-    from app.plugins.living import day_page
+    from app.living.day_page import day_page_wake
 
-    return day_page(LANE, PersonaChain(), HER_RECORDS, RECEIVED)
+    return day_page_wake(LANE, her_diary(HER_RECORDS, RECEIVED))
+
+
+def _her_round(now: dt.datetime) -> Round:
+    """她在 ``now`` 那一轮（只有"上一次写下的那一天"那一段要用的那几样）。"""
+    return Round(
+        app="agent-service",
+        lane=LANE,
+        participant="akao",
+        profile="resident",
+        round_id=now.isoformat(timespec="minutes"),
+        now=now,
+        reason="常规节奏",
+        due=None,
+    )
 
 
 async def _tick(at: dt.datetime, persona_id: str = "akao") -> LivingDayPage | None:
@@ -97,7 +111,7 @@ def stub_page(monkeypatch, models):
     不碰真库的 persona。替身的 ``material`` 是最后一轮真的摆到她眼前的那段文字。"""
     from types import SimpleNamespace
 
-    from app.living import day_page as page_mod
+    from app.living.day_page import pages as page_mod
     from app.living.persona import chain as persona_mod
 
     async def fake_find_persona(persona_id: str):
@@ -191,7 +205,7 @@ def test_the_page_table_is_not_the_old_engines_day_page_table():
     只有真的部署到已经有那张旧表的库上才炸。所以把类名派生出来的表名钉在这里。
     """
     from app.data.schema import table_name
-    from app.living.day_page import _TABLE
+    from app.living.day_page.pages import _TABLE
 
     assert table_name(LivingDayPage) != _OLD_ENGINE_TABLE, (
         f"这个 Data 类派生出来的表名是 {_OLD_ENGINE_TABLE} —— 那是已删掉的旧引擎"
@@ -513,12 +527,9 @@ async def test_the_snapshot_carries_the_page_she_wrote(page_db, stub_page):
     stub_page("胶片摊了一茶几，绫奈说要下雨。")
     await _tick(_on(26, 4, 30))
 
-    snap = await read_snapshot(
-        lane=LANE, persona_id="akao", now=_on(26, 14)
-    )
+    shown = await her_diary().last_written_section(_her_round(_on(26, 14)))
 
-    assert snap.day_page is not None
-    assert "胶片摊了一茶几，绫奈说要下雨。" in snap.render_day_page()
+    assert "胶片摊了一茶几，绫奈说要下雨。" in shown
 
 
 @pytest.mark.integration
@@ -554,12 +565,9 @@ async def test_a_page_of_the_current_living_day_is_never_served_as_yesterday(
 @pytest.mark.integration
 async def test_with_no_page_yet_the_snapshot_says_so_plainly(page_db):
     """冷启动第一天一页都没有 —— 如实说空，不留白洞。"""
-    snap = await read_snapshot(
-        lane=LANE, persona_id="akao", now=_on(26, 14)
-    )
+    shown = await her_diary().last_written_section(_her_round(_on(26, 14)))
 
-    assert snap.day_page is None
-    assert snap.render_day_page().strip() != ""
+    assert shown.strip() != ""
 
 
 @pytest.mark.integration
@@ -569,11 +577,7 @@ async def test_a_page_older_than_yesterday_is_labelled_by_its_date(page_db, stub
     stub_page("07-25 这天。")
     await _tick(_on(26, 4, 30))
 
-    snap = await read_snapshot(
-        lane=LANE, persona_id="akao", now=_on(29, 14)
-    )
-
-    rendered = snap.render_day_page()
+    rendered = await her_diary().last_written_section(_her_round(_on(29, 14)))
     assert "07-25" in rendered
     assert "昨天" not in rendered, f"三天前那页被说成了昨天：{rendered}"
 
@@ -694,11 +698,11 @@ async def test_the_material_reaches_her_verbatim(page_db, stub_page):
 
 
 async def test_each_sister_has_a_day_page_queue_the_clock_signals_every_five_minutes(app_host):
-    """living 给三姐妹每人登记一条日记队列（占用上限 900 秒），日记的钟每 5 分钟给它发一个信号；
+    """day_page 插件给三姐妹每人登记一条日记队列（占用上限 900 秒），日记的钟每 5 分钟给它发一个信号；
     每个信号都排队（``QUEUE_EACH``）。它和她的轮次不在一条队列上，写日记不挡她过日子。忘了登记的
     症状是静默的：模块写好了、测试全绿，而线上一页都不会有。"""
     from app.host import Coalesce
-    from app.living.day_page import write_due_page
+    from app.living.day_page.pages import write_due_page
     from app.living.persona.chain import PersonaChain
     from tests.living.conftest import her_residents
 
@@ -713,7 +717,7 @@ async def test_each_sister_has_a_day_page_queue_the_clock_signals_every_five_min
     assert sorted(
         (w.plugin, w.detail["turns"].participant, w.detail["turns"].line, w.detail["every"])
         for w in wakes
-    ) == sorted(("living", p, "day-page", dt.timedelta(minutes=5)) for p in her_residents())
+    ) == sorted(("day_page", p, "day-page", dt.timedelta(minutes=5)) for p in her_residents())
     for w in wakes:
         assert w.detail["turns"] is queues[f"{w.detail['turns'].participant}/day-page"]
         assert w.detail["turns"].hold_limit == dt.timedelta(seconds=900)

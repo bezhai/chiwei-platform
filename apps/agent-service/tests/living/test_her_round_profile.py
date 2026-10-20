@@ -12,7 +12,7 @@ import datetime as dt
 from app.agent.continuity import HistoryView
 from app.agent.contracts import Continue, CostSpec
 from app.agent.round import Round, in_round
-from app.living.day_page import LivingDayPage
+from app.living.day_page.pages import LivingDayPage
 from app.living.her_records.records import Happening, Whereabouts
 from app.living.household.received import ReceivedMessage
 from app.living.loose_ends.threads import LooseEnd
@@ -73,6 +73,7 @@ def test_living_places_every_part_of_her_round_the_manifest_lists(resident):
         "loose_ends.just_due": "loose_ends",
         "her_records.recent": "her_records",
         "her_records.whereabouts": "her_records",
+        "day_page.last_written": "day_page",
         "phone.unread": "phone",
         "phone.arrived": "phone",
         "phone.glances": "phone",
@@ -111,19 +112,17 @@ _OWN_RECENT = [
 
 
 def _snapshot() -> MomentSnapshot:
-    return MomentSnapshot(
-        lane=LANE,
-        persona_id="akao",
-        now=NOW,
-        day_page=LivingDayPage(
-            lane=LANE,
-            persona_id="akao",
-            day=dt.date(2026, 7, 24),
-            text="胶片摊了一茶几，绫奈说要下雨。",
-            written_at=_at(4, 30),
-            happenings=3,
-        ),
-    )
+    return MomentSnapshot(lane=LANE, persona_id="akao", now=NOW)
+
+
+_DAY_PAGE = LivingDayPage(
+    lane=LANE,
+    persona_id="akao",
+    day=dt.date(2026, 7, 24),
+    text="胶片摊了一茶几，绫奈说要下雨。",
+    written_at=_at(4, 30),
+    happenings=3,
+)
 
 
 _OPEN_ENDS = [
@@ -185,11 +184,12 @@ _RECEIVED = [
 
 
 def _reads(
-    monkeypatch, *, snapshot, doing, own_recent, open_ends, envelopes, received
+    monkeypatch, *, snapshot, day_page, doing, own_recent, open_ends, envelopes, received
 ) -> dict[str, int]:
-    """这一轮读的六样（快照、她在哪、她刚做过说过的、心里挂着的、手机信封、收件箱）换成写死的，
-    并数每样读了几次。"""
+    """这一轮读的七样（快照、上一次写下的那一页、她在哪、她刚做过说过的、心里挂着的、手机信封、收件箱）
+    换成写死的，并数每样读了几次。"""
     from app.living import moment as moment_mod
+    from app.living.day_page import pages as pages_mod
     from app.living.her_records import book as book_mod
     from app.living.household import mailbox as mailbox_mod
     from app.living.loose_ends import mind as mind_mod
@@ -197,6 +197,7 @@ def _reads(
 
     reads = {
         "snapshot": 0,
+        "day_page": 0,
         "doing": 0,
         "own_recent": 0,
         "open_ends": 0,
@@ -224,6 +225,11 @@ def _reads(
         reads["snapshot"] += 1
         return snapshot
 
+    async def read_day_page_before(*, lane, persona_id, day):
+        assert (lane, persona_id, day) == (LANE, "akao", dt.date(2026, 7, 25))
+        reads["day_page"] += 1
+        return day_page
+
     async def envelopes_for(*, lane, persona_id, now, her_records):
         assert (lane, persona_id, now) == (LANE, "akao", NOW)
         reads["envelopes"] += 1
@@ -235,6 +241,7 @@ def _reads(
         return received
 
     monkeypatch.setattr(moment_mod, "read_snapshot", read_snapshot)
+    monkeypatch.setattr(pages_mod, "read_day_page_before", read_day_page_before)
     monkeypatch.setattr(book_mod, "current_whereabouts", current_whereabouts)
     monkeypatch.setattr(book_mod, "recent_own_happenings", recent_own_happenings)
     monkeypatch.setattr(mind_mod, "list_open_loose_ends", list_open_loose_ends)
@@ -288,6 +295,7 @@ async def test_a_round_whose_history_broke_shows_everything_section_by_section(
     reads = _reads(
         monkeypatch,
         snapshot=_snapshot(),
+        day_page=_DAY_PAGE,
         doing=_DOING,
         own_recent=_OWN_RECENT,
         open_ends=_OPEN_ENDS,
@@ -339,6 +347,7 @@ async def test_a_round_whose_history_broke_shows_everything_section_by_section(
     # 两段用的是同一次读到的清单。
     assert reads == {
         "snapshot": 1,
+        "day_page": 1,
         "doing": 1,
         "own_recent": 1,
         "open_ends": 1,
@@ -350,10 +359,11 @@ async def test_a_round_whose_history_broke_shows_everything_section_by_section(
 async def test_a_first_round_whose_history_continues_leaves_out_what_is_not_there(
     resident, monkeypatch
 ):
-    empty = MomentSnapshot(lane=LANE, persona_id="akao", now=NOW, day_page=None)
+    empty = MomentSnapshot(lane=LANE, persona_id="akao", now=NOW)
     _reads(
         monkeypatch,
         snapshot=empty,
+        day_page=None,
         doing=None,
         own_recent=[],
         open_ends=[],

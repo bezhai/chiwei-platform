@@ -65,6 +65,8 @@ def ticks(monkeypatch) -> dict[str, list[object]]:
     nothing. Returns what each recorder received, by clock or source name."""
     from datetime import timedelta
 
+    import app.living.day_page as day_page
+    import app.living.persona_review as persona_review
     import app.living.speaking as speaking
     import app.plugins.living as living
     from app.host import Coalesce, WakeSource
@@ -90,12 +92,12 @@ def ticks(monkeypatch) -> dict[str, list[object]]:
     monkeypatch.setattr(speaking, "LANDING_EVERY", timedelta(seconds=0.02))
     monkeypatch.setattr(living, "regular", recording("regular"))
     monkeypatch.setattr(living, "nudge", recording("nudge"))
-    monkeypatch.setattr(living, "day_page", recording("day-page"))
-    monkeypatch.setattr(living, "persona_review", recording("persona-review"))
+    monkeypatch.setattr(day_page, "day_page_wake", recording("day-page"))
+    monkeypatch.setattr(persona_review, "persona_review_wake", recording("persona-review"))
     monkeypatch.setattr(living, "REGULAR_EVERY", timedelta(seconds=0.02))
     monkeypatch.setattr(living, "NUDGE_EVERY", timedelta(seconds=0.02))
-    monkeypatch.setattr(living, "DAY_PAGE_EVERY", timedelta(seconds=0.02))
-    monkeypatch.setattr(living, "PERSONA_REVIEW_EVERY", timedelta(seconds=0.02))
+    monkeypatch.setattr(day_page, "DAY_PAGE_EVERY", timedelta(seconds=0.02))
+    monkeypatch.setattr(persona_review, "PERSONA_REVIEW_EVERY", timedelta(seconds=0.02))
     return seen
 
 

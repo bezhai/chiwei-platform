@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -443,6 +443,28 @@ class Received(Protocol):
 
     def line(self, letter: Letter) -> str:
         """收到的一条在她眼里的样子（她每一轮读到的、日记材料里摆的是同一个样子）。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# day_pages：她给每个生活日写下的那一页（day_page 插件提供）
+# ---------------------------------------------------------------------------
+
+
+class DayPage(Protocol):
+    """她给一个生活日写下的那一页，交给别的插件时读得到的样子。"""
+
+    day: date
+    text: str
+
+
+class DayPages(Protocol):
+    """她的日记：每个生活日她自己写下的一页。"""
+
+    async def between(
+        self, *, lane: str, persona_id: str, since: date, until: date
+    ) -> list[DayPage]:
+        """``[since, until)`` 这段日子里她写下的每一页，按日子升序；一页都没有返回空列表。"""
         ...
 
 

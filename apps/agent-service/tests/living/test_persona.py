@@ -635,9 +635,9 @@ async def test_the_persona_plugin_places_who_she_is_in_her_round(app_host):
 def test_no_other_living_module_reads_bot_persona_for_who_she_is():
     """喂人设进模型的路都经 persona 服务：一轮的「她是谁」段、写日记、每周回看。它们自己不查
     ``bot_persona`` —— 第二份人设组装就是这样长出来的。"""
-    from app.living import day_page as page_mod
     from app.living import moment as moment_mod
-    from app.living import persona_review as review_mod
+    from app.living.day_page import pages as page_mod
+    from app.living.persona_review import review as review_mod
 
     for mod in (moment_mod, page_mod, review_mod):
         assert not hasattr(mod, "find_persona"), (

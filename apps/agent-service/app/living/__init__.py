@@ -28,6 +28,11 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
     姐妹，从她存下的经历里取，没确认发出去的原样再发，只在她的轮次队列上发
   * :mod:`app.living.reading`     读别人发给她的文件（没有"书"这个注册物，她读得到的严格等于她看得见的）；
     读一程的 agent 只有一只往后翻页的手，读完揉出新印象
+  * :mod:`app.living.day_page`    跨天沉淀：每天凌晨她把刚过去那一天自己写成一页，之后每一轮都读得到
+    （不是机器折叠原文，原始记录一条不动；``day_pages`` 服务），一条自己的队列
+  * :mod:`app.living.persona_review` 每周回看：周一早上她读上一周自己写的那几页，重写一版「我是谁」进
+    版本链（周一没写成，同一周后面几天的早上再试）。锚是 ``bot_persona.persona_core`` 那个扁平列——不给
+    锚她就是在自我回流；一条自己的队列
   * :mod:`app.living.speaking`    嘴：把她写下的那句话发出去（**没有入口**），交出去之前过一道检查（禁用词
     和判词模型，坏了放行但记账）；撤回自己说过的话，按她自己台账上的编号指；渠道那边关于她这次开口的
     事实，事后按 id 取回来
@@ -41,11 +46,6 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
 她一直在推进（T2）+ 她对外说话（T4）——嘴在外面，收到什么都不会直接让她跑一轮：
 
   * :mod:`app.living.snapshot`    她进入这一轮时读到的东西：状态快照，不是历史回放
-  * :mod:`app.living.day_page`    跨天沉淀：每天凌晨她把刚过去那一天自己写成一页，
-    之后每一轮都读得到（不是机器折叠原文，原始记录一条不动）
-  * :mod:`app.living.persona_review` 每周回看：周一早上她读上一周自己写的那几页，
-    重写一版「我是谁」进版本链（周一没写成，同一周后面几天的早上再试）。锚是
-    ``bot_persona.persona_core`` 那个扁平列——不给锚她就是在自我回流
   * :mod:`app.living.moment`      她的醒来周期：默认「继续」，被带走时换的是一件事。
     她跨 moment 的连续上下文（键、阈值、素材表、写失败怎么算）也在这里，存取和裁剪的
     机制在基础层 :mod:`app.agent.continuity`
@@ -56,8 +56,8 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * **每个人只读她自己的记录。** 她做过的事、她在哪，只给她自己读；别人做了什么由 world
     判断谁会察觉后告诉她，或者姐妹直接对她说，都进她的收件箱。life 里没有一条按位置把别人
     的经历分给她的路（``tests/living/test_only_her_own_records.py`` 守着）。
-  * **占用是进程内的**：她的三条队列（轮次、日记、回看，:mod:`app.plugins.living` 向宿主登记的
-    :class:`app.host.Turns`）都只在一个进程里互斥，前提是 agent-service 单副本；滚动发布时新旧
+  * **占用是进程内的**：她的三条队列（轮次、日记、回看，:mod:`app.plugins.living`、
+    :mod:`app.living.day_page`、:mod:`app.living.persona_review` 向宿主登记的 :class:`app.host.Turns`）都只在一个进程里互斥，前提是 agent-service 单副本；滚动发布时新旧
     两个进程会重叠一段，这段时间里同一格可能被跑两次。
   * **游标按提交序。** 她的经历按提交序 ``seq`` 往外讲（:mod:`app.living.household.outgoing`）；按发生
     时刻开窗会漏掉晚提交的记录。

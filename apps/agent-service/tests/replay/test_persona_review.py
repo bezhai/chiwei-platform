@@ -30,7 +30,7 @@ import pytest
 from app.capabilities._errors import CapabilityTimeout
 from app.data.persist import insert_idempotent
 from app.infra.cst_time import CST
-from app.living.day_page import LivingDayPage
+from app.living.day_page.pages import LivingDayPage
 from tests.replay import seeds
 from tests.replay.harness import Fail, Reply
 from tests.replay.harness.prompts import config_errors

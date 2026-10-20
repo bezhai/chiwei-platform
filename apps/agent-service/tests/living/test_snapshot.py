@@ -42,7 +42,7 @@ from app.living.services import (
     OUTBOUND_HAPPENING_PREFIX,
 )
 from app.living.snapshot import read_snapshot
-from tests.living.conftest import own_records
+from tests.living.conftest import her_diary, own_records
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -87,6 +87,7 @@ async def _say(actor: str, content: str, at: dt.datetime, *, to=(), kind=KIND_SP
 # 那个对象，跟快照的几段拼在一起看她一轮里的样子。
 _MIND = OnHerMind()
 _RECORDS = own_records()
+_DIARY = her_diary(_RECORDS)
 
 
 def _round(snap, previous_at: dt.datetime | None = None) -> Round:
@@ -108,7 +109,7 @@ async def _state_sections(snap) -> str:
     """她此刻的样子那三段（日记页、挂念、刚做过说过）连在一起，查某句话在不在里面。"""
     return "\n\n".join(
         (
-            snap.render_day_page(),
+            await _DIARY.last_written_section(_round(snap)),
             await _MIND.open_section(_round(snap)),
             await _RECORDS.recent_section(_round(snap)),
         )
@@ -255,7 +256,7 @@ async def test_she_can_be_nowhere_yet_and_the_snapshot_says_so_plainly(snap_db):
     assert all(
         text.strip()
         for text in (
-            snap.render_day_page(),
+            await _DIARY.last_written_section(_round(snap)),
             await _MIND.open_section(_round(snap)),
             await _RECORDS.recent_section(_round(snap)),
         )
@@ -314,7 +315,8 @@ async def test_when_her_words_are_already_in_view_the_state_does_not_copy_them(
     await _say("akao", "布丁我吃了。", _at(13, 50), to=["ayana"])
 
     snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 10))
-    page, open_ends = snap.render_day_page(), await _MIND.open_section(_round(snap))
+    page = await _DIARY.last_written_section(_round(snap))
+    open_ends = await _MIND.open_section(_round(snap))
 
     # 她的话只在「你刚做过、说过」那一段里：那一段不摆，别的两段一个字都不带它们。
     for text in (page, open_ends):

@@ -54,8 +54,7 @@ from app.agent.trace import collect_usage
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST
 from app.living.common import week_start_cst
-from app.living.day_page import LivingDayPage, read_day_pages_between
-from app.living.services import Persona, PersonaText
+from app.living.services import DayPage, DayPages, Persona, PersonaText
 
 logger = logging.getLogger(__name__)
 
@@ -112,24 +111,24 @@ def last_full_week(now: datetime) -> tuple[date, date]:
 
 
 async def week_material(
-    *, lane: str, persona_id: str, since: date, until: date
-) -> list[LivingDayPage]:
+    *, lane: str, persona_id: str, since: date, until: date, day_pages: DayPages
+) -> list[DayPage]:
     """这一周她写下的那几页，按日子升序；一页都没有返回空列表。
 
-    **原文照搬，中间没有第二次概括**——理由同 :func:`app.living.day_page.day_material`：
+    **原文照搬，中间没有第二次概括**——理由同 :func:`app.living.day_page.pages.day_material`：
     这一层存在的意义就是让她读自己真的写下的东西，在摆材料这一步先压一遍等于把被否掉
     的"机器折叠原文"从后门放回来。
 
     这里不做任何裁剪：一页日记本来就是她自己的视角，写的是她自己的经历
-    （:func:`app.living.day_page.day_material`）。
+    （:func:`app.living.day_page.pages.day_material`）。
     """
-    return await read_day_pages_between(
+    return await day_pages.between(
         lane=lane, persona_id=persona_id, since=since, until=until
     )
 
 
 def _persona_review_prompt(
-    *, since: date, until: date, current: str, pages: list[LivingDayPage]
+    *, since: date, until: date, current: str, pages: list[DayPage]
 ) -> str:
     """摆到她眼前的那一段：上一周是哪几天、她现在对自己的那段描述、那一周的每一页。
 
@@ -161,7 +160,7 @@ class DueReview:
     # 她这一轮的『现在』：轮到她时读的钟。
     now: datetime
     # 那一周她写下的那几页，按日子升序（:func:`week_material`）。
-    pages: tuple[LivingDayPage, ...]
+    pages: tuple[DayPage, ...]
 
 
 async def persona_review_due(
@@ -171,6 +170,7 @@ async def persona_review_due(
     at: datetime,
     clock: Callable[[], datetime],
     persona: Persona,
+    day_pages: DayPages,
 ) -> DueReview | None:
     """回看的钟在 ``at`` 响的那一拍，轮到她的回看队列时：要回看哪一周；不该跑返回 ``None``。
 
@@ -179,7 +179,7 @@ async def persona_review_due(
     轮到，这一版是那时写下的，不是那一拍敲响时。
 
     **窗口按那一拍响的时刻判**（``at``，换到北京时间），理由同
-    :func:`app.living.day_page.day_page_due`：排在后面、轮到时已经过了窗口的那一拍照样写。
+    :func:`app.living.day_page.pages.day_page_due`：排在后面、轮到时已经过了窗口的那一拍照样写。
 
     之后两道判断都在模型前面，能不调模型就不调：
 
@@ -191,7 +191,7 @@ async def persona_review_due(
       2. **上一周一页日记都没有**就返回：那是服务根本没跑的一周，不该有那一版，更不该为一片空白
          叫一次模型（她会凭空编出一周的变化）。
 
-    判和写在她回看队列上的同一次轮次里（:mod:`app.plugins.living`）：两拍打到同一个人时，各自读到
+    判和写在她回看队列上的同一次轮次里（:mod:`app.living.persona_review`）：两拍打到同一个人时，各自读到
     "本周还没写"就会双双烧一次模型，最后链上多出一版语义重复的正文（版本链是 append-only，没有
     任何东西会拦第二次）。队列上每一拍都排队，轮到时再判一遍。
     """
@@ -201,7 +201,9 @@ async def persona_review_due(
     since, until = last_full_week(now)
     if await persona.has_review_this_week(lane=lane, persona_id=persona_id, now=now):
         return None
-    pages = await week_material(lane=lane, persona_id=persona_id, since=since, until=until)
+    pages = await week_material(
+        lane=lane, persona_id=persona_id, since=since, until=until, day_pages=day_pages
+    )
     if not pages:
         logger.info(
             "living persona review lane=%s persona=%s %s 那一周一页日记都没有，不写",

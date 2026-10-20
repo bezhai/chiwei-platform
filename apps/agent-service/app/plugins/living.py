@@ -1,13 +1,8 @@
-"""Living: the three sisters' life engine — for each sister a queue of rounds with two wakes on it
-and a queue each for her diary and her weekly look back with one.
+"""Living: the three sisters' life engine — for each sister a queue of rounds with two wakes on it.
 
   each sister's queue of rounds ("round", ``ctx.turns``), signalled by two wakes (``ctx.wake``):
   every  60 s  regular   -> regular_moment_due / run_due_moment   her regular rhythm
   every  60 s  nudge     -> nudged_moment_due / run_due_moment    wake her early for a call or a message
-
-  each sister's diary ("day-page") and weekly look back ("persona-review"), one wake each:
-  every 300 s  day-page        -> day_page_due / write_due_page          yesterday's page (04:00-06:00)
-  every 300 s  persona-review  -> persona_review_due / write_due_review  last week's "who I am" (06:00-08:00)
 
   (the household plugin opens the inboxes named after the three personas: stored only, she reads
   them on her clock; the speaking plugin has the landing clock and the two outbound queues; the
@@ -22,13 +17,13 @@ and a queue each for her diary and her weekly look back with one.
                                 plugin does)
     the round before            life.moments      when her last round landed, and whether its
                                                   history was stored
-    state sections              day_page.last_written
     input sections              life.now
                                 (the loose_ends plugin registers keep_in_mind and the state and
                                 input sections about what is on her mind, the her_records plugin
                                 the ones about what she just did and where she is, the phone plugin
                                 her three phone tools and the sections about her phone, the
-                                household plugin what reached her and the sends before and after)
+                                household plugin what reached her and the sends before and after,
+                                the day_page plugin the last page she wrote)
     commit (one transaction)    life.moment   (and phone.glances, household.read of those plugins)
     after the commit            history   (Continue: logged, the round counts)
 
@@ -44,16 +39,10 @@ the wakes' ``run`` hands it to :func:`app.living.moment.run_due_moment`.
 rhythm and her early wakes share her queue, a turn at a time, first come first served. Each of the
 two drops a tick while it already has one queued or running (``DROP_WHILE_ACTIVE``): one tick
 waiting behind a stuck round is enough, since it decides on what is true when it gets its turn.
-A turn holds her queue for at most :data:`HOLD_LIMIT`; a turn that never ends is cut off there
+A turn holds her queue for at most :data:`app.living.common.HOLD_LIMIT`; a turn that never ends is cut off there
 and handled as a crash. Each tick reads the database and compares; most run nothing. Her diary and
-her weekly look back do not take turns on this queue.
-
-**Her diary and her weekly look back have a queue each** ("day-page", "persona-review"), with the
-same hold limit, so writing yesterday's page or rewriting who she is never keeps her from living
-today, nor each other. Every tick of their wakes is queued (``QUEUE_EACH``): a tick waiting behind a
-stuck one gets its turn, and decides then whether there is still something to write. Whether a tick
-counts is judged by when it ticked (the window), what it writes by when it got its turn
-(:func:`app.living.day_page.day_page_due`, :func:`app.living.persona_review.persona_review_due`).
+her weekly look back have queues of their own (:mod:`app.living.day_page`,
+:mod:`app.living.persona_review`).
 
 **Clocks tick denser than the work they drive.** A clock's seconds are fixed when it is
 registered, so the intervals that are business parameters (ten minutes between rounds, the
@@ -80,13 +69,11 @@ from app.agent.round import AssembledProfile
 from app.agent.tooling import Tool
 from app.host import Batch, Coalesce, Context, Plugin, WakeSource
 from app.living import moment
-from app.living.common import living_lane
-from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
+from app.living.common import HOLD_LIMIT
 from app.living.moment import (
     LIFE_MOMENT_SEGMENTS,
     DueMoment,
     LifeMoment,
-    day_page_section,
     land_the_moment,
     lost_the_last_round,
     now_section,
@@ -96,11 +83,8 @@ from app.living.moment import (
     run_due_moment,
 )
 from app.living.nudge import nudged_moment_due
-from app.living.persona_review import DueReview, persona_review_due, write_due_review
 from app.living.services import (
     HerRecords,
-    Persona,
-    PersonaText,
     Phone,
     Received,
     WhoLivesHere,
@@ -109,20 +93,6 @@ from app.living.services import (
 # How often her wakes tick (see "Clocks tick denser than the work they drive").
 REGULAR_EVERY = timedelta(seconds=60)
 NUDGE_EVERY = timedelta(seconds=60)
-# Five minutes: 24 tries inside the two hours of the diary's and the look back's windows; a tick
-# that fails (the model timed out, she wrote nothing) is tried again by the next one.
-DAY_PAGE_EVERY = timedelta(minutes=5)
-PERSONA_REVIEW_EVERY = timedelta(minutes=5)
-
-# How long a turn may hold one of her queues before it is cut off and handled as a crash
-# (:mod:`app.host.turns`). Not a budget for a round: it turns a turn that never ends into one that
-# fails. Calibrated on prod, not picked: on 2026-09-16, 1413 prod rounds in Langfuse took 8.5 s at
-# p50, 76.4 s at p95, 121.8 s at p99 and 188.9 s at the most (a world round); 900 s is 4.8 times the
-# longest. That distribution counts only rounds that finished (the stuck ones left no trace), so it
-# says how slow a normal round can be, which is what the limit has to stay clear of. If the log shows
-# a turn cut off that was only slow, the distribution has changed: measure it again rather than
-# raising the limit.
-HOLD_LIMIT = timedelta(seconds=900)
 
 
 class NotSplitYet:
@@ -188,65 +158,16 @@ def nudge(
     )
 
 
-def day_page(
-    lane: str, persona: Persona, her_records: HerRecords, received: Received
-) -> WakeSource[DuePage, LivingDayPage | None]:
-    """Her diary on ``lane``: the page of the living day that just ended, when the tick came in the
-    window and the day has no page yet (:func:`app.living.day_page.day_page_due`); who she is
-    comes from the ``persona`` service, what she did that day from the ``her_records`` service,
-    what reached her from the ``received`` service."""
-
-    async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DuePage | None:
-        (tick,) = batch.close()
-        return await day_page_due(
-            lane=lane,
-            persona_id=persona_id,
-            at=tick.at,
-            clock=clock,
-            her_records=her_records,
-            received=received,
-        )
-
-    return WakeSource(
-        "day-page", Coalesce.QUEUE_EACH, due, partial(write_due_page, persona=persona)
-    )
-
-
-def persona_review(lane: str, persona: Persona) -> WakeSource[DueReview, PersonaText | None]:
-    """Her weekly look back on ``lane``: a new "who I am" from last week's pages, when the tick
-    came in the window and this week has no review yet
-    (:func:`app.living.persona_review.persona_review_due`), written to the ``persona`` service's
-    chain."""
-
-    async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DueReview | None:
-        (tick,) = batch.close()
-        return await persona_review_due(
-            lane=lane, persona_id=persona_id, at=tick.at, clock=clock, persona=persona
-        )
-
-    return WakeSource(
-        "persona-review", Coalesce.QUEUE_EACH, due, partial(write_due_review, persona=persona)
-    )
-
-
 def setup(ctx: Context) -> None:
-    lane = living_lane()
-    persona = ctx.service("persona")
     residents = ctx.service("residents")
     resident = ctx.profile("resident")
     phone, received = ctx.service("phone"), ctx.service("received")
     regular_rounds, early_wakes = regular(resident), nudge(resident, phone, received)
     her_records = ctx.service("her_records")
-    pages = day_page(lane, persona, her_records, received)
-    reviews = persona_review(lane, persona)
     for persona_id in ctx.participants(profile="resident"):
         rounds = ctx.turns(persona_id, "round", hold_limit=HOLD_LIMIT)
         ctx.wake(rounds, regular_rounds, every=REGULAR_EVERY)
         ctx.wake(rounds, early_wakes, every=NUDGE_EVERY)
-        diary = ctx.turns(persona_id, "day-page", hold_limit=HOLD_LIMIT)
-        ctx.wake(diary, pages, every=DAY_PAGE_EVERY)
-        look_back = ctx.turns(persona_id, "persona-review", hold_limit=HOLD_LIMIT)
-        ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
     living = NotSplitYet(residents=residents, her_records=her_records)
     _her_round(ctx, living)
 
@@ -261,11 +182,7 @@ def _her_round(ctx: Context, living: NotSplitYet) -> None:
         previous_at=previous_moment_at,
         lost_last_round=lost_the_last_round,
     )
-    for name, section in (
-        ("day_page.last_written", day_page_section),
-        ("life.now", now_section),
-    ):
-        ctx.section(name, section)
+    ctx.section("life.now", now_section)
     ctx.commit(
         "life.moment",
         partial(
@@ -304,7 +221,6 @@ PLUGIN = Plugin(
     name="living",
     setup=setup,
     requires=(
-        "persona",
         "residents",
         "her_records",
         "loose_ends",
