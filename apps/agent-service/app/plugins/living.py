@@ -145,7 +145,6 @@ from app.living.received import open_inboxes
 from app.living.records import living_lane
 from app.living.services import Persona, PersonaText
 from app.living.takeback import TAKEBACK_TOOLS
-from app.living.web import WEB_TOOLS
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
 
 # How often her wakes tick (see "Clocks tick denser than the work they drive").
@@ -288,7 +287,6 @@ def _her_round(ctx: Context) -> None:
         *PHONE_TOOLS,
         *MOUTH_TOOLS,
         *TAKEBACK_TOOLS,
-        *WEB_TOOLS,
         *READING_TOOLS,
         *PICTURE_TOOLS,
         *GUIDE_TOOLS,

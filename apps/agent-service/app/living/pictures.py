@@ -475,7 +475,7 @@ async def find_a_picture_online(
     )
 
     # 她写的那句**原样**当检索词，不替她改写、不替她补关键词（跟
-    # :func:`app.living.web.search_online` 同一条）。
+    # :func:`app.living.web.online.search_online` 同一条）。
     hits = await image_search(wanted, count=PICTURE_SEARCH_COUNT)
     if not hits:
         # capability 的契约把"没配置"也表达成空列表，所以这一刻分不清是哪一种。如实

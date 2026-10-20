@@ -60,7 +60,7 @@ Python 脚本内部发 HTTP 不受这条限制** —— 那三份说明的脚本
 
   * :func:`run_a_script` 打出来的 ``stdout`` / ``stderr`` **过**。沙箱没有网络命名空间
     隔离，脚本自己上网是这几份说明成立的前提 —— "抓一个网页、把内容 print 出来"于是跟
-    :func:`app.living.web.browse_online` 是同一条逐字通道，那几个字节由网页那边决定。
+    :func:`app.living.web.online.browse_online` 是同一条逐字通道，那几个字节由网页那边决定。
   * :func:`read_a_guide` 交回的**说明正文不过**。那是主人自己写在 NFS 上的 markdown，
     按"外面来的"这条口径他不是外面：能改那个目录的人已经能改她读到的一切。整段转义
     只会把他写的 markdown 糟蹋掉。
@@ -290,7 +290,7 @@ async def run_a_script(
 
     # 打出来的两股都过 :func:`esc`。**沙箱没有网络命名空间隔离**（见模块 docstring），
     # 那几份说明的脚本正是靠这一点上网 —— 所以"脚本抓一个网页、把内容 print 出来"跟
-    # :func:`app.living.web.browse_online` 是同一条逐字通道：那几个字节由网页那边决定，
+    # :func:`app.living.web.online.browse_online` 是同一条逐字通道：那几个字节由网页那边决定，
     # 原样进她眼前，而她这一轮的输入里还摆着 ``<msg from=".." rel="owner">`` 那几行。
     #
     # **转义落在这只手上，不落进 capability。** 那个 capability 还被

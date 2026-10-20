@@ -26,6 +26,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         "skills",
         "persona",
         "loose_ends",
+        "web",
         "living",
     ]
     assert Counter((r.plugin, r.kind) for r in host.registered()) == {
@@ -39,6 +40,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("loose_ends", "service"): 1,
         ("loose_ends", "tool"): 1,
         ("loose_ends", "section"): 2,
+        ("web", "tool"): 2,
         ("living", "turns"): 9,
         ("living", "wake"): 12,
         ("living", "clock"): 1,
@@ -46,7 +48,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("living", "inbox"): 1,
         ("living", "outbound"): 2,
         ("living", "inboxes_at_start"): 1,
-        ("living", "tool"): 21,
+        ("living", "tool"): 19,
         ("living", "segment"): 5,  # four more segments of her round and the output check
         ("living", "round_start"): 1,
         ("living", "round_log"): 1,

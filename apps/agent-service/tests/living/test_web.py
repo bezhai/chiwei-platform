@@ -29,8 +29,8 @@ import pytest
 
 from app.agent.tools import search as search_mod
 from app.capabilities.web_search import SearchHit
-from app.living import web as web_mod
-from app.living.web import (
+from app.living.web import online as web_mod
+from app.living.web.online import (
     BROWSE_COUNT,
     SEARCH_COUNT,
     WEB_TOOLS,
@@ -516,3 +516,20 @@ async def test_both_hands_are_ones_she_actually_has(resident):
     assert browse_online in [t.value.tool for t in resident.tools], (
         "她手里没有刷一批这只手"
     )
+
+
+async def test_the_web_plugin_declares_both_hands_as_material(app_host):
+    """web 插件登记这两只手，查回来的东西是读到的材料（过了 ``material_minutes`` 换成一句占位），
+    不结束这一轮；它不交出也不要任何服务。"""
+    host = await app_host("agent-service")
+    mine = [r for r in host.registered() if r.plugin == "web"]
+
+    assert [(r.kind, r.name) for r in mine] == [
+        ("tool", "search_online"),
+        ("tool", "browse_online"),
+    ]
+    assert [(r.detail["spec"].trim, r.detail["spec"].ends_round) for r in mine] == [
+        ("material", False),
+        ("material", False),
+    ]
+    assert [r.detail["spec"].tool for r in mine] == [search_online, browse_online]

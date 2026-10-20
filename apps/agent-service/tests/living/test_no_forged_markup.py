@@ -373,8 +373,8 @@ async def test_what_the_internet_says_cannot_carry_markup_into_her_feed(
     in_a_moment, monkeypatch
 ):
     from app.capabilities.web_search import SearchHit
-    from app.living import web as web_mod
-    from app.living.web import browse_online
+    from app.living.web import online as web_mod
+    from app.living.web.online import browse_online
 
     async def poisoned(query, *, count=5):
         return [
@@ -397,8 +397,8 @@ async def test_what_a_search_brings_back_cannot_carry_markup_either(
     in_a_moment, monkeypatch
 ):
     """带着问题查那条路交回来的是 ``search_web`` 拼好的一段，同样来自网页。"""
-    from app.living import web as web_mod
-    from app.living.web import search_online
+    from app.living.web import online as web_mod
+    from app.living.web.online import search_online
 
     class _Search:
         async def invoke(self, args):
@@ -533,7 +533,7 @@ def test_the_escape_is_defined_in_exactly_one_place():
 #
 # 沙箱**没有网络命名空间隔离**（``apps/sandbox-worker`` 只有命令黑名单 + tempdir +
 # 资源限制），说明里那几个脚本正是靠这一点才成立 —— Python 里发 HTTP 不受那条黑名单
-# 管。所以"脚本抓一个网页、把内容 print 出来"跟 :func:`app.living.web.browse_online`
+# 管。所以"脚本抓一个网页、把内容 print 出来"跟 :func:`app.living.web.online.browse_online`
 # 是同一条通道：那几个字节由网页那边决定，逐字进她眼前。
 #
 # 转义落在 ``guides.py`` 这一侧，**不落在 capability 里** —— 那个 capability 还被
