@@ -41,7 +41,7 @@ from app.infra.config import settings
 from app.infra.lane_policy import current_deployment_lane
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
     from langfuse.model import PromptClient
     from opentelemetry.trace import SpanContext
@@ -99,28 +99,36 @@ def under_last_generation() -> Iterator[None]:
 #
 # 但它不能像"最近一次模型调用"那样只覆盖、不恢复：外层 agent 的工具里调了另一个 agent，回来
 # 之后外层的下一次模型调用要关联的还是外层的 prompt。所以它按作用域设（``rendered_from``）。
-_current_prompt: ContextVar[PromptClient | None] = ContextVar(
-    "agent_current_prompt", default=None
+_current_prompts: ContextVar[tuple[PromptClient, ...]] = ContextVar(
+    "agent_current_prompts", default=()
 )
 
 
 @contextmanager
-def rendered_from(prompt: PromptClient | None) -> Iterator[None]:
-    """这个作用域里开的 generation 都关联 ``prompt``（它的名字和版本）。
+def rendered_from(prompts: Sequence[PromptClient]) -> Iterator[None]:
+    """这个作用域里的模型调用由 ``prompts`` 渲染（按拼接顺序的每一段）。
 
-    一次 run / extract 带的是它这次实际编译的那个 prompt 对象：泳道 label 命中就是那个
-    版本，回落到 production 就是 production 的版本。``None`` 表示这次调用不是由 prompt 渲染的，
-    它会清掉从外层继承来的值，而不是沿用外层的。SDK 自己的兜底 prompt（``is_fallback``）由
+    一次 run / extract 带的是它这次实际编译的那几个 prompt 对象：泳道 label 命中就是那个
+    版本，回落到 production 就是 production 的版本。只有一段时，generation 关联它（名字和版本）；
+    几段拼成的不关联任何一段：一个 generation 只能关联一个 prompt，关联其中一段会让那一段的使用
+    统计看起来像是整份的（各段的版本记在调用的根 span 上）。空的表示这次调用不是由 prompt 渲染
+    的，它会清掉从外层继承来的值，而不是沿用外层的。SDK 自己的兜底 prompt（``is_fallback``）由
     SDK 跳过不关联。
 
     离开时（包括出异常、被取消）恢复外层的值。
     """
-    outer = _current_prompt.get()
-    _current_prompt.set(prompt)
+    outer = _current_prompts.get()
+    _current_prompts.set(tuple(prompts))
     try:
         yield
     finally:
-        _current_prompt.set(outer)
+        _current_prompts.set(outer)
+
+
+def _linked_prompt() -> PromptClient | None:
+    """The prompt a generation opened here links: the one this scope is rendered from, if one."""
+    prompts = _current_prompts.get()
+    return prompts[0] if len(prompts) == 1 else None
 
 
 # ---------------------------------------------------------------------------
@@ -140,11 +148,11 @@ def separate_trace() -> Iterator[None]:
     """
     otel_token = otel_context.attach(otel_context.Context())
     generation_token = _last_generation.set(None)
-    prompt_token = _current_prompt.set(None)
+    prompt_token = _current_prompts.set(())
     try:
         yield
     finally:
-        _current_prompt.reset(prompt_token)
+        _current_prompts.reset(prompt_token)
         _last_generation.reset(generation_token)
         otel_context.detach(otel_token)
 
@@ -408,7 +416,7 @@ def generation_span(
     it; its span context is kept for the tools this call asks for, which the loop
     dispatches after it has closed (``under_last_generation``).
 
-    关联的 prompt 是这次调用所在的 ``rendered_from`` 作用域里那一个。
+    关联的 prompt 是这次调用所在的 ``rendered_from`` 作用域里那一个（只有一段时）。
     """
     try:
         cm = _get_client().start_as_current_generation(
@@ -417,7 +425,7 @@ def generation_span(
             input=input,
             model_parameters=model_parameters,
             metadata=metadata,
-            prompt=_current_prompt.get(),
+            prompt=_linked_prompt(),
         )
         gen = cm.__enter__()
     except Exception as exc:

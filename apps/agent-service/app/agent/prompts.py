@@ -257,9 +257,7 @@ class PromptSet:
             for p in self._by_agent[agent]
         ]
 
-    def single_prompt(self, agent: str) -> PromptClient | None:
-        """The one prompt ``agent`` is rendered from, which its model calls link in Langfuse;
-        ``None`` when it is rendered from several segments (a model call links one prompt, and
-        linking one segment would count that segment's use as the whole prompt's)."""
-        parts = self._by_agent[agent]
-        return parts[0].prompt if len(parts) == 1 else None
+    def prompts(self, agent: str) -> tuple[PromptClient, ...]:
+        """The prompts ``agent`` is rendered from, one per segment in its order: what its model
+        calls are rendered from (:func:`app.agent.trace.rendered_from`)."""
+        return tuple(p.prompt for p in self._by_agent[agent])

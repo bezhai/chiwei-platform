@@ -114,11 +114,48 @@
           "number": 1,
           "call": "complete",
           "model": "offline-model",
-          "prompt": {
-            "name": "world_round",
-            "version": 1,
-            "variables": {}
-          },
+          "prompt": [
+            {
+              "name": "world_round/core",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/reality",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/report-change",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/npc",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/write-record",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/wake",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/unfinished",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/order",
+              "version": 1,
+              "variables": {}
+            }
+          ],
           "options": {
             "session_id": "world:coe-replay"
           },
@@ -582,11 +619,48 @@
           "number": 2,
           "call": "complete",
           "model": "offline-model",
-          "prompt": {
-            "name": "world_round",
-            "version": 1,
-            "variables": {}
-          },
+          "prompt": [
+            {
+              "name": "world_round/core",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/reality",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/report-change",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/npc",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/write-record",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/wake",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/unfinished",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/order",
+              "version": 1,
+              "variables": {}
+            }
+          ],
           "options": {
             "session_id": "world:coe-replay"
           },
@@ -660,11 +734,48 @@
           "number": 3,
           "call": "complete",
           "model": "offline-model",
-          "prompt": {
-            "name": "world_round",
-            "version": 1,
-            "variables": {}
-          },
+          "prompt": [
+            {
+              "name": "world_round/core",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/reality",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/report-change",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/npc",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/write-record",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/wake",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/unfinished",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "world_round/order",
+              "version": 1,
+              "variables": {}
+            }
+          ],
           "options": {
             "session_id": "world:coe-replay"
           },

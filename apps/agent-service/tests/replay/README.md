@@ -48,8 +48,17 @@ version; this table is. Copied on 2026-10-08.
 | `world_answer.txt` | `world_answer` | `coe-world` | 2 | text |
 | `world_npc.txt` | `world_npc` | `coe-world` | 2 | text |
 
+Her round's prompt and world's round prompt are rendered from segments, one per top-level
+section: `living_life_moment/<segment>.txt` (5) and `world_round/<segment>.txt` (8), the Langfuse
+ids `living_life_moment/<segment>` and `world_round/<segment>`. They were cut from the two whole
+fixtures above at the blank line between two sections, so joined by a blank line they give back
+the whole fixture byte for byte (`test_prompt_segments.py`); the whole fixtures stay as the text
+the segments must add up to. A baseline records the prompt of a call to these two agents as the
+list of its segments.
+
 Moving a fixture to a newer version is an intended change like any other: replace the text,
-update its row, and re-record the baselines that render it.
+update its row, and re-record the baselines that render it. For a split prompt, replace the whole
+fixture and the segments together.
 
 ## What is intercepted, and where
 

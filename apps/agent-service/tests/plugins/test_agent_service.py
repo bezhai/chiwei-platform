@@ -35,7 +35,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("living", "outbound"): 2,
         ("living", "inboxes_at_start"): 1,
         ("living", "tool"): 22,
-        ("living", "segment"): 2,
+        ("living", "segment"): 6,  # her round's five segments and the output check
         ("living", "round_start"): 1,
         ("living", "round_log"): 1,
         ("living", "section"): 9,

@@ -7,13 +7,17 @@ Langfuse SDK exporting to memory (``tests/conftest.py``), and pin the shape the 
 the trace today:
 
 * her round is one trace named after it, in her session ``living-life:<lane>:<persona>``; each
-  model call hangs under the round's root and is linked to the prompt it was rendered from; each
-  tool hangs under the model call that asked for it. The output check on what she sends is a root
+  model call hangs under the round's root; each tool hangs under the model call that asked for
+  it. The output check on what she sends is a root
   span of its own hanging under ``tool.send_message``, in the same trace, and renames nothing;
 * every model call world makes (its round, a perception judgement, an NPC, an answer) is a trace
   of its own, all in the one session ``world:<lane>``;
 * the root span of every call made in a participant's round names what woke the round in its
   metadata (``wake``: the wake source, the round's id and its reason);
+* a call's root span lists the segments it rendered (``prompt_segments``: id, label, version). A
+  model call of an agent rendered from one prompt is linked to it; her round and world's round
+  are rendered from several segments, and their model calls link none (a model call links one
+  prompt, and linking one segment would count its use as the whole prompt's);
 * a perception judgement that fails on every attempt leaves one ERROR trace per attempt;
 * her diary, her weekly look back and a stretch of reading are each a trace of its own, in the
   sessions ``living-day-page:<lane>:<persona>``, ``living-persona-review:<lane>:<persona>`` and
@@ -184,9 +188,15 @@ async def test_her_round_is_one_trace_with_each_tool_under_the_call_that_asked_f
         "reason": f"常规节奏，{slot} 那一格",
     }
 
+    assert _metadata(root, "prompt_segments") == [
+        {"prompt_id": f"living_life_moment/{name}", "label": "production", "version": 1}
+        for name in ("identity", "this-moment", "rules", "voice", "guides")
+    ]
     first, second = _calls_under(found, root)
     for call in (first, second):
-        assert call.attrs[Attr.OBSERVATION_PROMPT_NAME] == "living_life_moment"
+        assert Attr.OBSERVATION_PROMPT_NAME not in call.attrs, (
+            "rendered from several segments, a model call links none of them"
+        )
     assert _one(found, "tool.send_message").parent == first.id
     assert _one(found, "tool.stop_for_now").parent == second.id
 
@@ -286,9 +296,27 @@ async def test_every_call_world_makes_is_a_trace_of_its_own_in_one_session(
         assert r.attrs[Attr.TRACE_SESSION_ID] == f"world:{LANE}"
         assert "app:world" in r.attrs[Attr.TRACE_TAGS]
         for call in _calls_under(found, r):
-            assert call.attrs[Attr.OBSERVATION_PROMPT_NAME] == r.name.replace("-", "_")
+            if r.name == "world-round":
+                assert Attr.OBSERVATION_PROMPT_NAME not in call.attrs
+            else:
+                assert call.attrs[Attr.OBSERVATION_PROMPT_NAME] == r.name.replace(
+                    "-", "_"
+                )
 
     round_root = _one(roots, "world-round")
+    assert _metadata(round_root, "prompt_segments") == [
+        {"prompt_id": f"world_round/{name}", "label": LANE, "version": 1}
+        for name in (
+            "core",
+            "reality",
+            "report-change",
+            "npc",
+            "write-record",
+            "wake",
+            "unfinished",
+            "order",
+        )
+    ]
     wake = _metadata(round_root, "wake")
     assert wake["source"] == "world-inbox"
     assert wake["reason"] == "woken by akao-digest-1"

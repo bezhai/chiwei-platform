@@ -411,6 +411,34 @@ from langfuse.model import TextPromptClient  # noqa: E402
 from app.agent.trace import rendered_from  # noqa: E402
 
 
+def _text_prompt(name: str) -> TextPromptClient:
+    return TextPromptClient(
+        Prompt_Text(
+            name=name, version=1, prompt="段落。", config={}, labels=["production"], tags=[]
+        )
+    )
+
+
+async def test_a_model_call_links_its_prompt_only_when_it_is_rendered_from_one(
+    exported_spans,
+):
+    """A generation links one prompt; one rendered from several segments links none of them, or
+    that segment's use would read as the whole prompt's."""
+    core, order = _text_prompt("world_round/core"), _text_prompt("world_round/order")
+    with rendered_from((core, order)):
+        with generation_span(name="segmented-llm", model="m", input=[]):
+            pass
+    with rendered_from((core,)):
+        with generation_span(name="single-llm", model="m", input=[]):
+            pass
+
+    linked = {
+        s.name: s.attributes.get(LangfuseOtelSpanAttributes.OBSERVATION_PROMPT_NAME)
+        for s in exported_spans.get_finished_spans()
+    }
+    assert linked == {"segmented-llm": None, "single-llm": "world_round/core"}
+
+
 async def test_separate_trace_does_not_carry_the_outer_prompt_in(exported_spans):
     world_round = TextPromptClient(
         Prompt_Text(
@@ -422,7 +450,7 @@ async def test_separate_trace_does_not_carry_the_outer_prompt_in(exported_spans)
             tags=[],
         )
     )
-    with rendered_from(world_round):
+    with rendered_from((world_round,)):
         with separate_trace():
             with generation_span(name="inner-llm", model="m", input=[]):
                 pass

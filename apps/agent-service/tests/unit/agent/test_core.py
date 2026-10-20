@@ -74,8 +74,8 @@ class _Prompts:
     def versions(self, agent):
         return [(agent, "production", 1)]
 
-    def single_prompt(self, agent):
-        return None
+    def prompts(self, agent):
+        return ()
 
 
 # What every call in this module renders from; mock_deps empties it per test.
@@ -396,7 +396,7 @@ class TestRunSessionPlumbing:
         from contextlib import contextmanager
 
         @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None, prompt=None):
+        def _spy_span(*, name, input, update_trace, session_id=None, prompts=()):
             captured["session_id"] = session_id
             yield MagicMock()
 
@@ -412,7 +412,7 @@ class TestRunSessionPlumbing:
         from contextlib import contextmanager
 
         @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None, prompt=None):
+        def _spy_span(*, name, input, update_trace, session_id=None, prompts=()):
             captured["session_id"] = session_id
             yield MagicMock()
 

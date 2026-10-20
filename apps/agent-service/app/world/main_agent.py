@@ -62,10 +62,26 @@ from app.world.wake import WORLD, NextWake, is_own_wake, read_next_wake, set_nex
 
 logger = logging.getLogger(__name__)
 
-# 主 agent 这一类：名字就是它的 Langfuse prompt（泳道 label 取不到时退回 production，见
-# :class:`app.agent.prompts.PromptSet`），模型用主 agent 的键。
+# 主 agent 这一类，模型用主 agent 的键。它的 prompt 按顶层小节分成八段（Langfuse id
+# ``world_round/<段名>``，泳道 label 取不到时退回 production，见 :class:`app.agent.prompts.PromptSet`），
+# 按这个顺序用空行拼成一条 SYSTEM，和分段之前的整份逐字节相同。身份、「你能查到什么」、「什么会让世界
+# 变化」、「你改什么，不改什么」在核心那一段；「你能查到什么」和「一轮的顺序」说到好几样东西，各自整段
+# 留在一起。
 ROUND = "world_round"
-ROUND_AGENT = world_agent(ROUND, "world-round")
+ROUND_SEGMENTS = tuple(
+    f"{ROUND}/{name}"
+    for name in (
+        "core",
+        "reality",
+        "report-change",
+        "npc",
+        "write-record",
+        "wake",
+        "unfinished",
+        "order",
+    )
+)
+ROUND_AGENT = world_agent(ROUND, "world-round", segments=ROUND_SEGMENTS)
 
 # 一轮最多跑多久，超过就取消、算这一轮没跑完（:class:`app.world.rounds.Rounds` 管它，收件箱的
 # 处理时限和占位租约按它放长）。正常一轮 30 到 70 秒，10 分钟是将近十倍的余量。不能再长：一次投递

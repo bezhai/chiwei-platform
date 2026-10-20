@@ -262,17 +262,17 @@ async def test_text_segments_compile_into_one_system_message_a_blank_line_apart(
 
     assert system.role is Role.SYSTEM
     assert system.content == "你是 赤尾。\n\n<rules>\n规则。\n</rules>\n"
-    assert prompts.single_prompt("moment") is None
+    assert [p.name for p in prompts.prompts("moment")] == ["identity", "rules"]
 
 
-async def test_a_single_text_segment_is_the_prompt_the_call_links(langfuse):
+async def test_a_single_text_segment_is_the_one_prompt_its_agent_renders_from(langfuse):
     prompt = _text("diary", "写日记。")
     langfuse.prompts[("diary", "production")] = prompt
     prompts = await PromptSet.resolve(
         {"diary": _agent("diary")}, {"diary": Segment("diary", "diary")}, None
     )
 
-    assert prompts.single_prompt("diary") is prompt
+    assert prompts.prompts("diary") == (prompt,)
     assert [m.content for m in prompts.messages("diary")] == ["写日记。"]
 
 

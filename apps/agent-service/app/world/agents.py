@@ -70,11 +70,18 @@ WORLD_RECURSION_LIMIT = FromConfig(
 )
 
 
-def world_agent(name: str, trace_name: str, model_key: str | None = None) -> AgentSpec:
-    """world 的一类 agent：prompt 就是它的名字，模型先看它自己的键、再看主 agent 的。"""
+def world_agent(
+    name: str,
+    trace_name: str,
+    model_key: str | None = None,
+    *,
+    segments: tuple[str, ...] | None = None,
+) -> AgentSpec:
+    """world 的一类 agent：prompt 是 ``segments`` 这几段，没给就是整份一段、id 是它的名字；模型先看
+    它自己的键、再看主 agent 的。"""
     keys = (WORLD_MODEL_KEY,) if model_key is None else (model_key, WORLD_MODEL_KEY)
     return AgentSpec(
-        segments=(name,),
+        segments=(name,) if segments is None else segments,
         model=FromConfig(keys=keys, default=DEFAULT_WORLD_MODEL),
         trace_name=trace_name,
         recursion_limit=WORLD_RECURSION_LIMIT,
@@ -84,7 +91,7 @@ def world_agent(name: str, trace_name: str, model_key: str | None = None) -> Age
 
 
 def world_segments(*names: str) -> dict[str, Segment]:
-    """world 这几类的 prompt：各是整份一段，id 就是名字，正文不引用任何变量。"""
+    """world 的这几段 prompt：id 就是段名，正文不引用任何变量。"""
     return {name: Segment(name, name) for name in names}
 
 

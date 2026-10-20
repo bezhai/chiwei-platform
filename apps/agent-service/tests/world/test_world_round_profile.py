@@ -53,7 +53,9 @@ async def test_the_world_profile_places_what_world_and_its_three_sources_registe
         ("let_npc_appear", "world", "kept"),
     ]
     assert not any(t.value.ends_round for t in p.tools)
-    assert sorted(p.segments) == ["world_npc", "world_perception", "world_round"]
+    assert sorted(p.segments) == sorted(
+        ["world_npc", "world_perception", *main_agent.ROUND_SEGMENTS]
+    )
     assert [s.name for s in p.round_start] == ["unfinished.resend"]
     assert [s.name for s in p.state] == ["records.listing"]
     assert [s.name for s in p.input] == [

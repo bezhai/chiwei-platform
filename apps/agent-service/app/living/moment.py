@@ -92,8 +92,9 @@
     命令真的跑一遍（:mod:`app.living.guides`。她自己长什么样就写在其中一份里；四份
     说明里三份通篇在教她跑脚本，只接读取的话读完手上没有能跑它的东西）
 
-prompt 在 Langfuse（:data:`LIFE_MOMENT_PROMPT_ID`，新 id、只发泳道 label），变量三
-个——``persona_name``、``persona_core``、``guides_you_can_read``。**每个 moment 都变的东西一律
+prompt 在 Langfuse，按顶层小节分成五段（:data:`LIFE_MOMENT_SEGMENTS`，id 是
+``living_life_moment/<段名>``），变量三个——``persona_name``、``persona_core`` 在「她是谁」那一段，
+``guides_you_can_read`` 在「手边能读的说明」那一段。**每个 moment 都变的东西一律
 走 USER 消息**：prompt 变量没有编译期校验，改名会静默渲染成字面量，能少一个就少一个。
 第三个是例外，而且只能是变量：她手边有哪些说明可读会变（注册表启动时填、每 30 秒热
 加载），工具 schema 在 import 时就定死了，装不下一份会变的清单。
@@ -113,7 +114,7 @@ from inner_shared.dynamic_config import dynamic_config
 from pydantic import Field, field_validator
 
 from app.agent.continuity import TrimPolicy
-from app.agent.contracts import AgentSpec, Segment, ToolSpec
+from app.agent.contracts import AgentSpec, Segment, ToolSpec, VarsFn
 from app.agent.round import (
     AssembledProfile,
     Round,
@@ -195,33 +196,44 @@ LIFE_MOMENT_PROMPT_ID = "living_life_moment"
 # 一个人的一整天在 langfuse 里读成一条流（session），逐个 moment 翻起来才不用大海捞针。
 # 模型的临时失败不整轮重来（``max_retries`` 1）：重放会把已经执行过的 durable 写再执行一遍，
 # 派生 id 让它无害，但仍是白花的一次钱，下一拍再来就行。
+async def who_she_is(round: Round) -> dict[str, str]:
+    """「她是谁」那一段的两个变量，一轮开始取齐 prompt 时算一次。由 :mod:`app.living.persona` 一处
+    组装（这一轮和日记那两条路共用同一份）。"""
+    return await persona_prompt_vars(lane=round.lane, persona_id=round.participant)
+
+
+async def guides_at_hand(round: Round) -> dict[str, str]:
+    """「手边能读的说明」那一段的变量，一轮开始取齐 prompt 时算一次。**只加在这个 moment 上**：只有
+    这个 moment 有读它、跑它的那两只手，塞进「她是谁」那个共用函数就等于把一份写日记时用不上的清单
+    也灌进那个 agent 的 prompt。"""
+    return {GUIDES_VAR: guides_she_can_read()}
+
+
+def _segment(
+    name: str, *, variables: tuple[str, ...] = (), values: VarsFn | None = None
+) -> Segment:
+    """她这一轮 prompt 的一段：段名和 Langfuse id 都是 ``living_life_moment/<name>``。"""
+    prompt_id = f"{LIFE_MOMENT_PROMPT_ID}/{name}"
+    return Segment(prompt_id, prompt_id, variables=variables, values=values)
+
+
+# 她这一轮的 prompt：按顶层小节分的五段，按这个顺序用空行拼成一条 SYSTEM，和分段之前的整份逐字节
+# 相同。每段声明的变量就是这一段给的那几个（模板多一个、少一个都是配置错误，见
+# :class:`app.agent.prompts.PromptConfigError`）。``<rules>`` 一条规则同时说到好几只手，整段留在一起。
+LIFE_MOMENT_SEGMENTS = (
+    _segment("identity", variables=("persona_name", "persona_core"), values=who_she_is),
+    _segment("this-moment"),
+    _segment("rules"),
+    _segment("voice"),
+    _segment("guides", variables=(GUIDES_VAR,), values=guides_at_hand),
+)
+
 LIFE_MOMENT_AGENT = AgentSpec(
-    segments=(LIFE_MOMENT_PROMPT_ID,),
+    segments=tuple(segment.name for segment in LIFE_MOMENT_SEGMENTS),
     model="life-model",
     trace_name="living-life-moment",
     recursion_limit=12,
     session="living-life:{lane}:{participant}",
-)
-
-
-async def her_prompt_values(round: Round) -> dict[str, str]:
-    """她这一轮 prompt 的三个变量，一轮开始取齐 prompt 时算一次。「她是谁」那两个由
-    :mod:`app.living.persona` 一处组装（这一轮和日记那两条路共用同一份）。手边有哪些说明可读
-    **只加在这个 moment 上**：只有这个 moment 有读它、跑它的那两只手，塞进那个共用函数就等于把一份
-    写日记时用不上的清单也灌进那个 agent 的 prompt。"""
-    return {
-        **await persona_prompt_vars(lane=round.lane, persona_id=round.participant),
-        GUIDES_VAR: guides_she_can_read(),
-    }
-
-
-# 她这一轮的 prompt 整份一段；它声明的三个变量就是这一轮给的那三个（模板多一个、少一个都是配置
-# 错误，见 :class:`app.agent.prompts.PromptConfigError`）。
-LIFE_MOMENT_SEGMENT = Segment(
-    LIFE_MOMENT_PROMPT_ID,
-    LIFE_MOMENT_PROMPT_ID,
-    variables=("persona_name", "persona_core", GUIDES_VAR),
-    values=her_prompt_values,
 )
 
 @dataclass

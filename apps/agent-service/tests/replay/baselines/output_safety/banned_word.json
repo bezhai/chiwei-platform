@@ -51,15 +51,38 @@
           "number": 1,
           "call": "complete",
           "model": "life-model",
-          "prompt": {
-            "name": "living_life_moment",
-            "version": 1,
-            "variables": {
-              "persona_name": "赤尾",
-              "persona_core": "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。",
-              "guides_you_can_read": "（这会儿你手边一份说明都没有 —— 不是你记错了，是它们没送到这儿来。）"
+          "prompt": [
+            {
+              "name": "living_life_moment/identity",
+              "version": 1,
+              "variables": {
+                "persona_name": "赤尾",
+                "persona_core": "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。"
+              }
+            },
+            {
+              "name": "living_life_moment/this-moment",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "living_life_moment/rules",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "living_life_moment/voice",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "living_life_moment/guides",
+              "version": 1,
+              "variables": {
+                "guides_you_can_read": "（这会儿你手边一份说明都没有 —— 不是你记错了，是它们没送到这儿来。）"
+              }
             }
-          },
+          ],
           "options": {
             "session_id": "living-life:coe-replay:akao"
           },
@@ -279,15 +302,38 @@
           "number": 2,
           "call": "complete",
           "model": "life-model",
-          "prompt": {
-            "name": "living_life_moment",
-            "version": 1,
-            "variables": {
-              "persona_name": "赤尾",
-              "persona_core": "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。",
-              "guides_you_can_read": "（这会儿你手边一份说明都没有 —— 不是你记错了，是它们没送到这儿来。）"
+          "prompt": [
+            {
+              "name": "living_life_moment/identity",
+              "version": 1,
+              "variables": {
+                "persona_name": "赤尾",
+                "persona_core": "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。"
+              }
+            },
+            {
+              "name": "living_life_moment/this-moment",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "living_life_moment/rules",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "living_life_moment/voice",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "living_life_moment/guides",
+              "version": 1,
+              "variables": {
+                "guides_you_can_read": "（这会儿你手边一份说明都没有 —— 不是你记错了，是它们没送到这儿来。）"
+              }
             }
-          },
+          ],
           "options": {
             "session_id": "living-life:coe-replay:akao"
           },
@@ -369,15 +415,38 @@
           "number": 3,
           "call": "complete",
           "model": "life-model",
-          "prompt": {
-            "name": "living_life_moment",
-            "version": 1,
-            "variables": {
-              "persona_name": "赤尾",
-              "persona_core": "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。",
-              "guides_you_can_read": "（这会儿你手边一份说明都没有 —— 不是你记错了，是它们没送到这儿来。）"
+          "prompt": [
+            {
+              "name": "living_life_moment/identity",
+              "version": 1,
+              "variables": {
+                "persona_name": "赤尾",
+                "persona_core": "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。"
+              }
+            },
+            {
+              "name": "living_life_moment/this-moment",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "living_life_moment/rules",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "living_life_moment/voice",
+              "version": 1,
+              "variables": {}
+            },
+            {
+              "name": "living_life_moment/guides",
+              "version": 1,
+              "variables": {
+                "guides_you_can_read": "（这会儿你手边一份说明都没有 —— 不是你记错了，是它们没送到这儿来。）"
+              }
             }
-          },
+          ],
           "options": {
             "session_id": "living-life:coe-replay:akao"
           },

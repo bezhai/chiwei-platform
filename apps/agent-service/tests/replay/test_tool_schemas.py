@@ -29,8 +29,8 @@ class _NoPrompts:
     def versions(self, agent):
         return []
 
-    def single_prompt(self, agent):
-        return None
+    def prompts(self, agent):
+        return ()
 
 
 async def _offered(specs: list[ToolSpec]) -> list[dict]:

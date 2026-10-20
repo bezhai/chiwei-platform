@@ -269,7 +269,7 @@ def _root_span(
     input: Any,
     update_trace: bool,
     session_id: str | None = None,
-    prompt: PromptClient | None = None,
+    prompts: Sequence[PromptClient] = (),
 ):
     """Open the run/extract root span and (optionally) name the trace.
 
@@ -283,9 +283,10 @@ def _root_span(
     调用方把这次调用交回去的结果记成这个 span 的 output（``_record_output``）。它是 trace 的根
     时，langfuse 拿它的名字、输入输出和开始时间当 trace 的。
 
-    ``prompt`` 是这次调用实际编译的那个 prompt 对象，这个 span 里开的每个 generation 都关联它
-    （``rendered_from``）；``None`` 是不由 prompt 渲染的调用，清掉外层调用设的那个。离开时恢复
-    外层的，外层 agent 的工具里调完这一次，外层接下来的模型调用照旧关联外层的 prompt。
+    ``prompts`` 是这次调用实际编译的那几个 prompt 对象（每段一个），这个 span 里开的模型调用由它们
+    渲染（``rendered_from``：只有一段时 generation 关联它）；空的是不由 prompt 渲染的调用，清掉
+    外层调用设的那些。离开时恢复外层的，外层 agent 的工具里调完这一次，外层接下来的模型调用照旧
+    关联外层的 prompt。
 
     ``session_id`` (when provided) groups this trace into a langfuse session,
     independently of who owns the trace name/input: a guard span with
@@ -298,7 +299,7 @@ def _root_span(
     span_name = name or "agent"
     with (
         _safe_current_span(span_name, input) as span,
-        rendered_from(prompt),
+        rendered_from(prompts),
     ):
         _set_current_trace(
             name=span_name if update_trace else None,
@@ -677,8 +678,8 @@ class Agent:
     current call for as long as it runs; the call's own state is emptied at the start of each
     attempt. Its prompt comes from the :class:`~app.agent.prompts.PromptSet` resolved for the
     round (or for the call) under the call's name; ``values`` are the variables known only at the
-    call. The root span records the segments rendered (``prompt_segments``); the model calls
-    link the prompt when the agent has a single one. The model and the budget of model calls are read when the call starts (they may come
+    call. The root span records the segments rendered (``prompt_segments``) and, in a round, what
+    woke the round (``wake``); the model calls link the prompt when the agent has a single one. The model and the budget of model calls are read when the call starts (they may come
     from Dynamic Config); a whole call is tried ``spec.max_retries`` times on a temporary model
     failure. ``spec.separate_trace`` puts every call in a Langfuse trace of its own.
     """
@@ -750,7 +751,7 @@ class Agent:
                     input=[m.to_dict() for m in full_messages],
                     update_trace=spec.update_trace,
                     session_id=call.session,
-                    prompt=prompts.single_prompt(call.agent),
+                    prompts=prompts.prompts(call.agent),
                 ) as span:
                     _record_call(span, prompts, call)
                     result = await _run_loop(
@@ -803,7 +804,7 @@ class Agent:
                     input=[m.to_dict() for m in full_messages],
                     update_trace=spec.update_trace,
                     session_id=call.session,
-                    prompt=prompts.single_prompt(call.agent),
+                    prompts=prompts.prompts(call.agent),
                 ) as span:
                     _record_call(span, prompts, call)
                     data = await model.structured(

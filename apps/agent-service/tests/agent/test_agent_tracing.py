@@ -526,7 +526,7 @@ async def test_a_call_not_rendered_from_a_prompt_links_none_inside_one_that_is(
     @tool
     async def judge() -> str:
         """判一下：一次不由 prompt 渲染的模型调用。"""
-        with rendered_from(None):
+        with rendered_from(()):
             verdict = await models["judge-model"].structured([_user("行吗")], schema={})
         return str(verdict["ok"])
 

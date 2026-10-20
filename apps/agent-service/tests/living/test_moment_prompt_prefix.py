@@ -35,7 +35,7 @@ from app.living.loose_ends import LooseEnd
 from app.living.moment import (
     LIFE_MOMENT_AGENT,
     LIFE_MOMENT_PROMPT_ID,
-    LIFE_MOMENT_SEGMENT,
+    LIFE_MOMENT_SEGMENTS,
     LifeMoment,
 )
 from tests.living.conftest import Calls, regular_round
@@ -137,11 +137,11 @@ async def test_the_life_moment_prompt_variables_are_not_named_after_the_clock(
 # ---------------------------------------------------------------------------
 
 
-def _life_moment_prompt(template: str) -> TextPromptClient:
-    """一份挂在 living_life_moment 这个 id 下的 text prompt（本地编译，不连网）。"""
+def _life_moment_prompt(prompt_id: str, template: str) -> TextPromptClient:
+    """她这一轮的一段 text prompt（本地编译，不连网）。"""
     return TextPromptClient(
         Prompt_Text(
-            name=LIFE_MOMENT_PROMPT_ID,
+            name=prompt_id,
             version=1,
             type="text",
             prompt=template,
@@ -152,13 +152,17 @@ def _life_moment_prompt(template: str) -> TextPromptClient:
     )
 
 
-async def _system_at(template: str, clock: dt.datetime) -> str:
-    """按 ``clock`` 这个时刻开始的一轮取齐、编译她这一轮的 prompt，交回 SYSTEM 正文。变量是这一轮
-    算出来的（:func:`app.living.moment.her_prompt_values`），「她是谁」和手边的说明按住不放。"""
+async def _system_at(templates: dict[str, str], clock: dt.datetime) -> str:
+    """按 ``clock`` 这个时刻开始的一轮取齐、编译她这一轮的 prompt（``templates`` 是每一段的模板，按
+    段名），交回 SYSTEM 正文。变量是这一轮算出来的（「她是谁」那一段和「手边能读的说明」那一段各自
+    的，见 :data:`app.living.moment.LIFE_MOMENT_SEGMENTS`），「她是谁」和手边的说明按住不放。"""
     from app.agent.round import Round
 
-    prompt = _life_moment_prompt(template)
-    langfuse = SimpleNamespace(get_prompt=lambda *_a, **_k: prompt)
+    langfuse = SimpleNamespace(
+        get_prompt=lambda prompt_id, **_k: _life_moment_prompt(
+            prompt_id, templates[prompt_id.rsplit("/", 1)[1]]
+        )
+    )
 
     async def who_she_is(*, lane, persona_id):
         return {
@@ -187,16 +191,20 @@ async def _system_at(template: str, clock: dt.datetime) -> str:
     ):
         prompts = await PromptSet.resolve(
             {LIFE_MOMENT_PROMPT_ID: LIFE_MOMENT_AGENT},
-            {LIFE_MOMENT_PROMPT_ID: LIFE_MOMENT_SEGMENT},
+            {segment.name: segment for segment in LIFE_MOMENT_SEGMENTS},
             round,
         )
         [system] = prompts.messages(LIFE_MOMENT_PROMPT_ID)
     return system.content
 
 
-_STABLE_TEMPLATE = (
-    "你是 {{persona_name}}。\n{{persona_core}}\n手边能读的说明：{{guides_you_can_read}}"
-)
+_STABLE_TEMPLATES = {
+    "identity": "你是 {{persona_name}}。\n{{persona_core}}",
+    "this-moment": "<this-moment>\n此刻。\n</this-moment>",
+    "rules": "<rules>\n规则。\n</rules>",
+    "voice": "<voice>\n说话。\n</voice>",
+    "guides": "手边能读的说明：{{guides_you_can_read}}",
+}
 
 
 async def test_the_system_text_does_not_move_with_the_clock():
@@ -205,8 +213,8 @@ async def test_the_system_text_does_not_move_with_the_clock():
     钉的是编译这一步：谁也不许把"现在几点"直接拼进 SYSTEM 正文——那样模板写得再干净前缀也是
     每次都变。
     """
-    early = await _system_at(_STABLE_TEMPLATE, _at(14, 0))
-    later = await _system_at(_STABLE_TEMPLATE, _at(15, 30))
+    early = await _system_at(_STABLE_TEMPLATES, _at(14, 0))
+    later = await _system_at(_STABLE_TEMPLATES, _at(15, 30))
 
     assert early == later
     assert "14:00" not in early and "15:30" not in later
@@ -215,10 +223,13 @@ async def test_the_system_text_does_not_move_with_the_clock():
 async def test_a_template_that_reads_the_clock_is_a_configuration_error():
     """反过来：模板一旦用上 ``currTime`` / ``currDate``，这一轮不会悄悄给它们一个值（那样前缀
     就跟着钟走了），也不会把字面的 ``{{currTime}}`` 发给模型，而是在取齐时按配置错误失败。"""
-    template = _STABLE_TEMPLATE + "\n现在是 {{currDate}} {{currTime}}"
+    templates = {
+        **_STABLE_TEMPLATES,
+        "this-moment": "<this-moment>\n现在是 {{currDate}} {{currTime}}\n</this-moment>",
+    }
 
     with pytest.raises(PromptConfigError) as raised:
-        await _system_at(template, _at(14, 0))
+        await _system_at(templates, _at(14, 0))
 
     assert raised.value.unexpected == frozenset({"currDate", "currTime"})
     assert raised.value.missing == frozenset()

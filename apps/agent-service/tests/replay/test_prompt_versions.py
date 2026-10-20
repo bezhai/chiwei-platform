@@ -17,6 +17,8 @@ from typing import Any
 import pytest
 
 from app.infra.cst_time import CST
+from app.living.moment import LIFE_MOMENT_AGENT
+from app.world.main_agent import ROUND_SEGMENTS
 from tests.replay import seeds
 from tests.replay.harness import Reply, ToolUse
 from tests.replay.harness.prompts import load_fixture
@@ -50,8 +52,15 @@ def _at(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 7, 25, hour, minute, tzinfo=CST)
 
 
-def _versions(replay, agent: str) -> list[int]:
-    return [c["prompt"]["version"] for c in replay.model.calls if c["agent"] == agent]
+def _versions(replay, agent: str) -> list[int | tuple[int, ...]]:
+    """The version each model call of ``agent`` was rendered from; for an agent whose prompt is
+    several segments, the version of each segment."""
+    return [
+        prompt["version"]
+        if isinstance(prompt, dict)
+        else tuple(segment["version"] for segment in prompt)
+        for prompt in (c["prompt"] for c in replay.model.calls if c["agent"] == agent)
+    ]
 
 
 def _sends(what: str) -> Reply:
@@ -84,8 +93,11 @@ async def test_her_output_check_renders_the_version_her_round_fixed(replay, rele
     )
 
     assert _versions(replay, "guard_output_safety") == [1, 1]
-    assert _versions(replay, "living_life_moment") == [1, 1, 1]
-    assert releasing.fetches == {"living_life_moment": 1, "guard_output_safety": 1}
+    assert _versions(replay, "living_life_moment") == [(1,) * 5] * 3
+    assert releasing.fetches == {
+        **dict.fromkeys(LIFE_MOMENT_AGENT.segments, 1),
+        "guard_output_safety": 1,
+    }
 
 
 async def test_worlds_perception_and_npc_render_the_versions_its_round_fixed(
@@ -129,9 +141,9 @@ async def test_worlds_perception_and_npc_render_the_versions_its_round_fixed(
 
     assert _versions(replay, "world_perception") == [1, 1, 1]
     assert _versions(replay, "world_npc") == [1]
-    assert _versions(replay, "world_round") == [1] * 5
+    assert _versions(replay, "world_round") == [(1,) * 8] * 5
     assert releasing.fetches == {
-        "world_round": 1,
+        **dict.fromkeys(ROUND_SEGMENTS, 1),
         "world_perception": 1,
         "world_npc": 1,
     }
@@ -174,5 +186,7 @@ async def test_her_prompts_are_fixed_after_her_input_and_before_her_first_model_
         "her round stops right away", lambda: replay.wake("akao", "regular"), at=_at(14)
     )
 
-    assert order.index("her phone's notices") < order.index("fetch living_life_moment")
-    assert order.index("fetch living_life_moment") < order.index("model call")
+    fetched = [i for i, step in enumerate(order) if step.startswith("fetch living_life_moment/")]
+    assert len(fetched) == 5
+    assert order.index("her phone's notices") < fetched[0]
+    assert fetched[-1] < order.index("model call")

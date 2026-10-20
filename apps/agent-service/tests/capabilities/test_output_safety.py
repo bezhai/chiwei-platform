@@ -13,7 +13,7 @@ import pytest
 
 from app.agent.client import ModelClient
 from app.agent.round import current_call
-from app.agent.trace import _current_prompt
+from app.agent.trace import _current_prompts
 from app.capabilities import banned_words
 from app.capabilities.output_safety import audit_output
 
@@ -41,7 +41,8 @@ class _FakeGuard(ModelClient):
         raise NotImplementedError
 
     async def structured(self, messages, *, schema, **_kwargs):
-        self.asked.append(_current_prompt.get().replay_variables["response"])
+        (prompt,) = _current_prompts.get()
+        self.asked.append(prompt.replay_variables["response"])
         self.calls.append(current_call())
         if self.hang:
             await asyncio.sleep(3600)

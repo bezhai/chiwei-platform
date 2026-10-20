@@ -196,7 +196,7 @@ async def test_scripted_by_the_call():
     rendered = load_fixture("world_round")
 
     with in_call(Call(agent="world_perception", session=None, round=None)):
-        with rendered_from(rendered):
+        with rendered_from((rendered,)):
             reply = await script.complete(
                 "perception-model", [Message(role=Role.USER, content="x")], None, {}
             )

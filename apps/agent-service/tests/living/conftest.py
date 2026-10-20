@@ -504,7 +504,7 @@ class Calls:
     最后说 ``said``。
 
     记下每次调用拿到了什么（``runs``：SYSTEM 之后的那些消息，和一份
-    ``{"values": prompt 编译时的变量, "call": 这次调用, "tools": 给它的工具名}``）、每只手交回了
+    ``{"values": 各段 prompt 编译时的变量（合在一起）, "call": 这次调用, "tools": 给它的工具名}``）、每只手交回了
     什么（``results``），以及每次调用最后那条输入（``prompts``）。``meanwhile`` 在模型那一步开头
     跑（模型跑着的时候发生的事），``after`` 在手都调完、说话之前跑；``fail`` 给了就在模型那一步
     抛它。
@@ -538,7 +538,7 @@ def _scripted_call_class():
     from app.agent.client import ModelClient
     from app.agent.neutral import Message, Role, ToolCall
     from app.agent.round import current_call
-    from app.agent.trace import _current_prompt
+    from app.agent.trace import _current_prompts
 
     class ScriptedCall(ModelClient):
         def __init__(self, script: Calls) -> None:
@@ -548,12 +548,14 @@ def _scripted_call_class():
         async def complete(self, messages, *, tools=None, **_kwargs):
             script = self._script
             if self._step == 0:
-                prompt = _current_prompt.get()
+                values: dict[str, str] = {}
+                for prompt in _current_prompts.get():
+                    values.update(getattr(prompt, "replay_variables", None) or {})
                 script.runs.append(
                     (
                         list(messages[1:]),
                         {
-                            "values": dict(getattr(prompt, "replay_variables", None) or {}),
+                            "values": values,
                             "call": current_call(),
                             "tools": [t.name for t in tools or []],
                         },

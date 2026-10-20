@@ -53,7 +53,7 @@ from app.world.admin import (
 from app.world.agents import world_segments
 from app.world.answer import answer_question
 from app.world.main_agent import (
-    ROUND,
+    ROUND_SEGMENTS,
     ROUND_TIMEOUT,
     clear_unfinished,
     left_over,
@@ -113,7 +113,7 @@ def setup(ctx: Context) -> None:
 
 def _the_round(ctx: Context) -> None:
     """主 agent 的一轮由什么组成；清单 ``world`` 排它们的位置。"""
-    for segment in world_segments(ROUND, PERCEPTION, NPC).values():
+    for segment in world_segments(*ROUND_SEGMENTS, PERCEPTION, NPC).values():
         ctx.segment(segment)
     for action in (write_record, wake_me_at, report_change, let_npc_appear):
         ctx.tool(action, trim="kept")

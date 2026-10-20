@@ -14,8 +14,9 @@ is several segments is rendered from no one prompt named after it. A reply is a 
 callable taking the :class:`Request` and returning one of those (for replies that copy something
 out of the conversation, the way a model would).
 
-Each call is recorded in full: the agent, the prompt version and the variables it was compiled
-with, the model id, call options, the tool definitions offered, every message sent, and what the
+Each call is recorded in full: the agent, the prompt it was rendered from with its version and the
+variables it was compiled with (a list of those, one per segment in order, for an agent whose
+prompt is several segments), the model id, call options, the tool definitions offered, every message sent, and what the
 script answered. An image block that points into the replay's object store also says what
 fetching it at the time of the call returns (``"fetched"``; see
 :mod:`tests.replay.harness.objects`), since that is what the real adapter would send. Usage is
@@ -33,7 +34,7 @@ from typing import Any
 from app.agent.client import ModelClient
 from app.agent.neutral import Message, ToolCall, ToolDef, TurnPart
 from app.agent.round import current_call
-from app.agent.trace import _current_prompt, generation_span
+from app.agent.trace import _current_prompts, generation_span
 from tests.replay.harness.errors import describe_error
 
 DEFAULT_USAGE = {
@@ -149,7 +150,14 @@ class ModelScript:
         self, kind: str, model: str, messages, tools, kwargs
     ) -> tuple[dict, Request]:
         self._effects.alive()
-        prompt = _current_prompt.get()
+        prompts = [
+            {
+                "name": prompt.name,
+                "version": prompt.version,
+                "variables": getattr(prompt, "replay_variables", None),
+            }
+            for prompt in _current_prompts.get()
+        ]
         agent = current_call().agent
         self._numbers[agent] += 1
         number = self._numbers[agent]
@@ -158,13 +166,7 @@ class ModelScript:
             "number": number,
             "call": kind,
             "model": model,
-            "prompt": None
-            if prompt is None
-            else {
-                "name": prompt.name,
-                "version": prompt.version,
-                "variables": getattr(prompt, "replay_variables", None),
-            },
+            "prompt": prompts if len(prompts) > 1 else (prompts[0] if prompts else None),
             "options": dict(kwargs),
             "tool_defs": [
                 {

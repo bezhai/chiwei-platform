@@ -111,7 +111,7 @@ from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_
 from app.living.guides import GUIDE_TOOLS
 from app.living.landing import reconcile_what_she_said
 from app.living.moment import (
-    LIFE_MOMENT_SEGMENT,
+    LIFE_MOMENT_SEGMENTS,
     LIFE_TOOLS,
     DueMoment,
     LifeMoment,
@@ -285,7 +285,8 @@ def _her_round(ctx: Context) -> None:
         *GUIDE_TOOLS,
     ):
         ctx.tool(spec.tool, trim=spec.trim, ends_round=spec.ends_round)
-    ctx.segment(LIFE_MOMENT_SEGMENT)
+    for segment in LIFE_MOMENT_SEGMENTS:
+        ctx.segment(segment)
     ctx.segment(GUARD_OUTPUT_SEGMENT)
     ctx.round_start("outgoing.before", send_her_doings)
     ctx.round_log(
