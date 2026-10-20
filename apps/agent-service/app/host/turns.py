@@ -20,8 +20,10 @@ Different sources never coalesce; on one queue they take turns first come, first
 
 **Where the batch closes and when the clock is read are the source's.** ``due`` gets the batch and
 the clock. world's inbox asks messaging which handled messages are settled before it closes its
-batch, so a delivery that arrives during that query is part of this round and fails with it; her
-sources read the clock first thing, before reading any state. A batch ``due`` left open is closed
+batch, so a delivery that arrives during that query is part of this round and fails with it; it
+reads no clock, its round reads the time when the run starts. Her sources read the clock first
+thing, before reading any state; her diary and her weekly look back judge their windows by when
+the tick came (``Signal.at``) and everything else by that clock. A batch ``due`` left open is closed
 before ``run``.
 
 **Turns starts no task and never reads the clock.** A turn runs in the task of the caller whose

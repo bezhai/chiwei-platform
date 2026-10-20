@@ -18,8 +18,8 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * :mod:`app.living.day_page`    跨天沉淀：每天凌晨她把刚过去那一天自己写成一页，
     之后每一轮都读得到（不是机器折叠原文，原始记录一条不动）
   * :mod:`app.living.persona_review` 每周回看：周一早上她读上一周自己写的那几页，
-    重写一版「我是谁」进版本链。锚是 ``bot_persona.persona_core`` 那个扁平列——不给
-    锚她就是在自我回流
+    重写一版「我是谁」进版本链（周一没写成，同一周后面几天的早上再试）。锚是
+    ``bot_persona.persona_core`` 那个扁平列——不给锚她就是在自我回流
   * :mod:`app.living.loose_ends`  她自己挂着没了结的事
   * :mod:`app.living.moment`      她的醒来周期：默认「继续」，被带走时换的是一件事。
     她跨 moment 的连续上下文（键、阈值、素材表、写失败怎么算）也在这里，存取和裁剪的

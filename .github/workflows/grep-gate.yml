@@ -290,7 +290,7 @@ jobs:
           # （函数里的 import、import_module 的字符串字面量都算）。互相走得到的几个包
           # 是一组环：不在 KNOWN_CYCLES 里的环失败，名单上的环消失或缩小了也失败，
           # 所以名单只能缩。FORBIDDEN_EDGES 里的边（messaging -> runtime、
-          # messaging -> host、runtime -> messaging）不管成不成环，出现就失败。
+          # messaging -> host、runtime -> messaging、agent -> host）不管成不成环，出现就失败。
           # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_package_cycles.py
           python3 -m scripts.check_package_cycles app
 
