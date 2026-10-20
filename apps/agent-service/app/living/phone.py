@@ -1588,7 +1588,7 @@ async def look_at_phone(
 #     换掉更精确，但那要在裁剪这一层解析手机这边渲染出来的标签 —— 渲染改一个字，句柄就静默地留
 #     不住了，而症状是几小时后她拿着一个不存在的编号去撤消息。别人的正文因此多留 3 小时：一页十几
 #     条文本，跟这个风险不是一个量级（图片块**不**跟着多留，它走
-#     :data:`app.agent.continuity.PICTURE_TRIMMED` 那条独立的线）。
+#     ``HistoryTexts.picture_trimmed``（:mod:`app.manifests.history`） 那条独立的线）。
 PHONE_TOOLS = [
     ToolSpec(look_at_phone, trim="kept"),
     ToolSpec(look_through_your_phone, trim="kept"),

@@ -6,13 +6,15 @@ contextvars back into outbound headers before publishing. The hops are
 messaging (:mod:`app.messaging`), the outbound queues' sink dispatch
 (:mod:`app.runtime.sink_dispatch`) and the host's clocks (:mod:`app.host.clock`).
 
-Four primitives:
+Five primitives:
 
 * ``extract_context(headers)`` — defensive parse of inbound headers.
 * ``inject_context(headers, ctx=None)`` — write outbound headers (defaults to
   reading current contextvars).
 * ``outbound_context(fallback_lane=None)`` — the Context a *producer* should
   inject, with the lane resolved the same way ``mq.publish`` picks the queue.
+* ``current_context()`` — the Context bound now (trace_id / lane), for code that
+  only reads it (a trace tag).
 * ``bind_context(ctx)`` — async context manager that sets contextvars on enter,
   restores on exit (works on success and exception paths).
 
@@ -56,6 +58,12 @@ def extract_context(headers: dict[str, Any] | None) -> Context:
     )
 
 
+def current_context() -> Context:
+    """The context bound now: what the hop that started this work read from its headers (or the
+    clock that started it), and what :func:`inject_context` writes by default."""
+    return Context(trace_id=trace_id_var.get(), lane=lane_var.get())
+
+
 def inject_context(
     headers: dict[str, Any] | None,
     ctx: Context | None = None,
@@ -67,7 +75,7 @@ def inject_context(
     messaging handlers and the outbound queues' consumers.
     """
     if ctx is None:
-        ctx = Context(trace_id=trace_id_var.get(), lane=lane_var.get())
+        ctx = current_context()
     out: dict[str, Any] = dict(headers) if headers else {}
     out["trace_id"] = ctx.trace_id or ""
     out["lane"] = ctx.lane or ""

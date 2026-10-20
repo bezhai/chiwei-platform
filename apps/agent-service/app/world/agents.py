@@ -31,6 +31,7 @@ from app.agent.core import Agent
 from app.agent.neutral import Message as Turn
 from app.agent.prompts import PromptSet
 from app.agent.round import Call
+from app.agent.tools.outcome import BAD_ARGUMENTS
 from app.agent.trace import collect_usage
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import now_cst, to_cst_full
@@ -87,6 +88,7 @@ def world_agent(
         recursion_limit=WORLD_RECURSION_LIMIT,
         session=f"{WORLD}:{{lane}}",
         separate_trace=True,
+        bad_arguments=BAD_ARGUMENTS,
     )
 
 

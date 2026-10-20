@@ -20,8 +20,6 @@ import pytest
 
 from app.agent import round as round_mod
 from app.agent.continuity import (
-    CHECKPOINT_HEAD,
-    GAP_HEAD,
     commit_transcript,
 )
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
@@ -33,10 +31,15 @@ from app.living.received import ReceivedMessage, ReceivedRead
 from app.living.records import KIND_SPEECH
 from app.living.whereabouts import note_whereabouts
 from app.manifests.agent_service import RESIDENT
+from app.manifests.history import HISTORY_TEXTS
 from tests.living.conftest import nudged_round, regular_round
 
 # 真 pg + 替身 life 这两样跟逐个 moment 的用例是同一份，不在这里再抄一遍。
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
+
+CHECKPOINT_HEAD = HISTORY_TEXTS.checkpoint_head.partition("{at}")[0]
+GAP_HEAD = HISTORY_TEXTS.gap_head.partition("{at}")[0]
+
 
 LANE = "coe-living"
 

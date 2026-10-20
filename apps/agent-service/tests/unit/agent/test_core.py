@@ -24,6 +24,7 @@ from app.agent.contracts import AgentSpec, FromConfig, ToolSpec
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role
 from app.agent.round import Call, open_call
+from app.infra.propagation import Context
 
 pytestmark = pytest.mark.unit
 
@@ -289,7 +290,11 @@ class TestRootSpanLaneAttributes:
         client = MagicMock()
         with (
             patch.object(core, "_get_trace_client", return_value=client),
-            patch.object(core, "get_lane", return_value="ppe-lf"),
+            patch.object(
+                core,
+                "current_context",
+                return_value=Context(trace_id=None, lane="ppe-lf"),
+            ),
             patch.object(core, "current_deployment_lane", return_value=None),
         ):
             with core._root_span(name="main", input=[], update_trace=True):
@@ -313,7 +318,11 @@ class TestRootSpanLaneAttributes:
         client = MagicMock()
         with (
             patch.object(core, "_get_trace_client", return_value=client),
-            patch.object(core, "get_lane", return_value=None),
+            patch.object(
+                core,
+                "current_context",
+                return_value=Context(trace_id=None, lane=None),
+            ),
             patch.object(core, "current_deployment_lane", return_value="coe-lf"),
         ):
             with core._root_span(name="world", input=[], update_trace=True):
@@ -329,7 +338,11 @@ class TestRootSpanLaneAttributes:
         client = MagicMock()
         with (
             patch.object(core, "_get_trace_client", return_value=client),
-            patch.object(core, "get_lane", return_value=None),
+            patch.object(
+                core,
+                "current_context",
+                return_value=Context(trace_id=None, lane=None),
+            ),
             patch.object(core, "current_deployment_lane", return_value=None),
         ):
             with core._root_span(name="main", input=[], update_trace=False):
@@ -353,7 +366,11 @@ class TestRootSpanAppAttributes:
         client = MagicMock()
         with (
             patch.object(core, "_get_trace_client", return_value=client),
-            patch.object(core, "get_lane", return_value=None),
+            patch.object(
+                core,
+                "current_context",
+                return_value=Context(trace_id=None, lane=None),
+            ),
             patch.object(core, "current_deployment_lane", return_value=None),
         ):
             with core._root_span(name="world-round", input=[], update_trace=True):
@@ -617,9 +634,10 @@ class TestRun:
     async def test_whether_a_tool_ends_the_run_is_what_its_declaration_says(
         self, mock_deps, ends_round
     ):
-        from app.agent.core import NEVER_RAN
         from app.agent.neutral import ToolCall
         from app.agent.tooling import tool
+
+        never_ran = "（没有执行）"
 
         @tool
         async def finish() -> str:
@@ -641,7 +659,9 @@ class TestRun:
         )
         sink: list[Message] = []
         await Agent(
-            _CFG, tools=[ToolSpec(finish, trim="kept", ends_round=ends_round)]
+            _CFG,
+            tools=[ToolSpec(finish, trim="kept", ends_round=ends_round)],
+            never_ran=never_ran,
         ).run(
             messages=[Message(role=Role.USER, content="go")],
             call=_call(),
@@ -652,10 +672,43 @@ class TestRun:
         answered = [m.text() for m in sink if m.role is Role.TOOL]
         if ends_round:
             assert mock_deps["model"].complete.await_count == 1
-            assert answered == ["done", NEVER_RAN]
+            assert answered == ["done", never_ran]
         else:
             assert mock_deps["model"].complete.await_count == 2
             assert answered == ["done", "done"]
+
+    async def test_a_kept_run_whose_tool_ends_the_round_is_given_what_the_rest_is_answered_with(
+        self, mock_deps
+    ):
+        """The calls after the one that ends the round are answered in the participant's words,
+        which a run that is kept (the history stores it) needs: running it without them is a code
+        error. A run that is not kept leaves them unanswered; nothing reads them."""
+        from app.agent.neutral import ToolCall
+        from app.agent.tooling import tool
+
+        @tool
+        async def finish() -> str:
+            """Finish."""
+            return "done"
+
+        mock_deps["model"].complete = AsyncMock(
+            return_value=Message(
+                role=Role.ASSISTANT,
+                content="",
+                tool_calls=[
+                    ToolCall(id="c1", name="finish", arguments={}),
+                    ToolCall(id="c2", name="finish", arguments={}),
+                ],
+            )
+        )
+        agent = Agent(_CFG, tools=[ToolSpec(finish, trim="kept", ends_round=True)])
+        go = [Message(role=Role.USER, content="go")]
+
+        with pytest.raises(ValueError):
+            await agent.run(go, call=_call(), prompts=_PROMPTS, transcript_sink=[])
+        assert mock_deps["model"].complete.await_count == 0
+        await agent.run(go, call=_call(), prompts=_PROMPTS)
+        assert mock_deps["model"].complete.await_count == 1
 
 
 # ---------------------------------------------------------------------------

@@ -128,3 +128,13 @@ class Settings:
 
 
 settings = Settings()
+
+
+DEFAULT_APP = "agent-service"
+"""The app a process runs as when ``APP_NAME`` is not set."""
+
+
+def current_app() -> str:
+    """The app this process runs as: ``APP_NAME`` (PaaS injects it per Deployment), otherwise
+    :data:`DEFAULT_APP`. Read from the environment each time it is asked for."""
+    return environ.get("APP_NAME") or DEFAULT_APP

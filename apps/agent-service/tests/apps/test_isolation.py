@@ -84,7 +84,8 @@ def test_an_app_nobody_declared_cannot_start():
 
 
 def test_every_declared_app_is_a_known_app():
-    from app.deployment import APPS, DEFAULT_APP
+    from app.deployment import APPS
+    from app.infra.config import DEFAULT_APP
 
     assert set(APPS) == {"agent-service", "world"}
     assert DEFAULT_APP in APPS

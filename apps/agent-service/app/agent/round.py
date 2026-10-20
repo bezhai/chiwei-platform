@@ -371,6 +371,7 @@ async def run_round(
                     now=round.now,
                     state=state,
                     policy=history.policy,
+                    texts=history.texts,
                     material_tools=frozenset(
                         t.value.tool.name
                         for t in profile.tools
@@ -394,12 +395,15 @@ async def run_round(
         produced: list[Message] = []
         with collect_usage() as usage:
             reply = await Agent(
-                spec, tools=[t.value for t in _on(profile.tools, off)]
+                spec,
+                tools=[t.value for t in _on(profile.tools, off)],
+                never_ran=history.texts.never_ran if history is not None else None,
             ).run(
                 [*earlier, stimulus],
                 call=call,
                 prompts=round.prompts,
-                transcript_sink=produced,
+                # Kept only when the round keeps a history (what it produced is stored there).
+                transcript_sink=produced if history is not None else None,
             )
         cost = profile.profile.cost
         if cost is not None:
@@ -481,7 +485,9 @@ async def _read_history(profile: AssembledProfile, round: Round, key: str) -> No
         messages=messages,
         version=version,
         lost_last_round=lost,
-        continues_unbroken=continues_unbroken(messages, lost_last_round=lost),
+        continues_unbroken=continues_unbroken(
+            messages, lost_last_round=lost, texts=profile.profile.history.texts
+        ),
     )
 
 

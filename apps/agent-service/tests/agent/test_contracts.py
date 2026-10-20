@@ -8,6 +8,8 @@ That the agent layer never imports the host is checked on the real tree by
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from inner_shared.dynamic_config import dynamic_config
 
@@ -39,9 +41,9 @@ POLICY = TrimPolicy(
     trim_target_tokens=100_000,
 )
 TEXTS = HistoryTexts(
-    checkpoint_head="【清理 ",
+    checkpoint_head="【清理 {at}】",
     checkpoint_note="往前的不在了。",
-    gap_head="【缺口 ",
+    gap_head="【缺口 {at}】",
     gap_note="上一轮没存下来。",
     material_trimmed="（不在眼前了）",
     picture_trimmed="（图不在眼前了）",
@@ -93,6 +95,36 @@ def test_a_cost_row_names_its_actor_by_participant_and_its_round_by_id_and_trace
 # ---------------------------------------------------------------------------
 # agents, segments, tools, switches
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "head", ["【清理 ", "【清理 {at}", "{at}】", "【清理 {at} {who}】", "【{at}】{at}】"]
+)
+def test_a_marker_head_puts_its_time_once_between_text_before_and_after(head):
+    """A marker is found again by its head: the text before the time, the time, and the text
+    that ends it (a folded marker keeps exactly that much)."""
+    with pytest.raises(ValueError):
+        dataclasses.replace(TEXTS, checkpoint_head=head)
+    with pytest.raises(ValueError):
+        dataclasses.replace(TEXTS, gap_head=head)
+
+
+def test_the_two_marker_heads_differ():
+    with pytest.raises(ValueError):
+        dataclasses.replace(TEXTS, gap_head=TEXTS.checkpoint_head)
+
+
+def test_an_agent_answers_arguments_that_do_not_fit_with_the_tool_and_the_error():
+    spec = AgentSpec(
+        segments=("world_round",),
+        model="m",
+        trace_name="t",
+        bad_arguments="工具 {tool} 参数不对：{error}",
+    )
+    assert spec.bad_arguments == "工具 {tool} 参数不对：{error}"
+    assert AgentSpec(segments=("diary",), model="m", trace_name="t").bad_arguments is None
+    with pytest.raises(ValueError):
+        AgentSpec(segments=("x",), model="m", trace_name="t", bad_arguments="{who}")
 
 
 def test_an_agent_has_at_least_one_segment_and_each_once():

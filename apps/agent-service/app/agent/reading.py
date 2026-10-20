@@ -58,6 +58,7 @@ from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.agent.tooling import Tool
 from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import BAD_ARGUMENTS
 from app.agent.trace import collect_usage
 from app.domain.reading_source import (  # module-level so tests can monkeypatch
     BookParseError,
@@ -90,6 +91,7 @@ READING_AGENT = AgentSpec(
     trace_name="book-reading",
     recursion_limit=MAX_READ_CALLS + 4,
     session="{lane}:{participant}:{date}",
+    bad_arguments=BAD_ARGUMENTS,
 )
 READING_SEGMENT = Segment(READING, READING, variables=("persona_name", "persona_lite"))
 

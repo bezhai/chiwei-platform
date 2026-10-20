@@ -124,6 +124,7 @@ from app.agent.round import (
 )
 from app.agent.tooling import tool
 from app.agent.tools._common import get_or_create_counter, tool_error
+from app.agent.tools.outcome import BAD_ARGUMENTS
 from app.data.ordered import insert_in_commit_order
 from app.data.persist import fetch_one, from_row
 from app.data.schema import CommitOrder, Data, Key, table_name
@@ -234,6 +235,7 @@ LIFE_MOMENT_AGENT = AgentSpec(
     trace_name="living-life-moment",
     recursion_limit=12,
     session="living-life:{lane}:{participant}",
+    bad_arguments=BAD_ARGUMENTS,
 )
 
 @dataclass

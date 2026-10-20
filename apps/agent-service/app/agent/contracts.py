@@ -148,6 +148,8 @@ class FromConfig:
 # The variables an agent's Langfuse session can use: the lane, the participant the call is for,
 # and the date (Beijing time) of the moment the call is about.
 SESSION_VARIABLES = frozenset({"lane", "participant", "date"})
+# The variables an agent's answer to arguments that do not fit a tool can use.
+BAD_ARGUMENTS_VARIABLES = frozenset({"tool", "error"})
 
 
 @dataclass(frozen=True)
@@ -162,7 +164,9 @@ class AgentSpec:
     :data:`SESSION_VARIABLES`, or ``None`` for none. ``update_trace`` False leaves the trace it
     runs in named after its caller; ``separate_trace`` puts every call in a trace of its own.
     ``tools`` are the tools of an agent that is not a participant's main agent (a main agent's
-    are its profile's).
+    are its profile's). ``bad_arguments`` is what a tool call whose arguments do not fit its tool
+    is answered with, a format string over :data:`BAD_ARGUMENTS_VARIABLES` (the tool's name, the
+    error); ``None`` answers with the tool's name and the error alone.
     """
 
     segments: tuple[str, ...]
@@ -175,6 +179,7 @@ class AgentSpec:
     update_trace: bool = True
     separate_trace: bool = False
     tools: tuple[str, ...] = ()
+    bad_arguments: str | None = None
 
     def __post_init__(self) -> None:
         if not self.segments:
@@ -195,6 +200,12 @@ class AgentSpec:
             _check_format(
                 f"agent {self.trace_name!r} session", self.session, SESSION_VARIABLES
             )
+        if self.bad_arguments is not None:
+            _check_format(
+                f"agent {self.trace_name!r} bad_arguments",
+                self.bad_arguments,
+                BAD_ARGUMENTS_VARIABLES,
+            )
 
 
 @dataclass(frozen=True)
@@ -202,7 +213,12 @@ class HistoryTexts:
     """The words the history of a participant's rounds is trimmed and marked with: the head and
     the explanation of the two marker messages (a cleanup, a round that was not stored), what a
     trimmed tool result and a trimmed picture are replaced with, and what a tool call that never
-    ran because the round ended before it is answered with."""
+    ran because the round ended before it is answered with.
+
+    A marker message is its head, a line break, its note and the state laid out again. A head is a
+    format string with ``{at}`` (the marker's time) once, between text before it and text that
+    ends it: that is how a marker is found again in a stored history, and all a folded marker
+    keeps. The two heads differ, so the two kinds of marker are told apart."""
 
     checkpoint_head: str
     checkpoint_note: str
@@ -211,6 +227,23 @@ class HistoryTexts:
     material_trimmed: str
     picture_trimmed: str
     never_ran: str
+
+    def __post_init__(self) -> None:
+        for name in ("checkpoint_head", "gap_head"):
+            head = getattr(self, name)
+            before, _, after = head.partition("{at}")
+            if (
+                _format_variables(head) != {"at"}
+                or head.count("{at}") != 1
+                or not before
+                or not after
+            ):
+                raise ValueError(
+                    f"history texts {name} {head!r}: put {{at}} once, between text before it "
+                    f"and text that ends the head"
+                )
+        if self.checkpoint_head == self.gap_head:
+            raise ValueError("history texts: the two marker heads must differ")
 
 
 # The variables a history key can use.

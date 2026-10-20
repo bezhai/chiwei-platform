@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from typing import Any
@@ -90,16 +89,15 @@ from app.agent.trace import (
     separate_trace,
     under_last_generation,
 )
-from app.api.middleware import get_lane
 from app.capabilities._errors import CapabilityTimeout
 from app.capabilities.retry import retry as _retry_decorator
-from app.deployment import DEFAULT_APP
-from app.infra.config import settings
+from app.infra.config import current_app, settings
 from app.infra.lane_policy import (
     classify_deployment_lane,
     current_deployment_lane,
     normalize_deployment_lane,
 )
+from app.infra.propagation import current_context
 
 logger = logging.getLogger(__name__)
 
@@ -171,11 +169,13 @@ def _trace_attributes() -> tuple[dict[str, str], list[str]]:
     ``tags`` are the primary query surface (``list-traces`` supports tags
     directly); metadata carries the same fields for the trace detail page and
     later analytics. The app is the one this process runs as (``APP_NAME``,
-    injected by PaaS per Deployment), so a world round is tagged ``app:world``
-    and an agent-service run ``app:agent-service``.
+    injected by PaaS per Deployment, :func:`app.infra.config.current_app`), so a world
+    round is tagged ``app:world`` and an agent-service run ``app:agent-service``. The
+    lane is the one the hop that started this work bound (a message's, a clock's), else
+    the deployment's.
     """
-    app_name = os.getenv("APP_NAME") or DEFAULT_APP
-    raw_request_lane = get_lane()
+    app_name = current_app()
+    raw_request_lane = current_context().lane
     if raw_request_lane:
         lane = normalize_deployment_lane(raw_request_lane) or "prod"
         source = "request"
@@ -374,14 +374,6 @@ def _record_tool_output(span: Any, result: ToolResult) -> None:
 # Hand-written ReAct loops (module-level so they can be de-risked in isolation)
 # ---------------------------------------------------------------------------
 
-# What a call that never ran is answered with. A tool that ends the round
-# (``ToolSpec.ends_round``; hers is ``stop_for_now``) ends the run at
-# the position it holds in the turn, so every call after it is left unexecuted —
-# and an assistant turn whose calls are not all answered makes the provider
-# reject the whole next request. The wording says what happened, so a model
-# reading the stored context does not take it for a tool that failed.
-NEVER_RAN = "（这一轮在这只手之前就结束了，它没有执行。）"
-
 def _tooldefs(tools: list[Tool]) -> list[ToolDef] | None:
     """Project neutral Tools to the ToolDefs the model sees, or None if empty."""
     return [t.definition for t in tools] if tools else None
@@ -519,6 +511,8 @@ async def _run_loop(
     tools: list[Tool],
     recursion_limit: int,
     ends_round: frozenset[str] = frozenset(),
+    never_ran: str | None = None,
+    bad_arguments: str | None = None,
     session_id: str | None = None,
     model_kwargs: dict[str, Any] | None = None,
     transcript_sink: list[Message] | None = None,
@@ -551,7 +545,10 @@ async def _run_loop(
 
       - **every call is answered.** A terminal tool ends the run where it sits
         in the turn, so the calls after it never run; each of those gets a
-        result saying so (``NEVER_RAN``).
+        result saying so, in the caller's words (``never_ran``: an assistant
+        turn whose calls are not all answered makes the provider reject the
+        whole next request, and the words say what happened, so a model reading
+        the stored context does not take it for a tool that failed).
       - **nothing content-free is stored** (``_carries_something``). The empty
         message a terminal tool returns stays out — it carries nothing, and a
         caller whose rounds usually end that way would pile up one per round —
@@ -589,7 +586,7 @@ async def _run_loop(
             transcript_sink.append(last)
         for at, call in enumerate(last.tool_calls):
             with _tool_span(name=call.name, input=call.arguments) as span:
-                result = await dispatch(tools, call)
+                result = await dispatch(tools, call, bad_arguments=bad_arguments)
                 normalised = _normalise_tool_result(result)
                 _record_tool_output(span, normalised)
             tool_msg = normalised.to_message()
@@ -601,9 +598,9 @@ async def _run_loop(
                 # carrying them is already stored. Answer each so the stored
                 # round keeps every call paired with a result — a turn with an
                 # unanswered call makes the provider reject the next request.
-                for skipped in last.tool_calls[at + 1 :]:
+                for skipped in last.tool_calls[at + 1 :] if never_ran is not None else ():
                     cancelled = ToolResult(
-                        tool_call_id=skipped.id, content=NEVER_RAN
+                        tool_call_id=skipped.id, content=never_ran
                     ).to_message()
                     convo.append(cancelled)
                     if transcript_sink is not None:
@@ -672,7 +669,10 @@ class Agent:
     structured-output path (single ``model.structured`` call). The tools are
     given as their declarations (:class:`~app.agent.contracts.ToolSpec`): the
     model sees their schemas in the order given, and a call to one declared
-    ``ends_round`` ends the run.
+    ``ends_round`` ends the run; when the run is kept (``transcript_sink``), the calls
+    after it are answered with ``never_ran`` (the participant's
+    :class:`~app.agent.contracts.HistoryTexts`), which it then needs. A tool call whose
+    arguments do not fit its tool is answered with ``spec.bad_arguments``.
 
     Every entry takes the :class:`~app.agent.round.Call` its caller opened and binds it as the
     current call for as long as it runs; the call's own state is emptied at the start of each
@@ -684,10 +684,17 @@ class Agent:
     failure. ``spec.separate_trace`` puts every call in a Langfuse trace of its own.
     """
 
-    def __init__(self, spec: AgentSpec, *, tools: Sequence[ToolSpec] = ()) -> None:
+    def __init__(
+        self,
+        spec: AgentSpec,
+        *,
+        tools: Sequence[ToolSpec] = (),
+        never_ran: str | None = None,
+    ) -> None:
         self._spec = spec
         self._tools = [t.tool for t in tools]
         self._ends_round = frozenset(t.tool.name for t in tools if t.ends_round)
+        self._never_ran = never_ran
 
     # ------------------------------------------------------------------
     # internal
@@ -738,6 +745,12 @@ class Agent:
         attempt for the same reason.
         """
         spec = self._spec
+        if transcript_sink is not None and self._ends_round and self._never_ran is None:
+            raise ValueError(
+                f"agent {spec.trace_name!r}: {sorted(self._ends_round)} end the round and the "
+                f"run is kept, so the calls after them need never_ran (the participant's "
+                f"HistoryTexts.never_ran)"
+            )
         with in_call(call), self._trace_scope():
             model, recursion_limit = await self._model()
             full_messages = [*prompts.messages(call.agent, values), *messages]
@@ -759,6 +772,8 @@ class Agent:
                         messages=full_messages,
                         tools=self._tools,
                         ends_round=self._ends_round,
+                        never_ran=self._never_ran,
+                        bad_arguments=spec.bad_arguments,
                         recursion_limit=recursion_limit,
                         session_id=call.session,
                         model_kwargs=dict(spec.model_kwargs),

@@ -1,7 +1,7 @@
 """这个镜像跑出哪几个 App，每个 App 的清单在哪个模块（:data:`APPS`）。
 
 **一个 App 的进程只 import 它自己清单里的插件。** 同一个镜像由 PaaS 部署成几个 App（PaaS 给
-每个 Deployment 注入 ``APP_NAME``），``app.main`` 的 lifespan 按 :data:`APPS` 找到那一个 App 的
+每个 Deployment 注入 ``APP_NAME``，没设时是 :data:`app.infra.config.DEFAULT_APP`），``app.main`` 的 lifespan 按 :data:`APPS` 找到那一个 App 的
 清单（:mod:`app.manifests`），起它的插件宿主（:meth:`app.host.Host.for_app`）。插件模块 import 到的东西（Data 类、节点）和插件
 setup 里登记的东西（钟、路由、收件箱）才会出现在那个进程里；没被 import 的代码在那个进程里
 不存在——不建它的表、不跑它的钟、不开它的收件箱。
@@ -14,9 +14,6 @@ App 之间不靠代码互通，靠通信机制（:mod:`app.messaging`）。App �
 ``/api/paas/apps/`` 建，否则部署那步没有落脚处）。
 """
 from __future__ import annotations
-
-DEFAULT_APP = "agent-service"
-"""没设 ``APP_NAME`` 的进程跑的 App。"""
 
 APPS: dict[str, str] = {
     "agent-service": "app.manifests.agent_service",

@@ -96,3 +96,10 @@ __all__ = [
     "ToolNotFound",
     "ToolOutcomeError",
 ]
+
+
+# What her agents and world's answer a tool call whose arguments do not fit its tool with
+# (``AgentSpec.bad_arguments``: the tool's name and the binding error are filled in). The loop
+# feeds it back so the model fixes the arguments and calls again in the same run; the wording is
+# theirs, the generic dispatch only fills it in.
+BAD_ARGUMENTS = "工具 {tool} 参数绑定失败：{error}。请检查该工具的参数定义，修正参数后重新调用。"

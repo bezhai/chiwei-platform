@@ -70,7 +70,7 @@ async def world_process(broker, tmp_path, monkeypatch, app_host):  # noqa: F811
     # 最后一次定到一天以后：测试结束时它还躺在延时交换机里，这个 broker 活不到那时候，
     # 不会有一条迟到的自定消息落进后面用例的收件箱。
     runner = ScriptedRunner([2.0, 1.5, 86_400.0])
-    monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(): runner)
+    monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(), never_ran=None: runner)
 
     await app_host("world")
     return runner
@@ -171,7 +171,7 @@ async def test_someone_elses_message_dead_lettered_leaves_world_waking_on_its_pl
 
     _fast_retry(monkeypatch)
     runner = RunnerFailingOn(lambda s: "发来一条消息" in s, [4.0, 86_400.0])
-    monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(): runner)
+    monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(), never_ran=None: runner)
 
     await start_messaging()
     await eventually(
@@ -207,7 +207,7 @@ async def test_the_latest_wake_failing_again_and_again_is_never_dead_lettered(
         return False
 
     runner = RunnerFailingOn(fails, [86_400.0])
-    monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(): runner)
+    monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(), never_ran=None: runner)
 
     await start_messaging()
     started = None
@@ -261,7 +261,7 @@ async def test_messages_arriving_while_a_round_runs_are_taken_together_by_one_ro
     from app.world import pending
 
     runner = HeldFirstRound()
-    monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(): runner)
+    monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(), never_ran=None: runner)
 
     await start_messaging()
     await eventually(lambda: len(runner.round_inputs) == 1, timeout=10)  # 启动补醒那一轮在跑
@@ -347,7 +347,7 @@ async def test_a_round_whose_success_was_not_recorded_does_not_run_again_after_t
     from app.messaging import receiving
 
     runner = WakesTomorrow()
-    monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(): runner)
+    monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(), never_ran=None: runner)
 
     knock = uuid.uuid4().hex
     real_mark = receiving.mark_succeeded

@@ -267,6 +267,7 @@ class TestRunLoop:
             messages=[Message(role=Role.USER, content="go")],
             tools=[ends_it, echo_tool],
             ends_round=frozenset({"ends_it"}),
+            never_ran="（没有执行）",
             recursion_limit=12,
             transcript_sink=sink,
         )
@@ -942,7 +943,7 @@ async def stop_for_now() -> str:
 
 class TestEndsRound:
     async def test_a_tool_declared_to_end_the_round_ends_it_and_answers_the_rest(self):
-        from app.agent.core import NEVER_RAN, _run_loop
+        from app.agent.core import _run_loop
 
         calls = [
             ToolCall(id="c1", name="finish", arguments={}),
@@ -958,6 +959,7 @@ class TestEndsRound:
             messages=[Message(role=Role.USER, content="go")],
             tools=[finish, echo_tool],
             ends_round=frozenset({"finish"}),
+            never_ran="（没有执行）",
             recursion_limit=12,
             transcript_sink=sink,
         )
@@ -965,7 +967,7 @@ class TestEndsRound:
         assert result.text() == ""
         assert len(fake.complete_calls) == 1
         answered = {m.tool_call_id: m.text() for m in sink if m.role is Role.TOOL}
-        assert answered == {"c1": "done", "c2": NEVER_RAN}
+        assert answered == {"c1": "done", "c2": "（没有执行）"}
 
     async def test_a_tool_not_declared_to_end_the_round_does_not_end_it_whatever_its_name(
         self,

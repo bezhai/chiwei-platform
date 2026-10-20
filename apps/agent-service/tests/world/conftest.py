@@ -221,7 +221,7 @@ async def world(volume, monkeypatch, app_host, world_manifest):
     class Dispatch:
         """按这次调用的名字交给主 agent 的替身或那一类的替身，记下调用的是谁、拿到哪些工具。"""
 
-        def __init__(self, spec, *, tools=()):
+        def __init__(self, spec, *, tools=(), never_ran=None):
             self.spec, self.tools = spec, [t.tool.name for t in tools]
 
         async def run(self, messages, *, call, **kw):

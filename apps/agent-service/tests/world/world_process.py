@@ -71,7 +71,7 @@ async def main() -> None:
     agent_round.load_session = load_session
     agent_round.commit_transcript = nothing
     agent_round.record_round_cost = nothing
-    agent_core.Agent = lambda spec, *, tools=(): _Runner()
+    agent_core.Agent = lambda spec, *, tools=(), never_ran=None: _Runner()
     # 一轮在第一次调模型之前取齐 prompt：用回放的 prompt 快照，不连 Langfuse。
     fixtures = FixtureLangfuse()
     prompts._get_client = lambda: fixtures

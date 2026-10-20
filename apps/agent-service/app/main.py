@@ -1,5 +1,4 @@
 import logging
-import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -12,9 +11,8 @@ from inner_shared.middlewares.context_propagation import (
 
 from app.api.middleware import HeaderContextMiddleware, PrometheusMiddleware
 from app.api.routes import router as api_router
-from app.deployment import DEFAULT_APP
 from app.host import Host
-from app.infra.config import settings
+from app.infra.config import current_app, settings
 
 load_dotenv()
 setup_logging(log_dir="/logs/agent-service", log_file="app.log")
@@ -34,7 +32,7 @@ async def lifespan(app: FastAPI):
     clocks, and stops them in the shutdown order. The middlewares, ``/metrics`` and ``/health``
     are set on the app at import, below.
     """
-    app_name = os.getenv("APP_NAME") or DEFAULT_APP
+    app_name = current_app()
     logger.info("shared pkg loaded: %s", shared_hello())
 
     host = Host.for_app(app_name)

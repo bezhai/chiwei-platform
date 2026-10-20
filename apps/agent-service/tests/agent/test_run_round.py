@@ -405,9 +405,9 @@ POLICY = TrimPolicy(
     trim_target_tokens=100_000,
 )
 TEXTS = HistoryTexts(
-    checkpoint_head="【上下文清理 ",
+    checkpoint_head="【上下文清理 {at}】",
     checkpoint_note="",
-    gap_head="【上一轮没存下来 ",
+    gap_head="【上一轮没存下来 {at}】",
     gap_note="",
     material_trimmed="",
     picture_trimmed="",

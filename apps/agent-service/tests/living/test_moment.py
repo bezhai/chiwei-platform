@@ -1891,7 +1891,9 @@ async def test_what_she_still_has_not_read_comes_back_on_the_checkpoint(
     每轮只给新到的，摆出它的那一轮刺激走 ``own_minutes``，到期整组删。界桩不重铺的话
     之后再没有第二处说得出有人找过她 —— 她不看手机就永远不知道。
     """
-    from app.agent.continuity import CHECKPOINT_HEAD
+    from app.manifests.history import HISTORY_TEXTS
+
+    CHECKPOINT_HEAD = HISTORY_TEXTS.checkpoint_head.partition("{at}")[0]
     from tests.living.test_phone import _DM, _incoming, _seed_world
 
     await _seed_world()

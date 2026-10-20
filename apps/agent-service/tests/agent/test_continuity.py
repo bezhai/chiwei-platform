@@ -30,10 +30,6 @@ from pathlib import Path
 import pytest
 
 from app.agent.continuity import (
-    CHECKPOINT_HEAD,
-    GAP_HEAD,
-    MATERIAL_TRIMMED,
-    PICTURE_TRIMMED,
     TranscriptConflict,
     TrimPolicy,
     commit_transcript,
@@ -45,7 +41,14 @@ from app.agent.continuity import (
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall
 from app.agent.session import load_session
 from app.domain.session_transcript import SessionTranscript
+from app.manifests.history import HISTORY_TEXTS
 from tests.runtime.conftest import migrate, test_db, test_db_dsn  # noqa: F401
+
+CHECKPOINT_HEAD = HISTORY_TEXTS.checkpoint_head.partition("{at}")[0]
+GAP_HEAD = HISTORY_TEXTS.gap_head.partition("{at}")[0]
+MATERIAL_TRIMMED = HISTORY_TEXTS.material_trimmed
+PICTURE_TRIMMED = HISTORY_TEXTS.picture_trimmed
+
 
 _CST = dt.timezone(dt.timedelta(hours=8))
 _EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
@@ -95,7 +98,8 @@ def _round(
     material_tools: frozenset[str] = MATERIAL,
 ) -> list[Message]:
     fed = trim_for_round(
-        history, now=at, state=STATE, policy=policy, material_tools=material_tools
+        history, now=at, state=STATE, policy=policy, material_tools=material_tools,
+        texts=HISTORY_TEXTS,
     )
     round_input = Message(role=Role.USER, content=f"现在 {at:%H:%M}。")
     return next_transcript(fed, [round_input, *produced], policy=policy)
@@ -152,7 +156,8 @@ def test_the_cleanup_grid_counts_from_the_epoch_not_from_anyones_day():
     every_45 = dataclasses.replace(POLICY, cleanup_minutes=45)
     for now in (_at(3, 50), _at(4, 10), _at(4, 40), _at(0, 5), _at(23, 59)):
         fed = trim_for_round(
-            [], now=now, state=STATE, policy=every_45, material_tools=MATERIAL
+            [], now=now, state=STATE, policy=every_45, material_tools=MATERIAL,
+            texts=HISTORY_TEXTS,
         )
         at = _marker_time(fed[0], CHECKPOINT_HEAD)
         assert (at - _EPOCH) % dt.timedelta(minutes=45) == dt.timedelta(0), (
@@ -164,7 +169,8 @@ def test_the_cleanup_grid_counts_from_the_epoch_not_from_anyones_day():
 def test_an_hourly_grid_lands_on_whole_hours_in_the_callers_zone():
     """一小时一格落在整点上，标记消息里的时刻沿用调用方给的时区。"""
     fed = trim_for_round(
-        [], now=_at(14, 20), state=STATE, policy=POLICY, material_tools=MATERIAL
+        [], now=_at(14, 20), state=STATE, policy=POLICY, material_tools=MATERIAL,
+        texts=HISTORY_TEXTS,
     )
 
     assert fed[0].text().startswith(f"{CHECKPOINT_HEAD}2026-07-25T14:00:00+08:00】")
@@ -176,7 +182,8 @@ def test_the_cleanup_line_never_goes_backwards():
     at = _at(0, 0)
     while at < _at(0, 0, day=27):
         fed = trim_for_round(
-            [], now=at, state=STATE, policy=POLICY, material_tools=MATERIAL
+            [], now=at, state=STATE, policy=POLICY, material_tools=MATERIAL,
+            texts=HISTORY_TEXTS,
         )
         now = _marker_time(fed[0], CHECKPOINT_HEAD)
         assert last is None or now >= last, f"{at} 的清理点 {now} 比上一个 {last} 还早"
@@ -351,6 +358,7 @@ def test_a_lost_round_gets_a_gap_marker_and_keeps_the_history():
         policy=POLICY,
         material_tools=MATERIAL,
         lost_last_round=True,
+        texts=HISTORY_TEXTS,
     )
 
     assert len(fed) == len(history) + 1
@@ -383,7 +391,8 @@ def test_the_hard_cap_drops_the_oldest_groups_and_never_this_round():
 
 def _round_with(history: list[Message], at: dt.datetime, state: str) -> list[Message]:
     fed = trim_for_round(
-        history, now=at, state=state, policy=POLICY, material_tools=MATERIAL
+        history, now=at, state=state, policy=POLICY, material_tools=MATERIAL,
+        texts=HISTORY_TEXTS,
     )
     round_input = Message(role=Role.USER, content=f"现在 {at:%H:%M}。")
     return next_transcript(fed, [round_input, _said("继续")], policy=POLICY)
@@ -423,6 +432,7 @@ def test_a_later_cleanup_folds_the_gap_marker_too():
         policy=POLICY,
         material_tools=MATERIAL,
         lost_last_round=True,
+        texts=HISTORY_TEXTS,
     )
     ctx = next_transcript(fed, [Message(role=Role.USER, content="现在 14:35。")], policy=POLICY)
     ctx = _round_with(ctx, _at(15, 5), "状态：15:05 那会儿。")
@@ -440,7 +450,8 @@ def test_between_two_markers_nothing_is_folded_and_the_prefix_stays_put():
     for minute in (15, 25, 35, 45, 55):
         before = list(ctx)
         fed = trim_for_round(
-            ctx, now=_at(14, minute), state="不该出现", policy=POLICY, material_tools=MATERIAL
+            ctx, now=_at(14, minute), state="不该出现", policy=POLICY, material_tools=MATERIAL,
+            texts=HISTORY_TEXTS,
         )
         assert fed == before, f"14:{minute} 那一轮改动了前缀"
         ctx = next_transcript(
@@ -470,10 +481,10 @@ def test_the_context_continues_unbroken_only_with_a_marker_and_no_lost_round():
     """
     ctx = _round_with([], _at(14, 5), STATE)
 
-    assert continues_unbroken(ctx, lost_last_round=False)
-    assert not continues_unbroken(ctx, lost_last_round=True), "上一轮没存下来"
-    assert not continues_unbroken([], lost_last_round=False), "上下文是空的"
-    assert not continues_unbroken(ctx[1:], lost_last_round=False), (
+    assert continues_unbroken(ctx, lost_last_round=False, texts=HISTORY_TEXTS)
+    assert not continues_unbroken(ctx, lost_last_round=True, texts=HISTORY_TEXTS), "上一轮没存下来"
+    assert not continues_unbroken([], lost_last_round=False, texts=HISTORY_TEXTS), "上下文是空的"
+    assert not continues_unbroken(ctx[1:], lost_last_round=False, texts=HISTORY_TEXTS), (
         "硬顶把标记消息全裁掉了：剩下那一截说不清是从哪儿接上的"
     )
 
@@ -486,5 +497,5 @@ def test_a_folded_marker_still_counts_as_the_context_carrying_on():
     only_folded = ctx[:newest]
 
     assert _markers(only_folded) and "你现在：" not in only_folded[0].text()
-    assert continues_unbroken(only_folded, lost_last_round=False)
+    assert continues_unbroken(only_folded, lost_last_round=False, texts=HISTORY_TEXTS)
 

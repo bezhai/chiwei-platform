@@ -24,10 +24,6 @@ from dataclasses import replace
 import pytest
 
 from app.agent.continuity import (
-    CHECKPOINT_HEAD,
-    GAP_HEAD,
-    MATERIAL_TRIMMED,
-    PICTURE_TRIMMED,
     TrimPolicy,
     continues_unbroken,
     estimate_tokens,
@@ -37,8 +33,15 @@ from app.agent.continuity import (
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.agent.session import load_session
 from app.living.moment import HISTORY_KEY, MOMENT_TRIM_POLICY
+from app.manifests.history import HISTORY_TEXTS
 from tests.living.conftest import regular_round
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
+
+CHECKPOINT_HEAD = HISTORY_TEXTS.checkpoint_head.partition("{at}")[0]
+GAP_HEAD = HISTORY_TEXTS.gap_head.partition("{at}")[0]
+MATERIAL_TRIMMED = HISTORY_TEXTS.material_trimmed
+PICTURE_TRIMMED = HISTORY_TEXTS.picture_trimmed
+
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -124,7 +127,8 @@ def _round(
     存下去的就是喂进去的那份加上这一轮。
     """
     kept = trim_for_round(
-        history, now=at, state=state, policy=policy, material_tools=material_tools
+        history, now=at, state=state, policy=policy, material_tools=material_tools,
+        texts=HISTORY_TEXTS,
     )
     return next_transcript(
         kept, [_stim(f"现在 {at:%H:%M}。"), *produced], policy=policy
@@ -583,6 +587,7 @@ async def test_folded_checkpoints_still_encode_as_a_valid_gemini_request():
             policy=BEFORE_THE_MOVE,
             material_tools=HER_MATERIAL,
             lost_last_round=True,
+            texts=HISTORY_TEXTS,
         ),
         [_stim("现在 13:35。"), _call("say", "c3"), _result("c3", "记下了。"), _said("嗯")],
         policy=BEFORE_THE_MOVE,
@@ -722,6 +727,7 @@ def test_a_gap_marker_also_folds_the_checkpoints_before_it():
         policy=BEFORE_THE_MOVE,
         material_tools=HER_MATERIAL,
         lost_last_round=True,
+        texts=HISTORY_TEXTS,
     )
 
     first, gap = _markers(fed)
@@ -744,6 +750,7 @@ def test_a_later_cleanup_folds_the_gap_marker_too():
             policy=BEFORE_THE_MOVE,
             material_tools=HER_MATERIAL,
             lost_last_round=True,
+            texts=HISTORY_TEXTS,
         ),
         [_stim("现在 14:35。"), _said("继续")],
         policy=BEFORE_THE_MOVE,
@@ -766,14 +773,14 @@ def test_her_recent_words_are_in_view_only_when_the_history_carries_on_unbroken(
     """
     ctx = _round([], _at(14, 5), _said("我去洗澡了"))
 
-    assert continues_unbroken(ctx, lost_last_round=False)
-    assert not continues_unbroken(ctx, lost_last_round=True), (
+    assert continues_unbroken(ctx, lost_last_round=False, texts=HISTORY_TEXTS)
+    assert not continues_unbroken(ctx, lost_last_round=True, texts=HISTORY_TEXTS), (
         "上一轮没存下来：那一轮说过的话比眼前剩下的都新，却不在眼前"
     )
-    assert not continues_unbroken([], lost_last_round=False), (
+    assert not continues_unbroken([], lost_last_round=False, texts=HISTORY_TEXTS), (
         "第一次跑 / 清过库：眼前什么都没有"
     )
-    assert not continues_unbroken(ctx[1:], lost_last_round=False), (
+    assert not continues_unbroken(ctx[1:], lost_last_round=False, texts=HISTORY_TEXTS), (
         "硬顶把界桩全裁掉了：剩下的那一截说不清是从哪儿接上的"
     )
 
@@ -799,6 +806,7 @@ def test_a_transcript_stored_before_folding_existed_folds_at_the_next_cleanup():
         state="新状态",
         policy=BEFORE_THE_MOVE,
         material_tools=HER_MATERIAL,
+        texts=HISTORY_TEXTS,
     )
 
     assert [m.text() for m in _markers(fed)[:-1]] == [
@@ -873,6 +881,7 @@ def test_a_round_that_blew_past_the_cap_is_cut_back_before_the_next_model_call()
         state="手上：你在家/客厅，正在发呆。",
         policy=policy,
         material_tools=HER_MATERIAL,
+        texts=HISTORY_TEXTS,
     )
 
     assert estimate_tokens(fed) <= policy.hard_cap_tokens, (
@@ -973,6 +982,7 @@ def _replay_both(
             state="手上：你在家/客厅，正在发呆。",
             policy=policy,
             material_tools=material_tools,
+            texts=HISTORY_TEXTS,
         )
         stored = next_transcript(
             fed, [_stim(f"现在 {at:%H:%M}。"), *produced], policy=policy
@@ -1396,7 +1406,7 @@ def test_trimming_the_pictures_changes_the_content_and_nothing_else():
         ],
     )
 
-    trimmed = _without_pictures(message)
+    trimmed = _without_pictures(message, PICTURE_TRIMMED)
 
     assert [b.type for b in trimmed.content] == ["text", "text"]
     assert trimmed.content[1].text == PICTURE_TRIMMED

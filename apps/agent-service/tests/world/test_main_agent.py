@@ -10,10 +10,11 @@ from datetime import timedelta
 
 import pytest
 
-from app.agent.continuity import CHECKPOINT_HEAD, estimate_tokens
+from app.agent.continuity import estimate_tokens
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
 from app.infra.cst_time import now_cst
+from app.manifests.history import HISTORY_TEXTS
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, wake
 from app.world.agents import when
@@ -27,6 +28,9 @@ from .conftest import (
     spec_called,
     tools_built_for,
 )
+
+CHECKPOINT_HEAD = HISTORY_TEXTS.checkpoint_head.partition("{at}")[0]
+
 
 
 def _round_input(world_handle, run: int = -1) -> str:
