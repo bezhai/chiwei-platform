@@ -39,6 +39,7 @@ from app.infra.cst_time import CST
 if TYPE_CHECKING:
     from app.agent.continuity import HistoryView
     from app.agent.neutral import Message
+    from app.agent.prompts import PromptSet
 
 S = TypeVar("S")
 
@@ -48,7 +49,9 @@ class Round:
     """One round of one participant. ``round_id`` and ``now`` are decided by the wake source
     (hers when her queue gives her the turn; world's when its round starts); ``due`` is what the
     source decided, with its own fields (the message that woke her, the messages world takes).
-    ``previous_at``, ``history`` and ``reply`` are filled in as the round gets to them."""
+    ``previous_at``, ``history``, ``prompts`` (the segments of the main agent and of the sub-agents
+    it may call, at the versions fixed for this round) and ``reply`` are filled in as the round gets
+    to them."""
 
     app: str
     lane: str
@@ -60,6 +63,7 @@ class Round:
     due: Due
     previous_at: datetime | None = None
     history: HistoryView | None = None
+    prompts: PromptSet | None = None
     reply: Message | None = None
     _states: dict[type, Any] = field(default_factory=dict, repr=False, compare=False)
 
