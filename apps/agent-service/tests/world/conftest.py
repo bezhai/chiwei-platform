@@ -10,8 +10,10 @@ from __future__ import annotations
 import importlib
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,6 +28,14 @@ from app.world.actions import wake_me_at
 from app.world.rounds import InboxRound
 
 LANE = "coe-world"
+
+# 这次调用交给模型的工具（名字 → 工具）：替身模型只够得着这些，跟真的模型一样。
+_offered: ContextVar[dict[str, Any]] = ContextVar("world_test_offered_tools")
+
+
+async def use_tool(name: str, arguments: dict[str, Any]) -> Any:
+    """替身模型在这次调用里调工具 ``name``：只有交给这次调用的工具才调得到。"""
+    return await _offered.get()[name].invoke(arguments)
 
 
 @contextmanager
@@ -222,12 +232,16 @@ async def world(volume, monkeypatch, app_host, world_manifest):
         """按这次调用的名字交给主 agent 的替身或那一类的替身，记下调用的是谁、拿到哪些工具。"""
 
         def __init__(self, spec, *, tools=(), never_ran=None):
-            self.spec, self.tools = spec, [t.tool.name for t in tools]
+            self.spec, self.tools = spec, {t.tool.name: t.tool for t in tools}
 
         async def run(self, messages, *, call, **kw):
-            h.built.append((call.agent, self.spec, self.tools))
+            h.built.append((call.agent, self.spec, list(self.tools)))
             target = h.runner if call.agent == main_agent.ROUND else h.agents[call.agent]
-            return await target.run(messages, call=call, **kw)
+            offered = _offered.set(self.tools)
+            try:
+                return await target.run(messages, call=call, **kw)
+            finally:
+                _offered.reset(offered)
 
     from inner_shared.dynamic_config import dynamic_config
 
@@ -296,6 +310,14 @@ def _world_inbox_handler(host):
     """宿主登记的 ``world`` 收件箱交给通信机制的那个处理函数。"""
     (inbox,) = [r for r in host.registered() if r.kind == "inbox" and r.name == "world"]
     return inbox.detail["on_message"]
+
+
+async def ask(world_handle, question):
+    """问 world 一个问题：交给 world 收件箱登记的 ``on_question``，跟通信机制交的一样。"""
+    (inbox,) = [
+        r for r in world_handle.host.registered() if r.kind == "inbox" and r.name == "world"
+    ]
+    return await inbox.detail["on_question"](question)
 
 
 def tools_built_for(world_handle, agent: str) -> list[str]:

@@ -5,13 +5,19 @@
 """
 from __future__ import annotations
 
+from app.manifests.world import QUERY_TOOLS
 from app.messaging.message import Kind, new_message
 from app.world import npc, perception
-from app.world.actions import let_npc_appear
 from app.world.agents import when
-from app.world.sources import query_tools
 
-from .conftest import LANE, ScriptedAgent, sets_wake, spec_called, tools_built_for
+from .conftest import (
+    LANE,
+    ScriptedAgent,
+    sets_wake,
+    spec_called,
+    tools_built_for,
+    use_tool,
+)
 
 SITUATION = "下午四点，学校的美术教室，一个学生把一幅画递给美术老师。"
 LINES = "美术老师接过画，举到窗边看了一会儿，说：「这里的光很好，影子可以再深一点。」"
@@ -41,7 +47,7 @@ def lets_appear(*appearances: tuple[str, str]):
     async def plan():
         for who, situation in appearances:
             results.append(
-                await let_npc_appear.invoke({"npc": who, "situation": situation})
+                await use_tool("let_npc_appear", {"npc": who, "situation": situation})
             )
         return await sets_wake()()
 
@@ -105,7 +111,7 @@ async def test_the_npc_agent_has_its_own_prompt_trace_cost_and_only_the_sources_
 
     config = spec_called(world, "world_npc")
     assert config.trace_name == "world-npc"
-    assert tools_built_for(world, "world_npc") == [t.tool.name for t in await query_tools()]
+    assert tools_built_for(world, "world_npc") == list(QUERY_TOOLS)
     assert len([c for c in world.costs if c["round_id"].startswith("world-npc:")]) == 1
 
 

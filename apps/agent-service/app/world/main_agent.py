@@ -56,7 +56,7 @@ from app.messaging.message import Kind, Message
 from app.world import records, unfinished
 from app.world.actions import RoundScope
 from app.world.agents import when, world_agent
-from app.world.perception import Told, render_told, tell
+from app.world.perception import Told, render_told, send_notices
 from app.world.rounds import InboxRound
 from app.world.wake import WORLD, NextWake, is_own_wake, read_next_wake, set_next_wake
 
@@ -143,7 +143,7 @@ async def resend_left_over(round: Round) -> None:
 
     发送出错原样往外抛：这一轮在模型开始之前就算失败，记着的东西一样不动，下一轮再补。
     """
-    left_over = [(h, await tell(h.notices)) for h in unfinished.read()]
+    left_over = [(h, await send_notices(h.notices)) for h in unfinished.read()]
     if left_over:
         logger.info(
             "world: resent %d notice(s) of %d happening(s) left by an unfinished round",

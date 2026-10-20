@@ -7,7 +7,7 @@
 
 所以一件事判断完、**发出任何一条告知之前**，先把它连同要发的告知（发给谁、发什么、要不要叫醒
 他、预先定好的消息 id）记进私有卷上的 ``unfinished.json``（:func:`note`），然后才按这些 id 去发
-（:func:`app.world.perception.tell`）。下一轮开始、模型跑之前，先按原 id 把这里记着的告知全部
+（:func:`app.world.perception.send_notices`）。下一轮开始、模型跑之前，先按原 id 把这里记着的告知全部
 再发一遍，再把这些事摆到主 agent 眼前；这一轮的上下文存下之后清空（:func:`clear`）——存下之后，
 上下文里已经有它们了。出事的位置不同，接下来是这样：
 

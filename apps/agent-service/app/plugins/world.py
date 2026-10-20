@@ -24,7 +24,7 @@
 只在拿着卷的写锁时消费（:func:`app.world.volume.writer_lock`）；开设时按私有状态补醒
 （:func:`app.world.wake.wake_on_start`，也在拿到锁之后才跑）；状态里的最新唤醒那一轮失败时不限
 次数重试、永不进死信（:func:`app.world.wake.retry_latest_wake_without_limit`）。提问由应答 agent
-回答（:func:`app.world.answer.answer_question`）：只读，不叫醒主 agent。
+回答（:meth:`app.world.answer.Answering.answer_question`）：只读，不叫醒主 agent。
 
 **``Rounds`` 和它的轮次队列在 setup 里建，每次起来一个新的。** 队列是进程内的，记着正在跑的那一轮
 和排着的下一轮。宿主每次起来都相当于一个新的 world 进程：同一个 Python 进程里停了再起（回放里的
@@ -40,8 +40,9 @@ from functools import partial
 
 from app.agent.contracts import FailRound
 from app.agent.round import store_history
+from app.agent.tooling import tool
 from app.host import Context, Plugin
-from app.world.actions import let_npc_appear, report_change, wake_me_at, write_record
+from app.world.actions import wake_me_at, write_record
 from app.world.admin import (
     RecordDeleteRequest,
     RecordListRequest,
@@ -53,7 +54,7 @@ from app.world.admin import (
     record_write_node,
 )
 from app.world.agents import world_segments
-from app.world.answer import ANSWER, answer_question
+from app.world.answer import ANSWER, Answering
 from app.world.main_agent import (
     ROUND_SEGMENTS,
     ROUND_TIMEOUT,
@@ -67,8 +68,8 @@ from app.world.main_agent import (
     set_the_next_wake,
     woken_by,
 )
-from app.world.npc import NPC
-from app.world.perception import PERCEPTION, someone_notices
+from app.world.npc import NPC, Npcs
+from app.world.perception import PERCEPTION, Perceiving, someone_notices
 from app.world.rounds import Rounds
 from app.world.volume import writer_lock
 from app.world.wake import WORLD, retry_latest_wake_without_limit, wake_on_start
@@ -86,15 +87,16 @@ ROUTES = (
 
 def setup(ctx: Context) -> None:
     _the_round(ctx)
+    profile = ctx.profile("world")
     rounds = Rounds(
-        partial(run_inbox_round, ctx.profile("world")),
+        partial(run_inbox_round, profile),
         round_timeout=ROUND_TIMEOUT,
         turns=ctx.turns(WORLD),
     )
     ctx.inbox(
         WORLD,
         on_message=rounds.receive,
-        on_question=answer_question,
+        on_question=Answering(ctx.agent(ANSWER), profile.profile.switches).answer_question,
         processing_timeout=rounds.delivery_timeout,
         on_open=wake_on_start,
         consume_while=writer_lock,
@@ -117,11 +119,13 @@ def _the_round(ctx: Context) -> None:
     """主 agent 的一轮由什么组成；清单 ``world`` 排它们的位置。"""
     for segment in world_segments(*ROUND_SEGMENTS, PERCEPTION, NPC, ANSWER).values():
         ctx.segment(segment)
+    perceiving = Perceiving(ctx.agent(PERCEPTION))
+    npcs = Npcs(ctx.agent(NPC), perceiving)
     for action in (
         write_record,
         wake_me_at,
-        report_change,
-        let_npc_appear,
+        tool(perceiving.report_change),
+        tool(npcs.let_npc_appear),
         someone_notices,
     ):
         ctx.tool(action, trim="kept")

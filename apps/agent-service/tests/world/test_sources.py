@@ -55,7 +55,7 @@ async def test_without_dynamic_config_every_registered_source_is_enabled(registe
     names = [s.name for s in await sources.enabled_sources()]
 
     assert names[:2] == ["records", "reality"]
-    tools = await sources.query_tools()
+    tools = [spec for s in await sources.enabled_sources() for spec in s.query_tools]
     assert {"list_records", "read_record", "search_web", *WEATHER_TOOLS} <= {
         t.tool.name for t in tools
     }
@@ -68,10 +68,10 @@ async def test_the_enabled_list_keeps_only_the_named_sources_in_registration_ord
     assert [s.name for s in await sources.enabled_sources()] == ["records", "reality"]
 
 
-async def test_a_source_left_out_of_the_enabled_list_loses_its_tools(registered):
+async def test_a_source_left_out_of_the_enabled_list_is_not_enabled(registered):
     registered[sources.ENABLED_SOURCES_KEY] = "records"
 
-    assert [t.tool.name for t in await sources.query_tools()] == ["list_records", "read_record"]
+    assert [s.name for s in await sources.enabled_sources()] == ["records"]
 
 
 def test_two_sources_cannot_share_a_name_or_a_tool_name(registered):

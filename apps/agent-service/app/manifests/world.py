@@ -13,9 +13,10 @@
 感知判断、NPC、应答拿的也是 :data:`QUERY_TOOLS` 这一份，按同样的顺序（感知判断另有它记判断的
 那只手）：加一个查询工具，就是在它的插件里登记、在 :data:`QUERY_TOOLS` 里加上名字。
 
-agent 的定义（:class:`~app.agent.contracts.AgentSpec`）在它们原来的模块里：感知判断、NPC 是在主
-agent 的工具里调的，调它们的代码要用同一份定义。上下文的键、裁剪的数和标记消息的文字也都引用各自
-唯一的定义处（标记消息这些文字和 agent-service 共用，见 :mod:`app.manifests.history`）。
+agent 的定义（:class:`~app.agent.contracts.AgentSpec`）在它们原来的模块里，这里给三类按需调用的
+agent 加上工具；调它们的代码从宿主拿到的（``ctx.agent``）就是这里列的这一份。上下文的键、裁剪的数和
+标记消息的文字也都引用各自唯一的定义处（标记消息这些文字和 agent-service 共用，见
+:mod:`app.manifests.history`）。
 """
 
 from __future__ import annotations

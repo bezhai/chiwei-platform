@@ -17,11 +17,10 @@ from openai import InternalServerError
 import app.world
 from app.capabilities._errors import CapabilityTimeout
 from app.infra.cst_time import now_cst
+from app.manifests.world import QUERY_TOOLS
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, perception, wake
-from app.world.actions import report_change
 from app.world.agents import when
-from app.world.sources import query_tools
 
 from .conftest import (
     LANE,
@@ -30,6 +29,7 @@ from .conftest import (
     sets_wake,
     spec_called,
     tools_built_for,
+    use_tool,
 )
 
 
@@ -53,7 +53,7 @@ def reports(*changes: str):
 
     async def plan():
         for change in changes:
-            results.append(await report_change.invoke({"change": change}))
+            results.append(await use_tool("report_change", {"change": change}))
         return await sets_wake()()
 
     plan.results = results
@@ -126,7 +126,7 @@ async def test_perception_runs_with_its_own_prompt_trace_and_the_sources_tools(w
 
     config = spec_called(world, "world_perception")
     assert config.trace_name == "world-perception"
-    expected = [t.tool.name for t in await query_tools()] + ["someone_notices"]
+    expected = [*QUERY_TOOLS, "someone_notices"]
     assert tools_built_for(world, "world_perception") == expected
 
 
@@ -483,7 +483,8 @@ async def test_the_main_agent_has_no_tool_that_messages_anyone(world):
     await _a_round(world, reports())
 
     main_tools = tools_built_for(world, main_agent.ROUND)
-    assert main_tools == [t.tool.name for t in await query_tools()] + [
+    assert main_tools == [
+        *QUERY_TOOLS,
         "write_record",
         "wake_me_at",
         "report_change",

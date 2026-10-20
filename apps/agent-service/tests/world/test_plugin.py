@@ -58,7 +58,7 @@ async def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_t
     app_host,
 ):
     from app.messaging.receiving import PROCESSING_RETRY, _lease_ms
-    from app.world.answer import answer_question
+    from app.world.answer import Answering
     from app.world.main_agent import ROUND_TIMEOUT
     from app.world.volume import writer_lock
     from app.world.wake import retry_latest_wake_without_limit, wake_on_start
@@ -68,7 +68,7 @@ async def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_t
     assert [r.name for r in host.registered() if r.kind == "inbox"] == ["world"]
     spec = INBOX_REGISTRY["world"]
     rounds = _rounds_now()
-    assert spec.on_question is answer_question
+    assert spec.on_question.__func__ is Answering.answer_question
     assert spec.on_open is wake_on_start
     # 状态里的最新唤醒失败时不限次数重试，永不进死信；别的消息照常有限次重试。
     assert spec.retry_without_limit is retry_latest_wake_without_limit

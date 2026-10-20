@@ -1,7 +1,7 @@
 """world 的感知判断遇到模型的临时失败会整次重来；试完了还是失败时，每一次失败的调用在 Langfuse 里
 都是一条单独的、标成 ERROR 的 trace，看得出这次判断没做成、为什么。
 
-走真的那条路（在 world 的一轮里）：:func:`app.world.perception.judge_who_notices` →
+走真的那条路（在 world 的一轮里）：:meth:`app.world.perception.Perceiving.judge_who_notices` →
 :func:`app.world.agents.run_agent` → ``Agent.run``，根 span 是真的，导出到内存（conftest 的 ``exported_spans``）。模型
 换成一直返回 500 的替身，Langfuse 换成一个本地 prompt 的替身，Dynamic Config 用默认值。
 """
@@ -21,7 +21,7 @@ from openai import InternalServerError
 from app.agent.client import ModelClient
 from app.agent.neutral import Message, ToolDef
 from app.agent.prompts import PromptSet
-from app.agent.round import Round, in_round
+from app.agent.round import AssembledAgent, Round, in_round
 from app.infra.cst_time import now_cst
 from app.infra.propagation import Context
 from app.messaging.message import Kind, new_message
@@ -103,8 +103,18 @@ async def test_an_exhausted_perception_retry_leaves_one_error_trace_per_attempt(
         world_round,
     )
 
+    # 宿主组好的感知判断 agent，没有工具：模型一次都没答上来，用不到它们。
+    judging = perception.Perceiving(
+        AssembledAgent(
+            app="world",
+            name=perception.PERCEPTION,
+            spec=perception.PERCEPTION_AGENT,
+            assembled=True,
+        )
+    )
+
     with in_round(world_round), pytest.raises(InternalServerError):
-        await perception.judge_who_notices("窗关上之后，屋里的雨声小了。", round_messages=[woke])
+        await judging.judge_who_notices("窗关上之后，屋里的雨声小了。", round_messages=[woke])
 
     roots = [
         s for s in exported_spans.get_finished_spans() if s.name == perception.PERCEPTION_AGENT.trace_name

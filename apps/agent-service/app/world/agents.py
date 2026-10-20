@@ -92,6 +92,13 @@ def world_agent(
     )
 
 
+def not_done(what: str, exc: Exception) -> str:
+    """一个动作调的 agent（感知判断、NPC 扮演）没做成、什么都还没告知时，交给主 agent 的那句话：
+    ``what``、为什么，它可以再试一次。"""
+    logger.warning("world: %s: %s", what, exc, exc_info=True)
+    return f"{what}：{type(exc).__name__}: {exc}。什么都还没告知，可以再试一次。"
+
+
 def world_segments(*names: str) -> dict[str, Segment]:
     """world 的这几段 prompt：id 就是段名，正文不引用任何变量。"""
     return {name: Segment(name, name) for name in names}

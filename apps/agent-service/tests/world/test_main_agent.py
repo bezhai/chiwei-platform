@@ -226,13 +226,14 @@ async def test_when_the_context_cannot_be_stored_the_round_fails_before_scheduli
 
 
 async def test_the_main_agent_gets_every_enabled_sources_query_tools_and_its_own_actions(world):
-    from app.world.sources import query_tools
+    from app.manifests.world import QUERY_TOOLS
 
     await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
-    expected = [t.tool.name for t in await query_tools()] + [
+    expected = [
+        *QUERY_TOOLS,
         "write_record",
         "wake_me_at",
         "report_change",

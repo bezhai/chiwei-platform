@@ -16,9 +16,8 @@ import pytest
 
 from app.messaging.message import Kind, SendFailed, new_message
 from app.world import main_agent, npc, perception, unfinished, wake
-from app.world.actions import let_npc_appear, report_change
 
-from .conftest import LANE, ScriptedAgent, sets_wake
+from .conftest import LANE, ScriptedAgent, sets_wake, use_tool
 
 
 class Crash(BaseException):
@@ -40,7 +39,7 @@ def judges(*judgments: tuple):
 
 def reports(change: str, *, sets: bool = True):
     async def plan():
-        await report_change.invoke({"change": change})
+        await use_tool("report_change", {"change": change})
         if sets:
             return await sets_wake()()
         return "报告完了，忘了定时刻。"
@@ -137,7 +136,7 @@ async def test_a_judgment_that_fails_is_handed_back_and_nothing_is_kept_or_sent(
     results: list = []
 
     async def plan():
-        results.append(await report_change.invoke({"change": "下雨了。"}))
+        results.append(await use_tool("report_change", {"change": "下雨了。"}))
         return await sets_wake()()
 
     world.runner.plan = plan
@@ -232,7 +231,7 @@ async def test_stored_but_not_cleared_resends_them_once_more_and_clears_after(
     monkeypatch.setattr(unfinished, "clear", clear)
 
     async def reports_and_says_so():
-        told = await report_change.invoke({"change": "下雨了。"})
+        told = await use_tool("report_change", {"change": "下雨了。"})
         await sets_wake()()
         return f"报告了下雨，结果是：{told}"
 
@@ -341,7 +340,7 @@ async def test_an_npcs_appearance_is_kept_with_its_own_words_and_resent(world):
     world.before_send = crash_on_send(1, Crash())
 
     async def plan():
-        await let_npc_appear.invoke({"npc": "门卫", "situation": "放学时的校门口。"})
+        await use_tool("let_npc_appear", {"npc": "门卫", "situation": "放学时的校门口。"})
         return await sets_wake()()
 
     world.runner.plan = plan
@@ -375,8 +374,8 @@ async def test_every_change_a_failed_round_reported_is_kept_in_order(world):
     world.agents[perception.PERCEPTION] = judges(("ayana", "x"))
 
     async def plan():
-        await report_change.invoke({"change": "先起风。"})
-        await report_change.invoke({"change": "后下雨。"})
+        await use_tool("report_change", {"change": "先起风。"})
+        await use_tool("report_change", {"change": "后下雨。"})
         return "忘了定时刻。"
 
     world.runner.plan = plan

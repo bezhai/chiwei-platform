@@ -65,9 +65,7 @@ async def _declared(app_host, monkeypatch) -> dict[str, list[ToolSpec]]:
 
     from app.living.reading.agent import build_reading_tools
     from app.manifests.agent_service import RESIDENT
-    from app.manifests.world import WORLD
-    from app.world.perception import someone_notices
-    from app.world.sources import query_tools
+    from app.manifests.world import MANIFEST, WORLD
 
     # Nothing configured: every knowledge source the world manifest lists is enabled.
     monkeypatch.setattr(dynamic_config, "get", lambda key, default="": default)
@@ -78,14 +76,14 @@ async def _declared(app_host, monkeypatch) -> dict[str, list[ToolSpec]]:
         return {r.name: r.detail["spec"] for r in host.registered() if r.kind == "tool"}
 
     hers, its = declared(living), declared(world)
-    query = await query_tools()
     return {
         "living_life_moment": [hers[name] for name in RESIDENT.tools],
         "book_reading_impression": build_reading_tools(pages=[], total_pages=0, progress={}),
         "world_round": [its[name] for name in WORLD.tools],
-        "world_answer": query,
-        "world_npc": query,
-        "world_perception": [*query, ToolSpec(someone_notices, trim="kept")],
+        **{
+            agent: [its[name] for name in MANIFEST.agents[agent].tools]
+            for agent in ("world_answer", "world_npc", "world_perception")
+        },
     }
 
 

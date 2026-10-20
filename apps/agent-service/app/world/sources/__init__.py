@@ -14,14 +14,14 @@
 **每个来源是一个插件**（:func:`source_plugin`）：起来时把来源登记进这里的登记表，把查询工具登记给
 宿主（``ctx.tool``，清单 ``world`` 排它们给主 agent 的位置）；停下时把来源从登记表里拿掉。
 
-**四个 agent 拿到的只读工具是同一份来源**：主 agent 的按清单排（关掉的来源由一轮开始时读的开关
-拿掉，见 :func:`app.agent.round.run_round`）；感知判断、NPC、应答拿全部已启用来源的查询工具
-（:func:`query_tools`），按登记的先后排。主 agent 另有它自己才有的几个动作
-（:mod:`app.world.actions`），不在这里。
+**四个 agent 拿到的只读工具是同一份来源**：清单把查询工具的名字列一次（
+:data:`app.manifests.world.QUERY_TOOLS`），主 agent 的工具和感知判断、NPC、应答的 AgentSpec 都用它；
+关掉的来源由开关拿掉（一轮里按这一轮开始时读的，见 :func:`app.agent.round.run_round`；应答按每个
+问题来时读的）。主 agent 另有它自己才有的几个动作（:mod:`app.world.actions`），不在这里。
 
 **加一个来源**：在这个包里新增它的模块，定义一个 :class:`Source` 和它的插件
 （``PLUGIN = source_plugin(SOURCE)``），在 world 的清单（:mod:`app.manifests.world`）里列上插件，
-给它的工具排好位置，加进开关能关掉的插件。不改任何 agent，也不改 prompt。
+把它的工具名加进 ``QUERY_TOOLS``，加进开关能关掉的插件。不改任何 agent，也不改 prompt。
 
 **启用哪些走 Dynamic Config**（:data:`ENABLED_SOURCES_KEY`，逗号分隔的名字）。没配就是登记过
 的全部；配了就只启用列出来的，没登记过的名字记一条 warning、跳过。没启用的来源，工具从四个
@@ -122,11 +122,6 @@ async def enabled_sources() -> list[Source]:
             sorted(unknown),
         )
     return [s for name, s in _registered.items() if name in wanted]
-
-
-async def query_tools() -> list[ToolSpec]:
-    """感知判断、NPC、应答拿的那份只读工具：全部已启用来源的查询工具（:attr:`Source.query_tools`）。"""
-    return [spec for s in await enabled_sources() for spec in s.query_tools]
 
 
 async def take_in(message: Message) -> None:

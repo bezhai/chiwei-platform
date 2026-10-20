@@ -4,12 +4,13 @@
 """
 from __future__ import annotations
 
+from app.manifests.world import QUERY_TOOLS
 from app.messaging.message import Kind, new_message
 from app.world import answer, records
-from app.world.sources import query_tools, told
 from app.world.sources import records as records_source
+from app.world.sources import told
 
-from .conftest import LANE, ScriptedAgent, spec_called, tools_built_for
+from .conftest import LANE, ScriptedAgent, ask, spec_called, tools_built_for
 
 
 def _question(body: str, sender: str = "operator"):
@@ -36,7 +37,7 @@ async def test_a_question_is_answered_from_the_sources(world):
     records.write("地方/厨房.md", "灶上炖着汤，窗开着一条缝。", expected=None)
     world.agents[answer.ANSWER] = looks_up_the_kitchen()
 
-    reply = await answer.answer_question(_question("厨房现在什么样？"))
+    reply = await ask(world, _question("厨房现在什么样？"))
 
     assert reply == "厨房现在是这样：灶上炖着汤，窗开着一条缝。"
     assert "厨房现在什么样？" in world.agents[answer.ANSWER].inputs[0]
@@ -51,7 +52,7 @@ async def test_answering_writes_nothing_tells_nobody_and_does_not_wake_the_main_
     world.agents[answer.ANSWER] = looks_up_the_kitchen()
     before = _volume_state(volume)
 
-    await answer.answer_question(_question("厨房现在什么样？", sender="ayana"))
+    await ask(world, _question("厨房现在什么样？", sender="ayana"))
 
     assert _volume_state(volume) == before
     assert world.sent == [] and world.scheduled == []
@@ -62,11 +63,11 @@ async def test_the_answer_agent_has_its_own_prompt_trace_cost_and_only_the_sourc
     world.agents[answer.ANSWER] = looks_up_the_kitchen()
     records.write("地方/厨房.md", "x", expected=None)
 
-    await answer.answer_question(_question("厨房现在什么样？"))
+    await ask(world, _question("厨房现在什么样？"))
 
     config = spec_called(world, "world_answer")
     assert config.trace_name == "world-answer"
-    assert tools_built_for(world, "world_answer") == [t.tool.name for t in await query_tools()]
+    assert tools_built_for(world, "world_answer") == list(QUERY_TOOLS)
     assert len([c for c in world.costs if c["round_id"].startswith("world-answer:")]) == 1
     assert all(c["actor"] == "world" and c["lane"] == LANE for c in world.costs)
 
@@ -77,7 +78,7 @@ async def test_saying_nothing_is_no_answer(world):
 
     world.agents[answer.ANSWER] = ScriptedAgent(silent)
 
-    assert await answer.answer_question(_question("赤尾在哪？")) is None
+    assert await ask(world, _question("赤尾在哪？")) is None
 
 
 async def test_the_world_inbox_answers_questions_with_the_answer_agent(app_host):
@@ -85,4 +86,6 @@ async def test_the_world_inbox_answers_questions_with_the_answer_agent(app_host)
 
     await app_host("world")
 
-    assert INBOX_REGISTRY["world"].on_question is answer.answer_question
+    on_question = INBOX_REGISTRY["world"].on_question
+    assert isinstance(on_question.__self__, answer.Answering)
+    assert on_question.__func__ is answer.Answering.answer_question
