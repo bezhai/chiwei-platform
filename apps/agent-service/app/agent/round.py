@@ -33,10 +33,17 @@ transaction (none when there is none); the steps after the commit, each of which
 failure fails the round (:class:`~app.agent.contracts.FailRound`) or is logged and counted
 (:class:`~app.agent.contracts.Continue`). Storing the history is one of those steps
 (:func:`store_history`), which the plugin that keeps it registers with its own failure handling.
+
+**Switches.** A profile may name plugins its rounds can leave out
+(:class:`~app.agent.contracts.Switches`): the loop reads the Dynamic Config key once, before
+anything else in the round, and leaves every tool, section and step of a plugin that is switched
+off out of that round. Trimming still counts the tools of a plugin that is switched off as
+material: what they returned earlier is still in the history.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -44,6 +51,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Generic, TypeVar
+
+from inner_shared.dynamic_config import dynamic_config
 
 from app.agent.continuity import (
     HistoryView,
@@ -59,6 +68,7 @@ from app.agent.contracts import (
     FailRound,
     Profile,
     Segment,
+    Switches,
     ToolSpec,
 )
 from app.agent.neutral import Message, Role
@@ -300,7 +310,8 @@ async def run_round(
 ) -> RoundResult:
     """Run one round of ``participant`` as ``profile`` says (see the module docstring). The round's
     identity, time and reason are the wake source's. A step before the round, a check, a commit step
-    or a step after the commit that fails the round raises out of here unchanged."""
+    or a step after the commit that fails the round raises out of here unchanged. The profile's
+    switches are read first; a plugin switched off has no tool, section or step in this round."""
     if not profile.assembled:
         raise RuntimeError(
             f"profile {profile.name!r} of app {profile.app!r} is not assembled; "
@@ -319,18 +330,19 @@ async def run_round(
     )
     call = open_call(profile.profile.agent, spec, lane=round.lane, round=round)
     history = profile.profile.history
+    off = await _switched_off(profile.profile.switches)
     with in_round(round):
-        for step in profile.round_start:
+        for step in _on(profile.round_start, off):
             await step.value(round)
         if profile.round_log is not None:
             round.previous_at = await profile.round_log.previous_at(round)
         if history is not None:
             key = history.key.format(lane=round.lane, participant=participant)
             await _read_history(profile, round, key)
-        state = await _joined(profile.profile.join, profile.state, round)
+        state = await _joined(profile.profile.join, _on(profile.state, off), round)
         stimulus = Message(
             role=Role.USER,
-            content=await _joined(profile.profile.join, profile.input, round),
+            content=await _joined(profile.profile.join, _on(profile.input, off), round),
         )
         if history is not None:
             read = round.history
@@ -363,7 +375,9 @@ async def run_round(
 
         produced: list[Message] = []
         with collect_usage() as usage:
-            reply = await Agent(spec, tools=[t.value for t in profile.tools]).run(
+            reply = await Agent(
+                spec, tools=[t.value for t in _on(profile.tools, off)]
+            ).run(
                 [*earlier, stimulus],
                 call=call,
                 prompts=round.prompts,
@@ -379,7 +393,7 @@ async def run_round(
                 observed_at=round.now.isoformat(),
             )
         round.reply = reply
-        for check in profile.checks:
+        for check in _on(profile.checks, off):
             await check.value(round)
         if history is not None:
             # Worked out before the commit: it is pure, but anything that fails between the commit
@@ -389,11 +403,12 @@ async def run_round(
             pending.messages = next_transcript(
                 earlier, [stimulus, *produced], policy=history.policy
             )
-        if profile.commit:
+        commit = _on(profile.commit, off)
+        if commit:
             async with tx():
-                for step in profile.commit:
+                for step in commit:
                     await step.value(round)
-        for step in profile.after_commit:
+        for step in _on(profile.after_commit, off):
             await _after_commit(step, round)
     return RoundResult(round=round, reply=reply)
 
@@ -410,6 +425,31 @@ async def store_history(round: Round) -> None:
             f"its profile keeps none"
         )
     await commit_transcript(pending.key, pending.messages, expected_ver=pending.version)
+
+
+async def _switched_off(switches: Switches | None) -> frozenset[str]:
+    """The plugins ``switches`` leaves out of this round: the ones it lists that its Dynamic Config
+    key does not name. A blank key leaves every plugin on; a name it does not list is logged and
+    skipped."""
+    if switches is None:
+        return frozenset()
+    raw = await asyncio.to_thread(dynamic_config.get, switches.key, default="")
+    if not raw.strip():
+        return frozenset()
+    wanted = {name.strip() for name in raw.split(",") if name.strip()}
+    unknown = wanted - set(switches.plugins)
+    if unknown:
+        logger.warning(
+            "dynamic config %s names %s, which are not plugins it switches; skipped",
+            switches.key,
+            sorted(unknown),
+        )
+    return frozenset(switches.plugins) - wanted
+
+
+def _on(placed: tuple[Placed[T], ...], off: frozenset[str]) -> tuple[Placed[T], ...]:
+    """What of ``placed`` belongs to a plugin that is on this round."""
+    return tuple(p for p in placed if p.plugin not in off)
 
 
 async def _read_history(profile: AssembledProfile, round: Round, key: str) -> None:

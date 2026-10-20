@@ -22,7 +22,7 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.agent.tools.search import search_web
 from app.capabilities import weather
-from app.world.sources import Source
+from app.world.sources import Source, source_plugin
 
 # 和风 v1 的风向是方位代码，月相是英文代码；按和风文档里的中文名说出来，不认识的代码原样给。
 _COMPASS = {
@@ -182,3 +182,6 @@ SOURCE = Source(
     name="reality",
     tools=(check_current_weather, check_hourly_forecast, check_daily_forecast, search_web),
 )
+
+
+PLUGIN = source_plugin(SOURCE)

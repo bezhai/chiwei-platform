@@ -51,9 +51,11 @@ class _Runner:
 async def main() -> None:
     from inner_shared.dynamic_config import dynamic_config
 
+    import app.agent.core as agent_core
     import app.agent.prompts as prompts
+    import app.agent.round as agent_round
     from app.host import Host
-    from app.world import agents, main_agent, volume
+    from app.world import volume
     from tests.replay.harness.prompts import FixtureLangfuse
 
     volume.WRITER_LOCK_POLL_SECONDS = 0.2
@@ -66,10 +68,10 @@ async def main() -> None:
     async def nothing(*args, **kwargs):
         return None
 
-    main_agent.load_session = load_session
-    main_agent.commit_transcript = nothing
-    agents.record_round_cost = nothing
-    agents.Agent = lambda spec, *, tools=(): _Runner()
+    agent_round.load_session = load_session
+    agent_round.commit_transcript = nothing
+    agent_round.record_round_cost = nothing
+    agent_core.Agent = lambda spec, *, tools=(): _Runner()
     # 一轮在第一次调模型之前取齐 prompt：用回放的 prompt 快照，不连 Langfuse。
     fixtures = FixtureLangfuse()
     prompts._get_client = lambda: fixtures

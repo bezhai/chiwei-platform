@@ -1,14 +1,16 @@
 """world 测试共用：临时的私有卷、起 world 的插件宿主（``app_host``）、替身模型和一轮之外的替身。
 
-四类 agent（主 agent、感知判断、NPC、应答）都经 :func:`app.world.agents.run_agent` 造一个
-``Agent`` 来调，替身从那里换：按这次调用的名字（它的 prompt id）分给各自的替身，同时记下每一次
-调用的是哪一类、它的 spec、拿到了哪些工具。
+主 agent 的一轮由固定循环跑（:func:`app.agent.round.run_round`，它造 ``app.agent.core.Agent``），
+另外三类（感知判断、NPC、应答）经 :func:`app.world.agents.run_agent` 造 ``Agent``，替身从这两处
+换：按这次调用的名字（它的 prompt id）分给各自的替身，同时记下每一次调用的是哪一类、它的 spec、
+拿到了哪些工具。上下文存储和成本也在这两处换。
 """
 from __future__ import annotations
 
+import importlib
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -118,11 +120,23 @@ def sets_nothing():
 
 
 @pytest.fixture
-async def world(volume, monkeypatch, app_host):
-    """起 world 的宿主（只跑 setup），把一轮之外的东西换成替身，交回一个可以查看的句柄。"""
+def world_manifest():
+    """``world`` 按哪份清单起宿主：默认就是 world 的清单（:mod:`app.manifests.world`）。用例模块
+    覆盖这个 fixture 就换一份清单，比如多一个来源插件。"""
+    from app.manifests.world import MANIFEST
+
+    return MANIFEST
+
+
+@pytest.fixture
+async def world(volume, monkeypatch, app_host, world_manifest):
+    """按 ``world_manifest`` 起 world 的宿主（只跑 setup），把一轮之外的东西换成替身，交回一个
+    可以查看的句柄；``profile`` 是宿主按清单组好的 ``world``，跟 world 插件交给收件箱的是同一份。"""
 
     class Handle:
         runner: FakeRunner
+        # 宿主组好的 ``world``（:class:`app.agent.round.AssembledProfile`）。
+        profile = None
         # 主 agent 之外那三类的替身：prompt id → runner。
         agents: dict[str, object] = {}
         # 每一次调用：(调用的名字, AgentSpec, 拿到的工具名)。
@@ -217,18 +231,55 @@ async def world(volume, monkeypatch, app_host):
 
     from inner_shared.dynamic_config import dynamic_config
 
+    import app.agent.core as agent_core
+    import app.agent.round as agent_round
+    import app.manifests.world as manifest_module
+    from app.host import Plugin
+
     monkeypatch.setattr(dynamic_config, "get", lambda k, default="": default)
     monkeypatch.setattr(dynamic_config, "get_int", lambda k, default=0: default)
     monkeypatch.setattr(wake, "send_at", send_at)
     monkeypatch.setattr(perception, "send", send)
-    monkeypatch.setattr(main_agent, "load_session", load_session)
-    monkeypatch.setattr(main_agent, "commit_transcript", commit_transcript)
+    monkeypatch.setattr(agent_round, "load_session", load_session)
+    monkeypatch.setattr(agent_round, "commit_transcript", commit_transcript)
+    monkeypatch.setattr(agent_round, "record_round_cost", record_round_cost)
+    monkeypatch.setattr(agent_core, "Agent", Dispatch)
     monkeypatch.setattr(agents, "record_round_cost", record_round_cost)
     monkeypatch.setattr(agents, "Agent", Dispatch)
     monkeypatch.setattr(receiving, "succeeded_message_ids", succeeded_message_ids)
-    h.host = await app_host("world")
+    monkeypatch.setattr(manifest_module, "MANIFEST", world_manifest)
+    assembled = []
+    takes_the_profile = Plugin(
+        name="world-round-under-test",
+        setup=lambda ctx: assembled.append(ctx.profile("world")),
+    )
+    h.host = await app_host(
+        "world",
+        [
+            *(importlib.import_module(m).PLUGIN for m in world_manifest.plugins),
+            takes_the_profile,
+        ],
+    )
+    h.profile = assembled[0]
     h.handler = _world_inbox_handler(h.host)
     return h
+
+
+async def run_round_taking(
+    world_handle,
+    messages: Sequence,
+    *,
+    round_id: str = "round-under-test",
+    now: datetime | None = None,
+):
+    """不经过收件箱直接跑一轮：带着 ``messages``（按到达的先后），按 ``world`` 组好的那一份，
+    这一轮的 id 和时刻是给的（没给时刻就是现在）。"""
+    return await main_agent.run_inbox_round(
+        world_handle.profile,
+        InboxRound(reason="test", messages=tuple(messages)),
+        round_id=round_id,
+        now=now_cst() if now is None else now,
+    )
 
 
 async def restart(world_handle) -> None:

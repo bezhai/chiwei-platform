@@ -206,7 +206,7 @@ async def test_now_in_the_round_is_read_after_asking_messaging(world, monkeypatc
     slow = SlowAsking()
     monkeypatch.setattr(receiving, "succeeded_message_ids", slow)
     clock = [datetime(2026, 7, 25, 10, 59, 58, tzinfo=CST)]
-    monkeypatch.setattr(main_agent, "now_cst", lambda: clock[0])
+    monkeypatch.setattr("app.world.rounds.now_cst", lambda: clock[0])
     world.runner.plan = sets_wake()
 
     leading = asyncio.create_task(world.deliver(_from("千凪", "我在做饭。")))
@@ -229,12 +229,15 @@ def _no_clock() -> datetime:
 
 def _source():
     """world 收件箱的唤醒来源，跟 world 插件建的一样（一个新的 ``Rounds`` 就是一个新进程）。"""
+    from app.host import Turns
     from app.world.rounds import Rounds
 
-    async def never_runs(due):  # pragma: no cover - due 不跑一轮
+    async def never_runs(due, *, round_id, now):  # pragma: no cover - due 不跑一轮
         raise AssertionError
 
-    return Rounds(never_runs, round_timeout=main_agent.ROUND_TIMEOUT).source
+    turns = Turns("world", "round", hold_limit=None, clock=_no_clock)
+    rounds = Rounds(never_runs, round_timeout=main_agent.ROUND_TIMEOUT, turns=turns)
+    return rounds.source
 
 
 def _batch(message):

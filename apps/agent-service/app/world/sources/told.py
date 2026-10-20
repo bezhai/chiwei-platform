@@ -35,7 +35,7 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.messaging.message import Message
 from app.world.agents import when
-from app.world.sources import Source, private_dir
+from app.world.sources import Source, private_dir, source_plugin
 from app.world.volume import write_atomically
 from app.world.wake import WORLD
 
@@ -138,3 +138,6 @@ async def read_messages_from(
 
 
 SOURCE = Source(name=NAME, tools=(list_senders, read_messages_from), intake=take_in)
+
+
+PLUGIN = source_plugin(SOURCE)

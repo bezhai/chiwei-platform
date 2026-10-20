@@ -42,10 +42,16 @@ def _rounds_now() -> Rounds:
 # ---------------------------------------------------------------------------
 
 
-def test_the_world_app_runs_only_the_world_plugin():
+def test_the_world_app_runs_the_world_plugin_and_its_three_sources_in_order():
+    """来源插件的顺序就是来源登记的顺序：感知判断、NPC、应答和收件处理按它看到来源。"""
     from app.manifests.world import MANIFEST
 
-    assert MANIFEST.plugins == ("app.plugins.world",)
+    assert MANIFEST.plugins == (
+        "app.plugins.world",
+        "app.world.sources.records",
+        "app.world.sources.reality",
+        "app.world.sources.told",
+    )
 
 
 async def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_take_them(

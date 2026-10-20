@@ -11,6 +11,7 @@ prompt object; the transaction and the history store are in-memory stand-ins.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from app.agent.contracts import (
     HistoryTexts,
     Profile,
     Segment,
+    Switches,
     ToolSpec,
 )
 from app.agent.neutral import Message, Role, ToolCall, ToolDef
@@ -496,3 +498,197 @@ async def test_the_round_log_says_when_the_round_before_was_and_whether_it_lost_
     assert seen == [(datetime(2026, 7, 25, 13, 50, tzinfo=CST), 3, True)]
     assert result.round.history.version == 3
     assert histories["coe-test:akao"][1] == 4
+
+
+# --- switches -----------------------------------------------------------------------------------
+
+SWITCHES = Switches(key="round_sources", plugins=("tides", "weather"))
+
+
+@pytest.fixture
+def config(monkeypatch) -> SimpleNamespace:
+    """Dynamic Config as the round reads it: ``values`` by key (a key not given is unset), and
+    ``log``, which each read appends ``config:<key>`` to (the steps of :func:`_switchable` append
+    to the same log)."""
+    from inner_shared.dynamic_config import dynamic_config
+
+    seen = SimpleNamespace(values={}, log=[])
+
+    def get(key: str, default: str = "") -> str:
+        seen.log.append(f"config:{key}")
+        return seen.values.get(key, default)
+
+    monkeypatch.setattr(dynamic_config, "get", get)
+    return seen
+
+
+def _noted(log: list[str], name: str, value: str):
+    async def section(_round: Round) -> str:
+        log.append(name)
+        return value
+
+    return section
+
+
+def _switchable(log: list[str], committed: list[str], **parts: Any) -> AssembledProfile:
+    """Two plugins the profile can switch off (``weather``, ``tides``) and one it cannot
+    (``life``), each with something in every place of the round. The commit steps note
+    themselves in ``committed``, the rest in ``log``."""
+    return _profile(
+        profile=parts.pop(
+            "profile", Profile(agent="main", join="\n", switches=SWITCHES)
+        ),
+        tools=(
+            _placed(
+                "look_around",
+                ToolSpec(look_around, trim="material"),
+                plugin="weather",
+            ),
+            _placed(
+                "stop_for_now",
+                ToolSpec(stop_for_now, trim="kept", ends_round=True),
+                plugin="life",
+            ),
+        ),
+        round_start=(
+            _placed("weather.before", _step(log, "weather.before"), plugin="weather"),
+            _placed("life.before", _step(log, "life.before")),
+        ),
+        state=(
+            _placed(
+                "weather.state",
+                _noted(log, "weather.state", "多云。"),
+                plugin="weather",
+            ),
+            _placed("life.state", _noted(log, "life.state", "在家。")),
+        ),
+        input=(
+            _placed("weather.now", _text("晴。"), plugin="weather"),
+            _placed("tides.now", _text("涨潮。"), plugin="tides"),
+            _placed("life.now", _text("14:03。")),
+        ),
+        checks=(
+            _placed("weather.check", _step(log, "weather.check"), plugin="weather"),
+        ),
+        commit=(
+            _placed(
+                "weather.commit", _step(committed, "weather.commit"), plugin="weather"
+            ),
+            _placed("life.commit", _step(committed, "life.commit")),
+        ),
+        after_commit=(
+            _placed(
+                "weather.after",
+                AfterCommit(_step(log, "weather.after"), FailRound()),
+                plugin="weather",
+            ),
+            _placed("life.after", AfterCommit(_step(log, "life.after"), FailRound())),
+        ),
+        **parts,
+    )
+
+
+async def test_a_switched_off_plugin_has_no_tool_section_or_step_in_the_round(
+    model, transactions, config
+):
+    config.values["round_sources"] = "tides"
+
+    await _run(_switchable(config.log, transactions))
+
+    ((messages, tools),) = model.requests
+    assert tools == ["stop_for_now"]
+    assert messages[-1].content == "涨潮。\n14:03。"
+    assert config.log == [
+        "config:round_sources",
+        "life.before",
+        "life.state",
+        "life.after",
+    ]
+    assert transactions == ["begin", "life.commit", "end"]
+
+
+async def test_a_blank_switch_key_leaves_every_plugin_on(model, transactions, config):
+    await _run(_switchable(config.log, transactions))
+
+    ((messages, tools),) = model.requests
+    assert tools == ["look_around", "stop_for_now"]
+    assert messages[-1].content == "晴。\n涨潮。\n14:03。"
+    assert config.log == [
+        "config:round_sources",
+        "weather.before",
+        "life.before",
+        "weather.state",
+        "life.state",
+        "weather.check",
+        "weather.after",
+        "life.after",
+    ]
+    assert transactions == ["begin", "weather.commit", "life.commit", "end"]
+
+
+async def test_a_name_the_switches_do_not_list_is_logged_and_skipped(
+    model, transactions, config, caplog
+):
+    config.values["round_sources"] = " weather , surf,"
+
+    with caplog.at_level(logging.WARNING, logger="app.agent.round"):
+        await _run(_switchable(config.log, transactions))
+
+    assert model.requests[0][0][-1].content == "晴。\n14:03。"
+    [warning] = [
+        r
+        for r in caplog.records
+        if r.name == "app.agent.round" and r.levelno == logging.WARNING
+    ]
+    assert "round_sources" in warning.getMessage()
+    assert "surf" in warning.getMessage()
+
+
+async def test_only_names_the_switches_do_not_list_switch_every_plugin_off(
+    model, transactions, config
+):
+    config.values["round_sources"] = "surf"
+
+    await _run(_switchable(config.log, transactions))
+
+    assert model.requests[0][0][-1].content == "14:03。"
+
+
+async def test_a_profile_without_switches_reads_no_switch(model, transactions, config):
+    await _run(
+        _switchable(config.log, transactions, profile=Profile(agent="main", join="\n"))
+    )
+
+    assert not [entry for entry in config.log if entry.startswith("config:")]
+    assert model.requests[0][0][-1].content == "晴。\n涨潮。\n14:03。"
+
+
+async def test_trimming_counts_a_switched_off_plugins_tools_as_material(
+    model, transactions, config, histories, monkeypatch
+):
+    import app.agent.round as round_module
+
+    config.values["round_sources"] = "tides"
+    seen: dict[str, Any] = {}
+    real = round_module.trim_for_round
+
+    def trim(history, **kw):
+        seen.update(kw)
+        return real(history, **kw)
+
+    monkeypatch.setattr(round_module, "trim_for_round", trim)
+    profile = _switchable(
+        config.log,
+        transactions,
+        profile=Profile(
+            agent="main",
+            join="\n",
+            switches=SWITCHES,
+            history=HistorySpec(key="{lane}:{participant}", policy=POLICY, texts=TEXTS),
+        ),
+    )
+
+    await _run(profile)
+
+    assert model.requests[0][1] == ["stop_for_now"]
+    assert seen["material_tools"] == frozenset({"look_around"})

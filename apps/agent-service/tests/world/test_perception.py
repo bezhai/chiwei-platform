@@ -19,11 +19,18 @@ from app.capabilities._errors import CapabilityTimeout
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, perception, wake
-from app.world.actions import ACTIONS, report_change
+from app.world.actions import report_change
 from app.world.agents import when
 from app.world.sources import query_tools
 
-from .conftest import LANE, ScriptedAgent, sets_wake, spec_called, tools_built_for
+from .conftest import (
+    LANE,
+    ScriptedAgent,
+    run_round_taking,
+    sets_wake,
+    spec_called,
+    tools_built_for,
+)
 
 
 def judges(*judgments: tuple, said: str = "判断完了。"):
@@ -64,13 +71,6 @@ async def _a_round(world, plan):
 # ---------------------------------------------------------------------------
 # 一个变化 → 一次感知判断 → 每个会察觉的人一条告知
 # ---------------------------------------------------------------------------
-
-
-def _taking(messages):
-    """world 收件箱判出来的一轮，带着 ``messages``（按到达的先后）。"""
-    from app.world.rounds import InboxRound
-
-    return InboxRound(reason="test", messages=tuple(messages))
 
 
 async def test_a_reported_change_is_judged_once_and_each_judged_recipient_is_told_once(world):
@@ -350,7 +350,7 @@ async def test_perception_sees_every_message_of_the_round_with_sender_and_time(w
         sender="world", recipient="world", body="你发给千凪的消息没有送达。", kind=Kind.NOT_DELIVERED
     )
 
-    await main_agent.run_round(_taking([akao, own, ayana, bounced]))
+    await run_round_taking(world, [akao, own, ayana, bounced])
 
     [seen] = judge.inputs
     assert seen.split("\n")[1:] == [
@@ -483,8 +483,7 @@ async def test_the_main_agent_has_no_tool_that_messages_anyone(world):
     await _a_round(world, reports())
 
     main_tools = tools_built_for(world, main_agent.ROUND)
-    assert main_tools == [t.tool.name for t in await query_tools()] + [t.tool.name for t in ACTIONS]
-    assert [t.tool.name for t in ACTIONS] == [
+    assert main_tools == [t.tool.name for t in await query_tools()] + [
         "write_record",
         "wake_me_at",
         "report_change",

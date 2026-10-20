@@ -20,6 +20,7 @@ from app.world.agents import when
 
 from .conftest import (
     LANE,
+    run_round_taking,
     self_message,
     sets_nothing,
     sets_wake,
@@ -35,13 +36,6 @@ def _round_input(world_handle, run: int = -1) -> str:
 # ---------------------------------------------------------------------------
 # 两种醒来原因
 # ---------------------------------------------------------------------------
-
-
-def _taking(messages):
-    """world 收件箱判出来的一轮，带着 ``messages``（按到达的先后）。"""
-    from app.world.rounds import InboxRound
-
-    return InboxRound(reason="test", messages=tuple(messages))
 
 
 async def test_a_message_from_someone_wakes_it(world):
@@ -108,7 +102,7 @@ async def test_a_round_shows_each_of_its_messages_with_sender_time_and_text_in_o
     own = self_message(current.message_id, "该看看外面了。")
     bounced = _not_delivered("你发给千凪的消息没有送达。")
 
-    await main_agent.run_round(_taking([resident, own, bounced]))
+    await run_round_taking(world, [resident, own, bounced])
 
     lines = _round_input(world).split("\n")
     assert lines[1:8] == [
@@ -126,7 +120,9 @@ async def test_a_round_that_takes_its_own_wake_is_not_told_its_planned_wake_is_r
     current = await wake.set_next_wake(now_cst(), "该看看外面了。")
     resident = new_message(sender="赤尾", recipient="world", body="我出门了。", kind=Kind.MESSAGE)
 
-    await main_agent.run_round(_taking([resident, self_message(current.message_id, "该看看外面了。")]))
+    await run_round_taking(
+        world, [resident, self_message(current.message_id, "该看看外面了。")]
+    )
 
     assert "【你原来定的下次醒来】" not in _round_input(world)
 
@@ -134,10 +130,13 @@ async def test_a_round_that_takes_its_own_wake_is_not_told_its_planned_wake_is_r
 async def test_a_round_of_others_messages_only_is_told_the_wake_it_had_planned(world):
     await wake.set_next_wake(now_cst() + timedelta(hours=6), "傍晚再看。")
 
-    await main_agent.run_round(_taking([
+    await run_round_taking(
+        world,
+        [
             new_message(sender="赤尾", recipient="world", body="我出门了。", kind=Kind.MESSAGE),
             _not_delivered("你发给千凪的消息没有送达。"),
-        ]))
+        ],
+    )
 
     round_input = _round_input(world)
     assert "【你原来定的下次醒来】" in round_input and "傍晚再看。" in round_input
@@ -206,7 +205,7 @@ async def test_when_the_context_cannot_be_stored_the_round_fails_before_scheduli
     async def conflict(*a, **kw):
         raise TranscriptConflict("别人写过了")
 
-    monkeypatch.setattr(main_agent, "commit_transcript", conflict)
+    monkeypatch.setattr("app.agent.round.commit_transcript", conflict)
 
     with pytest.raises(TranscriptConflict):
         await world.deliver(
@@ -223,14 +222,18 @@ async def test_when_the_context_cannot_be_stored_the_round_fails_before_scheduli
 
 
 async def test_the_main_agent_gets_every_enabled_sources_query_tools_and_its_own_actions(world):
-    from app.world.actions import ACTIONS
     from app.world.sources import query_tools
 
     await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
-    expected = [t.tool.name for t in await query_tools()] + [t.tool.name for t in ACTIONS]
+    expected = [t.tool.name for t in await query_tools()] + [
+        "write_record",
+        "wake_me_at",
+        "report_change",
+        "let_npc_appear",
+    ]
     assert tools_built_for(world, main_agent.ROUND) == expected
     assert {
         "list_records", "read_record", "search_web",
@@ -248,23 +251,39 @@ async def test_the_round_runs_as_its_own_trace_with_its_own_prompt(world):
     assert world.costs[0]["round_id"].startswith("world-round:")
 
 
-async def test_what_the_sources_return_is_trimmed_as_material(world, monkeypatch):
-    from app.world import sources
+@pytest.mark.parametrize("enabled", ["", "records"])
+async def test_what_every_source_returns_is_trimmed_as_material_even_when_it_is_off(
+    world, monkeypatch, enabled
+):
+    """来源的查询结果都是材料，关掉的来源也算：上下文里还留着它以前的返回。"""
+    from inner_shared.dynamic_config import dynamic_config
 
+    import app.agent.round as agent_round
+    from app.world.sources import ENABLED_SOURCES_KEY, reality, records, told
+
+    monkeypatch.setattr(
+        dynamic_config,
+        "get",
+        lambda k, default="": enabled if k == ENABLED_SOURCES_KEY else default,
+    )
     seen = {}
-    real = main_agent.trim_for_round
+    real = agent_round.trim_for_round
 
     def trim(history, **kw):
         seen.update(kw)
         return real(history, **kw)
 
-    monkeypatch.setattr(main_agent, "trim_for_round", trim)
+    monkeypatch.setattr(agent_round, "trim_for_round", trim)
 
     await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
-    assert seen["material_tools"] == sources.material_tools()
+    assert seen["material_tools"] == frozenset(
+        t.name
+        for source in (records.SOURCE, reality.SOURCE, told.SOURCE)
+        for t in source.tools
+    )
     assert "write_record" not in seen["material_tools"]
 
 
@@ -355,7 +374,7 @@ async def test_a_checkpoint_cut_away_on_write_back_comes_back_with_the_records_n
     from app.world import records
 
     at = now_cst()
-    monkeypatch.setattr(main_agent, "now_cst", lambda: at)
+    monkeypatch.setattr("app.world.rounds.now_cst", lambda: at)
     records.write("地方/厨房.md", "灶上炖着汤。", expected=None)
     world.history = []
     await world.deliver(_from_operator())

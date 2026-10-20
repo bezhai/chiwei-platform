@@ -10,19 +10,26 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
+from uuid import UUID
 
 import pytest
 
-from app.infra.cst_time import now_cst
+from app.host import Turns
+from app.infra.cst_time import CST, now_cst
 from app.messaging import receiving
 from app.messaging.message import Kind, new_message
 from app.world import main_agent, pending, wake
 from app.world.actions import wake_me_at
-from app.world.rounds import RoundFailed, Rounds
+from app.world.rounds import InboxRound, RoundFailed, Rounds
 from tests.messaging.helpers import eventually
 
 from .conftest import LANE, restart, self_message, sets_nothing, sets_wake
+
+
+def _world_turns() -> Turns:
+    """world 的一条轮次队列，跟宿主给 world 插件的一样（``ctx.turns``），不经过宿主。"""
+    return Turns(wake.WORLD, "round", hold_limit=None, clock=now_cst)
 
 
 class Crash(BaseException):
@@ -588,14 +595,14 @@ async def test_a_round_over_its_time_fails_every_delivery_it_took(world):
     gate = asyncio.Event()
     taken: list[list[str]] = []
 
-    async def run(due):
+    async def run(due, *, round_id, now):
         taken.append([m.body for m in due.messages])
         if len(taken) == 1:
             await gate.wait()
             return
         await asyncio.sleep(10)
 
-    rounds = Rounds(run, round_timeout=timedelta(seconds=0.2))
+    rounds = Rounds(run, round_timeout=timedelta(seconds=0.2), turns=_world_turns())
     running = asyncio.create_task(rounds.receive(_from("赤尾", "我出门了。")))
     await eventually(lambda: taken, timeout=5)
     later = []
@@ -613,11 +620,34 @@ async def test_a_round_over_its_time_fails_every_delivery_it_took(world):
 
 
 def test_a_delivery_may_wait_for_the_round_ahead_and_then_its_own():
-    async def run(due):
+    async def run(due, *, round_id, now):
         return None
 
-    rounds = Rounds(run, round_timeout=timedelta(minutes=30))
+    rounds = Rounds(run, round_timeout=timedelta(minutes=30), turns=_world_turns())
     assert rounds.delivery_timeout > timedelta(minutes=60)
+
+
+async def test_a_round_takes_its_time_and_id_when_the_source_starts_running_it(
+    volume, monkeypatch
+):
+    """一轮的时刻和 id 在 world 收件箱这个来源开始跑它的那一刻定下（读钟、生成 uuid4），交给
+    跑这一轮的函数；之前判这一批的时候不读钟。"""
+    from app.world import rounds as rounds_module
+
+    seen: list[tuple[str, datetime]] = []
+    clock = [datetime(2026, 7, 25, 10, 59, 58, tzinfo=CST)]
+    monkeypatch.setattr(rounds_module, "now_cst", lambda: clock[0])
+    monkeypatch.setattr(rounds_module.uuid, "uuid4", lambda: UUID(int=7))
+
+    async def run(due, *, round_id, now):
+        seen.append((round_id, now))
+        clock[0] = datetime(2026, 7, 25, 11, 30, tzinfo=CST)
+
+    rounds = Rounds(run, round_timeout=timedelta(minutes=10), turns=_world_turns())
+    clock[0] = datetime(2026, 7, 25, 11, 0, 3, tzinfo=CST)
+    await rounds.source.run(InboxRound(reason="test", messages=()))
+
+    assert seen == [(UUID(int=7).hex, datetime(2026, 7, 25, 11, 0, 3, tzinfo=CST))]
 
 
 # ---------------------------------------------------------------------------

@@ -143,5 +143,12 @@ async def test_each_call_records_its_cost_under_world_by_kind(calling):
     assert set(cost["usage"]) >= {"input", "output", "calls"}
 
 
-def test_every_world_trace_groups_under_one_session(bare_volume):
-    assert agents.session_key() == f"world:{LANE}"
+def test_the_main_agents_history_is_kept_under_the_session_every_world_trace_groups_under(
+    bare_volume,
+):
+    from app.agent.round import open_call
+    from app.world.main_agent import ROUND, ROUND_AGENT
+
+    session = open_call(ROUND, ROUND_AGENT, lane=LANE).session
+    assert session == f"world:{LANE}"
+    assert agents.HISTORY_KEY.format(lane=LANE) == session

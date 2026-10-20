@@ -3,7 +3,7 @@
 **为什么不是一条消息一轮。** 三姐妹每一轮都给 world 发一条汇总，姐妹聊天时 world 几乎一轮接
 一轮，每一轮都把同一份历史整个读一遍。world 跑着的时候到的、同时到的几条汇总合进一轮，这份
 开销只花一次（2026-10-06 定）。代价是一轮的输入里有好几条消息，主 agent 和感知判断看到的是这一
-轮的全部，每条带着发件人和时间（:func:`app.world.main_agent.run_round`）。
+轮的全部，每条带着发件人和时间（:func:`app.world.main_agent.run_inbox_round`）。
 
 **一次投递怎么处理**（:meth:`Rounds.receive`，就是 world 收件箱的处理函数）：
 
@@ -29,11 +29,11 @@
 成了旧消息的自定醒来拿掉（排着的时候前一轮定了新的时刻）。这一批投递送来的消息要是都不在剩下的
 里面了（成了旧的醒来，或者排着的时候前一轮已经把它处理完了），这一轮就不跑：旧的醒来、已经处理完
 的消息不叫醒 world，剩下的那些等它们自己的投递，或者下一次真正要一轮的投递。这一轮的时刻不在这里
-读，在一轮开始时读（:func:`app.world.main_agent.run_round`），所以问通信机制那一步跨过了整分钟，
-这一轮眼前的【现在】是问完之后的时刻。
+读，在这个来源开始跑这一轮时读（:meth:`Rounds._run_round`，这一轮的 id 也在那时生成），所以问通信
+机制那一步跨过了整分钟，这一轮眼前的【现在】是问完之后的时刻。
 
 **自定醒来是不是旧的，只在轮到这一批时判断，不在投递一到就判断。** 状态里的最新唤醒只在两处改：
-一轮收尾时（:func:`app.world.main_agent.run_round` 调 :func:`app.world.wake.set_next_wake`，这一轮在
+一轮收尾时（这一轮的 ``wake.next`` 调 :func:`app.world.wake.set_next_wake`，这一轮在
 队列上跑），和收件箱开始消费之前的启动补醒（:func:`app.world.wake.wake_on_start`）。``set_next_wake``
 先发后记：新的醒来排出去、broker 确认、通信机制记完账之后才记成最新唤醒，这一段里新时刻要是已经
 到了，那条醒来会先送到。投递一到就判，这时状态还落后一步，它就会被当成旧消息确认掉，状态随后记的
@@ -77,9 +77,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from app.host import Batch, Coalesce, JoinedTurnFailed, Signal, Turns, WakeSource
 from app.infra.cst_time import now_cst
@@ -91,7 +93,14 @@ from app.world.wake import WORLD, is_own_wake, is_stale_wake
 
 logger = logging.getLogger(__name__)
 
-RunRound = Callable[["InboxRound"], Awaitable[None]]
+
+class RunRound(Protocol):
+    """跑一轮：带着判出来的这一轮（:class:`InboxRound`），用来源开始跑它时定下的 id 和时刻。"""
+
+    def __call__(
+        self, due: InboxRound, *, round_id: str, now: datetime
+    ) -> Awaitable[None]: ...
+
 
 # 一次投递等完两轮之后，把结果交回通信机制还要一点时间（记成处理完、排重试）。
 _SETTLING = timedelta(minutes=1)
@@ -120,19 +129,14 @@ class Rounds:
     """world 的一轮接一轮。``run`` 带着判出来的这一轮（:class:`InboxRound`，消息按到达的先后）跑
     一轮，失败就抛异常。
 
-    ``turns`` 是 world 的轮次队列，world 插件从宿主拿（``ctx.turns``）；不给就用一条自己的，
-    单独用一个 ``Rounds`` 时（不经过宿主）就是这样。"""
+    ``turns`` 是 world 的轮次队列，world 插件从宿主拿（``ctx.turns``）。"""
 
     def __init__(
-        self, run: RunRound, *, round_timeout: timedelta, turns: Turns | None = None
+        self, run: RunRound, *, round_timeout: timedelta, turns: Turns
     ) -> None:
         self._run = run
         self._round_timeout = round_timeout
-        self._turns = (
-            turns
-            if turns is not None
-            else Turns(WORLD, "round", hold_limit=None, clock=now_cst)
-        )
+        self._turns = turns
         self.source: WakeSource[InboxRound, None] = WakeSource(
             "world-inbox", Coalesce.JOIN_NEXT, self._due, self._run_round
         )
@@ -215,12 +219,14 @@ class Rounds:
         pending.forget(settled)
 
     async def _run_round(self, due: InboxRound) -> None:
-        """带着这一轮的消息跑一轮；跑完记成处理完，没跑完给每条记一次失败。"""
+        """带着这一轮的消息跑一轮：这一刻读钟、生成这一轮的 id（每次尝试一个新的，只用于成本和
+        日志），交给 ``run``。跑完记成处理完，没跑完给每条记一次失败。"""
+        now, round_id = now_cst(), uuid.uuid4().hex
         taking = list(due.messages)
         ids = [m.message_id for m in taking]
         try:
             async with asyncio.timeout(self._round_timeout.total_seconds()):
-                await self._run(due)
+                await self._run(due, round_id=round_id, now=now)
         except Exception:
             pending.failed(ids, give_up_at=receiving.PROCESSING_RETRY.n)
             raise

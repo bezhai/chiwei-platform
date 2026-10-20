@@ -1,7 +1,8 @@
 """world 的 agent 怎么调模型：主 agent 和三类按需调用的 agent（感知判断、NPC、应答）共用这一处。
 
 每一类是一个 :class:`~app.agent.contracts.AgentSpec`（:func:`world_agent` 造），名字是它的 Langfuse
-prompt id；四类都经 :func:`run_agent` 调一次模型（工具循环跑到它不再调工具为止）：
+prompt id。主 agent 的一轮由固定循环跑（:func:`app.agent.round.run_round`，按清单 ``world``），
+另外三类经 :func:`run_agent` 调一次模型；工具循环都跑到它不再调工具为止：
 
 * **用哪个模型**走 Dynamic Config：每一类一个键（``model_key``）；没配就跟主 agent 用同一个
   （:data:`WORLD_MODEL_KEY`），那个也没配就是 :data:`DEFAULT_WORLD_MODEL`。所以一开始四类用
@@ -14,7 +15,8 @@ prompt id；四类都经 :func:`run_agent` 调一次模型（工具循环跑到�
 * **模型的临时失败不整次重来**（``max_retries`` 1）：感知判断自己重试，见
   :mod:`app.world.perception`。
 * **成本**每一次调用记一行（:func:`app.domain.thinking_cost.record_round_cost`）：actor 是
-  ``world``，round_id 是 ``<trace 名>:<调用 id>``，按前缀就分得出四类各花了多少。
+  ``world``，round_id 是 ``<trace 名>:<调用 id>``，按前缀就分得出四类各花了多少。主 agent 的那一行
+  由固定循环按清单的成本名记，调用 id 就是这一轮的 id。
 
 工具按声明交给它（:class:`~app.agent.contracts.ToolSpec`）：知识来源的查询工具是读到的材料，
 主 agent 的动作和感知判断记判断的那只手留着。
@@ -52,9 +54,9 @@ def lane() -> str:
     return current_deployment_lane() or "prod"
 
 
-def session_key() -> str:
-    """world 主 agent 连续上下文的存储键，按泳道分；和它的 langfuse session 是同一个字符串。"""
-    return f"{WORLD}:{lane()}"
+# world 主 agent 连续上下文的存储键（格式串，按泳道分，清单 ``world`` 的历史用它）；填上泳道之后
+# 和四类 agent 的 langfuse session 是同一个字符串。
+HISTORY_KEY = f"{WORLD}:{{lane}}"
 
 
 def when(moment: datetime) -> str:

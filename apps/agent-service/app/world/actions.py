@@ -12,6 +12,10 @@
   agent 给出他的言行（:mod:`app.world.npc`），那段言行原样交给感知判断；主 agent 看到他的言行
   和告知了谁，事后把互动留下的东西记进记录。
 
+**它们由 world 插件逐个登记**（:mod:`app.plugins.world`，``ctx.tool``），清单 ``world`` 把它们
+排在知识来源的查询工具后面。它们的返回是它自己做过的事，跟着它自己的话一起留（``trim="kept"``；
+只有来源的查询结果当材料裁）。
+
 报告变化、让 NPC 出场：判断完、发出任何一条告知之前，先把要发的告知连同预先定好的消息 id 记进
 :mod:`app.world.unfinished`，再按这些 id 发。告知收不回来，这一轮要是没跑完，下一轮开始时按原 id
 补发，并且看得见它们。
@@ -34,7 +38,6 @@ from typing import Annotated
 
 from pydantic import Field
 
-from app.agent.contracts import ToolSpec
 from app.agent.round import current_call, current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
@@ -250,13 +253,3 @@ async def let_npc_appear(
     words = f"【{name} 这一次的言行】\n{acted}"
     told = await _tell_and_keep(f"你让 {name} 出场，情境：{situation}\n{words}", notices)
     return f"{words}\n\n{told}"
-
-
-# 只给主 agent 的动作，排在知识来源的查询工具后面。它们的返回是它自己做过的事，跟着它自己
-# 的话一起留（:mod:`app.agent.continuity` 只把来源的查询结果当材料裁）。
-ACTIONS = [
-    ToolSpec(write_record, trim="kept"),
-    ToolSpec(wake_me_at, trim="kept"),
-    ToolSpec(report_change, trim="kept"),
-    ToolSpec(let_npc_appear, trim="kept"),
-]

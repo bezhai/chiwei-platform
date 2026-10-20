@@ -3,13 +3,13 @@
 
 它和三姐妹的 life 互不 import（CI 规则 ``scripts/check_world_life_imports.py``），运行时
 也不加载 life 的代码：它是同一个镜像上的另一个 App，进程只起 world 的插件
-（:mod:`app.plugins.world`，清单在 ``app.deployment.APPS``）。它和别的参与者之间唯一的连接是通信机制
+（:mod:`app.plugins.world` 和三个知识来源的插件，清单是 :mod:`app.manifests.world`）。它和别的参与者之间唯一的连接是通信机制
 （:mod:`app.messaging`）。
 
 * :mod:`app.world.volume` —— 私有卷上按泳道分的那个目录；
 * :mod:`app.world.records` —— 记录：那个目录下的一棵自然语言文档树；
 * :mod:`app.world.wake` —— 下次醒来的时刻（私有状态）和醒来规则；
-* :mod:`app.world.sources` —— 知识来源：agent 能查到的东西从哪来，每个来源一个模块；
+* :mod:`app.world.sources` —— 知识来源：agent 能查到的东西从哪来，每个来源一个模块、一个插件；
 * :mod:`app.world.agents` —— world 的几类 agent 怎么调模型（模型、trace、成本）；
 * :mod:`app.world.rounds` —— 收件箱的处理：一轮处理所有还没经过一轮的消息，一次只跑一轮；
 * :mod:`app.world.pending` —— 收件箱里的消息走到了哪一步：还没经过一轮、处理完了、放弃了；
@@ -21,5 +21,6 @@
 * :mod:`app.world.unfinished` —— 没跑完的一轮里已经发生、收不回来的事；
 * :mod:`app.world.admin` —— 记录的人工读写接口。
 
-来源登记、收件箱和人工接口由 world 的插件（:mod:`app.plugins.world`）登记。
+主 agent 的一轮、收件箱和人工接口由 world 的插件（:mod:`app.plugins.world`）登记，来源和它们的
+查询工具由各自的插件登记。
 """

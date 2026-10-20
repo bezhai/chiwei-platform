@@ -1,8 +1,19 @@
-"""world App 的插件：知识来源、``world`` 收件箱、记录的人工读写接口。world 的清单
-（:data:`app.deployment.APPS`）只有这一个插件，所以 world 的进程不加载 life 的任何代码。
+"""world App 的核心插件：主 agent 的一轮、``world`` 收件箱、记录的人工读写接口。world 的清单
+（:mod:`app.manifests.world`）只有它和三个知识来源的插件（:mod:`app.world.sources`，各自登记来源和
+查询工具），所以 world 的进程不加载 life 的任何代码。
 
-**知识来源**（:mod:`app.world.sources`）：登记 :data:`SOURCES`，停下时清空登记表。加一个来源就是
-在 :data:`SOURCES` 里加一项。
+**主 agent 的一轮**（:mod:`app.world.main_agent`），清单 ``world`` 排它们的位置：
+
+  segments (``ctx.segment``)   world_round，和一轮里调的 world_perception、world_npc
+  tools (``ctx.tool``)         write_record、wake_me_at、report_change、let_npc_appear（都 kept）
+  before the round             unfinished.resend        按原 id 补发没跑完的一轮的告知
+  state section                records.listing          记录目录（只进清理标记）
+  input sections               wake.woken_by、wake.planned、unfinished.happenings
+  check                        wake.chosen              没定下次醒来，这一轮失败
+  after the commit             history、unfinished.clear、wake.next（都 FailRound）
+
+插件起来时向宿主要组好的 ``world``（``ctx.profile``），收件箱来源跑一轮时交给
+:func:`app.world.main_agent.run_inbox_round`。
 
 **收件箱** ``world``：送来的消息交给 :class:`~app.world.rounds.Rounds`，一轮处理收件箱里所有还没
 经过一轮的消息，一轮一轮排在宿主给 world 的轮次队列上（``ctx.turns``），同一时刻只有一轮在跑，
@@ -23,7 +34,12 @@
 """
 from __future__ import annotations
 
+from functools import partial
+
+from app.agent.contracts import FailRound
+from app.agent.round import store_history
 from app.host import Context, Plugin
+from app.world.actions import let_npc_appear, report_change, wake_me_at, write_record
 from app.world.admin import (
     RecordDeleteRequest,
     RecordListRequest,
@@ -34,16 +50,26 @@ from app.world.admin import (
     record_read_node,
     record_write_node,
 )
+from app.world.agents import world_segments
 from app.world.answer import answer_question
-from app.world.main_agent import ROUND_TIMEOUT, run_round
+from app.world.main_agent import (
+    ROUND,
+    ROUND_TIMEOUT,
+    clear_unfinished,
+    left_over,
+    next_wake_chosen,
+    planned_wake,
+    records_listing,
+    resend_left_over,
+    run_inbox_round,
+    set_the_next_wake,
+    woken_by,
+)
+from app.world.npc import NPC
+from app.world.perception import PERCEPTION
 from app.world.rounds import Rounds
-from app.world.sources import clear_sources, reality, register, told
-from app.world.sources import records as records_source
 from app.world.volume import writer_lock
 from app.world.wake import WORLD, retry_latest_wake_without_limit, wake_on_start
-
-# world 的 agent 能查到的东西，按登记的先后排（:func:`app.world.sources.query_tools`）。
-SOURCES = (records_source.SOURCE, reality.SOURCE, told.SOURCE)
 
 _RECORDS = "/admin/world/records"
 _DOCUMENT = f"{_RECORDS}/document"
@@ -57,12 +83,12 @@ ROUTES = (
 
 
 def setup(ctx: Context) -> None:
-    # 先登记撤销再登记来源：setup 中途失败时，宿主停下也会把已经登记的来源清掉。
-    ctx.on_stop(clear_sources)
-    for source in SOURCES:
-        register(source)
-
-    rounds = Rounds(run_round, round_timeout=ROUND_TIMEOUT, turns=ctx.turns(WORLD))
+    _the_round(ctx)
+    rounds = Rounds(
+        partial(run_inbox_round, ctx.profile("world")),
+        round_timeout=ROUND_TIMEOUT,
+        turns=ctx.turns(WORLD),
+    )
     ctx.inbox(
         WORLD,
         on_message=rounds.receive,
@@ -83,6 +109,23 @@ def setup(ctx: Context) -> None:
             lane_match=True,
             answers_with_lane=True,
         )
+
+
+def _the_round(ctx: Context) -> None:
+    """主 agent 的一轮由什么组成；清单 ``world`` 排它们的位置。"""
+    for segment in world_segments(ROUND, PERCEPTION, NPC).values():
+        ctx.segment(segment)
+    for action in (write_record, wake_me_at, report_change, let_npc_appear):
+        ctx.tool(action, trim="kept")
+    ctx.round_start("unfinished.resend", resend_left_over)
+    ctx.section("records.listing", records_listing)
+    ctx.section("wake.woken_by", woken_by)
+    ctx.section("wake.planned", planned_wake)
+    ctx.section("unfinished.happenings", left_over)
+    ctx.check("wake.chosen", next_wake_chosen)
+    ctx.after_commit("history", store_history, on_failure=FailRound())
+    ctx.after_commit("unfinished.clear", clear_unfinished, on_failure=FailRound())
+    ctx.after_commit("wake.next", set_the_next_wake, on_failure=FailRound())
 
 
 PLUGIN = Plugin(name="world", setup=setup)

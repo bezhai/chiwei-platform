@@ -21,7 +21,7 @@ from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg, CapabilityNotFound
 from app.world import records
 from app.world.agents import when
-from app.world.sources import Source
+from app.world.sources import Source, source_plugin
 
 
 @dataclass
@@ -72,3 +72,6 @@ async def read_record(path: RecordPath) -> str:
 
 
 SOURCE = Source(name="records", tools=(list_records, read_record))
+
+
+PLUGIN = source_plugin(SOURCE)

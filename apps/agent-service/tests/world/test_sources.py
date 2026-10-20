@@ -37,7 +37,9 @@ async def registered(monkeypatch, app_host):
         dynamic_config, "get", lambda k, default="": config.get(k, default)
     )
     await app_host("world")
-    return config
+    yield config
+    # 用例直接登记的来源不属于哪个插件，宿主停下时不会拿掉它们。
+    sources.clear_sources()
 
 
 async def _call(t, **arguments):
@@ -53,8 +55,11 @@ async def test_without_dynamic_config_every_registered_source_is_enabled(registe
     names = [s.name for s in await sources.enabled_sources()]
 
     assert names[:2] == ["records", "reality"]
-    tools = [t.tool.name for t in await sources.query_tools()]
-    assert {"list_records", "read_record", "search_web", *WEATHER_TOOLS} <= set(tools)
+    tools = await sources.query_tools()
+    assert {"list_records", "read_record", "search_web", *WEATHER_TOOLS} <= {
+        t.tool.name for t in tools
+    }
+    assert {t.trim for t in tools} == {"material"}
 
 
 async def test_the_enabled_list_keeps_only_the_named_sources_in_registration_order(registered):
@@ -69,26 +74,11 @@ async def test_a_source_left_out_of_the_enabled_list_loses_its_tools(registered)
     assert [t.tool.name for t in await sources.query_tools()] == ["list_records", "read_record"]
 
 
-async def test_a_new_source_is_one_registration_away(registered):
-    sources.register(Source(name="tides", tools=(look_up_tides,)))
-
-    assert "look_up_tides" in [t.tool.name for t in await sources.query_tools()]
-    assert "look_up_tides" in sources.material_tools()
-
-
 def test_two_sources_cannot_share_a_name_or_a_tool_name(registered):
     with pytest.raises(ValueError):
         sources.register(Source(name="records", tools=(look_up_tides,)))
     with pytest.raises(ValueError):
         sources.register(Source(name="copy", tools=(records_source.read_record,)))
-
-
-def test_every_registered_query_tool_counts_as_material_even_when_disabled(registered):
-    registered[sources.ENABLED_SOURCES_KEY] = "records"
-
-    assert {"list_records", "read_record", "search_web", *WEATHER_TOOLS} <= (
-        sources.material_tools()
-    )
 
 
 async def test_intake_goes_to_each_enabled_source_that_has_one(registered):

@@ -10,24 +10,16 @@
 
 agent 的定义（:class:`~app.agent.contracts.AgentSpec`）在它们原来的模块里：安全检查是她发消息时
 在那一轮里调的，调它的代码要用同一份定义。上下文的键、裁剪的数和标记消息的文字也都引用各自唯一的
-定义处。
+定义处（标记消息这些文字和 world 共用，见 :mod:`app.manifests.history`）。
 """
 
 from __future__ import annotations
 
-from app.agent.continuity import (
-    CHECKPOINT_HEAD,
-    CHECKPOINT_NOTE,
-    GAP_HEAD,
-    GAP_NOTE,
-    MATERIAL_TRIMMED,
-    PICTURE_TRIMMED,
-)
-from app.agent.contracts import CostSpec, HistorySpec, HistoryTexts, Profile
-from app.agent.core import NEVER_RAN
+from app.agent.contracts import CostSpec, HistorySpec, Profile
 from app.capabilities.output_safety import GUARD_OUTPUT_AGENT
 from app.host.manifest import App, Participant
 from app.living.moment import HISTORY_KEY, LIFE_MOMENT_AGENT, MOMENT_TRIM_POLICY
+from app.manifests.history import HISTORY_TEXTS
 
 RESIDENT = Profile(
     agent="living_life_moment",
@@ -73,17 +65,7 @@ RESIDENT = Profile(
     commit=("life.moment", "phone.glances", "household.read"),
     after_commit=("history", "outgoing.after"),
     history=HistorySpec(
-        key=HISTORY_KEY,
-        policy=MOMENT_TRIM_POLICY,
-        texts=HistoryTexts(
-            checkpoint_head=CHECKPOINT_HEAD,
-            checkpoint_note=CHECKPOINT_NOTE,
-            gap_head=GAP_HEAD,
-            gap_note=GAP_NOTE,
-            material_trimmed=MATERIAL_TRIMMED,
-            picture_trimmed=PICTURE_TRIMMED,
-            never_ran=NEVER_RAN,
-        ),
+        key=HISTORY_KEY, policy=MOMENT_TRIM_POLICY, texts=HISTORY_TEXTS
     ),
     round_log="life.moments",
     cost=CostSpec(actor="{participant}", round_id="{round_id}"),

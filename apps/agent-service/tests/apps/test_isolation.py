@@ -48,7 +48,7 @@ def test_the_world_app_loads_none_of_the_life_code():
     assert loaded["living"] == [], (
         "world 的进程里出现了 life 的代码：" + ", ".join(loaded["living"])
     )
-    assert loaded["plugins"] == ["world"]
+    assert loaded["plugins"] == ["world", "records", "reality", "told"]
     assert loaded["inboxes"] == ["world"]
     assert loaded["inboxes_at_start"] == [], "world 的进程不开三姐妹的收件箱"
     assert loaded["clocks"] == []
