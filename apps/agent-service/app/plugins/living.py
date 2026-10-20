@@ -28,11 +28,11 @@ old reading queue.
     before the round            outgoing.before   send what she did and has not sent yet
     the round before            life.moments      when her last round landed, and whether its
                                                   history was stored
-    state sections              day_page.last_written, her_records.recent, phone.unread
-    input sections              life.now, her_records.whereabouts, household.received,
-                                phone.arrived
+    state sections              day_page.last_written, phone.unread
+    input sections              life.now, household.received, phone.arrived
                                 (the loose_ends plugin registers keep_in_mind and the state and
-                                input sections about what is on her mind)
+                                input sections about what is on her mind, the her_records plugin
+                                the ones about what she just did and where she is)
     commit (one transaction)    life.moment, phone.glances, household.read
     after the commit            history, outgoing.after   (both Continue: logged, the round counts)
 
@@ -96,10 +96,9 @@ at import (:func:`app.living.received.open_inboxes` reads and checks them throug
 service, and declares the inboxes through the function the host hands it). Whose queues are opened
 is the manifest's: the participants of the ``resident`` profile.
 
-**``records`` is imported for its Data classes.** A Data class registers when its module is
-imported, and the schema step builds tables only for registered classes. It is also reached through
-``moment`` today; importing it here keeps its tables from depending on that chain. The other living
-Data classes come in with the modules below.
+**Her Data classes come in with the modules below.** A Data class registers when its module is
+imported, and the schema step builds tables only for registered classes; the split-out plugins
+import their own.
 """
 from __future__ import annotations
 
@@ -118,9 +117,9 @@ from app.living import (
     mouth,
     phone,
     reading,
-    records,  # noqa: F401
     takeback,
 )
+from app.living.common import living_lane
 from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
 from app.living.landing import reconcile_what_she_said
 from app.living.moment import (
@@ -133,7 +132,6 @@ from app.living.moment import (
     lost_the_last_round,
     mark_received_read,
     now_section,
-    own_recent_section,
     phone_arrived_section,
     phone_unread_section,
     previous_moment_at,
@@ -142,15 +140,20 @@ from app.living.moment import (
     remember_this_round,
     run_due_moment,
     send_her_doings,
-    whereabouts_section,
 )
 from app.living.nudge import nudged_moment_due
 from app.living.output_safety import GUARD_OUTPUT_SEGMENT
 from app.living.persona_review import DueReview, persona_review_due, write_due_review
 from app.living.reading import read_a_round
 from app.living.received import open_inboxes
-from app.living.records import living_lane
-from app.living.services import READING, Persona, PersonaText, Pictures, WhoLivesHere
+from app.living.services import (
+    READING,
+    HerRecords,
+    Persona,
+    PersonaText,
+    Pictures,
+    WhoLivesHere,
+)
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
 
 # How often her wakes tick (see "Clocks tick denser than the work they drive").
@@ -207,8 +210,11 @@ class NotSplitYet:
     look_for_something_to_read = reading.look_for_something_to_read
     read_a_bit = reading.read_a_bit
 
-    def __init__(self, *, residents: WhoLivesHere, pictures: Pictures) -> None:
+    def __init__(
+        self, *, residents: WhoLivesHere, her_records: HerRecords, pictures: Pictures
+    ) -> None:
         self.residents = residents
+        self.her_records = her_records
         self.pictures = pictures
 
 
@@ -246,11 +252,11 @@ def nudge(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
 
 
 def day_page(
-    lane: str, persona: Persona, residents: WhoLivesHere
+    lane: str, persona: Persona, her_records: HerRecords
 ) -> WakeSource[DuePage, LivingDayPage | None]:
     """Her diary on ``lane``: the page of the living day that just ended, when the tick came in the
     window and the day has no page yet (:func:`app.living.day_page.day_page_due`); who she is
-    comes from the ``persona`` service, her sisters' names from the ``residents`` service."""
+    comes from the ``persona`` service, what she did that day from the ``her_records`` service."""
 
     async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DuePage | None:
         (tick,) = batch.close()
@@ -259,7 +265,7 @@ def day_page(
             persona_id=persona_id,
             at=tick.at,
             clock=clock,
-            residents=residents.residents(),
+            her_records=her_records,
         )
 
     return WakeSource(
@@ -290,7 +296,8 @@ def setup(ctx: Context) -> None:
     residents = ctx.service("residents")
     resident = ctx.profile("resident")
     regular_rounds, early_wakes = regular(resident), nudge(resident)
-    pages, reviews = day_page(lane, persona, residents), persona_review(lane, persona)
+    her_records = ctx.service("her_records")
+    pages, reviews = day_page(lane, persona, her_records), persona_review(lane, persona)
     for persona_id in ctx.participants(profile="resident"):
         rounds = ctx.turns(persona_id, "round", hold_limit=HOLD_LIMIT)
         ctx.wake(rounds, regular_rounds, every=REGULAR_EVERY)
@@ -299,7 +306,10 @@ def setup(ctx: Context) -> None:
         ctx.wake(diary, pages, every=DAY_PAGE_EVERY)
         look_back = ctx.turns(persona_id, "persona-review", hold_limit=HOLD_LIMIT)
         ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
-    _her_round(ctx, NotSplitYet(residents=residents, pictures=ctx.service("pictures")))
+    living = NotSplitYet(
+        residents=residents, her_records=her_records, pictures=ctx.service("pictures")
+    )
+    _her_round(ctx, living)
     ctx.clock(
         "landing",
         LANDING_EVERY.total_seconds(),
@@ -328,7 +338,11 @@ def setup(ctx: Context) -> None:
 def _her_round(ctx: Context, living: NotSplitYet) -> None:
     """Everything her round is made of; the manifest's ``resident`` profile places it."""
     _her_tools(ctx, living)
-    send_doings = partial(send_her_doings, residents=living.residents)
+    send_doings = partial(
+        send_her_doings, residents=living.residents, her_records=living.her_records
+    )
+    phone_unread = partial(phone_unread_section, her_records=living.her_records)
+    phone_arrived = partial(phone_arrived_section, her_records=living.her_records)
     for segment in LIFE_MOMENT_SEGMENTS:
         ctx.segment(segment)
     ctx.segment(GUARD_OUTPUT_SEGMENT)
@@ -340,15 +354,20 @@ def _her_round(ctx: Context, living: NotSplitYet) -> None:
     )
     for name, section in (
         ("day_page.last_written", day_page_section),
-        ("her_records.recent", partial(own_recent_section, residents=living.residents)),
-        ("phone.unread", phone_unread_section),
+        ("phone.unread", phone_unread),
         ("life.now", now_section),
-        ("her_records.whereabouts", whereabouts_section),
         ("household.received", received_section),
-        ("phone.arrived", phone_arrived_section),
+        ("phone.arrived", phone_arrived),
     ):
         ctx.section(name, section)
-    ctx.commit("life.moment", partial(land_the_moment, loose_ends=ctx.service("loose_ends")))
+    ctx.commit(
+        "life.moment",
+        partial(
+            land_the_moment,
+            loose_ends=ctx.service("loose_ends"),
+            her_records=living.her_records,
+        ),
+    )
     ctx.commit("phone.glances", commit_her_glances)
     ctx.commit("household.read", mark_received_read)
     ctx.after_commit("history", remember_this_round, on_failure=Continue())
@@ -407,5 +426,5 @@ def _her_tools(ctx: Context, living: NotSplitYet) -> None:
 PLUGIN = Plugin(
     name="living",
     setup=setup,
-    requires=("persona", "residents", "pictures", "loose_ends"),
+    requires=("persona", "residents", "her_records", "pictures", "loose_ends"),
 )

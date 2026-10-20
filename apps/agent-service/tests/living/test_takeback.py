@@ -22,20 +22,21 @@ import uuid
 import pytest
 from sqlalchemy import text
 
+from app.agent.round import current_round
 from app.data.persist import insert_append, select_latest
 from app.data.tx import current_session, tx
-from app.living.happening import record_happening
+from app.living.her_records import book as book_mod
+from app.living.her_records.deeds import recent_own_happenings, record_happening
+from app.living.her_records.whereabouts import note_whereabouts
 from app.living.mouth import (
     STATE_CLAIMED,
     STATE_HANDED_OFF,
     SpokenOutbound,
     latest_outbound,
 )
-from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
-from app.living.snapshot import read_snapshot, recent_own_happenings
-from app.living.whereabouts import note_whereabouts
+from app.living.services import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
 from tests.data.read_back import all_versions
-from tests.living.conftest import RESIDENTS, her_tool
+from tests.living.conftest import her_tool, own_records
 
 send_message = her_tool("send_message")
 take_back_message = her_tool("take_back_message")
@@ -325,10 +326,7 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
         )
         assert isinstance(said, str), f"她这条没发出去，后面无从谈起。拿到：{said!r}"
 
-        shown = await read_snapshot(
-            lane=LANE, persona_id="akao", now=_at(21, 30)
-        )
-        rendered = shown.render_own_recent(RESIDENTS)
+        rendered = await own_records().recent_section(current_round())
         handles = re.findall(r"［([^］]+)］", rendered)
         assert len(handles) == 1, (
             f"快照没把她刚发出去那条的编号印出来（或者印了不止一个）—— "
@@ -606,12 +604,11 @@ async def test_losing_the_version_race_merges_onto_the_latest_version(
     最新一版、把自己那根轴合上去 —— 拿手里那份过期的重写，会把对账已经补上的落地
     标识抹掉，而那是已知事实。
     """
-    from app.living import takeback as takeback_mod
 
     await _she_is_home()
     spoke = await _she_spoke()
     landed_id = str(uuid.uuid5(uuid.NAMESPACE_OID, "the-channel-wrote-this-row"))
-    real_record_happening = takeback_mod.record_happening
+    real_record_happening = book_mod.record_happening
 
     async def the_clock_ticks_first(**kw):
         """记忆那一步之后、写台账之前：对账钟追了一版上去。"""
@@ -631,7 +628,7 @@ async def test_losing_the_version_race_merges_onto_the_latest_version(
             == 1
         )
 
-    monkeypatch.setattr(takeback_mod, "record_happening", the_clock_ticks_first)
+    monkeypatch.setattr(book_mod, "record_happening", the_clock_ticks_first)
 
     async with in_a_moment("akao", moment_id=_MOMENT):
         outcome = await take_back_message.invoke({"message_id": spoke.outbound_id})
@@ -668,7 +665,7 @@ async def test_taking_it_back_lands_as_its_own_happening_and_leaves_the_old_one_
     改历史还会破坏 ``seq`` 的连续前缀：读侧的游标推到"本次读到的最大 seq"，被改写的
     那一行不会因此再被读一遍。
     """
-    from app.living.records import OUTBOUND_HAPPENING_PREFIX
+    from app.living.services import OUTBOUND_HAPPENING_PREFIX
 
     await _she_is_home()
     spoke = await _she_spoke()

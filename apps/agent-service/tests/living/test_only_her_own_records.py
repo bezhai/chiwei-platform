@@ -2,8 +2,8 @@
 
 谁察觉到谁做了什么，由 world 判断后告诉她（第二期）；传到她这里的只有收件箱里那一段
 （:mod:`app.living.received`）。life 这边每个人只读她自己的那几行：她自己做过、说过的
-（:class:`~app.living.records.Happening`），她自己在哪、在做什么
-（:class:`~app.living.records.Whereabouts`）。
+（:class:`~app.living.her_records.records.Happening`），她自己在哪、在做什么
+（:class:`~app.living.her_records.records.Whereabouts`）。
 
 这条用源码扫描守住。``app`` 下凡是碰到这两张表的地方，扫描都得认得出它是哪一种写法，
 认不出来的一律算违规，而不是跳过——跳过的写法就是一条没人看着的路：
@@ -38,7 +38,7 @@ import pytest
 
 from app.data.persist import from_row
 from app.data.schema import table_name
-from app.living.records import Happening, Whereabouts
+from app.living.her_records.records import Happening, Whereabouts
 
 _APP = Path(__file__).resolve().parents[2] / "app"
 
@@ -65,11 +65,9 @@ _ROW_TO_RECORD = {
 # 这几处一定在读这两张表；一处都扫不到说明扫描本身失效了（比如表名换了绑定方式），
 # 那时候这条门禁绿着等于没有。
 _KNOWN_READERS = {
-    "app/living/happening.py",
-    "app/living/outgoing.py",
-    "app/living/phone.py",
-    "app/living/snapshot.py",
-    "app/living/whereabouts.py",
+    "app/living/her_records/book.py",
+    "app/living/her_records/deeds.py",
+    "app/living/her_records/whereabouts.py",
 }
 
 
@@ -90,7 +88,7 @@ class _Scan(NamedTuple):
 class _Module(NamedTuple):
     where: str
     tree: ast.Module
-    # 表达式指向的全名，比如 ``records.Happening`` -> app.living.records.Happening
+    # 表达式指向的全名，比如 ``records.Happening`` -> app.living.her_records.records.Happening
     resolve: Callable[[ast.expr], str | None]
     # (行号, 被 * 导入的模块)
     star_imports: list[tuple[int, str]]
@@ -434,9 +432,9 @@ def _narrowed_by(column: str, tail: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _PRELUDE = """\
-from app.living import records
-from app.living.records import Happening, Whereabouts
-from app.living.records import Happening as Deed
+from app.living.her_records import records
+from app.living.her_records.records import Happening, Whereabouts
+from app.living.her_records.records import Happening as Deed
 from app.data.ordered import insert_in_commit_order
 from app.data.persist import from_row
 from app.data.schema import table_name
@@ -484,12 +482,12 @@ def _violations(body: str, **others: str) -> list[str]:
             id="table-name-attribute-on-the-class",
         ),
         pytest.param(
-            "from .records import Happening as Mine\n"
+            "from .her_records.records import Happening as Mine\n"
             'SQL = f"SELECT * FROM {table_name(Mine)} WHERE lane = :lane"\n',
             id="class-through-a-relative-import",
         ),
         pytest.param(
-            "from app.living.records import *\n"
+            "from app.living.her_records.records import *\n"
             'SQL = f"SELECT * FROM {table_name(Whereabouts)} WHERE persona_id = :me"\n',
             id="star-import-from-records",
         ),
@@ -594,7 +592,7 @@ def test_the_scan_lets_through_only_the_storage_from_row_not_its_name():
         _scan(
             {
                 "app/living/reader.py": (
-                    "from app.living.records import Happening\n"
+                    "from app.living.her_records.records import Happening\n"
                     "from app.living.mine import from_row\n"
                     "def mine(row):\n"
                     "    return from_row(Happening, row)\n"

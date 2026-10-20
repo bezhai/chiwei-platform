@@ -55,9 +55,8 @@ from app.data.schema import Data, Key, table_name
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST, dated_clock
 from app.living.common import require_aware
-from app.living.happening import own_line, read_her_happenings_between
 from app.living.received import read_received_between, received_line
-from app.living.services import Persona, Residents
+from app.living.services import HerRecords, Persona
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +144,7 @@ class LivingDayPage(Data):
     @classmethod
     def _aware_written_at(cls, v: datetime) -> datetime:
         # 同 living 另外几张表：naive 落进 TIMESTAMPTZ 会被按服务器时区解释、静默偏
-        # 几小时（见 app.living.records）。
+        # 几小时（见 app.living.her_records.records）。
         return require_aware("written_at", v)
 
 
@@ -175,7 +174,7 @@ def living_day_bounds(day: date) -> tuple[datetime, datetime]:
 
 
 async def day_material(
-    *, lane: str, persona_id: str, day: date, residents: Residents
+    *, lane: str, persona_id: str, day: date, her_records: HerRecords
 ) -> list[str]:
     """这一天她自己的经历，一件一行：她做过的事、说过的话，和传到她这里的消息。
 
@@ -183,7 +182,7 @@ async def day_material(
     料这一步先压一遍等于把否掉的方案从后门放回来。
 
     两样各有各的样子，跟她每一轮读到的一样：她自己的走
-    :func:`~app.living.happening.own_line`（手机上发的、撤回的也在，她自己回看得到），
+    :meth:`~app.living.services.HerRecords.own_line`（手机上发的、撤回的也在，她自己回看得到），
     收到的走 :func:`~app.living.received.received_line`。
 
     **按事情发生的先后合成一条**：她的经历按提交序（同一轮里的几件钟点相同，谁先谁后只有
@@ -203,8 +202,8 @@ async def day_material(
         )
     ]
     did = [
-        (h.occurred_at, own_line(h, residents=residents))
-        for h in await read_her_happenings_between(
+        (h.occurred_at, her_records.own_line(h))
+        for h in await her_records.happenings_between(
             lane=lane, persona_id=persona_id, since=since, until=until
         )
     ]
@@ -321,7 +320,7 @@ async def day_page_due(
     persona_id: str,
     at: datetime,
     clock: Callable[[], datetime],
-    residents: Residents,
+    her_records: HerRecords,
 ) -> DuePage | None:
     """日记的钟在 ``at`` 响的那一拍，轮到她的日记队列时：要写哪一页；不该写返回 ``None``。
 
@@ -351,7 +350,7 @@ async def day_page_due(
     if await read_day_page(lane=lane, persona_id=persona_id, day=day) is not None:
         return None
     lines = await day_material(
-        lane=lane, persona_id=persona_id, day=day, residents=residents
+        lane=lane, persona_id=persona_id, day=day, her_records=her_records
     )
     if not lines:
         logger.info(

@@ -19,8 +19,9 @@ import pytest
 
 from app.living import moment as moment_mod
 from app.living.common import esc
+from app.living.her_records import book as book_mod
+from app.living.her_records.whereabouts import note_whereabouts
 from app.living.services import WORLD, Residents
-from app.living.whereabouts import note_whereabouts
 from app.messaging.message import Answer, SendFailed
 from tests.living.conftest import (
     RESIDENT_NAMES,
@@ -301,7 +302,7 @@ async def test_failing_before_the_question_goes_out_tells_her_nobody_answered(
         async def db_down(**_kwargs):
             raise RuntimeError("连不上数据库")
 
-        monkeypatch.setattr(moment_mod, "current_whereabouts", db_down)
+        monkeypatch.setattr(book_mod, "current_whereabouts", db_down)
     else:
         # 通信机制开始接收之前，三姐妹的名字还没读进来。
         hand = her_tool("look_around", residents=_NamesNotRead())
@@ -324,7 +325,7 @@ async def test_cancelling_her_round_while_she_looks_around_is_not_nobody_answeri
             stuck.set()
             await asyncio.Event().wait()
 
-        monkeypatch.setattr(moment_mod, "current_whereabouts", never_returns)
+        monkeypatch.setattr(book_mod, "current_whereabouts", never_returns)
     else:
         world.hangs = True
         world.on_ask = stuck.set

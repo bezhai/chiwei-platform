@@ -13,11 +13,11 @@ from app.agent.continuity import HistoryView
 from app.agent.contracts import Continue, CostSpec
 from app.agent.round import Round, in_round
 from app.living.day_page import LivingDayPage
+from app.living.her_records.records import Happening, Whereabouts
 from app.living.loose_ends.threads import LooseEnd
 from app.living.moment import DueMoment
 from app.living.phone import Envelope, Sender
 from app.living.received import ReceivedMessage
-from app.living.records import Happening, Whereabouts
 from app.living.snapshot import MomentSnapshot
 
 LANE = "coe-living"
@@ -70,6 +70,8 @@ def test_living_places_every_part_of_her_round_the_manifest_lists(resident):
     assert {p.name: p.plugin for p in placed if p.plugin != "living"} == {
         "loose_ends.open": "loose_ends",
         "loose_ends.just_due": "loose_ends",
+        "her_records.recent": "her_records",
+        "her_records.whereabouts": "her_records",
     }
     assert resident.profile.history.key == "{lane}:{participant}"
     assert resident.profile.cost == CostSpec(
@@ -77,19 +79,34 @@ def test_living_places_every_part_of_her_round_the_manifest_lists(resident):
     )
 
 
+_DOING = Whereabouts(
+    lane=LANE,
+    persona_id="akao",
+    moment_id="2026-07-25T14:00+08:00",
+    place="家/客厅",
+    doing="看昨天拍的胶片",
+    noted_at=_at(14),
+)
+
+_OWN_RECENT = [
+    Happening(
+        lane=LANE,
+        happening_id="h1",
+        actor="akao",
+        kind="speech",
+        medium="in_person",
+        content="布丁我吃了。",
+        occurred_at=_at(13, 50),
+        audience=["ayana"],
+    )
+]
+
+
 def _snapshot() -> MomentSnapshot:
     return MomentSnapshot(
         lane=LANE,
         persona_id="akao",
         now=NOW,
-        doing=Whereabouts(
-            lane=LANE,
-            persona_id="akao",
-            moment_id="2026-07-25T14:00+08:00",
-            place="家/客厅",
-            doing="看昨天拍的胶片",
-            noted_at=_at(14),
-        ),
         day_page=LivingDayPage(
             lane=LANE,
             persona_id="akao",
@@ -98,18 +115,6 @@ def _snapshot() -> MomentSnapshot:
             written_at=_at(4, 30),
             happenings=3,
         ),
-        own_recent=[
-            Happening(
-                lane=LANE,
-                happening_id="h1",
-                actor="akao",
-                kind="speech",
-                medium="in_person",
-                content="布丁我吃了。",
-                occurred_at=_at(13, 50),
-                audience=["ayana"],
-            )
-        ],
     )
 
 
@@ -171,12 +176,33 @@ _RECEIVED = [
 ]
 
 
-def _reads(monkeypatch, *, snapshot, open_ends, envelopes, received) -> dict[str, int]:
-    """这一轮读的四样（快照、心里挂着的、手机信封、收件箱）换成写死的，并数每样读了几次。"""
+def _reads(
+    monkeypatch, *, snapshot, doing, own_recent, open_ends, envelopes, received
+) -> dict[str, int]:
+    """这一轮读的六样（快照、她在哪、她刚做过说过的、心里挂着的、手机信封、收件箱）换成写死的，
+    并数每样读了几次。"""
     from app.living import moment as moment_mod
+    from app.living.her_records import book as book_mod
     from app.living.loose_ends import mind as mind_mod
 
-    reads = {"snapshot": 0, "open_ends": 0, "envelopes": 0, "received": 0}
+    reads = {
+        "snapshot": 0,
+        "doing": 0,
+        "own_recent": 0,
+        "open_ends": 0,
+        "envelopes": 0,
+        "received": 0,
+    }
+
+    async def current_whereabouts(*, lane, persona_id):
+        assert (lane, persona_id) == (LANE, "akao")
+        reads["doing"] += 1
+        return doing
+
+    async def recent_own_happenings(*, lane, persona_id):
+        assert (lane, persona_id) == (LANE, "akao")
+        reads["own_recent"] += 1
+        return own_recent
 
     async def list_open_loose_ends(*, lane, persona_id):
         assert (lane, persona_id) == (LANE, "akao")
@@ -188,7 +214,7 @@ def _reads(monkeypatch, *, snapshot, open_ends, envelopes, received) -> dict[str
         reads["snapshot"] += 1
         return snapshot
 
-    async def envelopes_for(*, lane, persona_id, now):
+    async def envelopes_for(*, lane, persona_id, now, her_records):
         assert (lane, persona_id, now) == (LANE, "akao", NOW)
         reads["envelopes"] += 1
         return envelopes
@@ -199,6 +225,8 @@ def _reads(monkeypatch, *, snapshot, open_ends, envelopes, received) -> dict[str
         return received
 
     monkeypatch.setattr(moment_mod, "read_snapshot", read_snapshot)
+    monkeypatch.setattr(book_mod, "current_whereabouts", current_whereabouts)
+    monkeypatch.setattr(book_mod, "recent_own_happenings", recent_own_happenings)
     monkeypatch.setattr(mind_mod, "list_open_loose_ends", list_open_loose_ends)
     monkeypatch.setattr(moment_mod, "envelopes_for", envelopes_for)
     monkeypatch.setattr(moment_mod, "unread_received", unread_received)
@@ -250,6 +278,8 @@ async def test_a_round_whose_history_broke_shows_everything_section_by_section(
     reads = _reads(
         monkeypatch,
         snapshot=_snapshot(),
+        doing=_DOING,
+        own_recent=_OWN_RECENT,
         open_ends=_OPEN_ENDS,
         envelopes=_ENVELOPES,
         received=_RECEIVED,
@@ -297,21 +327,29 @@ async def test_a_round_whose_history_broke_shows_everything_section_by_section(
     )
     # 快照、心里挂着的、手机、收件箱各读一次：两个手机段用的是同一次查到的信封，挂念和刚到点的
     # 两段用的是同一次读到的清单。
-    assert reads == {"snapshot": 1, "open_ends": 1, "envelopes": 1, "received": 1}
+    assert reads == {
+        "snapshot": 1,
+        "doing": 1,
+        "own_recent": 1,
+        "open_ends": 1,
+        "envelopes": 1,
+        "received": 1,
+    }
 
 
 async def test_a_first_round_whose_history_continues_leaves_out_what_is_not_there(
     resident, monkeypatch
 ):
-    empty = MomentSnapshot(
-        lane=LANE,
-        persona_id="akao",
-        now=NOW,
+    empty = MomentSnapshot(lane=LANE, persona_id="akao", now=NOW, day_page=None)
+    _reads(
+        monkeypatch,
+        snapshot=empty,
         doing=None,
-        day_page=None,
         own_recent=[],
+        open_ends=[],
+        envelopes=[],
+        received=[],
     )
-    _reads(monkeypatch, snapshot=empty, open_ends=[], envelopes=[], received=[])
     round = _round(previous_at=None, continues_unbroken=True)
 
     state, stimulus = await _texts(resident, round)

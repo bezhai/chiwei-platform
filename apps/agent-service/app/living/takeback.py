@@ -10,8 +10,8 @@
     - 21:00 CST 你对 bezhai 说：「你去过那家抹茶店吗？」［55f3469bd46c5384a9ce22cb4944b77a］
 
 方括号里那串就是 :attr:`app.living.mouth.SpokenOutbound.outbound_id`，两处都经
-:func:`app.living.happening.printed_handle` 印出来（前缀常量见
-:data:`app.living.records.OUTBOUND_HAPPENING_PREFIX`，全链只有那一处定义）。所以这只
+:func:`app.living.common.printed_handle` 印出来（前缀常量见
+:data:`app.living.services.OUTBOUND_HAPPENING_PREFIX`，全链只有那一处定义）。所以这只
 手收的是那个编号，在她自己那张认领表里**按等值**找，不管她是从哪一处抄来的。
 
 **同一个值她会在三处看到，印法有两种。** 手机那侧（:func:`app.living.phone._one_message`）
@@ -92,10 +92,9 @@ from app.data.persist import fetch_one, from_row, insert_append, select_latest
 from app.data.schema import table_name
 from app.domain.safety import Recall
 from app.infra.outbound import publish
-from app.living.happening import note_recorded, record_happening
 from app.living.mouth import SpokenOutbound
 from app.living.phone import conversation_her_bot_is_in, medium_for
-from app.living.records import KIND_ACT
+from app.living.services import KIND_ACT, HerRecords
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +132,7 @@ async def her_line(
 
 async def _remember_she_took_it_back(
     *,
+    her_records: HerRecords,
     lane: str,
     persona_id: str,
     line: SpokenOutbound,
@@ -155,7 +155,7 @@ async def _remember_she_took_it_back(
     """
     happening_id = f"takeback:{line.outbound_id}"
     try:
-        await record_happening(
+        await her_records.record_happening(
             lane=lane,
             happening_id=happening_id,
             actor=persona_id,
@@ -166,7 +166,6 @@ async def _remember_she_took_it_back(
             medium=medium,
             channel_id=line.channel_id,
         )
-        note_recorded(happening_id)
     except Exception:
         logger.warning(
             "living takeback lane=%s outbound=%s 撤回已经交出去了，但这件事没记进"
@@ -328,6 +327,7 @@ async def take_back_message(
 
     # 以下两步都**不往外抛**：撤回已经在路上了，报成失败是假话。
     await _remember_she_took_it_back(
+        her_records=self.her_records,
         lane=lane,
         persona_id=persona_id,
         line=line,

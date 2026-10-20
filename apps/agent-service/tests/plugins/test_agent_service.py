@@ -26,6 +26,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         "skills",
         "persona",
         "residents",
+        "her_records",
         "loose_ends",
         "pictures",
         "web",
@@ -41,6 +42,8 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("persona", "service"): 1,
         ("persona", "segment"): 1,  # who she is, the first segment of her round
         ("residents", "service"): 1,
+        ("her_records", "service"): 1,
+        ("her_records", "section"): 2,
         ("loose_ends", "service"): 1,
         ("loose_ends", "tool"): 1,
         ("loose_ends", "section"): 2,
@@ -60,7 +63,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("living", "segment"): 4,  # three more segments of her round and the output check
         ("living", "round_start"): 1,
         ("living", "round_log"): 1,
-        ("living", "section"): 7,
+        ("living", "section"): 5,
         ("living", "commit"): 3,
         ("living", "after_commit"): 2,
     }

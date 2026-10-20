@@ -27,13 +27,13 @@ from sqlalchemy import text
 from app.data.persist import fetch_all, fetch_value, from_row
 from app.data.tx import current_session, tx
 from app.host import Signal
+from app.living.her_records.whereabouts import note_whereabouts
 from app.living.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
     LIFE_MOMENT_PROMPT_ID,
     LifeMoment,
     latest_moment,
 )
-from app.living.whereabouts import note_whereabouts
 from app.plugins.living import nudge, regular
 from tests.living.conftest import (
     Calls,

@@ -27,18 +27,22 @@ import uuid
 import pytest
 
 from app.agent.round import Round
-from app.living.happening import record_happening
+from app.living.her_records.deeds import (
+    OWN_RECENT_LIMIT,
+    recent_own_happenings,
+    record_happening,
+)
+from app.living.her_records.whereabouts import note_whereabouts
 from app.living.loose_ends.mind import OnHerMind
 from app.living.loose_ends.threads import LooseEnd, rewrite_loose_ends
-from app.living.records import (
+from app.living.services import (
     KIND_ACT,
     KIND_SPEECH,
     MEDIUM_PHONE,
     OUTBOUND_HAPPENING_PREFIX,
 )
-from app.living.snapshot import OWN_RECENT_LIMIT, read_snapshot
-from app.living.whereabouts import note_whereabouts
-from tests.living.conftest import RESIDENTS
+from app.living.snapshot import read_snapshot
+from tests.living.conftest import own_records
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -82,6 +86,7 @@ async def _say(actor: str, content: str, at: dt.datetime, *, to=(), kind=KIND_SP
 # 挂念和刚到点的那两段由 loose_ends 插件摆（:mod:`app.living.loose_ends.mind`），这里拿它交出去的
 # 那个对象，跟快照的几段拼在一起看她一轮里的样子。
 _MIND = OnHerMind()
+_RECORDS = own_records()
 
 
 def _round(snap, previous_at: dt.datetime | None = None) -> Round:
@@ -105,7 +110,7 @@ async def _state_sections(snap) -> str:
         (
             snap.render_day_page(),
             await _MIND.open_section(_round(snap)),
-            snap.render_own_recent(RESIDENTS),
+            await _RECORDS.recent_section(_round(snap)),
         )
     )
 
@@ -114,7 +119,7 @@ async def _new_sections(snap, *, previous_at) -> str:
     """这一轮的实况那三段（现在、手上、刚到点的）连在一起，查某句话在不在里面。"""
     parts = (
         snap.render_now(previous_at),
-        snap.render_hands(),
+        await _RECORDS.whereabouts_section(_round(snap)),
         await _MIND.just_due_section(_round(snap, previous_at)),
     )
     return "\n\n".join(part for part in parts if part is not None)
@@ -235,8 +240,9 @@ async def test_the_snapshot_opens_with_what_is_in_her_hands(snap_db):
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
 
-    assert snap.doing is not None
-    assert (snap.doing.place, snap.doing.doing) == ("家/客厅", "看昨天拍的胶片")
+    doing = await _RECORDS.current_whereabouts(lane=snap.lane, persona_id=snap.persona_id)
+    assert doing is not None
+    assert (doing.place, doing.doing) == ("家/客厅", "看昨天拍的胶片")
     assert "看昨天拍的胶片" in await _new_sections(snap, previous_at=_at(14))
 
 
@@ -245,13 +251,13 @@ async def test_she_can_be_nowhere_yet_and_the_snapshot_says_so_plainly(snap_db):
     """冷启动第一轮她还没定下在哪 —— 不许编一个位置，也不许渲染出一片空白。"""
     snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(8))
 
-    assert snap.doing is None
+    assert await _RECORDS.current_whereabouts(lane=snap.lane, persona_id=snap.persona_id) is None
     assert all(
         text.strip()
         for text in (
             snap.render_day_page(),
             await _MIND.open_section(_round(snap)),
-            snap.render_own_recent(RESIDENTS),
+            await _RECORDS.recent_section(_round(snap)),
         )
     )
 
@@ -287,8 +293,8 @@ async def test_she_can_see_what_she_herself_just_said(snap_db):
         lane=LANE, persona_id="akao", now=_at(14)
     )
 
-    assert [h.content for h in snap.own_recent] == ["周末祭典我陪你去。"]
-    assert "周末祭典我陪你去。" in snap.render_own_recent(RESIDENTS)
+    assert [h.content for h in (await recent_own_happenings(lane=snap.lane, persona_id=snap.persona_id))] == ["周末祭典我陪你去。"]
+    assert "周末祭典我陪你去。" in await _RECORDS.recent_section(_round(snap))
 
 
 @pytest.mark.integration
@@ -315,7 +321,7 @@ async def test_when_her_words_are_already_in_view_the_state_does_not_copy_them(
         assert "你刚做过、说过" not in text and "布丁我吃了。" not in text, text
     assert "你上一次写下的那一天" in page
     assert "周末陪绫奈去祭典" in open_ends
-    own = snap.render_own_recent(RESIDENTS)
+    own = await _RECORDS.recent_section(_round(snap))
     assert "你刚做过、说过" in own and "布丁我吃了。" in own
 
 
@@ -325,7 +331,7 @@ async def test_her_own_acts_show_up_too(snap_db):
 
     snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 6))
 
-    assert [h.content for h in snap.own_recent] == ["把胶片摊在茶几上"]
+    assert [h.content for h in (await recent_own_happenings(lane=snap.lane, persona_id=snap.persona_id))] == ["把胶片摊在茶几上"]
 
 
 @pytest.mark.integration
@@ -356,7 +362,7 @@ async def test_a_message_she_sent_carries_the_handle_that_takes_it_back(snap_db)
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 40)
     )
-    text = snap.render_own_recent(RESIDENTS)
+    text = await _RECORDS.recent_section(_round(snap))
 
     assert (
         f"- 14:32 CST 你对 bezhai 说：「你去过那家抹茶店吗？」［{oid}］" in text
@@ -375,7 +381,7 @@ async def test_what_she_said_face_to_face_carries_no_handle(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
-    text = snap.render_own_recent(RESIDENTS)
+    text = await _RECORDS.recent_section(_round(snap))
 
     assert "- 14:05 CST 你对 绫奈 说：「布丁我吃了。」" in text
     assert "［" not in text, (
@@ -393,7 +399,7 @@ async def test_a_sister_named_by_id_in_her_records_reads_as_her_name(snap_db):
     await _say("akao", "汤好了。", _at(14, 7), to=["千凪", "chinagi"])
 
     snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 10))
-    text = snap.render_own_recent(RESIDENTS)
+    text = await _RECORDS.recent_section(_round(snap))
 
     assert "- 14:05 CST 你对 绫奈 说：「布丁我吃了。」" in text
     assert "- 14:06 CST 你对 绫奈、千凪、许阿姨 说：「开饭了。」" in text
@@ -409,8 +415,8 @@ async def test_her_own_trail_is_bounded_by_count_not_by_a_clock(snap_db):
 
     snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(20))
 
-    assert len(snap.own_recent) == OWN_RECENT_LIMIT
-    assert [h.content for h in snap.own_recent] == [
+    assert len(await recent_own_happenings(lane=snap.lane, persona_id=snap.persona_id)) == OWN_RECENT_LIMIT
+    assert [h.content for h in (await recent_own_happenings(lane=snap.lane, persona_id=snap.persona_id))] == [
         f"第{i}件事" for i in range(5, OWN_RECENT_LIMIT + 5)
     ], "最近的应该在最后，而且按发生先后排"
 
@@ -421,7 +427,7 @@ async def test_another_sisters_acts_are_not_her_own_trail(snap_db):
 
     snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 5))
 
-    assert snap.own_recent == []
+    assert (await recent_own_happenings(lane=snap.lane, persona_id=snap.persona_id)) == []
 
 
 # --------------------------------------------------------------------------
@@ -447,7 +453,7 @@ async def test_last_nights_line_does_not_read_as_tonight(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(23, 45)
     )
-    text = snap.render_own_recent(RESIDENTS)
+    text = await _RECORDS.recent_section(_round(snap))
 
     assert "07-24 23:41" in text, (
         f"昨晚 23:41 那行渲染成了裸时分，跟今晚 23:41 一个形状 —— "
@@ -463,7 +469,7 @@ async def test_todays_own_lines_stay_undated(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
-    text = snap.render_own_recent(RESIDENTS)
+    text = await _RECORDS.recent_section(_round(snap))
 
     assert "- 14:05 CST 你 把胶片摊在茶几上" in text
     assert "07-25 14:05" not in text, f"当天的行不该带日期。拿到：\n{text}"
@@ -494,7 +500,7 @@ async def test_the_now_line_says_which_calendar_day_it_is(snap_db):
 # / switch_to），改完之后到下一个清理点之间，她眼前那份状态说的还是旧位置。而她在哪是
 # 这一轮里最该准的一样东西（world 按她报的位置判断谁看得见她）。
 #
-# 所以它归到这一轮的实况（:meth:`app.living.snapshot.MomentSnapshot.render_hands`）。
+# 所以它归到这一轮的实况（:meth:`app.living.her_records.book.OwnRecords.whereabouts_section`）。
 # ---------------------------------------------------------------------------
 
 

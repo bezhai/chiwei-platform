@@ -1,7 +1,7 @@
 """她自己的经历：做过的事、说过的话 —— 写入、读取，和她读到的样子。
 
 每一条都是她自己的：``actor`` 就是她。当面说的、当面做的、手机上发的、去撤回的，都记在
-这里，她回看得到（:mod:`app.living.snapshot` 那一段"你刚做过、说过"、日记那一页的材料）。
+这里，她回看得到（她一轮里"你刚做过、说过"那一段、日记那一页的材料）。
 
 **这里只记她自己的，也只给她自己读。** 读这张表的每一条查询都按 ``actor`` 筛到一个人
 （``tests/living/test_only_her_own_records.py`` 守着）。别人能不能察觉到她做了什么，不由
@@ -12,15 +12,14 @@ life 判断：当面做的事一轮一条汇总发给 world，只对姐妹说的
 **渠道是客观事实**（``medium``）：当面说的、当面做的进 world 的汇总；手机和群聊隔着设备，
 只在她自己的记录里。
 
-游标是 ``seq``（提交序），不是 ``occurred_at``。理由见 :class:`app.living.records.Happening`，
+游标是 ``seq``（提交序），不是 ``occurred_at``。理由见 :class:`app.living.her_records.records.Happening`，
 号由 :func:`app.data.ordered.insert_in_commit_order` 分配。
 
 **这一轮她做了几件事也记在这里**（:class:`Recorded`，她这一轮的状态）：她的工具每真的落下一件事
 就记一笔（:func:`note_recorded`），这一轮落地时数。
 
 **一条记录长什么样也归这里**（:func:`own_line`）：同一条记录在她每一轮里和在日记材料里必须
-长得一样，两份各写各的必然漂移。放在这里而不是 :mod:`app.living.snapshot`，是因为 snapshot
-要读日记那一页，日记反过来 import snapshot 就绕成环。
+长得一样，两份各写各的必然漂移；日记经 ``her_records`` 服务拿到的就是这一份。
 """
 
 from __future__ import annotations
@@ -33,13 +32,21 @@ from app.agent.round import current_round
 from app.data.ordered import insert_in_commit_order
 from app.data.persist import fetch_all, from_row
 from app.data.schema import table_name
-from app.living.records import (
-    KIND_SPEECH,
-    MEDIUM_IN_PERSON,
-    OUTBOUND_HAPPENING_PREFIX,
-    Happening,
-)
-from app.living.services import Residents
+from app.living.common import printed_handle
+from app.living.her_records.records import Happening
+from app.living.services import KIND_SPEECH, MEDIUM_IN_PERSON, Residents
+
+# 她自己最近做过 / 说过的多少条。按**条数**而不是按时间窗：安静一整天的时候，她
+# 上一次开口仍然读得到；而热闹的时候也不会把半天的行为一次全灌进来。
+#
+# 12 的量级依据：她真正动手 / 开口的轮次远少于"继续"的轮次，12 条大致覆盖她最近几个
+# 小时的行为轨迹 —— 足够让"刚答应姐姐的事"活到她下一次换事情、把它列进心上为止。
+#
+# 这一段只在上下文接不住她最近说过的话时给（上下文是空的、硬顶把标记消息全裁掉了、上一
+# 轮没存下来）。上下文不按天清零，所以正常跑着的时候它不出现；出现的那一轮，这 12 条就
+# 是她眼前唯一的说话样本，之前的腔调会跟着带进来。这是有意保留的：她得记得自己刚说过
+# 什么。
+OWN_RECENT_LIMIT = 12
 
 _TABLE = table_name(Happening)
 
@@ -114,38 +121,29 @@ async def read_her_happenings_between(
     return [from_row(Happening, row) for row in rows]
 
 
+
+async def recent_own_happenings(
+    *, lane: str, persona_id: str, limit: int = OWN_RECENT_LIMIT
+) -> list[Happening]:
+    """她自己最近做过 / 说过的若干条，按发生先后升序（最近的在最后）。
+
+    按 ``seq`` 取最近的一段再翻过来：``occurred_at`` 跨 persona 并发时跟落库顺序
+    无关，按它排会让同一刻的几条随机换位（见 :class:`app.living.her_records.records.Happening`
+    的 ``seq``）。
+    """
+    sql = (
+        f"SELECT * FROM {_TABLE} "
+        f"WHERE lane = :lane AND actor = :actor "
+        f"ORDER BY seq DESC LIMIT :limit"
+    )
+    rows = await fetch_all(sql, lane=lane, actor=persona_id, limit=limit)
+    items = [from_row(Happening, row) for row in rows]
+    items.reverse()
+    return items
+
 # ---------------------------------------------------------------------------
 # 一条记录摆到她眼前的样子
 # ---------------------------------------------------------------------------
-
-
-def message_handle(happening_id: str) -> str | None:
-    """这一条要是她发出去的消息，给出她能拿去撤回的那个编号；否则 ``None``。
-
-    编号就是 ``outbound_id``——:func:`app.living.takeback.take_back_message` 按等值查
-    的那个键。前缀走 :data:`~app.living.records.OUTBOUND_HAPPENING_PREFIX`，跟
-    :mod:`app.living.mouth` 拼 ``happening_id`` 时用的是同一个常量，所以"这里印出去
-    的"和"她照抄回来的"必然是同一个东西。
-
-    **判据是前缀，不是** ``kind``：当面说的话和发消息的 ``kind`` 都是 ``speech``，
-    但当面说的话撤不了。给它一个编号就是给她一个指了会失败的东西。
-    """
-    if not happening_id.startswith(OUTBOUND_HAPPENING_PREFIX):
-        return None
-    return happening_id[len(OUTBOUND_HAPPENING_PREFIX):]
-
-
-def printed_handle(happening_id: str) -> str:
-    """那个编号印在她眼前的样子：``［<编号>］``；不是她发出去的消息就是空串。
-
-    **印法只在这里写一次。** 她在两处见到这个形状 —— 「你刚做过、说过」那段
-    （:func:`own_line`）和发送回执（:func:`app.living.mouth.send_message`）—— 两处都走
-    它，所以她照抄给 :func:`app.living.takeback.take_back_message` 的是同一种东西。
-    手机那侧刻意不用这个印法（``take_back_id`` 属性，理由见
-    :func:`app.living.phone._one_message`）。
-    """
-    handle = message_handle(happening_id)
-    return f"［{handle}］" if handle is not None else ""
 
 
 def own_line(h: Happening, *, residents: Residents) -> str:

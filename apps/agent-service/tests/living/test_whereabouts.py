@@ -9,7 +9,7 @@ import datetime as dt
 
 import pytest
 
-from app.living.whereabouts import current_whereabouts, note_whereabouts
+from app.living.her_records.whereabouts import current_whereabouts, note_whereabouts
 
 LANE = "coe-living"
 _TEN_AM = dt.datetime(2026, 7, 25, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))

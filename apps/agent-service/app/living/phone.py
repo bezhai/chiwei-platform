@@ -196,7 +196,7 @@ from pydantic import Field, field_validator
 from app.agent.round import current_round
 from app.agent.tools._common import tool_error
 from app.capabilities.concurrency import fan_out_wait
-from app.data.persist import fetch_one, fetch_value, insert_idempotent
+from app.data.persist import fetch_one, insert_idempotent
 from app.data.queries.messages import (
     find_conversation_page,
     find_conversations_by_last_message,
@@ -214,8 +214,7 @@ from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import CST, to_cst_dated
 from app.infra.image import image_client, image_is_reachable
 from app.living.common import esc, require_aware
-from app.living.records import MEDIUM_GROUP_CHAT, MEDIUM_PHONE, Happening
-from app.living.services import Pictures
+from app.living.services import MEDIUM_GROUP_CHAT, MEDIUM_PHONE, HerRecords, Pictures
 from app.living.whitelist import channels_in_sight
 
 logger = logging.getLogger(__name__)
@@ -300,7 +299,6 @@ class PhoneRead(Data):
 
 
 _READ_TABLE = table_name(PhoneRead)
-_HAPPENING_TABLE = table_name(Happening)
 
 
 @dataclass(frozen=True)
@@ -556,32 +554,12 @@ async def commit_glances(*, glances: list[dict]) -> int:
 # 信封
 # ---------------------------------------------------------------------------
 
-# 她上次在这条会话上开口是什么时候。读的是她自己的 Happening（嘴落下的那条），
-# 不是 common_message —— 出站消息要等 chat-response-worker 异步落库，按它算会
-# 把刚说完的话算成"从没说过"。
-#
-# 读公共层的查询都在 :mod:`app.data.queries` 里；这一条读的是 living 自己那张表，SQL 留在这里。
-_LAST_SPOKE_SQL = f"""
-SELECT MAX(occurred_at) FROM {_HAPPENING_TABLE}
- WHERE lane = :lane AND actor = :persona_id AND channel_id = :channel_id
-"""
-
-
-async def _last_spoke_at(
-    *, lane: str, persona_id: str, channel_id: str
-) -> datetime | None:
-    """她上次在这条会话上开口的时刻；从没说过返回 ``None``。"""
-    return await fetch_value(
-        _LAST_SPOKE_SQL, lane=lane, persona_id=persona_id, channel_id=channel_id
-    )
-
-
 def _instant(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=CST)
 
 
 async def envelopes_for(
-    *, lane: str, persona_id: str, now: datetime
+    *, lane: str, persona_id: str, now: datetime, her_records: HerRecords
 ) -> list[Envelope]:
     """她此刻手机上有动静的那些会话，**按时间排、最新的在前**，一条不少。
 
@@ -622,7 +600,8 @@ async def envelopes_for(
             own_bots=own_bots,
             limit=ENVELOPE_SENDER_LIMIT,
         )
-        spoke = await _last_spoke_at(
+        # 她上次在这儿开口是什么时候：读她自己的经历（``her_records`` 服务），不读 common_message。
+        spoke = await her_records.last_spoke_in(
             lane=lane, persona_id=persona_id, channel_id=conv.channel_id
         )
         out.append(
@@ -1010,7 +989,7 @@ def _take_back_handle(row) -> str | None:
     **还没撤掉**（已经撤回的再撤一次只会撤了个空，那时留着编号等于同时说"这条撤回了"
     和"拿这串去撤它"）、**有这一列**（她回复别人的消息走另一条链，那条链不写它）。
 
-    印出去的写法是 32 位无短横的 hex —— 跟 :func:`app.living.happening.printed_handle`
+    印出去的写法是 32 位无短横的 hex —— 跟 :func:`app.living.common.printed_handle`
     在发送回执和「你刚做过、说过」那段里印的**是同一个值**（不是同一种印法：那边在全角
     方括号里，这边在 ``take_back_id`` 属性里，理由见 :func:`_one_message`）。库里这一列是 uuid
     类型，两种写法之间的相等关系由两侧共读的成对向量钉住

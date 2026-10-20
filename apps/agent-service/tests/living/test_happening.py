@@ -17,8 +17,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.data.persist import fetch_all
-from app.living.happening import record_happening
-from app.living.records import MEDIUM_IN_PERSON
+from app.living.her_records.deeds import record_happening
+from app.living.services import MEDIUM_IN_PERSON
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))

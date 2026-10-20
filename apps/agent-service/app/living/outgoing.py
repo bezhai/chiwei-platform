@@ -8,15 +8,15 @@ world 的三轮，每一轮只看到一部分。她这一段在世界里什么�
 
 手机上发的消息、撤回消息照常记在她的经历里（:mod:`app.living.mouth`、:mod:`app.living.takeback`），
 她自己回看得到，但隔着设备，不进汇总：判据是经历上的 ``medium``，不是这一轮记下了哪些
-（这一轮的 :class:`app.living.happening.Recorded` 里两种都有）。
+（这一轮的 :class:`app.living.her_records.deeds.Recorded` 里两种都有）。
 
 **只对姐妹说的话直接发给姐妹**，一位一条，不经过 world。同时还对别人说的，姐妹照样收到直达的
 那条，这句话也进汇总，别人听没听见由 world 判断。姐妹按她们在世界里的名字认
 （:meth:`app.living.services.Residents.sisters_in`）；她在 ``to`` 里写的姐妹 id，``say`` 记下
 时已经换成了名字。不是姐妹名字的，一律是世界里的某个人。
 
-**汇总从她存下的经历里取，不从这一轮的内存里取**（:class:`~app.living.records.Happening`、
-:class:`~app.living.records.Whereabouts`）。所以这一轮失败、超时、赶上部署被打断，她已经做了的
+**汇总从她存下的经历里取，不从这一轮的内存里取**（:class:`~app.living.services.Deed`、
+:class:`~app.living.services.Place`，经 ``her_records`` 服务读）。所以这一轮失败、超时、赶上部署被打断，她已经做了的
 事也还在，下一次照样发出去。
 
 **一段经历变成要发的消息，和"讲到哪了"在同一个事务里落地**（:func:`compose`、
@@ -66,8 +66,15 @@ from app.data.schema import CommitOrder, Data, Key, table_name
 from app.data.tx import tx
 from app.infra.cst_time import dated_clock
 from app.living.common import require_aware
-from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON, Happening, Whereabouts
-from app.living.services import WORLD, Residents
+from app.living.services import (
+    KIND_SPEECH,
+    MEDIUM_IN_PERSON,
+    WORLD,
+    Deed,
+    HerRecords,
+    Place,
+    Residents,
+)
 from app.messaging.sending import send
 
 logger = logging.getLogger(__name__)
@@ -161,26 +168,28 @@ class OutgoingUpTo(Data):
 _MESSAGE_TABLE = table_name(OutgoingMessage)
 _RESULT_TABLE = table_name(OutgoingResult)
 _UP_TO_TABLE = table_name(OutgoingUpTo)
-_HAPPENING_TABLE = table_name(Happening)
-_WHEREABOUTS_TABLE = table_name(Whereabouts)
 
 
 def _derive(*parts: str) -> str:
     return uuid.uuid5(_ID_NS, "\x1f".join(parts)).hex
 
 
-async def send_what_she_did(*, lane: str, persona_id: str, residents: Residents) -> None:
+async def send_what_she_did(
+    *, lane: str, persona_id: str, residents: Residents, her_records: HerRecords
+) -> None:
     """把她经历里还没讲出去的那一段变成要发的消息，再把还没有结果的逐条发出去。
 
     **调用方必须在她的一轮里调**（她的轮次队列上一次只跑一轮，:mod:`app.plugins.living`）：讲到
     哪了靠的是"她的经历这一刻全都落了库"，两处同时讲会把同一段讲两遍。
     """
-    await compose(lane=lane, persona_id=persona_id, residents=residents)
+    await compose(
+        lane=lane, persona_id=persona_id, residents=residents, her_records=her_records
+    )
     await send_unsent(lane=lane, persona_id=persona_id)
 
 
 async def compose(
-    *, lane: str, persona_id: str, residents: Residents
+    *, lane: str, persona_id: str, residents: Residents, her_records: HerRecords
 ) -> list[OutgoingMessage]:
     """她上次讲到的地方之后的经历，变成要发的消息；跟新的"讲到哪了"一个事务落地。交回落库的那几条。
 
@@ -188,14 +197,25 @@ async def compose(
     """
     mark = await _latest_mark(lane=lane, persona_id=persona_id)
     if mark is None:
-        await insert_append(await _starting_mark(lane=lane, persona_id=persona_id))
+        # 从她现在最新的经历讲起。
+        happening_seq, whereabouts_seq = await her_records.marks(
+            lane=lane, persona_id=persona_id
+        )
+        await insert_append(
+            OutgoingUpTo(
+                lane=lane,
+                persona_id=persona_id,
+                happening_seq=happening_seq,
+                whereabouts_seq=whereabouts_seq,
+            )
+        )
         return []
-    moves, before = await _her_whereabouts_after(
-        lane=lane, persona_id=persona_id, after=mark.whereabouts_seq
+    since = await her_records.after(
+        lane=lane,
+        persona_id=persona_id,
+        marks=(mark.happening_seq, mark.whereabouts_seq),
     )
-    deeds = await _her_happenings_after(
-        lane=lane, persona_id=persona_id, after=mark.happening_seq
-    )
+    moves, before, deeds = since.moves, since.before, since.deeds
     if not moves and not deeds:
         return []
 
@@ -341,7 +361,7 @@ async def unsent(*, lane: str, persona_id: str) -> list[OutgoingMessage]:
 # ---------------------------------------------------------------------------
 
 
-def _change_line(now: Whereabouts, *, before: Whereabouts | None) -> str | None:
+def _change_line(now: Place, *, before: Place | None) -> str | None:
     """她换了在做的事、或者挪了地方；跟上一条比什么都没变就没有这一行。"""
     if before is None or now.doing != before.doing:
         return f"改做 {now.doing}，在 {now.place}"
@@ -350,13 +370,13 @@ def _change_line(now: Whereabouts, *, before: Whereabouts | None) -> str | None:
     return None
 
 
-def _speech_line(deed: Happening) -> str:
+def _speech_line(deed: Deed) -> str:
     if deed.audience:
         return f"对 {'、'.join(deed.audience)} 说：「{deed.content}」"
     return f"说：「{deed.content}」"
 
 
-def _said_to_her(deed: Happening, *, name: str) -> str:
+def _said_to_her(deed: Deed, *, name: str) -> str:
     """给被说的那位姐妹的那条：当面说的，原话，还对谁说了也写上。"""
     others = [n for n in dict.fromkeys(deed.audience) if n != name]
     also = f"和 {'、'.join(others)} " if others else ""
@@ -366,7 +386,7 @@ def _said_to_her(deed: Happening, *, name: str) -> str:
 def _digest(
     lines: list[tuple[datetime, int, datetime, str]],
     *,
-    where: Whereabouts,
+    where: Place,
     ended_at: datetime,
 ) -> str:
     """给 world 的那条：一行一件，带着发生的时刻；最后是她这时候在哪、在做什么。
@@ -396,48 +416,3 @@ async def _latest_mark(*, lane: str, persona_id: str) -> OutgoingUpTo | None:
     )
     row = await fetch_one(sql, lane=lane, persona_id=persona_id)
     return None if row is None else from_row(OutgoingUpTo, row)
-
-
-async def _starting_mark(*, lane: str, persona_id: str) -> OutgoingUpTo:
-    """从她现在最新的经历讲起。"""
-    sql = (
-        f"SELECT (SELECT COALESCE(MAX(seq), 0) FROM {_HAPPENING_TABLE} "
-        f"WHERE lane = :lane AND actor = :persona_id) AS happening_seq, "
-        f"(SELECT COALESCE(MAX(seq), 0) FROM {_WHEREABOUTS_TABLE} "
-        f"WHERE lane = :lane AND persona_id = :persona_id) AS whereabouts_seq"
-    )
-    (row,) = await fetch_all(sql, lane=lane, persona_id=persona_id)
-    return OutgoingUpTo(lane=lane, persona_id=persona_id, **row)
-
-
-async def _her_happenings_after(
-    *, lane: str, persona_id: str, after: int
-) -> list[tuple[datetime, Happening]]:
-    """她自己 ``seq > after`` 的经历，按提交序，连同落库时刻。"""
-    sql = (
-        f"SELECT * FROM {_HAPPENING_TABLE} "
-        f"WHERE lane = :lane AND actor = :persona_id AND seq > :after ORDER BY seq"
-    )
-    rows = await fetch_all(sql, lane=lane, persona_id=persona_id, after=after)
-    return [(row["created_at"], from_row(Happening, row)) for row in rows]
-
-
-async def _her_whereabouts_after(
-    *, lane: str, persona_id: str, after: int
-) -> tuple[list[tuple[datetime, Whereabouts]], Whereabouts | None]:
-    """她 ``seq > after`` 的位置，按先后，连同落库时刻；外加这一段之前她最后在哪（没有是 ``None``）。"""
-    after_sql = (
-        f"SELECT * FROM {_WHEREABOUTS_TABLE} "
-        f"WHERE lane = :lane AND persona_id = :persona_id AND seq > :after ORDER BY seq"
-    )
-    before_sql = (
-        f"SELECT * FROM {_WHEREABOUTS_TABLE} "
-        f"WHERE lane = :lane AND persona_id = :persona_id AND seq <= :after "
-        f"ORDER BY seq DESC LIMIT 1"
-    )
-    rows = await fetch_all(after_sql, lane=lane, persona_id=persona_id, after=after)
-    earlier = await fetch_one(before_sql, lane=lane, persona_id=persona_id, after=after)
-    return (
-        [(row["created_at"], from_row(Whereabouts, row)) for row in rows],
-        None if earlier is None else from_row(Whereabouts, earlier),
-    )

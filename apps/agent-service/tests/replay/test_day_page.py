@@ -35,8 +35,8 @@ import pytest
 
 from app.capabilities._errors import CapabilityTimeout
 from app.infra.cst_time import CST
-from app.living.happening import record_happening
-from app.living.records import (
+from app.living.her_records.deeds import record_happening
+from app.living.services import (
     KIND_ACT,
     KIND_SPEECH,
     MEDIUM_IN_PERSON,

@@ -39,7 +39,7 @@ runtime 不给任何 Data 自动加 lane，不显式带上就跟 prod 的行混�
 **"看"为什么要拆成两只手。** 上一次的工具结果在她的上下文里只留 4 小时
 （登记时声明成留着的那一档，裁剪在 :mod:`app.agent.continuity`）；状态里
 「你刚做过、说过」那一段只在上下文接不住她最近说过的话时才给，而且只有最近有限几条
-（:data:`app.living.snapshot.OWN_RECENT_LIMIT`）。所以句柄如果只出现在画图那一刻的返回
+（:data:`app.living.her_records.deeds.OWN_RECENT_LIMIT`）。所以句柄如果只出现在画图那一刻的返回
 值里，过了那几个小时它就永远消失了 —— 库里那一行还在，而她两手空空。先列出
 来、再按句柄或名字点一张，形状跟 :mod:`app.living.reading` 那两只手对齐，她不用学第
 二套。

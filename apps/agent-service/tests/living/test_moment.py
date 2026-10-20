@@ -24,6 +24,7 @@ import pytest
 from app.agent.neutral import Role
 from app.agent.tooling import Tool
 from app.data.schema import pg_type
+from app.living.her_records.whereabouts import current_whereabouts, note_whereabouts
 from app.living.loose_ends.mind import OnHerMind
 from app.living.loose_ends.threads import LooseEnd, list_open_loose_ends
 from app.living.moment import (
@@ -33,8 +34,7 @@ from app.living.moment import (
     latest_moment,
     life_moment_minutes,
 )
-from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON
-from app.living.whereabouts import current_whereabouts, note_whereabouts
+from app.living.services import KIND_SPEECH, MEDIUM_IN_PERSON
 from tests.hosting import in_a_fresh_process
 from tests.living.conftest import (
     RESIDENTS,
@@ -312,7 +312,7 @@ async def test_speaking_face_to_face_is_what_the_house_can_overhear(
 
     await regular_round(resident, "akao", _at(14))
 
-    from app.living.snapshot import recent_own_happenings
+    from app.living.her_records.deeds import recent_own_happenings
 
     said = await recent_own_happenings(lane=LANE, persona_id="akao", limit=5)
     assert (said[0].kind, said[0].medium, said[0].audience) == (
@@ -335,8 +335,7 @@ async def test_a_sister_called_by_her_id_is_written_down_by_her_name(
 
     await regular_round(resident, "akao", _at(14))
 
-    from app.living.happening import own_line
-    from app.living.snapshot import recent_own_happenings
+    from app.living.her_records.deeds import own_line, recent_own_happenings
 
     (said,) = await recent_own_happenings(lane=LANE, persona_id="akao", limit=5)
     assert said.audience == ["绫奈", "千凪", "许阿姨"]
@@ -364,7 +363,7 @@ async def test_saying_and_acting_hand_back_no_copy_of_her_words(
     said, acted = runner.results
     assert isinstance(said, str) and said and "周末祭典我陪你去。" not in said, said
     assert isinstance(acted, str) and acted and "把胶片摊了一茶几" not in acted, acted
-    from app.living.snapshot import recent_own_happenings
+    from app.living.her_records.deeds import recent_own_happenings
 
     assert [h.content for h in await recent_own_happenings(
         lane=LANE, persona_id="akao", limit=5
@@ -404,7 +403,7 @@ async def test_she_can_speak_to_someone_the_code_never_heard_of(
     assert not isinstance(runner.results[0], dict), (
         f"她对世界里的第四个人开不了口：{runner.results[0]!r}"
     )
-    from app.living.snapshot import recent_own_happenings
+    from app.living.her_records.deeds import recent_own_happenings
 
     said = await recent_own_happenings(lane=LANE, persona_id="akao", limit=5)
     assert [(h.content, h.audience) for h in said] == [
@@ -1140,7 +1139,7 @@ async def test_a_crash_before_the_record_lands_does_not_redo_her_actions(
     而且两条记录长得不一样，事后查不出来是重复。
     """
     from app.living import moment as moment_mod
-    from app.living.snapshot import recent_own_happenings
+    from app.living.her_records.deeds import recent_own_happenings
 
     await _stand("akao", "家/客厅", "看书", _at(13))
     stub_moment(
@@ -1252,7 +1251,7 @@ async def test_where_she_is_and_what_she_does_are_named_from_her_rounds_identity
     uuid5 的输入是她、这一轮的身份、说话还是动作、原话、说给谁。"""
     from app.data.persist import fetch_all
     from app.data.schema import table_name
-    from app.living.records import Happening, Whereabouts
+    from app.living.her_records.records import Happening, Whereabouts
 
     stub_moment(
         ("switch_to", {"doing": "煮抹茶", "place": "家/厨房", "because": "想喝点热的"}),
@@ -2013,7 +2012,7 @@ async def test_landing_somewhere_hands_back_only_where_she_is(
     moment_db, in_a_moment
 ):
     """刚有人在那儿做过事，两只手也一个字都不带出来：返回的就是那一句确认。"""
-    from app.living.happening import record_happening
+    from app.living.her_records.deeds import record_happening
 
     await record_happening(
         lane=LANE,

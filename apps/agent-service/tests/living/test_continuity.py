@@ -25,11 +25,11 @@ from app.agent.continuity import (
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.agent.session import load_session
 from app.data.persist import fetch_value, insert_idempotent
-from app.living.happening import record_happening
+from app.living.her_records.deeds import record_happening
+from app.living.her_records.whereabouts import note_whereabouts
 from app.living.moment import LifeMoment, latest_moment
 from app.living.received import ReceivedMessage, ReceivedRead
-from app.living.records import KIND_SPEECH
-from app.living.whereabouts import note_whereabouts
+from app.living.services import KIND_SPEECH
 from app.manifests.agent_service import RESIDENT
 from app.manifests.history import HISTORY_TEXTS
 from tests.living.conftest import nudged_round, regular_round

@@ -50,8 +50,7 @@ from pydantic import field_validator
 from app.data.persist import fetch_all, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import dated_clock
-from app.living.common import esc, legacy_null_is, require_aware
-from app.living.records import living_lane
+from app.living.common import esc, legacy_null_is, living_lane, require_aware
 from app.living.services import WORLD, Residents, WhoLivesHere
 from app.messaging.message import Kind, Message
 from app.messaging.receiving import Declare
@@ -248,7 +247,7 @@ def received_line(item: ReceivedMessage) -> str:
 
     发送方和正文都过 :func:`app.living.common.esc`：正文由发送方写下，world 和姐妹那边是
     模型、人工参与者那边是人，哪一种都不归她管，而这一列上转义没有代价。她自己的经历不过
-    （:func:`app.living.happening.own_line`），判据写在 esc 上。
+    （:func:`app.living.her_records.deeds.own_line`），判据写在 esc 上。
     """
     if item.sender == WORLD:
         return esc(item.body)

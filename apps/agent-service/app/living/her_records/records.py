@@ -14,9 +14,8 @@ COLUMN``），删列 / 改类型会 ``MigrationError`` 崩启动。所以这里�
 lane 进 Key 是硬约束：runtime 持久化不给任何 Data 自动加 lane，不显式带上就会
 和 prod 的行混在一张表里。
 
-**本模块还住着两样跨模块的共用东西**（:data:`OUTBOUND_HAPPENING_PREFIX`、
-:func:`living_lane`）。它们不在各自"该在"的模块里，是因为读它的和写它的都 import
-本模块，反过来会绕成一个环 —— 而这几样各写一份的下场都是静默漂移。
+别的插件写进来、读出去的那几个取值（``kind``、``medium``、她发出去那条消息的 id 前缀）是插件之间的
+约定，定义在 :mod:`app.living.services`。
 """
 
 from __future__ import annotations
@@ -27,53 +26,16 @@ from typing import Annotated
 from pydantic import field_validator
 
 from app.data.schema import CommitOrder, Data, Key
-from app.infra.lane_policy import current_deployment_lane
 from app.living.common import require_aware
+from app.living.services import (
+    KIND_ACT,
+    KIND_SPEECH,
+    MEDIUM_GROUP_CHAT,
+    MEDIUM_IN_PERSON,
+    MEDIUM_PHONE,
+)
 
-
-def living_lane() -> str:
-    """本进程所在的泳道；prod 部署上是 ``"prod"``。
-
-    lane 进 living 每张表的 Key 是硬约束（runtime 不给任何 Data 自动加 lane）。
-    拿不到泳道时必须落到 ``"prod"`` 而不是空串：空串会开一条谁也读不到的影子轴——
-    写进去的行查不出来，而她那边一片安静，什么报错都没有。
-
-    住在这儿，理由跟本模块其余共用件同一条：用它的模块都 import 本模块。
-    """
-    return current_deployment_lane() or "prod"
-
-
-# happening 的形态。机制层硬定的两类，不是让模型自由发挥的字符串：
-#   * ``speech``  说出口的话。``content`` 是原话。
-#   * ``act``     做的事。``content`` 是一句自然语言描述（"我去厨房煮抹茶"）。
-# 两者共用一张表，是因为「她对谁做了什么说了什么」在读取侧是同一件事：她回看自己的经历、
-# 一轮结束时把当面做的事按先后汇总给 world（:mod:`app.living.outgoing`）。
-KIND_SPEECH = "speech"
-KIND_ACT = "act"
 _KINDS = frozenset({KIND_SPEECH, KIND_ACT})
-
-# 她通过嘴发出去的一条消息，在 :class:`Happening` 上的 id 前缀：
-# ``mouth:<outbound_id>``。前缀之后那一串就是撤回要用的键
-# （``SpokenOutbound.outbound_id``）。
-#
-# **只许有这一处定义。** 拼它的是 :mod:`app.living.mouth`，把它剥掉、好让她在发送回执、
-# 快照和日记材料里看见那个编号的是 :func:`app.living.happening.message_handle`，而她照抄
-# 那个编号调 :mod:`app.living.takeback` 时按等值查的就是同一个键。两边各写一份字面量的话，
-# 改了一处就漂移，而漂移的表现是她照抄了却撤不掉 —— 一句报错都没有。
-#
-# 放在这里而不是 ``mouth`` 里：``mouth`` 和 ``happening`` 本来就都 import 这个模块，
-# 而反过来会绕成一个环。
-OUTBOUND_HAPPENING_PREFIX = "mouth:"
-
-# 通过什么渠道。这是**客观事实**——她是当面说的，还是拿手机发的，还是发在群里的。
-# 不是给她的行为分优先级，也不是强度分级：三个值之间没有高低，只有"声音能不能传到
-# 旁边的人耳朵里"这一条物理差别。
-#   * ``in_person``   当面说 / 当场做。进 world 的汇总，谁会察觉由 world 判断。
-#   * ``phone``       私聊消息。隔着设备，旁边的人看不见，只在她自己的记录里。
-#   * ``group_chat``  群里说话。同上。
-MEDIUM_IN_PERSON = "in_person"
-MEDIUM_PHONE = "phone"
-MEDIUM_GROUP_CHAT = "group_chat"
 _MEDIA = frozenset({MEDIUM_IN_PERSON, MEDIUM_PHONE, MEDIUM_GROUP_CHAT})
 
 
@@ -82,7 +44,7 @@ class Happening(Data):
 
     ``actor`` 就是她：每一行都是某一个人自己的经历，也只给那个人自己读（读的一侧每一条查询
     都按 ``actor`` 筛，``tests/living/test_only_her_own_records.py`` 守着）。别人能不能察觉到，
-    不由这张表决定（见 :mod:`app.living.happening`）。
+    不由这张表决定（见 :mod:`app.living.her_records.deeds`）。
 
     自然键 ``(lane, happening_id)``——重放同一个 ``happening_id`` 只落一行。
 

@@ -15,7 +15,9 @@
   她刚做过 / 说过     她自己的 ``Happening``      最近 N 条，只在她自己的话不在眼前时给
   ==================  ==========================  ==============================
 
-还有一层「挂着没了结的事」由 loose_ends 插件自己读、自己摆（:mod:`app.living.loose_ends.mind`）。
+还有一层「挂着没了结的事」由 loose_ends 插件自己读、自己摆（:mod:`app.living.loose_ends.mind`）；
+「手上正在做的事」「她刚做过 / 说过」两层由 her_records 插件自己读、自己摆
+（:mod:`app.living.her_records.book`）。这里只剩上一次写下的那天和"现在"。
 
 **几层全是她自己的。** 别人做了什么、说了什么，不从这里读：谁会察觉由 world 判断后告诉她，
 姐妹对她说的话直接送到她那里，都进她的收件箱，那一段由 :mod:`app.living.received` 读、由
@@ -30,14 +32,14 @@
 （:mod:`app.living.moment` 摆进去，清单 ``resident`` 定顺序）：
 
   * **她此刻的样子**：上一次写下的那天（:meth:`MomentSnapshot.render_day_page`）、刚做过说过
-    什么（:meth:`MomentSnapshot.render_own_recent`）。读一百遍字字一样，所以每轮重发就是把同一段话
+    什么（:meth:`app.living.her_records.book.OwnRecords.recent_section`）。读一百遍字字一样，所以每轮重发就是把同一段话
     抄一遍。只在清理那一下作为新起点重铺（:func:`app.agent.continuity.trim_for_round`），默认
     一小时一次。「刚做过说过什么」那段只在这份历史接不住她最近说过的话时才带（上下文是空的、
     硬顶把标记消息全裁掉了、上一轮没存下来，判据见 :func:`app.agent.continuity.continues_unbroken`）：
     其余时候她 4 小时内说过的话都原样在上下文里，每小时再抄一份就是同一句话在一轮输入里
     出现好几遍。
   * **这一轮的实况**：几点了、离上一次隔了多久（:meth:`MomentSnapshot.render_now`）、她在哪在做
-    什么（:meth:`MomentSnapshot.render_hands`）。每轮都送，因为每轮都不一样。
+    什么（:meth:`app.living.her_records.book.OwnRecords.whereabouts_section`）。每轮都送，因为每轮都不一样。
 
 **日记那一层是她自己写的，不是折叠出来的。** 这是它跟被否掉的 ``SessionTranscript``
 唯一但决定性的区别：一条原始记录都没被动过，那一页是她另写的一份东西（见
@@ -56,28 +58,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from app.data.persist import fetch_all, from_row
-from app.data.schema import table_name
-from app.infra.cst_time import dated_clock, to_cst_full
+from app.infra.cst_time import to_cst_full
 from app.living.day_page import LivingDayPage, living_day_of, read_day_page_before
-from app.living.happening import own_line
-from app.living.records import Happening, Whereabouts
-from app.living.services import Residents
-from app.living.whereabouts import current_whereabouts
-
-# 她自己最近做过 / 说过的多少条。按**条数**而不是按时间窗：安静一整天的时候，她
-# 上一次开口仍然读得到；而热闹的时候也不会把半天的行为一次全灌进来。
-#
-# 12 的量级依据：她真正动手 / 开口的轮次远少于"继续"的轮次，12 条大致覆盖她最近几个
-# 小时的行为轨迹 —— 足够让"刚答应姐姐的事"活到她下一次换事情、把它列进心上为止。
-#
-# 这一段只在上下文接不住她最近说过的话时给（上下文是空的、硬顶把标记消息全裁掉了、上一
-# 轮没存下来）。上下文不按天清零，所以正常跑着的时候它不出现；出现的那一轮，这 12 条就
-# 是她眼前唯一的说话样本，之前的腔调会跟着带进来。这是有意保留的：她得记得自己刚说过
-# 什么。
-OWN_RECENT_LIMIT = 12
-
-_HAPPENING_TABLE = table_name(Happening)
 
 
 @dataclass(frozen=True)
@@ -87,9 +69,7 @@ class MomentSnapshot:
     lane: str
     persona_id: str
     now: datetime
-    doing: Whereabouts | None
     day_page: LivingDayPage | None
-    own_recent: list[Happening]
 
     # -- 这一轮的实况 ----------------------------------------------------
 
@@ -111,18 +91,6 @@ class MomentSnapshot:
         if gap < timedelta(minutes=1):
             return f"{now}，上一次就在刚才。"
         return f"{now}，离上一次过了 {_gap(gap)}。"
-
-    def render_hands(self) -> str:
-        """她在哪、在做什么。
-
-        **这一段是实况，不是她此刻的样子。** "读一百遍字字一样"这条对日记、挂念、刚做过说过
-        成立，对位置不成立：她自己每一轮都可能改（``move_to`` / ``switch_to``），改完到下一个
-        清理点之间，重铺那份说的还是旧位置 —— 而她在哪是这一轮里最不能过期的一样（world 按她
-        报的位置判断谁看得见她）。
-        """
-        if self.doing is None:
-            return "手上：你还没定下自己在哪、在做什么。"
-        return f"手上：你在 {self.doing.place}，正在 {self.doing.doing}。"
 
     # -- 她此刻的样子 ----------------------------------------------------
     #
@@ -146,21 +114,6 @@ class MomentSnapshot:
             head = f"你上一次写下的是 {when}："
         return f"{head}\n{self.day_page.text}"
 
-    def render_own_recent(self, residents: Residents) -> str:
-        """她自己最近做过、说过的那几条。
-
-        这一段带不带由组装那一层判（这一轮的历史接不接得住她最近说过的话，
-        :func:`app.agent.continuity.continues_unbroken`），这里只照着摆：接得住就不给 —— 她
-        4 小时内说过的话都原样在上下文里，再抄一份最近 12 句就是同一句话在一轮输入里出现好几遍。
-        """
-        if not self.own_recent:
-            return "你刚做过、说过：（还没有）"
-        lines = [
-            f"- {dated_clock(h.occurred_at, now=self.now)} {own_line(h, residents=residents)}"
-            for h in self.own_recent
-        ]
-        return "你刚做过、说过：\n" + "\n".join(lines)
-
 
 def _gap(delta: timedelta) -> str:
     """一段时长摆成她读得懂的样子：``10 分钟`` / ``4 小时`` / ``4 小时 30 分钟``。"""
@@ -169,26 +122,6 @@ def _gap(delta: timedelta) -> str:
         return f"{minutes} 分钟"
     hours, rest = divmod(minutes, 60)
     return f"{hours} 小时" if rest == 0 else f"{hours} 小时 {rest} 分钟"
-
-
-async def recent_own_happenings(
-    *, lane: str, persona_id: str, limit: int = OWN_RECENT_LIMIT
-) -> list[Happening]:
-    """她自己最近做过 / 说过的若干条，按发生先后升序（最近的在最后）。
-
-    按 ``seq`` 取最近的一段再翻过来：``occurred_at`` 跨 persona 并发时跟落库顺序
-    无关，按它排会让同一刻的几条随机换位（见 :class:`app.living.records.Happening`
-    的 ``seq``）。
-    """
-    sql = (
-        f"SELECT * FROM {_HAPPENING_TABLE} "
-        f"WHERE lane = :lane AND actor = :actor "
-        f"ORDER BY seq DESC LIMIT :limit"
-    )
-    rows = await fetch_all(sql, lane=lane, actor=persona_id, limit=limit)
-    items = [from_row(Happening, row) for row in rows]
-    items.reverse()
-    return items
 
 
 async def read_snapshot(
@@ -204,9 +137,7 @@ async def read_snapshot(
         lane=lane,
         persona_id=persona_id,
         now=now,
-        doing=await current_whereabouts(lane=lane, persona_id=persona_id),
         day_page=await read_day_page_before(
             lane=lane, persona_id=persona_id, day=living_day_of(now)
         ),
-        own_recent=await recent_own_happenings(lane=lane, persona_id=persona_id),
     )

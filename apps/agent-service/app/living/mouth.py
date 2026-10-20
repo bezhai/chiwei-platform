@@ -110,11 +110,10 @@ from app.domain.chat_dataflow import (
     ChatResponseSegment,
 )
 from app.infra.outbound import publish
-from app.living.common import require_aware
-from app.living.happening import note_recorded, printed_handle, record_happening
+from app.living.common import printed_handle, require_aware
 from app.living.output_safety import audit_output
 from app.living.phone import medium_for, reachable_conversation
-from app.living.records import KIND_SPEECH, OUTBOUND_HAPPENING_PREFIX
+from app.living.services import KIND_SPEECH, OUTBOUND_HAPPENING_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -258,9 +257,9 @@ def _happening_id(outbound_id: str) -> str:
     """她发出去这条在自己记录里的 id：``mouth:<outbound_id>``。
 
     落记忆和印回执都从这里拼，印回执那一步再经
-    :func:`app.living.happening.printed_handle` 剥回编号 —— 所以回执上那串、「你刚做
+    :func:`app.living.common.printed_handle` 剥回编号 —— 所以回执上那串、「你刚做
     过、说过」里那串、撤回收的那串，是同一个前缀常量推出来的同一个值
-    （:data:`app.living.records.OUTBOUND_HAPPENING_PREFIX` 那段注释说了为什么只许一处）。
+    （:data:`app.living.services.OUTBOUND_HAPPENING_PREFIX` 那段注释说了为什么只许一处）。
     """
     return f"{OUTBOUND_HAPPENING_PREFIX}{outbound_id}"
 
@@ -656,7 +655,7 @@ async def send_message(
     # 落进她自己的记录里 —— 不落的话，她下一轮不知道自己说过这句话。手机隔着设备，
     # 这条不进 world 的汇总（:mod:`app.living.outgoing` 按 medium 分），只她自己回看得到。
     happening_id = _happening_id(outbound_id)
-    await record_happening(
+    await self.her_records.record_happening(
         lane=lane,
         happening_id=happening_id,
         actor=persona_id,
@@ -667,7 +666,6 @@ async def send_message(
         medium=medium_for(conv.scope),
         channel_id=conv.channel_id,
     )
-    note_recorded(happening_id)
     # 收口。崩在这之前的话留下一条 ``claimed``：交出去了、可能已经送到，而她可能不
     # 记得 —— :func:`unsettled_outbound` 把这种捞出来给人看，**不自动重发**。
     # 对账钟可能已经在这条链上追过一版，所以收口是"合到最新一版上"，见 :func:`_settle`。

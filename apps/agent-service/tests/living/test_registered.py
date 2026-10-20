@@ -21,6 +21,7 @@ from pydantic import ValidationError
 
 from app.data.schema import commit_order, pg_type
 from app.living.day_page import LivingDayPage
+from app.living.her_records.records import Happening, Whereabouts
 from app.living.moment import LifeMoment
 from app.living.nudge import NudgeBegun
 from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
@@ -28,12 +29,7 @@ from app.living.persona.chain import PersonaVersion
 from app.living.pictures.album import Picture
 from app.living.reading import FileRead
 from app.living.received import ReceivedMessage, ReceivedRead
-from app.living.records import (
-    KIND_SPEECH,
-    MEDIUM_IN_PERSON,
-    Happening,
-    Whereabouts,
-)
+from app.living.services import KIND_SPEECH, MEDIUM_IN_PERSON
 from tests.hosting import in_a_fresh_process
 
 _AWARE = dt.datetime(2026, 7, 25, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
@@ -536,7 +532,7 @@ async def test_a_happening_written_before_channel_id_existed_still_reads_back(
     from sqlalchemy import text as _text
 
     from app.data.tx import current_session, tx
-    from app.living.snapshot import recent_own_happenings
+    from app.living.her_records.deeds import recent_own_happenings
 
     async with tx():
         s = current_session()

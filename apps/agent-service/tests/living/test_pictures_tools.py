@@ -25,6 +25,7 @@ import re
 import pytest
 
 from app.agent.tooling import Tool
+from app.living.pictures import album as pictures_mod
 from app.living.pictures.album import (
     PICTURE_LIST_LIMIT,
     PICTURE_SEARCH_COUNT,
@@ -35,7 +36,6 @@ from app.living.pictures.album import (
     pictures_she_made,
     remember_a_picture,
 )
-from app.living.pictures import album as pictures_mod
 
 # 四只手跟 pictures 插件登记的一样，是插件对象上的方法。
 _ALBUM = Album()

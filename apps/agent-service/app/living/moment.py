@@ -32,7 +32,7 @@
 时候它不出现。2026-09-13 上下文连起来之后，同一批话在一轮输入里一度出现了几十次，她的
 说话方式跟着一天天收窄成同一个样子。
 
-**位置和手上的事是例外，每轮都给**（:func:`whereabouts_section`）：那两样她自己就能改
+**位置和手上的事是例外，每轮都给**（:meth:`app.living.her_records.book.OwnRecords.whereabouts_section`）：那两样她自己就能改
 （:func:`switch_to`、:func:`move_to`），铺在界桩上的那份到下一个清理点之前一直是旧的，
 而她在哪是她这一轮里最不能过期的一样（world 按她报的位置判断谁看得见她）。
 
@@ -128,7 +128,6 @@ from app.data.persist import fetch_one, from_row
 from app.data.schema import CommitOrder, Data, Key, table_name
 from app.infra.cst_time import CST
 from app.living.common import esc, legacy_null_is, require_aware
-from app.living.happening import Recorded, note_recorded, record_happening
 from app.living.outgoing import SEND_SECONDS, send_what_she_did
 from app.living.phone import (
     Envelope,
@@ -144,10 +143,17 @@ from app.living.received import (
     render_received,
     unread_received,
 )
-from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, Whereabouts
-from app.living.services import WORLD, LooseEnds, WhoLivesHere
+from app.living.services import (
+    KIND_ACT,
+    KIND_SPEECH,
+    MEDIUM_IN_PERSON,
+    WORLD,
+    HerRecords,
+    LooseEnds,
+    Place,
+    WhoLivesHere,
+)
 from app.living.snapshot import MomentSnapshot, read_snapshot
-from app.living.whereabouts import current_whereabouts, note_whereabouts
 from app.messaging.sending import ask
 
 logger = logging.getLogger(__name__)
@@ -429,7 +435,7 @@ async def switch_to(
 
     # whereabouts 的自然键带上内容派生的后缀：同一个 moment 里她改两次主意要落两行
     # （最新的那条才是"当前"），而重放同样的内容仍然只落一行。
-    await note_whereabouts(
+    await self.her_records.note_whereabouts(
         lane=lane,
         persona_id=persona_id,
         moment_id=f"{moment_id}:{_derive(what, where)[:8]}",
@@ -471,7 +477,7 @@ async def move_to(
 
     # 手上那件事原样带走 —— 这只手改的只有位置。没有"当前"就没有可带走的事：
     # 她还没落过位置，这一步无从下脚（第一次落位走 switch_to）。
-    current = await current_whereabouts(lane=lane, persona_id=persona_id)
+    current = await self.her_records.current_whereabouts(lane=lane, persona_id=persona_id)
     if current is None:
         raise ValueError(
             "你还没定下过自己在哪，也就没有一件'照旧做着'的事可以带到新地方去。"
@@ -479,7 +485,7 @@ async def move_to(
 
     # 自然键跟 switch_to 同款：同一个 moment 里挪两次要落两行（最新那条才是"当前"），
     # 而重放同样的内容仍然只落一行。
-    await note_whereabouts(
+    await self.her_records.note_whereabouts(
         lane=lane,
         persona_id=persona_id,
         moment_id=f"{moment_id}:{_derive(current.doing, where)[:8]}",
@@ -526,7 +532,11 @@ async def say(
         一句确认文本。
     """
     return await _record(
-        kind=KIND_SPEECH, content=what, audience=to, residents=self.residents
+        kind=KIND_SPEECH,
+        content=what,
+        audience=to,
+        residents=self.residents,
+        her_records=self.her_records,
     )
 
 
@@ -563,19 +573,28 @@ async def act(
         一句确认文本。
     """
     return await _record(
-        kind=KIND_ACT, content=what, audience=[], residents=self.residents
+        kind=KIND_ACT,
+        content=what,
+        audience=[],
+        residents=self.residents,
+        her_records=self.her_records,
     )
 
 
 async def _record(
-    *, kind: str, content: str, audience: list[str], residents: WhoLivesHere
+    *,
+    kind: str,
+    content: str,
+    audience: list[str],
+    residents: WhoLivesHere,
+    her_records: HerRecords,
 ) -> str:
     """``say`` / ``act`` 共用的落库：位置必须是真的，说给谁是她的事。
 
     位置这条 fail-loud：当面做的事这一轮结束时汇总给 world，汇总末尾那句她在哪、在做什么，
     是 world 判断谁会察觉的依据（:mod:`app.living.outgoing` 靠这一条断言汇总一定说得出她在
     哪）。没定下位置就做事，world 不知道这件事发生在哪，而她那边一片安静。位置本身不记进
-    这件事里：它在她自己的位置记录上（:mod:`app.living.whereabouts`）。
+    这件事里：它在她自己的位置记录上（:mod:`app.living.her_records.whereabouts`）。
 
     **收件人不校验，故意的。** 这里曾经拿一份写死的三姐妹名单
     当白名单挡下"不是这三个人"的名字。那是把"这个世界里住着谁"这条断言存在了代码
@@ -602,7 +621,7 @@ async def _record(
     said = content.strip()
     if not said:
         raise ValueError("内容不能是空的：说一句真的话 / 写清楚你做了什么。")
-    if await current_whereabouts(lane=lane, persona_id=persona_id) is None:
+    if await her_records.current_whereabouts(lane=lane, persona_id=persona_id) is None:
         raise ValueError(
             "你还没定下自己在哪 —— 先用 switch_to 说清楚你人在哪、在做什么，"
             "再说话或者动作。"
@@ -610,7 +629,7 @@ async def _record(
     happening_id = "moment:" + _derive(
         persona_id, moment_id, kind, said, ",".join(audience)
     )
-    await record_happening(
+    await her_records.record_happening(
         lane=lane,
         happening_id=happening_id,
         actor=persona_id,
@@ -620,7 +639,6 @@ async def _record(
         audience=residents.residents().names_for(audience),
         medium=MEDIUM_IN_PERSON,
     )
-    note_recorded(happening_id)
     # 不把原话再抄一遍：它就在这次调用的参数里，而这条回执跟她的话一样在上下文里留
     # 4 小时（登记它时声明成留着的那一档），抄一遍就是同一句话在她每一轮的输入里多出现一次。
     # 当面说的话没有撤回编号，所以这里也没有编号可给。
@@ -673,7 +691,7 @@ LOOK_AROUND_ANSWER_SECONDS = 45.0
 NOBODY_ANSWERED = "没人回答：你不知道这里现在什么样。"
 
 
-def _looking_around_from(me: Whereabouts) -> str:
+def _looking_around_from(me: Place) -> str:
     """她问 world 的那一句：先说她自己此刻在哪、在做什么，再问这里现在什么样、有谁在。
 
     **她在哪必须写在问题里。** 她这一轮做的事要等这一轮结束才汇总发给 world
@@ -699,7 +717,7 @@ async def look_around(self) -> str:
     this_round = current_round()
     lane, persona_id = this_round.lane, this_round.participant
     try:
-        me = await current_whereabouts(lane=lane, persona_id=persona_id)
+        me = await self.her_records.current_whereabouts(lane=lane, persona_id=persona_id)
         if me is None:
             # 没有"这里"可问：她自己没定下在哪，world 也不知道。
             return "你还没定下自己在哪，所以什么都够不着。先用 switch_to 落个位置。"
@@ -1063,7 +1081,9 @@ class _Landed:
     moment: LifeMoment | None = None
 
 
-async def send_her_doings(round: Round, *, residents: WhoLivesHere) -> None:
+async def send_her_doings(
+    round: Round, *, residents: WhoLivesHere, her_records: HerRecords
+) -> None:
     """她做了的事一条发给 world，只对姐妹说的话直接发给那位姐妹（:mod:`app.living.outgoing`）。
 
     登记两次。**一轮开始前**（``outgoing.before``，失败这一轮就失败）：上一轮失败、超时、赶上
@@ -1072,7 +1092,10 @@ async def send_her_doings(round: Round, *, residents: WhoLivesHere) -> None:
     开始前那一次接着做。
     """
     await send_what_she_did(
-        lane=round.lane, persona_id=round.participant, residents=residents.residents()
+        lane=round.lane,
+        persona_id=round.participant,
+        residents=residents.residents(),
+        her_records=her_records,
     )
 
 
@@ -1125,7 +1148,7 @@ async def _snapshot(round: Round) -> MomentSnapshot:
     return front.snapshot
 
 
-async def _envelopes(round: Round) -> list[Envelope]:
+async def _envelopes(round: Round, her_records: HerRecords) -> list[Envelope]:
     """手机上只给通知（谁、多少条、多密、你上次在那儿开口是什么时候），按时间排、只给最新那几条。
     内容要她自己调 look_at_phone，整张会话名单要她自己调 look_through_your_phone —— 白送进来的
     话，"她没看见"这个状态就再也不会发生。
@@ -1140,7 +1163,7 @@ async def _envelopes(round: Round) -> list[Envelope]:
     front = round.state(_InFront)
     if front.envelopes is None:
         front.envelopes = await envelopes_for(
-            lane=round.lane, persona_id=round.participant, now=round.now
+            lane=round.lane, persona_id=round.participant, now=round.now, her_records=her_records
         )
     return front.envelopes
 
@@ -1168,21 +1191,11 @@ async def day_page_section(round: Round) -> str:
     return (await _snapshot(round)).render_day_page()
 
 
-async def own_recent_section(round: Round, *, residents: WhoLivesHere) -> str | None:
-    """状态：她刚做过、说过的。只在这份历史接不住她最近说过的话时才带：一根标记消息都没有（冷启动、
-    清过库、硬顶全裁掉了），或者上一轮没存下来（:attr:`app.agent.continuity.HistoryView.continues_unbroken`）。
-    判据问的是**这份历史**，不是这一轮要立哪种标记消息 —— 缺口撞上清理点、硬顶之后那一轮，立的都是
-    清理那根。"""
-    if round.history is not None and round.history.continues_unbroken:
-        return None
-    return (await _snapshot(round)).render_own_recent(residents.residents())
-
-
-async def phone_unread_section(round: Round) -> str:
+async def phone_unread_section(round: Round, *, her_records: HerRecords) -> str:
     """状态：手机上还没看的全貌。**未读必须在界桩上**：眼前那份只给新到的，一条她一直不看的通知会
     随着摆出它的那一轮刺激一起在 own_minutes 之后被裁掉，界桩不重铺的话之后再没有第二处说得出有人
     找过她。"""
-    return render_unread(await _envelopes(round), now=round.now)
+    return render_unread(await _envelopes(round, her_records), now=round.now)
 
 
 async def now_section(round: Round) -> str:
@@ -1190,20 +1203,15 @@ async def now_section(round: Round) -> str:
     return (await _snapshot(round)).render_now(round.previous_at)
 
 
-async def whereabouts_section(round: Round) -> str:
-    """输入：她在哪、在做什么。"""
-    return (await _snapshot(round)).render_hands()
-
-
 async def received_section(round: Round) -> str:
     """输入：这段时间传到她这里的。"""
     return render_received(await _received(round), now=round.now)
 
 
-async def phone_arrived_section(round: Round) -> str:
+async def phone_arrived_section(round: Round, *, her_records: HerRecords) -> str:
     """输入：手机上刚来的。"""
     return render_arrived(
-        await _envelopes(round), since=round.previous_at, now=round.now
+        await _envelopes(round, her_records), since=round.previous_at, now=round.now
     )
 
 
@@ -1216,7 +1224,9 @@ async def phone_arrived_section(round: Round) -> str:
 # 记成看过，也在这个事务里。
 
 
-async def land_the_moment(round: Round, *, loose_ends: LooseEnds) -> None:
+async def land_the_moment(
+    round: Round, *, loose_ends: LooseEnds, her_records: HerRecords
+) -> None:
     """落这一轮的 :class:`LifeMoment`。落地号也在这个事务里取
     （:func:`app.data.ordered.insert_in_commit_order`），所以号的先后就是提交的先后。这一格已经在
     别处落了地的话（两个进程跑同一格），不再写一行，留下库里那一行。
@@ -1225,7 +1235,7 @@ async def land_the_moment(round: Round, *, loose_ends: LooseEnds) -> None:
     （:func:`lost_last_round`）。``open_ends`` 是这时她还挂着几件（``loose_ends`` 服务）。
     """
     switches = round.state(Switched).changes
-    where = await current_whereabouts(lane=round.lane, persona_id=round.participant)
+    where = await her_records.current_whereabouts(lane=round.lane, persona_id=round.participant)
     moment = LifeMoment(
         lane=round.lane,
         persona_id=round.participant,
@@ -1233,7 +1243,7 @@ async def land_the_moment(round: Round, *, loose_ends: LooseEnds) -> None:
         began_at=round.now,
         switched=bool(switches),
         pulled_by=switches[-1]["because"] if switches else "",
-        recorded=len(set(round.state(Recorded).happening_ids)),
+        recorded=her_records.recorded_this_round(round),
         doing=where.doing if where is not None else "",
         open_ends=await loose_ends.open_count(
             lane=round.lane, persona_id=round.participant

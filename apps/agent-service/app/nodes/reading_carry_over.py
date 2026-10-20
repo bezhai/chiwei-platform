@@ -52,8 +52,8 @@ from app.api.middleware import get_header_var
 from app.data.schema import Data, Key
 from app.infra.lane_policy import current_deployment_lane
 from app.infra.rabbitmq import lane_queue, mq
+from app.living.common import living_lane
 from app.living.reading import FilePickedUp, send_round
-from app.living.records import living_lane
 from app.living.services import Residents, WhoLivesHere
 from app.messaging.message import SendFailed
 

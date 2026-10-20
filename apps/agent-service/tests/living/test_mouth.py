@@ -22,10 +22,11 @@ from sqlalchemy import text
 
 from app.data.tx import current_session, tx
 from app.domain.chat_dataflow import PROACTIVE_MESSAGE_ID_PREFIX
+from app.living.her_records import book as book_mod
+from app.living.her_records.deeds import recent_own_happenings
+from app.living.her_records.whereabouts import note_whereabouts
 from app.living.mouth import _SEND_CHECK_TIMEOUT_S
-from app.living.records import MEDIUM_GROUP_CHAT, MEDIUM_PHONE
-from app.living.snapshot import recent_own_happenings
-from app.living.whereabouts import note_whereabouts
+from app.living.services import MEDIUM_GROUP_CHAT, MEDIUM_PHONE
 from tests.living.conftest import RESIDENTS, her_tool
 
 send_message = her_tool("send_message")
@@ -527,13 +528,12 @@ async def test_a_crash_after_handoff_leaves_a_row_that_says_so(
     但没确认完，可能已经送到、她可能不记得"，用 :func:`unsettled_outbound` 一句
     SQL 就能捞出来。
     """
-    from app.living import mouth as mouth_mod
     from app.living.mouth import STATE_CLAIMED, unsettled_outbound
 
     async def boom(**_kw):
         raise RuntimeError("记这一步崩了")
 
-    monkeypatch.setattr(mouth_mod, "record_happening", boom)
+    monkeypatch.setattr(book_mod, "record_happening", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -562,15 +562,14 @@ async def test_an_unsettled_send_is_never_handed_off_a_second_time(
     一条"照样成立 —— 这条用例要守的防重路径**一次都没被执行过**。所以下面断言的是
     第二次拿到「已经认领过、不再发」那句正常回话，不是一个被吞掉的异常。
     """
-    from app.living import mouth as mouth_mod
     from app.living.mouth import STATE_CLAIMED, SpokenOutbound, latest_outbound
     from tests.data.read_back import all_versions
 
     async def boom(**_kw):
         raise RuntimeError("记这一步崩了")
 
-    real_record_happening = mouth_mod.record_happening
-    monkeypatch.setattr(mouth_mod, "record_happening", boom)
+    real_record_happening = book_mod.record_happening
+    monkeypatch.setattr(book_mod, "record_happening", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -579,7 +578,7 @@ async def test_an_unsettled_send_is_never_handed_off_a_second_time(
         await send_message.invoke({"what": _SAID, "channel_id": str(_DM)})
     assert len(spoken) == 1
 
-    monkeypatch.setattr(mouth_mod, "record_happening", real_record_happening)
+    monkeypatch.setattr(book_mod, "record_happening", real_record_happening)
     async with in_a_moment("akao", moment_id=_MOMENT):
         again = await send_message.invoke(
             {"what": _SAID, "channel_id": str(_DM)}
@@ -631,7 +630,6 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
     所以这里把那一拍真的插进认领和收口之间 —— 造出真实的版本链，而不是让替身报一
     个假的 CAS 失败。
     """
-    from app.living import mouth as mouth_mod
     from app.living.landing import reconcile_landings
     from app.living.mouth import (
         STATE_HANDED_OFF,
@@ -649,7 +647,7 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
         doing="翻胶片", noted_at=_at(21),
     )
 
-    real_record_happening = mouth_mod.record_happening
+    real_record_happening = book_mod.record_happening
     landed: list[uuid.UUID] = []
 
     async def the_channel_lands_and_the_clock_ticks(**kw):
@@ -664,7 +662,7 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
         assert await reconcile_landings(lane=LANE) == 1, "对账那一拍没补上落地标识"
 
     monkeypatch.setattr(
-        mouth_mod, "record_happening", the_channel_lands_and_the_clock_ticks
+        book_mod, "record_happening", the_channel_lands_and_the_clock_ticks
     )
 
     async with in_a_moment("akao", moment_id=_MOMENT):
@@ -782,7 +780,7 @@ async def test_a_sent_line_comes_back_as_its_handle_not_its_words(
     mouth_db, in_a_moment, spoken, guard
 ):
     """发出去了：回执里是这条的撤回编号，印法跟她在「你刚做过、说过」里见到的一样。"""
-    from app.living.happening import own_line
+    from app.living.her_records.deeds import own_line
     from app.living.mouth import latest_outbound
 
     await note_whereabouts(

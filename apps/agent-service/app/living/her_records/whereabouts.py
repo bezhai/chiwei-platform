@@ -15,7 +15,7 @@ from datetime import datetime
 from app.data.ordered import insert_in_commit_order
 from app.data.persist import fetch_one, from_row
 from app.data.schema import table_name
-from app.living.records import Whereabouts
+from app.living.her_records.records import Whereabouts
 
 _TABLE = table_name(Whereabouts)
 

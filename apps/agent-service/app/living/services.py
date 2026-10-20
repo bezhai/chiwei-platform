@@ -10,10 +10,13 @@ setup 里 ``ctx.provide(名字, 对象)`` 交出服务，使用方在 :class:`~a
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from app.agent.round import Round
 
 # ---------------------------------------------------------------------------
 # persona：「她是谁」（persona 插件提供）
@@ -109,7 +112,7 @@ class Residents:
           * ``say`` 记下这句话时（:func:`app.living.moment._record`）。她在 ``to`` 里写了姐妹的
             id，记下来的就是姐妹的名字，发消息时按名字认出是姐妹、直接送到她那里，跟写名字
             一样。
-          * 她记下的"说给谁"摆到她眼前时（:func:`app.living.happening.own_line`）。``say`` 以前
+          * 她记下的"说给谁"摆到她眼前时（:func:`app.living.her_records.deeds.own_line`）。``say`` 以前
             原样记 id，那些旧记录里是 ``chinagi`` 这种；她看到它，下一次就照着它去叫人。
 
         不是三姐妹的（世界里的人、写错的名字、写错的 id）原样留着，那是她写下的，她想叫的是谁
@@ -142,6 +145,138 @@ class WhoLivesHere(Protocol):
 
     def residents(self) -> Residents:
         """读好的那份对照；还没读就抛 ``RuntimeError``。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# her_records：她自己的经历和她在哪（her_records 插件提供）
+# ---------------------------------------------------------------------------
+
+# 一件经历的形态。机制层硬定的两类，不是让模型自由发挥的字符串：
+#   * ``speech``  说出口的话。``content`` 是原话。
+#   * ``act``     做的事。``content`` 是一句自然语言描述（"我去厨房煮抹茶"）。
+# 两者共用一张表，是因为「她对谁做了什么说了什么」在读取侧是同一件事：她回看自己的经历、
+# 一轮结束时把当面做的事按先后汇总给 world。
+KIND_SPEECH = "speech"
+KIND_ACT = "act"
+
+# 她通过嘴发出去的一条消息，在她经历上的 id 前缀：``mouth:<outbound_id>``。前缀之后那一串就是
+# 撤回要用的键（``SpokenOutbound.outbound_id``）。
+#
+# **只许有这一处定义。** 拼它的是发消息那只手，把它剥掉、好让她在发送回执、快照和日记材料里
+# 看见那个编号的是 :func:`app.living.common.message_handle`，而她照抄那个编号去撤回时按等值查
+# 的就是同一个键。两边各写一份字面量的话，改了一处就漂移，而漂移的表现是她照抄了却撤不掉
+# —— 一句报错都没有。
+OUTBOUND_HAPPENING_PREFIX = "mouth:"
+
+# 通过什么渠道。这是**客观事实**——她是当面说的，还是拿手机发的，还是发在群里的。
+# 不是给她的行为分优先级，也不是强度分级：三个值之间没有高低，只有"声音能不能传到
+# 旁边的人耳朵里"这一条物理差别。
+#   * ``in_person``   当面说 / 当场做。进 world 的汇总，谁会察觉由 world 判断。
+#   * ``phone``       私聊消息。隔着设备，旁边的人看不见，只在她自己的记录里。
+#   * ``group_chat``  群里说话。同上。
+MEDIUM_IN_PERSON = "in_person"
+MEDIUM_PHONE = "phone"
+MEDIUM_GROUP_CHAT = "group_chat"
+
+
+class Deed(Protocol):
+    """她的一件经历（做过的事、说过的话），交给别的插件时读得到的样子。``seq`` 是本泳道的提交序。"""
+
+    happening_id: str
+    seq: int
+    actor: str
+    kind: str
+    medium: str
+    content: str
+    occurred_at: datetime
+    audience: list[str]
+    channel_id: str | None
+
+
+class Place(Protocol):
+    """她在哪、在做什么的一条，交给别的插件时读得到的样子。``seq`` 是她自己那条轴上的号。"""
+
+    moment_id: str
+    seq: int
+    place: str
+    doing: str
+    noted_at: datetime
+
+
+@dataclass(frozen=True)
+class SinceMarks:
+    """她两个号之后的经历和位置（往外讲她做了什么用），各带落库时刻，按号的先后。"""
+
+    deeds: list[tuple[datetime, Deed]]
+    moves: list[tuple[datetime, Place]]
+    before: Place | None  # 这一段之前她最后在哪；没有是 ``None``
+
+
+class HerRecords(Protocol):
+    """她自己的经历和她在哪：只记她自己的，也只给她自己读（每个方法都按一个人筛）。"""
+
+    async def record_happening(
+        self,
+        *,
+        lane: str,
+        happening_id: str,
+        actor: str,
+        kind: str,
+        content: str,
+        occurred_at: datetime,
+        audience: Sequence[str] = (),
+        medium: str = MEDIUM_IN_PERSON,
+        channel_id: str | None = None,
+    ) -> Deed:
+        """记下她做过的一件事，并记进这一轮做了几件（必须在她的一轮里调）。同一个 id 只落一行。"""
+        ...
+
+    def recorded_this_round(self, round: Round) -> int:
+        """这一轮她真的落下了几件事（去重后）。"""
+        ...
+
+    async def note_whereabouts(
+        self,
+        *,
+        lane: str,
+        persona_id: str,
+        moment_id: str,
+        place: str,
+        doing: str,
+        noted_at: datetime,
+    ) -> Place:
+        """记下她这一轮在哪、在做什么。同一 ``moment_id`` 只落一行。"""
+        ...
+
+    async def current_whereabouts(self, *, lane: str, persona_id: str) -> Place | None:
+        """她当前在哪、在做什么；从没记过返回 ``None``。"""
+        ...
+
+    async def happenings_between(
+        self, *, lane: str, persona_id: str, since: datetime, until: datetime
+    ) -> list[Deed]:
+        """她 ``[since, until)`` 之间做过、说过的事，按提交序。"""
+        ...
+
+    def own_line(self, deed: Deed) -> str:
+        """她自己那条经历摆到她眼前的样子（她的一轮和日记材料里是同一个样子）。"""
+        ...
+
+    async def marks(self, *, lane: str, persona_id: str) -> tuple[int, int]:
+        """她此刻最新的经历号和位置号（``(happening_seq, whereabouts_seq)``，没有是 0）。"""
+        ...
+
+    async def after(
+        self, *, lane: str, persona_id: str, marks: tuple[int, int]
+    ) -> SinceMarks:
+        """``marks`` 之后她的经历和位置。"""
+        ...
+
+    async def last_spoke_in(
+        self, *, lane: str, persona_id: str, channel_id: str
+    ) -> datetime | None:
+        """她上次在这条会话上开口的时刻；从没说过返回 ``None``。"""
         ...
 
 

@@ -35,8 +35,9 @@ from app.living.phone import (
     read_through,
     render_unread,
 )
-from tests.living.conftest import RESIDENTS, glance_text, her_tool
+from tests.living.conftest import RESIDENTS, glance_text, her_tool, own_records
 
+HER_RECORDS = own_records()
 look_at_phone = her_tool("look_at_phone")
 look_through_your_phone = her_tool("look_through_your_phone")
 look_up_contact = her_tool("look_up_contact")
@@ -130,7 +131,7 @@ async def _unread_now(now: dt.datetime, *, persona_id: str = "akao") -> str:
     :func:`app.living.phone.render_arrived` 单独验，在第七之二节。
     """
     return render_unread(
-        await envelopes_for(lane=LANE, persona_id=persona_id, now=now), now=now
+        await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id=persona_id, now=now), now=now
     )
 
 
@@ -534,8 +535,8 @@ async def test_the_envelope_says_when_she_last_spoke_there(living_db, pinned):
     await _incoming(_GROUP, text_body="有人在吗", at=_at(21, 30), sender=_SOMEONE,
                     sender_name="路人")
 
-    from app.living.happening import record_happening
-    from app.living.records import KIND_SPEECH, MEDIUM_GROUP_CHAT
+    from app.living.her_records.deeds import record_happening
+    from app.living.services import KIND_SPEECH, MEDIUM_GROUP_CHAT
 
     await record_happening(
         lane=LANE,
@@ -630,7 +631,7 @@ async def test_a_conversation_with_nothing_unread_still_shows_the_recent_exchang
         await look_at_phone.invoke({"channel_id": str(_DM)})  # 读完，未读归零
     await _her_own(_DM, text_body="去过呀", at=_at(21, 32))
 
-    assert await envelopes_for(
+    assert await envelopes_for(her_records=HER_RECORDS,
         lane=LANE, persona_id="akao", now=_at(21, 40)
     ) == [], "用例前提没成立：这条会话该已经没有未读了"
 
@@ -850,13 +851,9 @@ async def test_the_handle_here_is_the_same_value_the_snapshot_printed(
     """
     import re
 
-    from app.living.happening import own_line
-    from app.living.records import (
-        KIND_SPEECH,
-        MEDIUM_PHONE,
-        OUTBOUND_HAPPENING_PREFIX,
-        Happening,
-    )
+    from app.living.her_records.deeds import own_line
+    from app.living.her_records.records import Happening
+    from app.living.services import KIND_SPEECH, MEDIUM_PHONE, OUTBOUND_HAPPENING_PREFIX
 
     await _seed_world()
     # 有人在跟她说话，这条私聊才在她视野里 —— 她自己说的那句一分都不算。
@@ -965,7 +962,7 @@ async def test_a_moment_that_never_finished_did_not_read_anything(
     assert await read_through(lane=LANE, persona_id="akao", channel_id=str(_DM)) == NEVER_LOOKED, "这一轮没跑完，游标却已经推过去了"
     assert [
         e.unread
-        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+        for e in await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35))
     ] == [1]
 
 
@@ -1002,8 +999,8 @@ async def test_sleeping_through_it_piles_the_messages_up_unread(living_db):
     await _incoming(_DM, text_body="第一条", at=_at(2, 0))
     await _incoming(_DM, text_body="第二条", at=_at(3, 0))
 
-    first = await envelopes_for(lane=LANE, persona_id="akao", now=_at(3, 30))
-    second = await envelopes_for(lane=LANE, persona_id="akao", now=_at(3, 30))
+    first = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(3, 30))
+    second = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(3, 30))
 
     assert [e.unread for e in first] == [2]
     assert [e.unread for e in second] == [2], "什么都没做，未读却变了"
@@ -1136,7 +1133,7 @@ async def test_paging_back_does_not_swallow_what_arrived_meanwhile(
     assert "刚到的" not in earlier, f"往前翻翻出了后面刚到的那条。拿到：\n{earlier}"
     left = [
         e.unread
-        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(20, 50))
+        for e in await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(20, 50))
     ]
     assert left == [1], f"她翻着的时候到的那条被算成看过了。拿到：{left}"
 
@@ -1198,7 +1195,7 @@ async def test_she_catches_up_one_page_at_a_time(living_db, in_a_moment):
     )
     assert [
         e.unread
-        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(20, 31))
+        for e in await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(20, 31))
     ] == [15 - PHONE_PAGE_AFTER - 1], "这一页之后那些被算成看过了"
 
     async with in_a_moment("akao", now=_at(20, 40)):
@@ -1209,7 +1206,7 @@ async def test_she_catches_up_one_page_at_a_time(living_db, in_a_moment):
     )
     assert [
         e.unread
-        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(20, 41))
+        for e in await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(20, 41))
     ] == [], "两页读完了还剩未读"
 
 
@@ -1253,7 +1250,7 @@ async def test_a_group_carries_on_from_where_the_last_page_ended(
     )
     left = [
         e.unread
-        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 11))
+        for e in await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 11))
     ]
     assert left == [29 - 17], (
         f"没摆到她眼前的那些被算成看过了。拿到：{left}"
@@ -1293,7 +1290,7 @@ async def test_the_chatter_before_the_mention_stops_being_unread(
     assert "闲聊第0句" in earlier, (
         f"往前翻找不回那些闲聊 —— 它们是真的没了，不只是不算未读。拿到：\n{earlier}"
     )
-    assert await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 31)) == [], (
+    assert await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 31)) == [], (
         "@ 之前那些没摆出来的闲聊还在通知上算没看过 —— 她会为它们反复拿起手机"
     )
 
@@ -1488,7 +1485,7 @@ async def test_a_message_landing_in_the_same_millisecond_is_not_skipped(
 
     assert [
         e.unread
-        for e in await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+        for e in await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35))
     ] == [1]
     async with in_a_moment("akao"):
         again = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
@@ -1531,7 +1528,7 @@ async def test_the_notifications_are_in_plain_time_order(
     noisy = await _seed_noisy_groups(ENVELOPE_LIMIT + 3, at_from=_at(21, 0))
     pinned(*noisy)
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 30))
+    envelopes = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 30))
     shown = render_arrived(envelopes, since=None, now=_at(21, 30))
     channels = re.findall(r"channel_id=(\S+)", shown)
 
@@ -1751,8 +1748,8 @@ async def test_when_she_last_spoke_there_is_dated_across_the_night(
         sender_name="路人",
     )
 
-    from app.living.happening import record_happening
-    from app.living.records import KIND_SPEECH, MEDIUM_GROUP_CHAT
+    from app.living.her_records.deeds import record_happening
+    from app.living.services import KIND_SPEECH, MEDIUM_GROUP_CHAT
 
     await record_happening(
         lane=LANE,
@@ -1852,7 +1849,7 @@ async def test_a_sister_speaking_in_the_same_group_is_something_she_can_see(
     pinned(str(_GROUP))
     await _sister_said(_GROUP, text_body="今晚吃什么", at=_at(21, 30))
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelopes = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35))
 
     assert [(e.channel_id, e.unread) for e in envelopes] == [(str(_GROUP), 1)], (
         "同群姐姐说的话被 role 一刀切排除出未读了 —— 她们明明在一个群里，"
@@ -1872,7 +1869,7 @@ async def test_her_own_words_in_the_group_are_never_unread_to_her(living_db, pin
     pinned(str(_GROUP))
     await _her_own(_GROUP, text_body="我在", at=_at(21, 30))
 
-    assert await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35)) == [], (
+    assert await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35)) == [], (
         "她自己刚说的话被算成了未读 —— 她会把自己的回声当成别人在说话"
     )
 
@@ -1900,7 +1897,7 @@ async def test_a_sister_chatting_in_the_group_does_not_summon_her(living_db, pin
     ) is None, (
         "姐姐在群里随口一句就把她召唤过去了 —— 两个 agent 会互相叫醒，停不下来"
     )
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelopes = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35))
     assert [e.named_you for e in envelopes] == [False], (
         f"姐姐的群聊发言被当成点了她的名。拿到：{envelopes}"
     )
@@ -1944,7 +1941,7 @@ async def test_the_envelope_says_someone_named_her(living_db):
         names_bot=_AKAO_BOT_UID,
     )
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelopes = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35))
 
     assert [e.named_you for e in envelopes] == [True], (
         f"群里点了她的名，通知却没认出来。拿到：{envelopes}"
@@ -1975,7 +1972,7 @@ async def test_the_envelope_does_not_claim_she_was_named_when_nobody_scanned(
         mention_unrecorded=True,
     )
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelopes = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35))
 
     assert [e.named_you for e in envelopes] == [False], (
         f"没人算过这条消息，通知却说她被点名了。拿到：{envelopes}"
@@ -2075,7 +2072,7 @@ async def test_a_conversation_with_nothing_unread_can_still_be_found_by_name(
     async with in_a_moment("akao", now=_at(20, 30)):
         await look_at_phone.invoke({"channel_id": str(_DM)})  # 读完，未读归零
 
-    assert await envelopes_for(
+    assert await envelopes_for(her_records=HER_RECORDS,
         lane=LANE, persona_id="akao", now=_at(20, 30)
     ) == [], "前提没成立：这条会话该已经从信封里消失了"
 
@@ -2624,14 +2621,14 @@ async def test_a_message_taken_back_before_she_looked_is_not_there_to_open(
     pinned(str(_GROUP))
     took_back = await _sister_said(_GROUP, text_body="今晚吃火锅", at=_at(21, 30))
 
-    before = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+    before = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35))
     assert [(e.channel_id, e.unread) for e in before] == [(str(_GROUP), 1)], (
         f"用例前提就没成立：撤回之前这条本该是一条未读。拿到：{before}"
     )
 
     await _recalled_on_the_channel(took_back, at=_at(21, 31))
 
-    assert await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35)) == [], (
+    assert await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35)) == [], (
         "撤掉的那条还在信封上算一条动静 —— 她会为一条不存在的消息拿起手机"
     )
     async with in_a_moment("akao"):
@@ -2660,7 +2657,7 @@ async def test_the_envelope_does_not_name_someone_whose_only_word_was_taken_back
     )
     await _recalled_on_the_channel(took_back, at=_at(21, 32))
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelopes = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35))
 
     assert [(e.unread, [s.name for s in e.senders]) for e in envelopes] == [
         (1, ["路人"])
@@ -2770,7 +2767,7 @@ async def test_the_envelope_only_lists_conversations_in_sight(living_db):
         sender_name="路人",
     )
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelopes = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35))
 
     assert [e.channel_id for e in envelopes] == [str(_DM)], (
         f"没人叫她的那个群还在信封上。拿到：{envelopes}"
@@ -3117,7 +3114,7 @@ async def test_the_envelope_marks_the_owner_and_never_merges_him_with_a_namesake
         sender=_TWIN, sender_name="bezhai",
     )
 
-    envelopes = await envelopes_for(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelopes = await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 35))
 
     assert [e.senders for e in envelopes] == [
         (Sender(name="bezhai", is_owner=False), Sender(name="bezhai", is_owner=True))

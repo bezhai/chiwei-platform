@@ -433,7 +433,7 @@ async def test_world_reaches_her_by_name_and_a_resend_is_stored_once(
 ):
     """名字从人设表来，收件箱在开始接收时按名字开好；world 发给"绫奈"的那条存到 ayana 名下，
     带着同一个 id 重发一次（world 补发没发完的告知就是这样）也只有一行。"""
-    from app.living.records import living_lane
+    from app.living.common import living_lane
     from app.messaging.lifecycle import start_messaging
     from app.messaging.receiving import inboxes_at_start
     from app.messaging.sending import send
@@ -482,7 +482,7 @@ async def test_a_quiet_message_stays_quiet_through_a_scheduled_hop_and_a_failed_
     重投——每一步都重新发布信封，存进她收件记录的还是不叫醒。"""
     from datetime import UTC, datetime, timedelta
 
-    from app.living.records import living_lane
+    from app.living.common import living_lane
     from app.messaging import broker as messaging_broker
     from app.messaging import receiving
     from app.messaging.lifecycle import start_messaging

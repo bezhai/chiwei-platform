@@ -45,8 +45,8 @@ from app.data.persist import insert_idempotent
 from app.infra.cst_time import CST
 from app.infra.rabbitmq import lane_queue
 from app.living.day_page import LivingDayPage
-from app.living.happening import record_happening
-from app.living.records import KIND_ACT, MEDIUM_IN_PERSON
+from app.living.her_records.deeds import record_happening
+from app.living.services import KIND_ACT, MEDIUM_IN_PERSON
 from app.messaging.broker import headers, question_route, reply_route
 from app.messaging.message import Kind, new_message
 from app.messaging.sending import ANSWER_BY_HEADER, REPLY_RK_HEADER

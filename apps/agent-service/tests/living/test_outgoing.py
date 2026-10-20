@@ -14,18 +14,15 @@ import pytest
 
 from app.agent.tooling import Tool
 from app.data.persist import fetch_all, from_row
+from app.data.schema import table_name
 from app.living import moment as moment_mod
 from app.living import outgoing as outgoing_mod
-from app.living.happening import record_happening
+from app.living.her_records.deeds import record_happening
+from app.living.her_records.records import Happening, Whereabouts
+from app.living.her_records.whereabouts import note_whereabouts
 from app.living.loose_ends.mind import OnHerMind
 from app.living.outgoing import OutgoingResult, OutgoingUpTo, send_what_she_did
-from app.living.records import (
-    KIND_ACT,
-    KIND_SPEECH,
-    MEDIUM_GROUP_CHAT,
-    MEDIUM_PHONE,
-)
-from app.living.whereabouts import note_whereabouts
+from app.living.services import KIND_ACT, KIND_SPEECH, MEDIUM_GROUP_CHAT, MEDIUM_PHONE
 from tests.living.conftest import (
     RESIDENT_NAMES,
     RESIDENTS,
@@ -35,6 +32,7 @@ from tests.living.conftest import (
     her_tool,
     model_facing_text,
     nudged_round,
+    own_records,
     settled,
 )
 from tests.living.test_moment import (  # noqa: F401 — 形参名就是 fixture 名
@@ -49,6 +47,7 @@ from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture
     messaging_db,
 )
 
+HER_RECORDS = own_records()
 switch_to = her_tool("switch_to")
 move_to = her_tool("move_to")
 say = her_tool("say")
@@ -78,7 +77,7 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
 
 
 async def _tell(persona: str = "akao") -> None:
-    await send_what_she_did(lane=LANE, persona_id=persona, residents=RESIDENTS)
+    await send_what_she_did(lane=LANE, persona_id=persona, residents=RESIDENTS, her_records=HER_RECORDS)
 
 
 async def _within(seconds: float, step) -> None:
@@ -349,7 +348,7 @@ async def test_a_line_the_old_version_already_wrote_is_not_said_again_after_the_
 
     # 送出去的是旧版本记下的那一条（audience 里还是 id，正文照它写），只此一条。
     assert len([s for s in post.sent if s.recipient == "绫奈"]) == 1, post.sent
-    assert len(await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor")) == 1
+    assert len(await _her_seqs(table_name(Happening), "actor")) == 1
 
 
 @pytest.mark.integration
@@ -361,7 +360,7 @@ async def test_the_same_round_run_again_says_the_same_line_once(started, in_a_mo
             await _do(say, {"what": "你好。", "to": ["ayana", "绫奈"]})
         await _tell()
 
-    assert len(await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor")) == 1
+    assert len(await _her_seqs(table_name(Happening), "actor")) == 1
     assert [(s.recipient, s.body) for s in post.sent] == [("绫奈", "当面对你说：「你好。」")]
 
 
@@ -376,11 +375,11 @@ async def test_her_messages_are_numbered_on_from_her_last_one_in_the_order_they_
     """
     async with in_a_moment("akao", now=_at(21, 30), moment_id="m-1"):
         await _do(say, {"what": "饭好了。", "to": ["绫奈", "千凪"]})
-    first = await outgoing_mod.compose(lane=LANE, persona_id="akao", residents=RESIDENTS)
+    first = await outgoing_mod.compose(lane=LANE, persona_id="akao", residents=RESIDENTS, her_records=HER_RECORDS)
     async with in_a_moment("akao", now=_at(21, 40), moment_id="m-2"):
         await _do(say, {"what": "快下来。", "to": ["绫奈"]})
         await _do(act, {"what": "把锅端上桌"})
-    second = await outgoing_mod.compose(lane=LANE, persona_id="akao", residents=RESIDENTS)
+    second = await outgoing_mod.compose(lane=LANE, persona_id="akao", residents=RESIDENTS, her_records=HER_RECORDS)
 
     assert [(m.seq, m.recipient) for m in first] == [(1, "绫奈"), (2, "千凪")]
     assert [(m.seq, m.recipient) for m in second] == [(3, "绫奈"), (4, outgoing_mod.WORLD)]
@@ -717,9 +716,9 @@ async def test_a_round_that_waited_behind_a_stuck_one_happens_when_it_gets_her(
     import asyncio
 
     from app.host import Signal
+    from app.living.her_records.deeds import recent_own_happenings
+    from app.living.her_records.whereabouts import current_whereabouts
     from app.living.moment import latest_moment
-    from app.living.snapshot import recent_own_happenings
-    from app.living.whereabouts import current_whereabouts
     from app.plugins.living import regular
 
     post = started
@@ -972,11 +971,11 @@ async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_othe
     assert landed is not None and landed.moment_id == f"nudge:inbox:{rain.message_id}"
     assert await nudged_round(resident, "akao", _at(21, 35)) is None
 
-    hers = await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor")
-    others = await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor", "chinagi")
+    hers = await _her_seqs(table_name(Happening), "actor")
+    others = await _her_seqs(table_name(Happening), "actor", "chinagi")
     assert len(hers) == 3 and len(others) == 2
     assert hers[1] < others[0] < others[1] < hers[2], "前提没造出来：两人的号要交错"
-    where = max(await _her_seqs(outgoing_mod._WHEREABOUTS_TABLE, "persona_id"))
+    where = max(await _her_seqs(table_name(Whereabouts), "persona_id"))
 
     expected = [
         ("绫奈", "当面对你说：「下雨了，收衣服。」", _at(21, 32)),
@@ -1015,7 +1014,7 @@ async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_
 
     姐妹那句直接到了绫奈那里，出现在她下一轮的输入里；world 收到一条汇总；记录者里发给 world
     的消息没有那句只对姐妹说的话。"""
-    from app.living.records import living_lane
+    from app.living.common import living_lane
     from app.living.residents import names as names_mod
     from app.living.services import WORLD
     from app.messaging.lifecycle import start_messaging
@@ -1072,8 +1071,8 @@ async def test_through_messaging_her_sister_reads_words_in_the_order_they_were_s
 ):
     """真的通信机制：赤尾 21:30 对绫奈说的那句第一次没发出去，千凪 21:35 对她说的那句先到了，
     赤尾那句之后补发。绫奈读到的还是先赤尾、后千凪：她那边按消息上的时间排，那是说出口的时间。"""
+    from app.living.common import living_lane
     from app.living.received import unread_received
-    from app.living.records import living_lane
     from app.living.residents import names as names_mod
     from app.living.services import WORLD
     from app.messaging.lifecycle import start_messaging
@@ -1106,22 +1105,22 @@ async def test_through_messaging_her_sister_reads_words_in_the_order_they_were_s
             lane=lane, persona_id=persona, moment_id="before", place="家/客厅",
             doing="看书", noted_at=_at(21, 0),
         )
-        await send_what_she_did(lane=lane, persona_id=persona, residents=RESIDENTS)
+        await send_what_she_did(lane=lane, persona_id=persona, residents=RESIDENTS, her_records=HER_RECORDS)
 
     async with in_a_moment("akao", lane=lane, now=_at(21, 30), moment_id="a"):
         await _do(say, {"what": "饭好了，下来吃。", "to": ["绫奈"]})
-    await send_what_she_did(lane=lane, persona_id="akao", residents=RESIDENTS)
+    await send_what_she_did(lane=lane, persona_id="akao", residents=RESIDENTS, her_records=HER_RECORDS)
     assert refused, "前提没造出来：赤尾那句第一次要没发出去"
 
     async with in_a_moment("chinagi", lane=lane, now=_at(21, 35), moment_id="c"):
         await _do(say, {"what": "我先吃了。", "to": ["绫奈"]})
-    await send_what_she_did(lane=lane, persona_id="chinagi", residents=RESIDENTS)
+    await send_what_she_did(lane=lane, persona_id="chinagi", residents=RESIDENTS, her_records=HER_RECORDS)
 
     async def she_has(n: int) -> bool:
         return len(await unread_received(lane=lane, persona_id="ayana")) == n
 
     await eventually(lambda: she_has(1))
-    await send_what_she_did(lane=lane, persona_id="akao", residents=RESIDENTS)
+    await send_what_she_did(lane=lane, persona_id="akao", residents=RESIDENTS, her_records=HER_RECORDS)
     await eventually(lambda: she_has(2))
 
     her_turn = stub_moment(said="继续")

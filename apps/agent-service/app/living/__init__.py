@@ -15,6 +15,8 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
     各条 prompt 的人设变量（``persona`` 服务）；她一轮 prompt 的「她是谁」那一段
   * :mod:`app.living.residents`   谁住在这儿：三姐妹在世界里的名字，取自人设表、开收件箱时检查
     （``residents`` 服务）；住的是哪几个人由清单定。名字就是地址
+  * :mod:`app.living.her_records` 她自己的经历（对谁、通过什么渠道、做了什么说了什么）和她此刻在
+    哪、在做什么，都只是她自己的；她一轮里"刚做过说过""手上"那两段（``her_records`` 服务）
   * :mod:`app.living.loose_ends`  她自己挂着没了结的事：``keep_in_mind`` 这只手、她一轮里挂念和
     刚到点的那两段（``loose_ends`` 服务）
   * :mod:`app.living.pictures`    她自己做过的图：画 / 上网找 / 翻一翻 / 拿出一张看，存永久句柄，跨轮
@@ -25,12 +27,6 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
     加载、渲染），有哪些可读只能从 prompt 变量进——工具 schema 装不下会变的清单
 
 还没拆成目录的模块：
-
-骨头层——持久的事，不含任何循环 / 轮次 / prompt：
-
-  * :mod:`app.living.records`     她做过的事、她在哪，两类持久数据的形态（都只是她自己的）
-  * :mod:`app.living.happening`   她自己的经历：对谁、通过什么渠道、做了什么说了什么
-  * :mod:`app.living.whereabouts` 她此刻在做什么、在哪
 
 她一直在推进（T2）+ 她对外说话（T4）——嘴在外面，收到什么都不会直接让她跑一轮：
 

@@ -74,6 +74,7 @@ def test_the_agent_service_app_loads_its_own_plugins():
         "skills",
         "persona",
         "residents",
+        "her_records",
         "loose_ends",
         "pictures",
         "web",

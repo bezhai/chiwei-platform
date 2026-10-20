@@ -4,6 +4,9 @@
   * :func:`require_aware`   时刻必须带时区，不带就当场炸（各张表的 validator 用它）
   * :func:`legacy_null_is`  后加的非 Optional 列：旧行读出来的 NULL 当成默认值
   * :func:`week_start_cst`  她的周界：自然周一 00:00 CST（她改写「我是谁」和回看哪一周都按它）
+  * :func:`living_lane`     本进程所在的泳道，拿不到就是 ``"prod"``（她每张表的 Key 里那个 lane）
+  * :func:`message_handle` / :func:`printed_handle`  她发出去的那条消息的撤回编号，和它印在她眼前的
+    样子：她的经历摆到她眼前时、发送回执上印的都是它，她照抄去撤回的也是它
 
 插件之间不互相 import（``tests/living/test_plugin_boundaries.py``），共用的纯函数只能放在这里；
 要读库、要别人数据的东西走 :mod:`app.living.services` 里的服务。
@@ -15,6 +18,8 @@ import html
 from datetime import datetime, timedelta
 
 from app.infra.cst_time import CST
+from app.infra.lane_policy import current_deployment_lane
+from app.living.services import OUTBOUND_HAPPENING_PREFIX
 
 
 def esc(s: str | None) -> str:
@@ -38,7 +43,7 @@ def esc(s: str | None) -> str:
     要过的是第三方能决定确切字节的那些：真人的昵称和消息正文、群名、文件名、网页
     的标题 / 链接 / 摘要、图片站的标题。
 
-    不过的是经过模型的那些：她自己说的话（:func:`app.living.happening.own_line`）、
+    不过的是经过模型的那些：她自己说的话（:func:`app.living.her_records.deeds.own_line`）、
     日页、读完一本书留下的印象。那些字节是某个模型写出来的，第三方最多
     只能"劝"它去写；而一旦模型能被劝着写出任意字节，转义也拦不住下一步 —— 它可以被
     劝着写别的。**那条路上要挡的是输出审计，不是转义**，而给她自己的话套上
@@ -120,3 +125,42 @@ def week_start_cst(now: datetime) -> datetime:
     local = now.astimezone(CST)
     monday = local.date() - timedelta(days=local.weekday())
     return datetime(monday.year, monday.month, monday.day, tzinfo=CST)
+
+
+def living_lane() -> str:
+    """本进程所在的泳道；prod 部署上是 ``"prod"``。
+
+    lane 进 living 每张表的 Key 是硬约束（runtime 不给任何 Data 自动加 lane）。
+    拿不到泳道时必须落到 ``"prod"`` 而不是空串：空串会开一条谁也读不到的影子轴——
+    写进去的行查不出来，而她那边一片安静，什么报错都没有。
+    """
+    return current_deployment_lane() or "prod"
+
+
+def message_handle(happening_id: str) -> str | None:
+    """这一条要是她发出去的消息，给出她能拿去撤回的那个编号；否则 ``None``。
+
+    编号就是 ``outbound_id``——:func:`app.living.takeback.take_back_message` 按等值查
+    的那个键。前缀走 :data:`~app.living.services.OUTBOUND_HAPPENING_PREFIX`，跟
+    :mod:`app.living.mouth` 拼 ``happening_id`` 时用的是同一个常量，所以"这里印出去
+    的"和"她照抄回来的"必然是同一个东西。
+
+    **判据是前缀，不是** ``kind``：当面说的话和发消息的 ``kind`` 都是 ``speech``，
+    但当面说的话撤不了。给它一个编号就是给她一个指了会失败的东西。
+    """
+    if not happening_id.startswith(OUTBOUND_HAPPENING_PREFIX):
+        return None
+    return happening_id[len(OUTBOUND_HAPPENING_PREFIX):]
+
+
+def printed_handle(happening_id: str) -> str:
+    """那个编号印在她眼前的样子：``［<编号>］``；不是她发出去的消息就是空串。
+
+    **印法只在这里写一次。** 她在两处见到这个形状 —— 「你刚做过、说过」那段
+    （:func:`app.living.her_records.deeds.own_line`）和发送回执（:func:`app.living.mouth.send_message`）—— 两处都走
+    它，所以她照抄给 :func:`app.living.takeback.take_back_message` 的是同一种东西。
+    手机那侧刻意不用这个印法（``take_back_id`` 属性，理由见
+    :func:`app.living.phone._one_message`）。
+    """
+    handle = message_handle(happening_id)
+    return f"［{handle}］" if handle is not None else ""

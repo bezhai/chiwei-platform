@@ -65,6 +65,14 @@ def residents_named(monkeypatch):
     monkeypatch.setattr(PersonaNames, "residents", lambda self: RESIDENTS)
 
 
+def own_records(residents=None):
+    """``her_records`` 服务：her_records 插件对象本身（不带状态，读写的是用例的库），名字默认已经读好
+    （:class:`NamesRead`）。"""
+    from app.living.her_records.book import OwnRecords
+
+    return OwnRecords(residents=residents or NamesRead())
+
+
 async def receive(message) -> None:
     """一条消息进了她的收件箱：跟三姐妹收件箱的处理函数一样存下
     （:func:`app.living.received.receive`），收件人按读好的名字认。"""
@@ -264,13 +272,14 @@ async def settled() -> None:
 def her_tool(name: str, *, residents=None) -> Tool:
     """她还没拆成插件的一只手：living 插件对象（:class:`app.plugins.living.NotSplitYet`）上的方法，
     包成跟插件登记给模型的同一种 :class:`~app.agent.tooling.Tool`。``residents`` 是交给它的
-    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）；``pictures`` 服务是 pictures
-    插件对象本身（不带状态，读写的是用例的库）。"""
+    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）；``her_records``、``pictures``
+    服务是那两个插件对象本身（不带状态，读写的是用例的库）。"""
     from app.agent.tooling import Tool
     from app.living.pictures.album import Album
     from app.plugins.living import NotSplitYet
 
-    living = NotSplitYet(residents=residents or NamesRead(), pictures=Album())
+    names = residents or NamesRead()
+    living = NotSplitYet(residents=names, her_records=own_records(names), pictures=Album())
     return Tool(getattr(living, name))
 
 
@@ -334,13 +343,13 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     )
     from app.domain.session_transcript import SessionTranscript
     from app.living.day_page import LivingDayPage
+    from app.living.her_records.records import Happening, Whereabouts
     from app.living.mouth import SpokenOutbound
     from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
     from app.living.persona.chain import PersonaVersion
     from app.living.phone import PhoneRead
     from app.living.pictures.album import Picture
     from app.living.received import ReceivedMessage, ReceivedRead
-    from app.living.records import Happening, Whereabouts
     from tests.runtime.conftest import migrate
 
     # ``LivingDayPage`` 跟手机那几张一样建在这里：**每一轮都读那一页**（``read_snapshot``
