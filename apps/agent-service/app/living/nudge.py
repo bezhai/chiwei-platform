@@ -25,7 +25,7 @@
 摆起（一轮最多摆 :data:`app.living.received.RECEIVED_LIMIT` 条），积压的时候最早的先被看掉，
 后面的接着一条一条叫醒她。"要叫醒她"在查询里就筛掉不叫醒的，不是先取最早那条再看：那样一条更早
 的不叫醒的会一直占住最前面，挡住后面所有该叫醒她的。叫醒她的那条**一定**在那一轮里（``must_show``，见
-:func:`app.living.moment.run_moment_held`）：叫醒她之后才到、发生得更早的消息再多，也挤不掉
+:func:`app.living.moment.run_due_moment`）：叫醒她之后才到、发生得更早的消息再多，也挤不掉
 它。那一轮的身份就是它，那一轮落地它就算看过；不然它会一直排在最前，每一拍拿它叫醒她都撞上
 "这一轮跑过了"，收件箱的提前叫醒就卡在那儿。
 
@@ -42,7 +42,7 @@
 上面那个"判完到轮到她之间被改掉"的问题不会回来。
 
 **开始了却没落地的那一轮，下一拍重跑的还是它自己**（:class:`NudgeBegun`）。她在那一轮里做的
-事、发出去的话，id 都从那一轮的身份派生（见 :func:`app.living.moment.run_moment`）；那一轮
+事、发出去的话，id 都从那一轮的身份派生（见 :class:`app.living.moment.DueMoment`）；那一轮
 在她已经做了些什么之后失败、超时、赶上部署，重跑时换了身份，同一个动作就落两遍、同一句话就
 对真人发两遍。所以开跑之前先记下"被什么叫醒的那一轮开始了"，之后每一拍先看有没有开始了而
 没落地的那一轮，有就原样重跑它，不管这期间手机上来了更新的一条、收件箱里到了更早的一条。
@@ -82,11 +82,12 @@ from app.data.persist import fetch_value, insert_append
 from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import now_cst
 from app.living.moment import (
+    DueMoment,
     LifeMoment,
     life_moment_lock_key,
     moment_ran,
     nudged_moment_id,
-    run_moment_held,
+    run_due_moment,
 )
 from app.living.persona import LIVING_PERSONAS
 from app.living.phone import newest_unread_summons
@@ -146,10 +147,8 @@ async def nudge_once(
     """有人在叫她、或者有传到她这里的消息她还没看过，就把她带到这一刻；都没有、或者都已经
     叫过了，返回 ``None``。
 
-    整段在她的 moment 占用里：先看有没有开始了而没落地的那一轮，有就原样重跑它；没有再看
-    现在有什么在叫她（:func:`_calling_her`），记下这一轮开始了，再跑。"现在"是拿到占用那一刻
-    的钟（``clock()``），判"什么在叫她"和跑那一轮用的是同一个（理由见
-    :func:`app.living.moment.run_moment`）。
+    判（:func:`nudged_moment_due`）和跑（:func:`app.living.moment.run_due_moment`）都在她的
+    moment 占用里。
 
     这条钟在她身上只排一拍（:func:`app.living.serial.at_most_one`）：已经有一拍在排队、或者
     正在跑它叫醒的那一轮，这一拍直接返回 ``None``，不排到后面去。排着的那一拍轮到她时才判，
@@ -163,24 +162,40 @@ async def nudge_once(
         if not admitted:
             return None
         async with hold(key):
-            return await _nudge_held(lane=lane, persona_id=persona_id, now=clock())
+            due = await nudged_moment_due(lane=lane, persona_id=persona_id, clock=clock)
+            return None if due is None else await run_due_moment(due)
 
 
-async def _nudge_held(*, lane: str, persona_id: str, now: datetime) -> LifeMoment | None:
-    """:func:`nudge_once` 占住之后的那一段：判是什么叫醒了她，再跑那一轮。"""
+async def nudged_moment_due(
+    *, lane: str, persona_id: str, clock: Callable[[], datetime]
+) -> DueMoment | None:
+    """有什么在叫她、而且还没叫醒过她，就判出被它叫醒的那一轮；没有返回 ``None``。
+
+    先读钟（她这一轮的『现在』，理由见 :class:`app.living.moment.DueMoment`），再看有没有开始了而
+    没落地的那一轮（:class:`NudgeBegun`），有就原样判出它，不再看手机和收件箱；没有再看现在有
+    什么在叫她（:func:`_calling_her`）。判出新的一轮时先写下"开始了"再交回，模型还没调、她还什么
+    都没做：之后这一轮失败，重跑的还是它。除了这一行它什么都不记，一个刚起来的进程从库里判出的
+    跟一直跑着的进程一样。
+    """
+    now = clock()
     nudged_by = await _begun_not_landed(lane=lane, persona_id=persona_id)
-    if nudged_by is None:
+    if nudged_by is not None:
+        reason = f"重跑被 {nudged_by} 叫醒、开始了没落地的那一轮"
+    else:
         nudged_by = await _calling_her(lane=lane, persona_id=persona_id, now=now)
         if nudged_by is None:
             return None
         await insert_append(
             NudgeBegun(lane=lane, persona_id=persona_id, nudged_by=nudged_by)
         )
-    return await run_moment_held(
+        reason = f"被 {nudged_by} 叫醒"
+    return DueMoment(
+        reason=reason,
         lane=lane,
         persona_id=persona_id,
+        moment_id=nudged_moment_id(nudged_by),
         now=now,
-        nudged_by=nudged_by,
+        nudged=True,
         must_show=(
             nudged_by.removeprefix(_INBOX) if nudged_by.startswith(_INBOX) else None
         ),

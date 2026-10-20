@@ -497,7 +497,14 @@ async def named(monkeypatch):
     await participants_mod.load_residents()
 
 
-def _to_her(body: str, *, at: dt.datetime, sender: str = "world", wakes_her: bool = True):
+def _to_her(
+    body: str,
+    *,
+    at: dt.datetime,
+    sender: str = "world",
+    wakes_her: bool = True,
+    message_id: str | None = None,
+):
     from app.messaging.message import Kind, new_message
 
     return new_message(
@@ -507,6 +514,7 @@ def _to_her(body: str, *, at: dt.datetime, sender: str = "world", wakes_her: boo
         kind=Kind.MESSAGE,
         time=at,
         wakes_recipient=wakes_her,
+        message_id=message_id,
     )
 
 
@@ -1235,3 +1243,115 @@ async def test_a_round_a_received_message_woke_is_named_after_that_message(
 
     assert moment.moment_id == "nudge:inbox:ayana-dinner-1"
     assert await _begun() == ["inbox:ayana-dinner-1"]
+
+
+# --------------------------------------------------------------------------
+# 提前叫醒判不判、判出哪一轮（不调模型）
+#
+# :func:`nudged_moment_due` 读钟和库，判出来要跑的那一轮先记下"开始了"再交回。它在内存里什么
+# 都不留，所以一个刚起来的进程从库里推出的判断跟一直跑着的进程一样。
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_the_nudge_due_reads_the_clock_before_it_reads_anything(nudge_db, monkeypatch):
+    from app.living import nudge as nudge_mod
+    from app.living.nudge import nudged_moment_due
+
+    read: list[str] = []
+
+    def clock() -> dt.datetime:
+        read.append("clock")
+        return _at(21, 32)
+
+    real = nudge_mod._begun_not_landed
+
+    async def begun(**kwargs):
+        read.append("begun")
+        return await real(**kwargs)
+
+    monkeypatch.setattr(nudge_mod, "_begun_not_landed", begun)
+
+    assert await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock) is None
+    assert read[:2] == ["clock", "begun"]
+
+
+@pytest.mark.integration
+async def test_nothing_calling_her_is_no_round_and_nothing_written(nudge_db, stub_life):
+    from app.living.nudge import nudged_moment_due
+
+    assert await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32))) is None
+    assert await _begun() == []
+
+
+@pytest.mark.integration
+async def test_the_nudge_due_writes_that_the_round_began_before_it_hands_it_back(
+    nudge_db, stub_life, named
+):
+    """判出来就记"开始了"，在模型调用之前：之后这一轮失败了，重跑的还是它。"""
+    from app.living.nudge import nudged_moment_due
+    from app.living.received import receive
+
+    await receive(_to_her("窗外下起了雨。", at=_at(21, 31), message_id="rain"))
+
+    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+
+    assert (due.moment_id, due.now, due.nudged, due.must_show) == (
+        "nudge:inbox:rain",
+        _at(21, 32),
+        True,
+        "rain",
+    )
+    assert await _begun() == ["inbox:rain"]
+    assert stub_life.prompts == [], "判的时候调到了模型"
+
+
+@pytest.mark.integration
+async def test_a_summons_on_her_phone_comes_before_her_inbox(nudge_db, stub_life, named):
+    from app.living.nudge import nudged_moment_due
+    from app.living.received import receive
+
+    await receive(_to_her("窗外下起了雨。", at=_at(21, 30), message_id="rain"))
+    summons = await _incoming(_DM, body="在吗", at=_at(21, 31))
+
+    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+
+    assert (due.moment_id, due.must_show) == (f"nudge:{summons}", None)
+    assert await _begun() == [summons]
+
+
+@pytest.mark.integration
+async def test_her_inbox_wakes_her_for_the_earliest_message_she_has_not_seen(
+    nudge_db, stub_life, named
+):
+    from app.living.nudge import nudged_moment_due
+    from app.living.received import receive
+
+    await receive(_to_her("楼下有人按门铃。", at=_at(21, 31), message_id="doorbell"))
+    await receive(_to_her("窗外下起了雨。", at=_at(21, 20), message_id="rain"))
+
+    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+
+    assert due.moment_id == "nudge:inbox:rain"
+
+
+@pytest.mark.integration
+async def test_a_round_that_began_and_never_landed_is_due_again_as_itself_before_anything_new(
+    nudge_db, stub_life, named
+):
+    """开始了没落地的那一轮，新进程判出的还是它，不再记一遍"开始了"，也不让手机上更新的那条、
+    收件箱里新到的那条插到它前面。"""
+    from app.living.nudge import nudged_moment_due
+    from app.living.received import receive
+
+    await receive(_to_her("窗外下起了雨。", at=_at(21, 31), message_id="rain"))
+    first = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+    # 那一轮没落地，进程没了。之后手机上来了叫她的一条，收件箱里也到了一条更早的。
+    await _incoming(_DM, body="在吗", at=_at(21, 33))
+    await receive(_to_her("千凪在厨房喊你。", at=_at(21, 0), message_id="dinner"))
+
+    again = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)))
+
+    assert first.moment_id == again.moment_id == "nudge:inbox:rain"
+    assert (again.now, again.must_show) == (_at(21, 34), "rain")
+    assert await _begun() == ["inbox:rain"]

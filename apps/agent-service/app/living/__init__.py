@@ -8,7 +8,6 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * :mod:`app.living.records`     她做过的事、她在哪，两类持久数据的形态（都只是她自己的）
   * :mod:`app.living.persona`     这个家里的人：谁住在这儿、「她是谁」那份正文的版本链
     （她自己每周改的那条），以及喂进 prompt 的那两个变量——三条注入路一处组装
-  * :mod:`app.living.anchor`      时间锚：moment 的身份，派生 id 全挂在它上面
   * :mod:`app.living.serial`      进程内排他占用 + 提交序 append
   * :mod:`app.living.happening`   她自己的经历：对谁、通过什么渠道、做了什么说了什么
   * :mod:`app.living.whereabouts` 她此刻在做什么、在哪

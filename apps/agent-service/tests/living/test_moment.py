@@ -1294,6 +1294,170 @@ async def test_where_she_is_and_what_she_does_are_named_from_her_rounds_identity
     ]
 
 
+# --------------------------------------------------------------------------
+# 七 quinquies · 常规节奏判不判、判出哪一轮（不调模型）
+#
+# :func:`regular_moment_due` 只读钟和库：这一格跑没跑过、身份是哪一格。它不记任何东西，所以
+# 一个刚起来的进程（没有任何内存里的状态）从库里推出的判断跟一直跑着的进程一样。
+# --------------------------------------------------------------------------
+
+
+async def _a_regular_round_landed(at: dt.datetime, *, cell: str, nudged: bool = False) -> None:
+    from app.data.ordered import insert_in_commit_order
+
+    await insert_in_commit_order(
+        LifeMoment(
+            lane=LANE,
+            persona_id="akao",
+            moment_id=cell,
+            began_at=at,
+            switched=False,
+            pulled_by="",
+            recorded=0,
+            doing="",
+            open_ends=0,
+            said="继续",
+            context_ver=1,
+            nudged=nudged,
+        )
+    )
+
+
+@pytest.mark.integration
+async def test_the_regular_due_reads_the_clock_before_it_reads_anything(moment_db, monkeypatch):
+    """排在挂住的那一轮后面的那一拍，『现在』是轮到她的那一刻：钟在读任何状态之前读。"""
+    from app.living import moment as moment_mod
+    from app.living.moment import regular_moment_due
+
+    read: list[str] = []
+
+    def clock() -> dt.datetime:
+        read.append("clock")
+        return _at(14, 7)
+
+    async def minutes() -> int:
+        read.append("minutes")
+        return 10
+
+    real_latest = moment_mod.latest_regular_moment
+
+    async def latest(**kwargs):
+        read.append("latest regular round")
+        return await real_latest(**kwargs)
+
+    monkeypatch.setattr(moment_mod, "life_moment_minutes", minutes)
+    monkeypatch.setattr(moment_mod, "latest_regular_moment", latest)
+
+    due = await regular_moment_due(lane=LANE, persona_id="akao", clock=clock)
+
+    assert read == ["clock", "minutes", "latest regular round"]
+    assert (due.moment_id, due.now, due.nudged, due.must_show) == (
+        "2026-07-25T14:00+08:00",
+        _at(14, 7),
+        False,
+        None,
+    )
+    assert (due.lane, due.persona_id) == (LANE, "akao")
+
+
+@pytest.mark.integration
+async def test_the_regular_due_says_no_once_the_cell_has_a_regular_round(moment_db, stub_moment):
+    from app.living.moment import regular_moment_due
+
+    await _a_regular_round_landed(_at(14, 7), cell="2026-07-25T14:00+08:00")
+
+    assert await regular_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 9))) is None
+    due = await regular_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 10)))
+    assert due is not None and due.moment_id == "2026-07-25T14:10+08:00"
+
+
+@pytest.mark.integration
+async def test_the_regular_due_counts_only_regular_rounds(moment_db, stub_moment):
+    """一轮被叫醒提前来的落在这一格里，这一格的常规那一轮照样要跑。"""
+    from app.living.moment import regular_moment_due
+
+    await _a_regular_round_landed(_at(14, 3), cell="nudge:m-1", nudged=True)
+
+    due = await regular_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 5)))
+    assert due is not None and due.moment_id == "2026-07-25T14:00+08:00"
+
+
+@pytest.mark.integration
+async def test_the_regular_due_takes_the_cell_size_from_dynamic_config(moment_db, monkeypatch):
+    from app.living import moment as moment_mod
+    from app.living.moment import regular_moment_due
+
+    monkeypatch.setattr(
+        moment_mod.dynamic_config,
+        "get",
+        lambda key, *, default="": "15" if key == moment_mod.LIVING_LIFE_MOMENT_MINUTES_KEY else default,
+    )
+
+    due = await regular_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 29)))
+    assert due.moment_id == "2026-07-25T14:15+08:00"
+
+
+@pytest.mark.integration
+async def test_a_new_process_decides_on_the_regular_round_from_the_database_alone(
+    moment_db, stub_moment
+):
+    """进程在这一格的一轮落地之前死了，新进程在同一格里判出同一个身份；落地之后新进程判不跑。"""
+    from app.living.moment import regular_moment_due
+
+    first = await regular_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 1)))
+    # 这一轮没落地，进程没了；新进程这一格里的下一拍：
+    again = await regular_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 2)))
+    assert first.moment_id == again.moment_id == "2026-07-25T14:00+08:00"
+    assert again.now == _at(14, 2)
+
+    await _a_regular_round_landed(_at(14, 2), cell=again.moment_id)
+    assert await regular_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 5))) is None
+
+
+@pytest.mark.integration
+async def test_the_cells_start_again_at_midnight(moment_db, monkeypatch):
+    """格子按北京时间的午夜起算：七分钟一格时，第二天 00:03 落在 00:00 那一格，不接着前一天的格往下
+    排（那样它会落在 00:02）。同一个钟点每天落在同一格上。"""
+    from app.living import moment as moment_mod
+    from app.living.moment import regular_moment_due
+
+    async def seven() -> int:
+        return 7
+
+    monkeypatch.setattr(moment_mod, "life_moment_minutes", seven)
+
+    due = await regular_moment_due(
+        lane=LANE,
+        persona_id="akao",
+        clock=clock_at(dt.datetime(2026, 7, 26, 0, 3, tzinfo=_CST)),
+    )
+    assert due.moment_id == "2026-07-26T00:00+08:00"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("configured", ["0", "-10"])
+async def test_a_cell_size_that_is_not_positive_falls_back_to_ten_minutes(
+    moment_db, monkeypatch, configured
+):
+    """非正的格子等于没有格子：每一拍都成了新的一轮，派生 id 全跟着变。读的时候就退回默认值。"""
+    from app.living import moment as moment_mod
+
+    monkeypatch.setattr(moment_mod.dynamic_config, "get", lambda key, *, default="": configured)
+
+    assert await life_moment_minutes() == DEFAULT_LIFE_MOMENT_MINUTES
+
+
+@pytest.mark.integration
+async def test_a_clock_without_a_time_zone_is_refused(moment_db, stub_moment):
+    """不带时区的时刻落进身份会被按服务器时区解释，静默偏几个小时、派生 id 全跟着错。"""
+    from app.living.moment import regular_moment_due
+
+    with pytest.raises(ValueError, match="时区"):
+        await regular_moment_due(
+            lane=LANE, persona_id="akao", clock=clock_at(dt.datetime(2026, 7, 25, 14, 7))
+        )
+
+
 def test_one_wake_has_room_for_more_than_one_whole_thing():
     """上限的含义是"她一口气能做几件事"，不是"一次思考多深"。
 
@@ -1318,6 +1482,23 @@ def test_the_moment_runs_on_the_life_model():
 # --------------------------------------------------------------------------
 
 
+async def _early_round(at: dt.datetime, *, woken_by: str) -> LifeMoment:
+    """被一条消息叫来提前的一轮，直接跑。这一节问的是它落地之后常规节奏和"上一轮"怎么算；判不判
+    它、身份怎么来在 ``tests/living/test_nudge.py``。"""
+    from app.living.moment import DueMoment, nudged_moment_id, run_due_moment
+
+    return await run_due_moment(
+        DueMoment(
+            reason=f"被 {woken_by} 叫醒",
+            lane=LANE,
+            persona_id="akao",
+            moment_id=nudged_moment_id(woken_by),
+            now=at,
+            nudged=True,
+        )
+    )
+
+
 @pytest.mark.integration
 async def test_an_early_moment_that_lands_first_is_not_taken_as_the_last_one(
     moment_db, stub_moment
@@ -1334,9 +1515,7 @@ async def test_an_early_moment_that_lands_first_is_not_taken_as_the_last_one(
     runner = stub_moment(said="继续")
 
     await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 20)))
-    early = await run_moment(
-        lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)), nudged_by="msg-1"
-    )
+    early = await _early_round(_at(21, 34), woken_by="msg-1")
     assert early is not None and early.began_at == _at(21, 34)
     regular = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35)))
     assert regular is not None
@@ -1367,7 +1546,7 @@ async def test_the_regular_rhythm_counts_only_the_regular_cells(moment_db, stub_
     stub_moment(said="继续")
 
     await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 20)))
-    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)), nudged_by="m-1")
+    await _early_round(_at(21, 34), woken_by="m-1")
     regular = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35)))
 
     last_regular = await latest_regular_moment(lane=LANE, persona_id="akao")
@@ -1395,9 +1574,7 @@ async def test_each_moment_carries_the_order_it_landed_in(moment_db, stub_moment
     stub_moment(said="继续")
 
     first = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 20)))
-    early = await run_moment(
-        lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)), nudged_by="m-1"
-    )
+    early = await _early_round(_at(21, 34), woken_by="m-1")
     regular = await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35)))
 
     assert [m.seq for m in (first, early, regular)] == [1, 2, 3]

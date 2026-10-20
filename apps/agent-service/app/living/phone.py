@@ -651,8 +651,8 @@ def _clock(moment: datetime, *, now: datetime) -> str:
     ``you_last_spoke_at`` 更是如此：这条事实存在的全部意义就是让她分得清"五分钟前刚
     说过"和"昨晚说过"。
 
-    ``now`` 从调用方传进来（这一轮的时间锚），**不在这里现取**：一轮一个 now 是这套引擎
-    的地基（:mod:`app.living.anchor`），渲染层自己读钟会让同一轮的输入跟它的身份对不上。
+    ``now`` 从调用方传进来（这一轮的『现在』），**不在这里现取**：一轮一个 now 是这套引擎
+    的地基（:class:`app.living.moment.DueMoment`），渲染层自己读钟会让同一轮的输入跟它的身份对不上。
 
     走 :func:`app.infra.cst_time.to_cst_dated` 而不是自己比日期：跨天判定要按 CST 日历
     日（不是 UTC、也不是"差了 24 小时"），这条逻辑只该有一处定义。它收的是原始时间串，

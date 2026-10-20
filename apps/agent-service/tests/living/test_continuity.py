@@ -619,13 +619,24 @@ async def test_the_replay_after_a_failed_close_stores_the_round_once(
 @pytest.mark.integration
 async def test_the_same_summons_only_wakes_her_once(moment_db, stub_moment):
     """同一条消息把她叫来两次时，第二次一句模型都不调，上下文也不多一条。"""
+    from app.living.nudge import NudgeBegun, nudge_once
+    from tests.runtime.conftest import migrate
+
+    await migrate(NudgeBegun, moment_db)
     runner = stub_moment(said="继续")
-    first = await run_moment(
-        lane=LANE, persona_id="akao", clock=clock_at(_at(14)), nudged_by="msg-1"
+    await insert_idempotent(
+        ReceivedMessage(
+            lane=LANE,
+            persona_id="akao",
+            message_id="msg-1",
+            sender="绫奈",
+            body="姐？",
+            message_time=_at(13, 59),
+            wakes_recipient=True,
+        )
     )
-    second = await run_moment(
-        lane=LANE, persona_id="akao", clock=clock_at(_at(14, 2)), nudged_by="msg-1"
-    )
+    first = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(14)))
+    second = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 2)))
 
     assert first is not None
     assert second is None

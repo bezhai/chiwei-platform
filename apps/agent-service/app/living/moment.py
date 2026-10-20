@@ -46,15 +46,15 @@
 :func:`app.living.serial.hold`，后到的排队等前一次做完（两条路：固定的钟，和
 :mod:`app.living.nudge` 那条被叫醒提前来的）。
 
-**moment 的身份是格子，不是钟表上那一瞬**（:func:`app.living.anchor.anchor_on_grid`）。
-副作用先落库、``LifeMoment`` 后落库，中间崩掉的话下一拍会重跑；锚落在格上，重试拿到
+**moment 的身份是格子，不是钟表上那一瞬**（:func:`regular_moment_due`）。
+副作用先落库、``LifeMoment`` 后落库，中间崩掉的话下一拍会重跑；身份落在格上，重试拿到
 的是同一个 moment、所有派生 id 原样对上，重放退化成无害的 no-op。残余缺口（重放产出了**不
-一样**的动作时两边都会留下）写在 anchor 那边的 docstring 里。
+一样**的动作时两边都会留下）写在那里。
 
 **提前来的那个 moment 不落在格子上**，它的身份是**把她叫来的那条消息**（``nudged_by``）。
-理由见 :func:`run_moment`：撞不上常规 moment 的 id，而且同一条消息只能把她叫来一次。
+理由见 :class:`DueMoment`：撞不上常规 moment 的 id，而且同一条消息只能把她叫来一次。
 
-**身份是格子，她这个 moment 的『现在』却是拿到占用那一刻的钟**（:func:`run_moment`）。排队是
+**身份是格子，她这个 moment 的『现在』却是拿到占用那一刻的钟**（:class:`DueMoment`）。排队是
 正常的（``hold`` 让后到的等，不丢），前一轮挂住时后面那一拍要过一阵才轮到她；她这一轮看到的、
 做的、发出去的都在轮到她之后，钟点也就是那一刻。
 
@@ -105,7 +105,8 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Annotated
 
 from inner_shared.dynamic_config import dynamic_config
@@ -132,8 +133,7 @@ from app.data.persist import fetch_one, from_row
 from app.data.schema import CommitOrder, Data, Key, table_name
 from app.data.tx import tx
 from app.domain.thinking_cost import record_round_cost
-from app.infra.cst_time import now_cst
-from app.living.anchor import anchor_on_grid
+from app.infra.cst_time import CST, now_cst
 
 # 她手边那几份写好的说明：两只手，外加"有哪些可读"那一份清单（清单只能从 prompt
 # 变量进，见本模块最后一段 docstring）。
@@ -246,7 +246,7 @@ class LifeMoment(Data):
 
       * ``began_at`` = **她这个 moment 的『现在』**：喂给快照、手机信封和 ``FEATURE_NOW``
         的那个时刻，也是她这一轮记下的事、发出去的消息上的时刻。两种 moment 都取拿到占用
-        那一刻的钟（:func:`run_moment`）；常规 moment 的身份是它落在的那一格，不是这个时刻。
+        那一刻的钟（:class:`DueMoment`）；常规 moment 的身份是它落在的那一格，不是这个时刻。
       * ``seq`` = **这个 moment 在这条轴上第几个落地**，(lane, persona) 各一条轴，在落地那次
         提交里取号（:func:`app.data.ordered.insert_in_commit_order`），所以它的先后就是提交的
         先后。
@@ -355,9 +355,9 @@ def transcript_key(*, lane: str, persona_id: str) -> str:
     一次保证前缀重建的时刻，去掉之后裁剪必须长期正确，守它的是
     ``tests/living/test_context_trim.py`` 跨天那一节。
 
-    **一个 moment 的键只算一次，读和写用同一个**（:func:`run_moment`）。
+    **一个 moment 的键只算一次，读和写用同一个**（:func:`run_due_moment`）。
 
-    跟 langfuse 的 session 不是一回事：trace 的 session id 在 :func:`run_moment` 里另给
+    跟 langfuse 的 session 不是一回事：trace 的 session id 在 :func:`run_due_moment` 里另给
     （``living-life:{lane}:{persona_id}``）。
     """
     return f"{lane}:{persona_id}"
@@ -1100,8 +1100,104 @@ async def _remember_this_round(
 
 
 def nudged_moment_id(nudged_by: str) -> str:
-    """被叫来提前的那个 moment 的身份：``nudge:<把她叫来的那条>``（理由见 :func:`run_moment`）。"""
+    """被叫来提前的那个 moment 的身份：``nudge:<把她叫来的那条>``（理由见 :class:`DueMoment`）。"""
     return f"nudge:{nudged_by}"
+
+
+@dataclass(frozen=True)
+class DueMoment:
+    """判出来要跑的她的一轮：身份、她这一轮的『现在』、为什么跑。
+
+    两条路判它：钟点上该来的（:func:`regular_moment_due`）和被人叫来提前的
+    （:func:`app.living.nudge.nudged_moment_due`）；跑它的是同一个 :func:`run_due_moment`。
+    判和跑在她的同一次占用里：判在占用外面的话，判完到轮到她之间可能隔着一整轮，那一轮会把判据
+    改掉（看过了、跑过了），判出来的就是过期的结论。
+
+    **两种 moment，身份不一样。**
+
+    *钟点上该来的*：身份是她那一格的起点，理由见 :func:`regular_moment_due`。
+
+    *被人叫来提前的*：身份是 ``nudge:<把她叫来的那条消息>``，**不落格子**。这一个决定同时解掉
+    两件事：
+
+      1. 跟同一分钟的常规 moment **撞不上 id**（一个是钟点串，一个是 ``nudge:`` 开头）；
+      2. **同一条消息只能把她叫来一次**——身份就是那条消息，跑过就不再跑。这不是冷却
+         也不是计数器：真人手机是新消息才震，躺着的未读不会一直震。她没看手机的话
+         那条一直未读，按"还有没有未读"判就是每分钟震一次。
+
+    **她这一轮的『现在』是判它时读的钟**，两种都一样：拿到占用之后、读任何状态之前读的那一刻，
+    不是钟敲响那一拍。前一轮挂住时（模型调用卡住，最长占锁 15 分钟，见
+    :data:`app.living.serial.HELD_SECONDS`），排在后面的那一拍要过一阵才轮到她；她看到的是轮到她
+    时的样子（收件箱、手机、她自己的经历都是那时读的），她做的事、发出去的消息带的也就必须是那一
+    刻。拿那一拍的时刻，world 收到的汇总就比汇总里回应的那件事还早。
+
+    『现在』每次重跑都不一样，幂等却不丢：一个 moment 里所有派生 id（happening_id、whereabouts
+    的自然键）都从 ``moment_id`` 来，**不从『现在』来**；``moment_id`` 稳了，重跑照样是 no-op，
+    第一遍已经落下的那几件留着第一遍的钟点。前提是重跑时身份不变：常规的那种靠格子；被叫来的
+    那一轮没落地，重跑判出的是它记下的"开始了"的那一轮（:class:`app.living.nudge.NudgeBegun`），
+    不会因为这期间又来了别的消息就换一个身份。
+    """
+
+    # 为什么跑这一轮，记进日志。
+    reason: str
+    lane: str
+    persona_id: str
+    # 这一轮的身份，她这一轮所有派生 id 都从它来。
+    moment_id: str
+    # 她这一轮的『现在』。
+    now: datetime
+    nudged: bool = False
+    # 收件箱里叫醒她这一轮的那条消息的 id（理由见 :func:`run_due_moment`）。
+    must_show: str | None = None
+
+
+async def regular_moment_due(
+    *, lane: str, persona_id: str, clock: Callable[[], datetime]
+) -> DueMoment | None:
+    """钟点上该来的那一轮：这一格还没有常规 moment 跑过，就判出它；跑过了返回 ``None``。
+
+    先读钟（理由见 :class:`DueMoment`），再把这一刻落到间隔网格上：格子大小每次从 Dynamic
+    Config 读（:func:`life_moment_minutes`），从北京时间的午夜起算、向下取整、秒一律丢掉，所以
+    同一个钟点每天落在同一格上，跨天不漂。**这一格的起点（精确到分）就是这一轮的身份。**
+
+    **为什么身份是格子，不是钟表上那一瞬。** 这一轮所有派生 id 都带着身份：``happening_id``、
+    whereabouts 的自然键、说话的认领、读书那一程。副作用先落库、``LifeMoment`` 后落库，中间崩掉的
+    话下一拍会重跑，而那时的钟已经不是原来那一刻了。身份跟着钟动，派生 id 就全跟着动，幂等直接被
+    击穿——她把同一句话说两遍，而且两条记录长得不一样（差几分钟），事后看不出是重复。落在格上，
+    一格之内的每一拍都判出同一个身份，重跑退化成无害的 no-op。
+
+    **这不能替代真事务。** 它保证的是"重跑同样的动作不会写出重复行"，不保证"重跑产出不同的动作
+    时不会两边都留下"——模型是不确定的，重跑一次未必做一样的事。真正的全有全无要把整个 moment
+    包进一个数据库事务，而那意味着一条业务连接被一次几十秒的模型调用占着（:mod:`app.living.serial`
+    的说明里写了为什么不能这么做）。所以这里选的是"身份稳住 + 派生 id 幂等"，残余缺口写在这儿，
+    别当成事务用。
+
+    **该不该跑只看这一格有没有常规 moment 跑过**（:func:`latest_regular_moment`）。提前来的那一轮
+    不算一格：不然每被人叫来一次就把她的固定节奏往后推一次。失败了，下一拍在同一格里以同一个身份
+    再跑；跨出这一格，这一格就不补了。这里什么都不记，一个刚起来的进程从库里判出的跟一直跑着的
+    进程一样。
+
+    不带时区的钟直接拒：它落进身份会被按服务器时区解释，静默偏几个小时，整条派生链跟着错位，
+    而且一句报错都没有。
+    """
+    now = clock()
+    minutes = await life_moment_minutes()
+    local = _require_aware("now", now).astimezone(CST)
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed = int((local - midnight).total_seconds() // 60)
+    cell = midnight + timedelta(minutes=(elapsed // minutes) * minutes)
+    # 这一格有常规 moment 跑过了：上一个常规 moment 的『现在』落在这一格里（或者更晚）。
+    last_regular = await latest_regular_moment(lane=lane, persona_id=persona_id)
+    if last_regular is not None and last_regular.began_at >= cell:
+        return None
+    moment_id = cell.isoformat(timespec="minutes")
+    return DueMoment(
+        reason=f"常规节奏，{moment_id} 那一格",
+        lane=lane,
+        persona_id=persona_id,
+        moment_id=moment_id,
+        now=now,
+    )
 
 
 async def run_moment(
@@ -1109,49 +1205,36 @@ async def run_moment(
     lane: str,
     persona_id: str,
     clock: Callable[[], datetime],
-    nudged_by: str | None = None,
 ) -> LifeMoment | None:
-    """推进这个人的一个 moment；这个 moment 不该跑就一句模型都不调，返回 ``None``。
+    """推进这个人钟点上该来的那一个 moment；这一格不该跑就一句模型都不调，返回 ``None``。
 
-    整段在排他占用里：一个人不能同时想两件事。该不该跑也判在里面——不然两条路会各自
-    读到"还没跑过"、双双跑一个 moment。
-
-    **这个 moment 的『现在』是拿到占用那一刻的钟**（``clock()``），不是钟敲响那一拍。前一轮
-    挂住时（模型调用卡住，最长占锁 15 分钟，见 :data:`app.living.serial.HELD_SECONDS`），排在
-    后面的那一拍要过一阵才轮到她；它看到的是轮到她时的样子（收件箱、手机、她自己的经历都是那
-    时读的），她做的事、发出去的消息带的也就必须是那一刻。拿那一拍的时刻，world 收到的汇总就
-    比汇总里回应的那件事还早。
+    判和跑都在她的排他占用里：一个人不能同时想两件事。判在里面，不然两条路会各自读到"还没
+    跑过"、双双跑一个 moment。
 
     **这条钟在她身上只排一拍**（:func:`app.living.serial.at_most_one`）：已经有一拍在排队或者
     正在跑，这一拍直接返回 ``None``。排着的那一拍轮到她时按那一刻判这一格跑没跑过，后面那几拍
     要判的它都判得到。被叫来提前的那条钟另排一拍（:mod:`app.living.nudge`），两条钟之间照样排队。
+    """
+    key = life_moment_lock_key(lane, persona_id)
+    async with at_most_one(f"{key}:regular") as admitted:
+        if not admitted:
+            return None
+        async with hold(key):
+            due = await regular_moment_due(lane=lane, persona_id=persona_id, clock=clock)
+            return None if due is None else await run_due_moment(due)
 
-    **两种 moment，身份和"该不该跑"的判据都不一样。**
 
-    *钟点上该来的那种*（``nudged_by is None``）：『现在』先落到间隔网格上
-    （:func:`app.living.anchor.anchor_on_grid`），锚就是这个 moment 的身份。副作用先落库、
-    这条记录后落库，中间崩掉下一拍会重跑——锚落在格上，那一拍算出的还是同一个 moment，所有
-    派生 id 原样对上，同样的动作重放一遍写不出新行。该不该跑，只看**这一格有没有常规 moment
-    跑过**（:func:`latest_regular_moment`）。
-
-    *被人叫来提前的那种*（``nudged_by`` 是把她叫来那条消息的 id）：身份是
-    ``nudge:<那条消息>``，**不落格子**。这一个决定同时解掉两件事：
-
-      1. 跟同一分钟的常规 moment**撞不上 id**（一个是钟点串，一个是 ``nudge:`` 开头）；
-      2. **同一条消息只能把她叫来一次**——身份就是那条消息，跑过就不再跑。这不是冷却
-         也不是计数器：真人手机是新消息才震，躺着的未读不会一直震。她没看手机的话
-         那条一直未读，按"还有没有未读"判就是每分钟震一次。
-
-    两种 moment 的 ``began_at`` 都是这个『现在』本身，身份落不落格子跟它无关。
-
-    『现在』每次重跑都不一样，幂等却不丢：一个 moment 里所有派生 id（happening_id、whereabouts
-    的自然键）都从 ``moment_id`` 来，**不从『现在』来**；``moment_id`` 稳了，重跑照样是 no-op，
-    第一遍已经落下的那几件留着第一遍的钟点。前提是重跑时身份不变：常规的那种靠格子；被叫来的
-    那一轮没落地，重跑它的是 :mod:`app.living.nudge` 那条钟，它记着开始了而没落地的那一轮
-    （:class:`app.living.nudge.NudgeBegun`），不会因为这期间又来了别的消息就换一个身份。
+async def run_due_moment(due: DueMoment) -> LifeMoment:
+    """跑判出来的这一轮（:class:`DueMoment`），交回落了地的那一行。**调用方必须已经占着她**：判它
+    和跑它在同一次占用里。
 
     **她被带到那一刻，回不回是她的输出。** 这里只负责把她带到，不看她说了什么、也没有
     任何"她该不该回"的判断——那是替她做决定。
+
+    ``due.must_show`` 是收件箱里叫醒她这一轮的那条消息的 id：它还没看过，就一定摆进这一轮
+    （:func:`app.living.received.unread_received` 的 ``including``），这一轮落地它就算
+    看过。这一轮的身份就是它；它不在这一轮里的话，这一轮落地了它还没看过，之后每一拍拿它
+    叫醒她都撞上"这一轮跑过了"。
 
     **上下文接着上一个 moment。** 开头读她那条上下文、结尾把"历史 + 这一轮的刺激 +
     这一轮模型产出的每一条"写成下一版（:mod:`app.agent.continuity`）。这一步在
@@ -1173,59 +1256,8 @@ async def run_moment(
     瞬时失败会整轮重放、重放已经执行过的 durable 写。派生 id 让重放无害，但重放
     仍然是白花的一次钱，而且下一拍再来就行。
     """
-    key = life_moment_lock_key(lane, persona_id)
-    async with at_most_one(f"{key}:regular") as admitted:
-        if not admitted:
-            return None
-        async with hold(key):
-            return await run_moment_held(
-                lane=lane, persona_id=persona_id, now=clock(), nudged_by=nudged_by
-            )
-
-
-async def run_moment_held(
-    *,
-    lane: str,
-    persona_id: str,
-    now: datetime,
-    nudged_by: str | None = None,
-    must_show: str | None = None,
-) -> LifeMoment | None:
-    """:func:`run_moment` 占住之后的那一段。**调用方必须已经占着**
-    :func:`life_moment_lock_key` 那条 key——这里不再占一次，``hold`` 不可重入，嵌套就是
-    永久自锁死。``now`` 是拿到占用之后读的钟（理由见 :func:`run_moment`），这一轮的『现在』
-    就是它。
-
-    单独拿出来，是因为被叫来提前的那条钟要在**同一次占用里**先判"是什么叫醒了她"，再跑
-    这一轮（:func:`app.living.nudge.nudge_once`）。判在占用外面的话，判完到轮到她之间
-    可能隔着一整轮：那一轮会把判据改掉（看过了、跑过了），判出来的就是过期的结论。
-
-    ``must_show`` 是收件箱里叫醒她这一轮的那条消息的 id：它还没看过，就一定摆进这一轮
-    （:func:`app.living.received.unread_received` 的 ``including``），这一轮落地它就算
-    看过。这一轮的身份就是它；它不在这一轮里的话，这一轮落地了它还没看过，之后每一拍拿它
-    叫醒她都撞上"这一轮跑过了"。
-    """
-    minutes = await life_moment_minutes()
-    anchor = anchor_on_grid(now, minutes=minutes)
-    nudged = nudged_by is not None
-    moment_id = (
-        nudged_moment_id(nudged_by)
-        if nudged_by is not None
-        else anchor.isoformat(timespec="minutes")
-    )
-
-    if nudged:
-        if await moment_ran(
-            lane=lane, persona_id=persona_id, moment_id=moment_id
-        ):
-            return None
-    else:
-        # 这一格有常规 moment 跑过了：上一个常规 moment 的『现在』落在这一格里（或者更晚）。
-        last_regular = await latest_regular_moment(
-            lane=lane, persona_id=persona_id
-        )
-        if last_regular is not None and last_regular.began_at >= anchor:
-            return None
+    lane, persona_id, now = due.lane, due.persona_id, due.now
+    moment_id, nudged = due.moment_id, due.nudged
 
     # 她之前做了、还没确认发出去的，这一轮开始前先发：上一轮失败、超时、赶上部署时，那一轮
     # 走不到下面的收尾（:mod:`app.living.outgoing`）。
@@ -1256,7 +1288,7 @@ async def run_moment_held(
     # 传到她这里、她还没看过的消息（:mod:`app.living.received`）。读在模型调用之前：
     # 只有这几条会跟这一轮一起记成看过，这一轮跑着的时候新到的留给下一轮。
     received = await unread_received(
-        lane=lane, persona_id=persona_id, including=must_show
+        lane=lane, persona_id=persona_id, including=due.must_show
     )
     # 「她是谁」那两个变量由 :mod:`app.living.persona` 一处组装（这一轮和日记那两
     # 条路共用同一份）。手边有哪些说明可读**只加在这个 moment 上**：只有这个 moment
