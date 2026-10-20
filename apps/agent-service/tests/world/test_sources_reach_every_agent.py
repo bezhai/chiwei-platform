@@ -14,10 +14,10 @@ from app.world.actions import let_npc_appear, report_change
 from .conftest import ScriptedAgent, sets_wake, tools_built_for
 
 FOUR = (
-    main_agent.ROUND.prompt_id,
-    perception.PERCEPTION.prompt_id,
-    npc.NPC.prompt_id,
-    answer.ANSWER.prompt_id,
+    main_agent.ROUND,
+    perception.PERCEPTION,
+    npc.NPC,
+    answer.ANSWER,
 )
 
 
@@ -35,9 +35,9 @@ def says(text: str) -> ScriptedAgent:
 
 
 async def _run_all_four(world) -> dict[str, list[str]]:
-    world.agents[perception.PERCEPTION.prompt_id] = says("没有人会察觉。")
-    world.agents[npc.NPC.prompt_id] = says("门卫点了点头。")
-    world.agents[answer.ANSWER.prompt_id] = says("厨房里没人。")
+    world.agents[perception.PERCEPTION] = says("没有人会察觉。")
+    world.agents[npc.NPC] = says("门卫点了点头。")
+    world.agents[answer.ANSWER] = says("厨房里没人。")
 
     async def a_round():
         await report_change.invoke({"change": "起风了。"})

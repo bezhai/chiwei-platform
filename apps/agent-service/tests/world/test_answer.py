@@ -9,7 +9,7 @@ from app.world import answer, records
 from app.world.sources import query_tools, told
 from app.world.sources import records as records_source
 
-from .conftest import LANE, ScriptedAgent, tools_built_for
+from .conftest import LANE, ScriptedAgent, spec_called, tools_built_for
 
 
 def _question(body: str, sender: str = "operator"):
@@ -34,13 +34,13 @@ def looks_up_the_kitchen():
 
 async def test_a_question_is_answered_from_the_sources(world):
     records.write("地方/厨房.md", "灶上炖着汤，窗开着一条缝。", expected=None)
-    world.agents[answer.ANSWER.prompt_id] = looks_up_the_kitchen()
+    world.agents[answer.ANSWER] = looks_up_the_kitchen()
 
     reply = await answer.answer_question(_question("厨房现在什么样？"))
 
     assert reply == "厨房现在是这样：灶上炖着汤，窗开着一条缝。"
-    assert "厨房现在什么样？" in world.agents[answer.ANSWER.prompt_id].inputs[0]
-    assert "operator" in world.agents[answer.ANSWER.prompt_id].inputs[0]
+    assert "厨房现在什么样？" in world.agents[answer.ANSWER].inputs[0]
+    assert "operator" in world.agents[answer.ANSWER].inputs[0]
 
 
 async def test_answering_writes_nothing_tells_nobody_and_does_not_wake_the_main_agent(world, volume):
@@ -48,7 +48,7 @@ async def test_answering_writes_nothing_tells_nobody_and_does_not_wake_the_main_
     await told.take_in(
         new_message(sender="akao", recipient="world", body="我在厨房。", kind=Kind.MESSAGE)
     )
-    world.agents[answer.ANSWER.prompt_id] = looks_up_the_kitchen()
+    world.agents[answer.ANSWER] = looks_up_the_kitchen()
     before = _volume_state(volume)
 
     await answer.answer_question(_question("厨房现在什么样？", sender="ayana"))
@@ -59,12 +59,12 @@ async def test_answering_writes_nothing_tells_nobody_and_does_not_wake_the_main_
 
 
 async def test_the_answer_agent_has_its_own_prompt_trace_cost_and_only_the_sources_tools(world):
-    world.agents[answer.ANSWER.prompt_id] = looks_up_the_kitchen()
+    world.agents[answer.ANSWER] = looks_up_the_kitchen()
     records.write("地方/厨房.md", "x", expected=None)
 
     await answer.answer_question(_question("厨房现在什么样？"))
 
-    [config] = [c for c, _ in world.built if c.prompt_id == "world_answer"]
+    config = spec_called(world, "world_answer")
     assert config.trace_name == "world-answer"
     assert tools_built_for(world, "world_answer") == [t.name for t in await query_tools()]
     assert len([c for c in world.costs if c["round_id"].startswith("world-answer:")]) == 1
@@ -75,7 +75,7 @@ async def test_saying_nothing_is_no_answer(world):
     async def silent(_input):
         return "  "
 
-    world.agents[answer.ANSWER.prompt_id] = ScriptedAgent(silent)
+    world.agents[answer.ANSWER] = ScriptedAgent(silent)
 
     assert await answer.answer_question(_question("赤尾在哪？")) is None
 

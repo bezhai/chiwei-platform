@@ -118,12 +118,10 @@ def _install_agent(
             captured["cfg"] = cfg
             captured["tools"] = tools
 
-        async def run(self, messages, *, prompt_vars=None, context=None,
-                      session_id=None, max_retries=2):
+        async def run(self, messages, *, call, prompt_vars=None):
             captured["runs"] += 1
             captured["prompt_vars"] = prompt_vars
-            captured["context"] = context
-            captured["max_retries"] = max_retries
+            captured["call"] = call
             if delay:
                 await asyncio.sleep(delay)
             if read_calls is not None:
@@ -160,11 +158,20 @@ async def _run(start_page=0, prior=None):
 
 
 def test_reading_config_points_at_deepseek_flash():
-    assert reading_mod._READING_CFG.model_id == "deepseek-v4-flash"
+    assert reading_mod.READING_AGENT.model == "deepseek-v4-flash"
 
 
 def test_reading_config_pins_prompt_id():
-    assert reading_mod._READING_CFG.prompt_id == "book_reading_impression"
+    assert reading_mod.READING == "book_reading_impression"
+    assert reading_mod.READING_AGENT.segments == ("book_reading_impression",)
+
+
+async def test_a_stretch_is_grouped_into_her_day_session(monkeypatch):
+    captured = _install_agent(monkeypatch, read_calls=[0])
+    await _run()
+    call = captured["call"]
+    assert call.agent == "book_reading_impression"
+    assert call.session.startswith(f"{_LANE}:{_PERSONA}:")
 
 
 async def test_reading_agent_has_only_read_tool(monkeypatch):

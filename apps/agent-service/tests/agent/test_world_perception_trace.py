@@ -83,7 +83,7 @@ async def test_an_exhausted_perception_retry_leaves_one_error_trace_per_attempt(
         await perception.judge_who_notices("窗关上之后，屋里的雨声小了。", round_messages=[woke])
 
     roots = [
-        s for s in exported_spans.get_finished_spans() if s.name == perception.PERCEPTION.trace_name
+        s for s in exported_spans.get_finished_spans() if s.name == perception.PERCEPTION_AGENT.trace_name
     ]
     assert model.calls == len(roots) == perception.PERCEPTION_ATTEMPTS > 1
     assert len({s.context.trace_id for s in roots}) == len(roots), "每一次是一条单独的 trace"

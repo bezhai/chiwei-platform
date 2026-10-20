@@ -1,8 +1,8 @@
 """world 测试共用：临时的私有卷、起 world 的插件宿主（``app_host``）、替身模型和一轮之外的替身。
 
 四类 agent（主 agent、感知判断、NPC、应答）都经 :func:`app.world.agents.build_runner` 拿到
-runner，替身从那里换：按 prompt id 分给各自的替身，同时记下每一次建出来的是哪一类、拿到了
-哪些工具。
+runner，替身从那里换：按这次调用的名字（它的 prompt id）分给各自的替身，同时记下每一次调用的
+是哪一类、它的 spec、拿到了哪些工具。
 """
 from __future__ import annotations
 
@@ -49,9 +49,8 @@ class FakeRunner:
     def __init__(self, plan):
         self.plan = plan
         self.runs: list[list[Turn]] = []
-        self.configs = []
 
-    async def run(self, messages, *, context, max_retries, transcript_sink, **_):
+    async def run(self, messages, *, call, context, transcript_sink, **_):
         self.runs.append(list(messages))
         with agent_context(context):
             said = await self.plan()
@@ -69,7 +68,7 @@ class ScriptedAgent:
         self.inputs: list[str] = []
         self.contexts: list = []
 
-    async def run(self, messages, *, context, max_retries, transcript_sink, **_):
+    async def run(self, messages, *, call, context, transcript_sink=None, **_):
         text = messages[-1].content
         self.inputs.append(text)
         self.contexts.append(context)
@@ -102,7 +101,7 @@ async def world(volume, monkeypatch, app_host):
         runner: FakeRunner
         # 主 agent 之外那三类的替身：prompt id → runner。
         agents: dict[str, object] = {}
-        # 每一次建 runner：(AgentConfig, 拿到的工具名)。
+        # 每一次调用：(调用的名字, AgentSpec, 拿到的工具名)。
         built: list[tuple] = []
         scheduled: list[dict] = []
         # 感知判断之后代码发出去的告知（和它们的消息 id、要不要叫醒收件人，按发的先后）；开设了
@@ -181,12 +180,19 @@ async def world(volume, monkeypatch, app_host):
     async def record_round_cost(**kw):
         h.costs.append(kw)
 
-    def build_runner(config, tools):
-        h.built.append((config, [t.name for t in tools]))
-        if config.prompt_id == main_agent.ROUND.prompt_id:
-            h.runner.configs.append(config)
-            return h.runner
-        return h.agents[config.prompt_id]
+    class Dispatch:
+        """按这次调用的名字交给主 agent 的替身或那一类的替身，记下调用的是谁、拿到哪些工具。"""
+
+        def __init__(self, spec, tools):
+            self.spec, self.tools = spec, [t.name for t in tools]
+
+        async def run(self, messages, *, call, **kw):
+            h.built.append((call.agent, self.spec, self.tools))
+            target = h.runner if call.agent == main_agent.ROUND else h.agents[call.agent]
+            return await target.run(messages, call=call, **kw)
+
+    def build_runner(spec, tools):
+        return Dispatch(spec, tools)
 
     from inner_shared.dynamic_config import dynamic_config
 
@@ -220,9 +226,14 @@ def _world_inbox_handler(host):
     return inbox.detail["on_message"]
 
 
-def tools_built_for(world_handle, prompt_id: str) -> list[str]:
-    """最近一次为 ``prompt_id`` 那一类 agent 建 runner 时，它拿到的工具名。"""
-    return [names for config, names in world_handle.built if config.prompt_id == prompt_id][-1]
+def tools_built_for(world_handle, agent: str) -> list[str]:
+    """最近一次调用 ``agent`` 那一类时，它拿到的工具名。"""
+    return [names for name, _, names in world_handle.built if name == agent][-1]
+
+
+def spec_called(world_handle, agent: str):
+    """调用 ``agent`` 那一类时用的 AgentSpec（每次都一样，取第一次的）。"""
+    return [spec for name, spec, _ in world_handle.built if name == agent][0]
 
 
 def self_message(message_id: str, body: str = "醒来。"):

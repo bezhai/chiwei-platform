@@ -21,13 +21,15 @@ import uuid
 from app.agent.context import AgentContext
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
+from app.agent.round import open_call
 from app.infra.cst_time import now_cst
-from app.world.agents import AgentKind, run_agent, session_key, when
+from app.world.agents import lane, run_agent, when, world_agent
 from app.world.sources import query_tools
 
 logger = logging.getLogger(__name__)
 
-NPC = AgentKind(prompt_id="world_npc", trace_name="world-npc", model_key="world_npc_model")
+NPC = "world_npc"
+NPC_AGENT = world_agent(NPC, "world-npc", "world_npc_model")
 
 
 def _npc_input(npc: str, situation: str) -> str:
@@ -43,10 +45,11 @@ async def play_npc(npc: str, situation: str) -> str:
     """
     call_id = uuid.uuid4().hex
     reply = await run_agent(
-        NPC,
+        open_call(NPC, NPC_AGENT, lane=lane()),
+        NPC_AGENT,
         [Turn(role=Role.USER, content=_npc_input(npc, situation))],
         tools=await query_tools(),
-        context=AgentContext(session_id=session_key()),
+        context=AgentContext(),
         call_id=call_id,
     )
     acted = reply.text().strip()

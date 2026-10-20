@@ -28,11 +28,12 @@ from langfuse.model import TextPromptClient
 
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role
+from app.agent.round import open_call
 from app.infra import cst_time
 from app.living import moment as moment_mod
 from app.living import persona as persona_mod
 from app.living.loose_ends import LooseEnd
-from app.living.moment import _MOMENT_CFG, LifeMoment
+from app.living.moment import LIFE_MOMENT_AGENT, LIFE_MOMENT_PROMPT_ID, LifeMoment
 from tests.living.conftest import regular_round
 
 LANE = "coe-living"
@@ -147,7 +148,7 @@ def _life_moment_prompt(template: str) -> TextPromptClient:
     """一份挂在 living_life_moment 这个 id 下的 text prompt（本地编译，不连网）。"""
     return TextPromptClient(
         Prompt_Text(
-            name=_MOMENT_CFG.prompt_id,
+            name=LIFE_MOMENT_PROMPT_ID,
             version=1,
             type="text",
             prompt=template,
@@ -170,7 +171,11 @@ async def _system_at(template: str, clock: dt.datetime) -> str:
         ),
         patch.object(cst_time, "now_cst", lambda: clock),
     ):
-        _, _, messages = await Agent(_MOMENT_CFG)._prepare(
+        call = open_call(
+            LIFE_MOMENT_PROMPT_ID, LIFE_MOMENT_AGENT, lane=LANE, participant="akao"
+        )
+        _, _, messages = await Agent(LIFE_MOMENT_AGENT)._prepare(
+            call,
             {
                 "persona_name": "赤尾",
                 "persona_core": "她拍胶片、写角色分析、逛论坛。",

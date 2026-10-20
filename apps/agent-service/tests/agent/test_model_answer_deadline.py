@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,8 +29,10 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 from app.agent.adapters.gemini import GeminiAdapter
 from app.agent.adapters.openai import OpenAIAdapter
 from app.agent.client import ModelClient
-from app.agent.core import Agent, AgentConfig
+from app.agent.contracts import AgentSpec
+from app.agent.core import Agent
 from app.agent.neutral import Message, Role, StreamChunk
+from app.agent.round import open_call
 from app.capabilities._errors import CapabilityTimeout
 
 LEVEL = LangfuseOtelSpanAttributes.OBSERVATION_LEVEL
@@ -40,7 +43,13 @@ TYPE = LangfuseOtelSpanAttributes.OBSERVATION_TYPE
 DEADLINE = 0.1
 GUARD = 2.0
 
-LIFE_MOMENT = AgentConfig("living_life_moment", "life-model", "living-life-moment")
+LIFE_MOMENT = AgentSpec(
+    segments=("living_life_moment",), model="life-model", trace_name="living-life-moment"
+)
+
+
+def _her_call(spec: AgentSpec = LIFE_MOMENT):
+    return open_call("living_life_moment", spec, lane="coe-living")
 SCHEMA = {"title": "verdict", "type": "object", "properties": {}}
 
 
@@ -364,9 +373,9 @@ def life_round(monkeypatch) -> list[dict[str, Any]]:
 async def test_her_round_fails_at_the_deadline_with_the_reason_on_the_trace(
     exported_spans, life_round
 ):
-    """她那一轮传 ``max_retries=1``：卡住的那次调用到期限就让这一轮失败，交给下一拍重来。"""
+    """她那一轮 ``max_retries`` 是 1：卡住的那次调用到期限就让这一轮失败，交给下一拍重来。"""
     with pytest.raises(CapabilityTimeout):
-        await _guarded(Agent(LIFE_MOMENT).run([_user("醒了")], max_retries=1))
+        await _guarded(Agent(LIFE_MOMENT).run([_user("醒了")], call=_her_call()))
 
     assert len(life_round) == 1
     [root] = _named(exported_spans, "living-life-moment")
@@ -380,8 +389,9 @@ async def test_a_caller_that_allows_a_retry_gets_one_after_the_deadline(
     exported_spans, life_round
 ):
     """到期限算可重试的失败，跟 provider 自己的超时一样：允许重试的调用方照它的次数再来。"""
+    twice = replace(LIFE_MOMENT, max_retries=2)
     with pytest.raises(CapabilityTimeout):
-        await _guarded(Agent(LIFE_MOMENT).run([_user("醒了")], max_retries=2))
+        await _guarded(Agent(twice).run([_user("醒了")], call=_her_call(twice)))
 
     assert len(life_round) == 2
     roots = _named(exported_spans, "living-life-moment")

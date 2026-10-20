@@ -30,18 +30,21 @@ is retried like the provider's own timeouts.
 
 Usage::
 
-    from app.agent.core import Agent, AgentConfig
+    from app.agent.contracts import AgentSpec
+    from app.agent.core import Agent
     from app.agent.neutral import Message, Role
+    from app.agent.round import open_call
 
-    CFG = AgentConfig("world_engine", "offline-model", "world-engine")
+    SPEC = AgentSpec(segments=("world_engine",), model="offline-model", trace_name="world-engine")
 
-    result = await Agent(CFG).run(messages=[Message(role=Role.USER, content="hi")])
+    call = open_call("world_engine", SPEC, lane="prod")
+    result = await Agent(SPEC).run([Message(role=Role.USER, content="hi")], call=call)
     text = result.text()
 
-    async for chunk in Agent(CFG, tools=ALL_TOOLS).stream(messages=[...]):
-        ...
+    data = await Agent(SPEC).extract(Model, [...], call=open_call("world_engine", SPEC, lane="prod"))
 
-    data = await Agent(CFG).extract(Model, messages=[...])
+The caller opens the call and keeps it (:mod:`app.agent.round`): the agent binds it while it
+runs, and what the call's tools noted is read from it afterwards.
 """
 
 from __future__ import annotations
@@ -50,12 +53,10 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import contextmanager
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
-from inner_shared.dynamic_config import dynamic_config
 from langfuse import Langfuse
 from langfuse.model import PromptClient
 from openai import (
@@ -68,6 +69,7 @@ from pydantic import BaseModel
 
 from app.agent.client import ModelClient, build_model_client
 from app.agent.context import AgentContext
+from app.agent.contracts import AgentSpec, FromConfig
 from app.agent.neutral import (
     ContentBlock,
     Message,
@@ -80,6 +82,7 @@ from app.agent.neutral import (
     TurnPartKind,
 )
 from app.agent.prompts import compile_to_messages, get_prompt
+from app.agent.round import Call, in_call
 from app.agent.runtime_context import agent_context
 from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
@@ -87,6 +90,7 @@ from app.agent.trace import (
     current_turn_trace_id,
     mark_failed,
     rendered_from,
+    separate_trace,
     under_last_generation,
 )
 from app.api.middleware import get_lane
@@ -124,16 +128,8 @@ RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
     CapabilityTimeout,
 )
 
-_DEFAULT_MAX_RETRIES = 2
 _BACKOFF_BASE = 2  # seconds (exponential base)
 _BACKOFF_MAX = 8  # seconds (clamp)
-
-# Max model calls per run/stream — the hand-written loop counts model calls
-# directly. The legacy LangGraph ``recursion_limit=12`` counted graph
-# super-steps (model + tool nodes alternating), i.e. ~6 model calls / ~6 tool
-# rounds. We keep that model-call budget here so runaway-loop cost / latency
-# stays equivalent to the langchain path.
-_DEFAULT_RECURSION_LIMIT = 6
 
 # Max attempts (including the first) for ONE ReAct turn when the model returns
 # an empty result — no text, no tool_calls (trace 82323210372fe067ec2a60abd8e9
@@ -148,29 +144,6 @@ _DEFAULT_RECURSION_LIMIT = 6
 # still costs exactly one model call, so this never adds latency/cost to the
 # common case.
 _EMPTY_TURN_MAX_ATTEMPTS = 3
-
-
-# ---------------------------------------------------------------------------
-# Agent configuration
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class AgentConfig:
-    """Immutable configuration for an agent.
-
-    Each domain module defines its own config constants.
-    Use ``dataclasses.replace(cfg, model_id="...")`` for per-call overrides.
-    """
-
-    prompt_id: str
-    model_id: str
-    trace_name: str | None = None
-    recursion_limit: int = _DEFAULT_RECURSION_LIMIT
-    # Opt-in: this agent wants Gemini's native google search to replace the
-    # ``search_web`` tool when the resolved model actually supports it. Only
-    # main chat declares it; every other config keeps the default (off).
-    native_web_search: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -421,17 +394,6 @@ _TERMINAL_TOOL_NAMES = {"no_reply", "stop_for_now"}
 # reading the stored context does not take it for a tool that failed.
 _NEVER_RAN = "（这一轮在这只手之前就结束了，它没有执行。）"
 
-# The self-written web-search tool. When an agent that opted into native search
-# runs on a model that supports it (and the flag is on), this tool is dropped
-# from the model's tool list and replaced by the provider's native grounding.
-_SEARCH_WEB_TOOL_NAME = "search_web"
-
-# Dynamic Config kill-switch for the native-search swap. Default off so the
-# swap stays dark until explicitly enabled per lane; flipping it back off
-# restores ``search_web`` at runtime with no redeploy.
-_NATIVE_WEB_SEARCH_FLAG = "main_chat_native_web_search"
-
-
 def _tooldefs(tools: list[Tool]) -> list[ToolDef] | None:
     """Project neutral Tools to the ToolDefs the model sees, or None if empty."""
     return [t.definition for t in tools] if tools else None
@@ -605,7 +567,6 @@ async def _run_loop(
     context: AgentContext | None,
     recursion_limit: int,
     session_id: str | None = None,
-    native_web_search: bool = False,
     model_kwargs: dict[str, Any] | None = None,
     transcript_sink: list[Message] | None = None,
 ) -> Message:
@@ -650,13 +611,7 @@ async def _run_loop(
     """
     convo = list(messages)
     tool_defs = _tooldefs(tools)
-    extra = model_kwargs or {}
-    # Only forward native_web_search when enabled: a False would hand existing
-    # adapters (which don't know the kwarg) a parameter they never received,
-    # so the non-native path stays byte-for-byte unchanged.
-    call_kwargs = {**extra, "session_id": session_id}
-    if native_web_search:
-        call_kwargs["native_web_search"] = True
+    call_kwargs = {**(model_kwargs or {}), "session_id": session_id}
     last: Message | None = None
 
     for _ in range(max(1, recursion_limit)):
@@ -754,7 +709,6 @@ async def _stream_loop(
     context: AgentContext | None,
     recursion_limit: int,
     session_id: str | None = None,
-    native_web_search: bool = False,
     model_kwargs: dict[str, Any] | None = None,
 ) -> AsyncIterator[StreamChunk]:
     """Stream neutral chunks; on a tool-call turn, dispatch and loop.
@@ -771,12 +725,7 @@ async def _stream_loop(
     """
     convo = list(messages)
     tool_defs = _tooldefs(tools)
-    extra = model_kwargs or {}
-    # Same rule as _run_loop: only forward native_web_search when enabled, so a
-    # non-native stream call carries exactly the kwargs it always did.
-    call_kwargs = {**extra, "session_id": session_id}
-    if native_web_search:
-        call_kwargs["native_web_search"] = True
+    call_kwargs = {**(model_kwargs or {}), "session_id": session_id}
 
     for _ in range(max(1, recursion_limit)):
         text_parts: list[str] = []
@@ -868,46 +817,47 @@ def _nullctx():
 # ---------------------------------------------------------------------------
 
 
+async def _configured(value: str | int | FromConfig) -> Any:
+    """``value`` itself, or what it reads from Dynamic Config now."""
+    return await value.read() if isinstance(value, FromConfig) else value
+
+
 class Agent:
-    """Unified thinking entry point.
+    """Unified thinking entry point for one agent (its :class:`AgentSpec`).
 
     ``run`` / ``stream`` drive a hand-written ReAct loop. Having tools or not is
     just a parameter difference, not a code path difference. ``extract`` is the
     structured-output path (single ``model.structured`` call).
+
+    Every entry takes the :class:`~app.agent.round.Call` its caller opened and binds it as the
+    current call for as long as it runs; the call's own state is emptied at the start of each
+    attempt. The model and the budget of model calls are read when the call starts (they may come
+    from Dynamic Config); a whole call is tried ``spec.max_retries`` times on a temporary model
+    failure. ``spec.separate_trace`` puts every call in a Langfuse trace of its own.
     """
 
-    def __init__(
-        self,
-        config: AgentConfig,
-        *,
-        tools: list[Tool] | None = None,
-        model_kwargs: dict[str, Any] | None = None,
-        update_trace: bool = True,
-    ) -> None:
-        self._cfg = config
-        self._tools = tools or []
-        self._model_kwargs = model_kwargs or {}
-        self._update_trace = update_trace
+    def __init__(self, spec: AgentSpec, *, tools: Sequence[Tool] = ()) -> None:
+        self._spec = spec
+        self._tools = list(tools)
 
     # ------------------------------------------------------------------
     # internal
     # ------------------------------------------------------------------
 
+    def _trace_scope(self):
+        return separate_trace() if self._spec.separate_trace else nullcontext()
+
     async def _prepare(
-        self, prompt_vars: dict[str, Any]
+        self, call: Call, prompt_vars: dict[str, Any]
     ) -> tuple[ModelClient, PromptClient, list[Message]]:
         """Resolve the model client, fetch the prompt and compile its messages.
 
-        The prompt object comes back with what it compiled to: the call's root
-        span carries it, so every model call links the version actually rendered.
+        The prompt is the one named after the call (an agent's name is its prompt id). The prompt
+        object comes back with what it compiled to: the call's root span carries it, so every
+        model call links the version actually rendered.
         """
-        if not self._cfg.prompt_id:
-            raise ValueError(
-                f"Agent({self._cfg.trace_name}).run/stream requires a non-empty "
-                f"prompt_id. Guard agents (empty prompt_id) should use extract()."
-            )
-        langfuse_prompt = get_prompt(self._cfg.prompt_id)
-        model = await build_model_client(self._cfg.model_id)
+        langfuse_prompt = get_prompt(call.agent)
+        model = await build_model_client(await _configured(self._spec.model))
         # 全局注入的"现在"显式取 CST（北京时间），不依赖容器时区——naive
         # ``datetime.now()`` 在 TZ 不确定的容器里可能是 UTC，喂给每条 prompt 的
         # currTime 就跟 world/life 的 CST 时刻差 8 小时。这一处修正整条 chat 线。
@@ -920,39 +870,13 @@ class Agent:
         )
         return model, langfuse_prompt, prompt_messages
 
-    async def _resolve_native_web_search(
-        self, model: ModelClient
-    ) -> tuple[list[Tool], bool]:
-        """Decide this run's tool list and whether to enable native web search.
-
-        The swap fires only when all three conditions hold — this agent opted in
-        (``cfg.native_web_search``, only main chat does), the resolved model can
-        run native grounding alongside custom tools (Gemini 3), and the runtime
-        flag is on — AND ``search_web`` is actually mounted. When it fires the
-        ``search_web`` tool is dropped (the model uses native search instead) and
-        the signal is returned. Otherwise the tool list is returned unchanged and
-        the signal is False, so every other agent (world / life / guard, never
-        opted in) calls the model byte-for-byte as before.
-
-        The two cheap in-memory predicates are checked first so every non-opted
-        agent short-circuits *before* touching Dynamic Config — the flag read is
-        the only blocking bit, wrapped in ``asyncio.to_thread`` because the SDK's
-        cache-miss refresh is sync httpx that would otherwise stall the shared
-        event loop.
-
-        Computed once per run (the model is fixed across retry attempts) so the
-        loops stay free of this business judgment.
-        """
-        tools = self._tools
-        if not (self._cfg.native_web_search and model.supports_native_web_search):
-            return tools, False
-        flag_on = await asyncio.to_thread(
-            dynamic_config.get_bool, _NATIVE_WEB_SEARCH_FLAG, default=False
+    def _retry(self):
+        return _retry_decorator(
+            attempts=self._spec.max_retries,
+            base_delay_s=float(_BACKOFF_BASE),
+            max_delay_s=float(_BACKOFF_MAX),
+            retry_on=RETRYABLE_EXCEPTIONS,
         )
-        if flag_on and any(t.name == _SEARCH_WEB_TOOL_NAME for t in tools):
-            tools = [t for t in tools if t.name != _SEARCH_WEB_TOOL_NAME]
-            return tools, True
-        return tools, False
 
     # ------------------------------------------------------------------
     # public API
@@ -962,10 +886,10 @@ class Agent:
         self,
         messages: list[Message],
         *,
+        call: Call,
         prompt_vars: dict[str, Any] | None = None,
         context: AgentContext | None = None,
         transcript_sink: list[Message] | None = None,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> Message:
         """Execute the ReAct loop and return the final assistant ``Message``.
 
@@ -979,44 +903,40 @@ class Agent:
 
         Only the messages of a *successful* attempt reach the sink: a retried
         attempt starts a fresh collection, so a transient failure never leaves a
-        half-written turn behind.
+        half-written turn behind. The call's own state starts empty on every
+        attempt for the same reason.
         """
-        model, prompt, prompt_messages = await self._prepare(prompt_vars or {})
-        tools, native_web_search = await self._resolve_native_web_search(model)
+        spec = self._spec
+        with in_call(call), self._trace_scope():
+            model, prompt, prompt_messages = await self._prepare(call, prompt_vars or {})
+            recursion_limit = await _configured(spec.recursion_limit)
+            full_messages = [*prompt_messages, *messages]
 
-        full_messages = [*prompt_messages, *messages]
-        trace_session_id = context.session_id if context else None
+            @self._retry()
+            async def _invoke() -> tuple[Message, list[Message]]:
+                call.clear_state()
+                sink: list[Message] = []
+                with _root_span(
+                    name=spec.trace_name,
+                    input=[m.to_dict() for m in full_messages],
+                    update_trace=spec.update_trace,
+                    session_id=call.session,
+                    prompt=prompt,
+                ) as span:
+                    result = await _run_loop(
+                        model,
+                        messages=full_messages,
+                        tools=self._tools,
+                        context=context,
+                        recursion_limit=recursion_limit,
+                        session_id=call.session,
+                        model_kwargs=dict(spec.model_kwargs),
+                        transcript_sink=sink,
+                    )
+                    _record_output(span, result.to_dict())
+                    return result, sink
 
-        @_retry_decorator(
-            attempts=max_retries,
-            base_delay_s=float(_BACKOFF_BASE),
-            max_delay_s=float(_BACKOFF_MAX),
-            retry_on=RETRYABLE_EXCEPTIONS,
-        )
-        async def _invoke() -> tuple[Message, list[Message]]:
-            sink: list[Message] = []
-            with _root_span(
-                name=self._cfg.trace_name,
-                input=[m.to_dict() for m in full_messages],
-                update_trace=self._update_trace,
-                session_id=trace_session_id,
-                prompt=prompt,
-            ) as span:
-                result = await _run_loop(
-                    model,
-                    messages=full_messages,
-                    tools=tools,
-                    context=context,
-                    recursion_limit=self._cfg.recursion_limit,
-                    session_id=trace_session_id,
-                    native_web_search=native_web_search,
-                    model_kwargs=self._model_kwargs,
-                    transcript_sink=sink,
-                )
-                _record_output(span, result.to_dict())
-                return result, sink
-
-        result, produced = await _invoke()
+            result, produced = await _invoke()
         if transcript_sink is not None:
             transcript_sink.extend(produced)
         return result
@@ -1025,9 +945,9 @@ class Agent:
         self,
         messages: list[Message],
         *,
+        call: Call,
         prompt_vars: dict[str, Any] | None = None,
         context: AgentContext | None = None,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream neutral ``StreamChunk``s through the ReAct loop.
 
@@ -1035,21 +955,25 @@ class Agent:
         consumer, replaying would duplicate the prefix. Backoff math matches
         ``app.capabilities.retry`` (exponential ``base * 2^(N-1)`` clamped) so
         streaming and non-streaming paths stay consistent.
-        """
-        model, prompt, prompt_messages = await self._prepare(prompt_vars or {})
-        tools, native_web_search = await self._resolve_native_web_search(model)
 
+        It takes the call for its session only and does not bind it: a context variable set in an
+        async generator cannot be reset when a consumer drops the generator unclosed (the
+        garbage collector finishes it in another context). No round streams.
+        """
+        spec = self._spec
+        max_retries = spec.max_retries
+        model, prompt, prompt_messages = await self._prepare(call, prompt_vars or {})
+        recursion_limit = await _configured(spec.recursion_limit)
         full_messages = [*prompt_messages, *messages]
-        trace_session_id = context.session_id if context else None
 
         for attempt in range(1, max_retries + 1):
             tokens_yielded = False
             try:
                 with _root_span(
-                    name=self._cfg.trace_name,
+                    name=spec.trace_name,
                     input=[m.to_dict() for m in full_messages],
-                    update_trace=self._update_trace,
-                    session_id=trace_session_id,
+                    update_trace=spec.update_trace,
+                    session_id=call.session,
                     prompt=prompt,
                 ) as span:
                     streamed: list[str] = []
@@ -1057,12 +981,11 @@ class Agent:
                         async for chunk in _stream_loop(
                             model,
                             messages=full_messages,
-                            tools=tools,
+                            tools=self._tools,
                             context=context,
-                            recursion_limit=self._cfg.recursion_limit,
-                            session_id=trace_session_id,
-                            native_web_search=native_web_search,
-                            model_kwargs=self._model_kwargs,
+                            recursion_limit=recursion_limit,
+                            session_id=call.session,
+                            model_kwargs=dict(spec.model_kwargs),
                         ):
                             tokens_yielded = True
                             if chunk.text:
@@ -1079,7 +1002,7 @@ class Agent:
                 logger.warning(
                     "Agent(%s).stream attempt %d/%d failed (%s: %s); "
                     "retrying in %.2fs",
-                    self._cfg.trace_name,
+                    spec.trace_name,
                     attempt,
                     max_retries,
                     type(e).__name__,
@@ -1093,52 +1016,41 @@ class Agent:
         response_model: type[BaseModel],
         messages: list[Message],
         *,
+        call: Call,
         prompt_vars: dict[str, Any] | None = None,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
-        session_id: str | None = None,
     ) -> BaseModel:
         """Structured output — return a validated Pydantic model instance.
 
         One ``model.structured`` call against ``response_model``'s JSON schema;
-        the returned dict is validated back into the model. Guard agents (empty
-        prompt_id) skip prompt compilation.
+        the returned dict is validated back into the model.
 
-        ``session_id`` (when given) tags this trace's langfuse session, so an
-        async-internal structured judgment (e.g. world 在场匹配) groups into its
-        actor's day session like ``run`` / ``stream`` do. ``None`` keeps the
-        status quo — the trace's session is left untouched. ``extract`` stays
-        stateless either way (no transcript read/write): session_id is a trace
-        tag only, not a continuation.
+        The call's session (when its agent has one) tags this trace's langfuse
+        session; ``extract`` stays stateless either way (no transcript
+        read/write): a session is a trace tag only, not a continuation.
         """
-        model = await build_model_client(self._cfg.model_id)
-        schema = response_model.model_json_schema()
-
-        full_messages = list(messages)
-        prompt: PromptClient | None = None
-        if self._cfg.prompt_id:
-            prompt = get_prompt(self._cfg.prompt_id)
+        spec = self._spec
+        with in_call(call), self._trace_scope():
+            model = await build_model_client(await _configured(spec.model))
+            schema = response_model.model_json_schema()
+            prompt = get_prompt(call.agent)
             prompt_messages = compile_to_messages(prompt, **(prompt_vars or {}))
             full_messages = [*prompt_messages, *messages]
 
-        @_retry_decorator(
-            attempts=max_retries,
-            base_delay_s=float(_BACKOFF_BASE),
-            max_delay_s=float(_BACKOFF_MAX),
-            retry_on=RETRYABLE_EXCEPTIONS,
-        )
-        async def _invoke() -> BaseModel:
-            with _root_span(
-                name=self._cfg.trace_name,
-                input=[m.to_dict() for m in full_messages],
-                update_trace=self._update_trace,
-                session_id=session_id,
-                prompt=prompt,
-            ) as span:
-                data = await model.structured(
-                    full_messages, schema=schema, **self._model_kwargs
-                )
-                result = response_model.model_validate(data)
-                _record_output(span, result.model_dump(mode="json"))
-                return result
+            @self._retry()
+            async def _invoke() -> BaseModel:
+                call.clear_state()
+                with _root_span(
+                    name=spec.trace_name,
+                    input=[m.to_dict() for m in full_messages],
+                    update_trace=spec.update_trace,
+                    session_id=call.session,
+                    prompt=prompt,
+                ) as span:
+                    data = await model.structured(
+                        full_messages, schema=schema, **dict(spec.model_kwargs)
+                    )
+                    result = response_model.model_validate(data)
+                    _record_output(span, result.model_dump(mode="json"))
+                    return result
 
-        return await _invoke()
+            return await _invoke()

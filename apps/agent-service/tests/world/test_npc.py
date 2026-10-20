@@ -11,7 +11,7 @@ from app.world.actions import let_npc_appear
 from app.world.agents import when
 from app.world.sources import query_tools
 
-from .conftest import LANE, ScriptedAgent, sets_wake, tools_built_for
+from .conftest import LANE, ScriptedAgent, sets_wake, spec_called, tools_built_for
 
 SITUATION = "下午四点，学校的美术教室，一个学生把一幅画递给美术老师。"
 LINES = "美术老师接过画，举到窗边看了一会儿，说：「这里的光很好，影子可以再深一点。」"
@@ -63,8 +63,8 @@ async def _a_round(world, plan):
 async def test_what_the_resident_is_told_comes_from_the_npc_agent_not_the_main_agent(world):
     player = plays(LINES)
     judge = passes_on_what_it_was_told("ayana")
-    world.agents[npc.NPC.prompt_id] = player
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[npc.NPC] = player
+    world.agents[perception.PERCEPTION] = judge
 
     [result] = await _a_round(world, lets_appear(("美术老师", SITUATION)))
 
@@ -82,8 +82,8 @@ async def test_what_the_resident_is_told_comes_from_the_npc_agent_not_the_main_a
 async def test_perception_of_an_npcs_words_sees_the_message_that_woke_this_round(world):
     """跟报告变化一样：感知判断知道这一轮是谁发来的什么叫醒的，NPC 的言行接在后面。"""
     judge = passes_on_what_it_was_told("ayana")
-    world.agents[npc.NPC.prompt_id] = plays(LINES)
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[npc.NPC] = plays(LINES)
+    world.agents[perception.PERCEPTION] = judge
 
     await _a_round(world, lets_appear(("美术老师", SITUATION)))
 
@@ -98,12 +98,12 @@ async def test_perception_of_an_npcs_words_sees_the_message_that_woke_this_round
 
 
 async def test_the_npc_agent_has_its_own_prompt_trace_cost_and_only_the_sources_tools(world):
-    world.agents[npc.NPC.prompt_id] = plays(LINES)
-    world.agents[perception.PERCEPTION.prompt_id] = passes_on_what_it_was_told("ayana")
+    world.agents[npc.NPC] = plays(LINES)
+    world.agents[perception.PERCEPTION] = passes_on_what_it_was_told("ayana")
 
     await _a_round(world, lets_appear(("美术老师", SITUATION)))
 
-    [config] = [c for c, _ in world.built if c.prompt_id == "world_npc"]
+    config = spec_called(world, "world_npc")
     assert config.trace_name == "world-npc"
     assert tools_built_for(world, "world_npc") == [t.name for t in await query_tools()]
     assert len([c for c in world.costs if c["round_id"].startswith("world-npc:")]) == 1
@@ -112,8 +112,8 @@ async def test_the_npc_agent_has_its_own_prompt_trace_cost_and_only_the_sources_
 async def test_each_appearance_is_its_own_npc_call_and_its_own_perception_call(world):
     player = plays(LINES)
     judge = passes_on_what_it_was_told("ayana")
-    world.agents[npc.NPC.prompt_id] = player
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[npc.NPC] = player
+    world.agents[perception.PERCEPTION] = judge
 
     await _a_round(world, lets_appear(("美术老师", SITUATION), ("门卫", "放学时的校门口。")))
 
@@ -123,8 +123,8 @@ async def test_each_appearance_is_its_own_npc_call_and_its_own_perception_call(w
 
 async def test_an_npc_who_says_and_does_nothing_tells_nobody(world):
     judge = passes_on_what_it_was_told("ayana")
-    world.agents[npc.NPC.prompt_id] = plays("   ")
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[npc.NPC] = plays("   ")
+    world.agents[perception.PERCEPTION] = judge
 
     [result] = await _a_round(world, lets_appear(("美术老师", SITUATION)))
 
@@ -136,8 +136,8 @@ async def test_the_main_agent_sees_the_npcs_own_words_even_if_nobody_notices_the
     async def nobody(_input):
         return "没有人会察觉。"
 
-    world.agents[npc.NPC.prompt_id] = plays(LINES)
-    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(nobody)
+    world.agents[npc.NPC] = plays(LINES)
+    world.agents[perception.PERCEPTION] = ScriptedAgent(nobody)
 
     [result] = await _a_round(world, lets_appear(("美术老师", SITUATION)))
 
@@ -148,8 +148,8 @@ async def test_the_main_agent_sees_the_npcs_own_words_even_if_nobody_notices_the
 async def test_npc_words_messaging_could_not_carry_are_not_kept_or_judged(world, volume):
     """NPC 的言行要原样记进 unfinished、交给感知判断；存不下的字当作这次扮演没做成，交回主 agent。"""
     judge = passes_on_what_it_was_told("ayana")
-    world.agents[npc.NPC.prompt_id] = plays("门卫说：「今天\x00关门早。」")
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[npc.NPC] = plays("门卫说：「今天\x00关门早。」")
+    world.agents[perception.PERCEPTION] = judge
 
     [result] = await _a_round(world, lets_appear(("门卫", "放学时的校门口。")))
 
@@ -160,7 +160,7 @@ async def test_npc_words_messaging_could_not_carry_are_not_kept_or_judged(world,
 
 async def test_a_situation_messaging_could_not_carry_is_handed_back_before_anyone_plays(world):
     player = plays(LINES)
-    world.agents[npc.NPC.prompt_id] = player
+    world.agents[npc.NPC] = player
 
     [result] = await _a_round(world, lets_appear(("美术老师", "美术教室\x00里。")))
 

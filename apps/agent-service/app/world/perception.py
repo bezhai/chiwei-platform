@@ -55,6 +55,7 @@ from app.agent.context import AgentContext
 from app.agent.core import RETRYABLE_EXCEPTIONS
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
+from app.agent.round import open_call
 from app.agent.runtime_context import get_context
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
@@ -63,17 +64,14 @@ from app.capabilities.retry import retry
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, Message, message_body, participant
 from app.messaging.sending import send
-from app.world.agents import AgentKind, run_agent, session_key, when
+from app.world.agents import lane, run_agent, when, world_agent
 from app.world.sources import query_tools
 from app.world.wake import WORLD, is_own_wake
 
 logger = logging.getLogger(__name__)
 
-PERCEPTION = AgentKind(
-    prompt_id="world_perception",
-    trace_name="world-perception",
-    model_key="world_perception_model",
-)
+PERCEPTION = "world_perception"
+PERCEPTION_AGENT = world_agent(PERCEPTION, "world-perception", "world_perception_model")
 
 # ``AgentContext.features`` 里这一次判断的结果：参与者名字 → (他察觉到的那段话, 要不要现在就叫他来看)。
 _JUDGMENTS = "world_perception_judgments"
@@ -209,10 +207,11 @@ async def judge_who_notices(
         judgments: dict[str, tuple[str, bool]] = {}
         call_id = uuid.uuid4().hex
         await run_agent(
-            PERCEPTION,
+            open_call(PERCEPTION, PERCEPTION_AGENT, lane=lane()),
+            PERCEPTION_AGENT,
             [Turn(role=Role.USER, content=perception_input)],
             tools=tools,
-            context=AgentContext(session_id=session_key(), features={_JUDGMENTS: judgments}),
+            context=AgentContext(features={_JUDGMENTS: judgments}),
             call_id=call_id,
         )
         return call_id, judgments

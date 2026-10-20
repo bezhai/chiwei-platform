@@ -21,16 +21,16 @@ import uuid
 from app.agent.context import AgentContext
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
+from app.agent.round import open_call
 from app.infra.cst_time import now_cst
 from app.messaging.message import Message
-from app.world.agents import AgentKind, run_agent, session_key, when
+from app.world.agents import lane, run_agent, when, world_agent
 from app.world.sources import query_tools
 
 logger = logging.getLogger(__name__)
 
-ANSWER = AgentKind(
-    prompt_id="world_answer", trace_name="world-answer", model_key="world_answer_model"
-)
+ANSWER = "world_answer"
+ANSWER_AGENT = world_agent(ANSWER, "world-answer", "world_answer_model")
 
 
 def _answer_input(question: Message) -> str:
@@ -50,10 +50,11 @@ async def answer_question(question: Message) -> str | None:
     """
     call_id = uuid.uuid4().hex
     reply = await run_agent(
-        ANSWER,
+        open_call(ANSWER, ANSWER_AGENT, lane=lane()),
+        ANSWER_AGENT,
         [Turn(role=Role.USER, content=_answer_input(question))],
         tools=await query_tools(),
-        context=AgentContext(session_id=session_key()),
+        context=AgentContext(),
         call_id=call_id,
     )
     text = reply.text().strip()

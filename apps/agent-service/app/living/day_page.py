@@ -44,9 +44,9 @@ from typing import Annotated
 
 from pydantic import field_validator
 
-from app.agent.context import AgentContext
-from app.agent.core import AgentConfig
+from app.agent.contracts import AgentSpec
 from app.agent.neutral import Message, Role
+from app.agent.round import open_call
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
 from app.data.persist import fetch_all, fetch_one, from_row, insert_idempotent
@@ -79,11 +79,14 @@ DAY_PAGE_PROMPT_ID = "living_day_page"
 # recursion_limit 1：这一轮**没有工具**，一次生成就完。这不是省钱，是把一整类失败
 # 从存在里去掉——有工具的话"她调了工具但正文写空了"是一种既没报错、也没有页的状态，
 # 而这里她的回复正文就是那一页，写没写成只有一个判据。
-_DAY_PAGE_CFG = AgentConfig(
-    DAY_PAGE_PROMPT_ID,
-    "offline-model",
-    "living-day-page",
+#
+# 一个人的日记在 langfuse 里读成一条流（session），逐天翻起来才不用大海捞针。
+DAY_PAGE_AGENT = AgentSpec(
+    segments=(DAY_PAGE_PROMPT_ID,),
+    model="offline-model",
+    trace_name="living-day-page",
     recursion_limit=1,
+    session="living-day-page:{lane}:{participant}",
 )
 
 
@@ -272,9 +275,9 @@ async def read_day_pages_between(
 def build_day_page_runner() -> AgentRunner:
     """写这一页的 agent。模块级函数，测试替身从这里换掉，不碰真模型。
 
-    **不带任何工具**（见 :data:`_DAY_PAGE_CFG`）：她的回复正文就是那一页。
+    **不带任何工具**（见 :data:`DAY_PAGE_AGENT`）：她的回复正文就是那一页。
     """
-    return AgentRunner(_DAY_PAGE_CFG)
+    return AgentRunner(DAY_PAGE_AGENT)
 
 
 def _day_page_prompt(*, day: date, lines: list[str], previous: LivingDayPage | None) -> str:
@@ -370,19 +373,14 @@ async def write_due_page(due: DuePage) -> LivingDayPage | None:
     话她会再写一次。拿空页把这天记成"写过了"是最坏的一种，因为那一天从此永远丢了，而且看起来
     一切正常。
 
-    ``max_retries=1``：core 的 ``run`` 把整轮包在 ``@retry`` 里，一次模型瞬时失败会整轮重放、白花
-    一次钱；这一轮本来就低频，五分钟后那一拍再来就行。模型失败往外抛，由她日记队列上的钟记一条
+    模型的临时失败不整轮重来（:data:`DAY_PAGE_AGENT` 的 ``max_retries`` 是 1）：重放白花一次钱；
+    这一轮本来就低频，五分钟后那一拍再来就行。模型失败往外抛，由她日记队列上的钟记一条
     warning（一个人的失败不拖累另两个人）。
     """
     lane, persona_id, day = due.lane, due.persona_id, due.day
     previous = await read_day_page_before(lane=lane, persona_id=persona_id, day=day)
     prompt_vars = await persona_prompt_vars(lane=lane, persona_id=persona_id)
-    # 一个人的日记在 langfuse 里读成一条流，逐天翻起来才不用大海捞针。没有工具，
-    # 所以不需要任何 ambient feature。
-    context = AgentContext(
-        persona_id=persona_id,
-        session_id=f"living-day-page:{lane}:{persona_id}",
-    )
+    call = open_call(DAY_PAGE_PROMPT_ID, DAY_PAGE_AGENT, lane=lane, participant=persona_id)
     # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
     # 会系统性丢 trace，"这一天花了多少"只能从 PG 数。
     with collect_usage() as usage:
@@ -395,9 +393,8 @@ async def write_due_page(due: DuePage) -> LivingDayPage | None:
                     ),
                 )
             ],
+            call=call,
             prompt_vars=prompt_vars,
-            context=context,
-            max_retries=1,
         )
 
     await record_round_cost(

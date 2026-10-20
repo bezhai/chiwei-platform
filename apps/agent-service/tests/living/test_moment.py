@@ -1129,11 +1129,14 @@ async def test_the_latest_moment_is_the_one_that_ran_last(moment_db, stub_moment
 @pytest.mark.integration
 async def test_a_moment_is_not_replayed_by_the_agent_retry(moment_db, stub_moment):
     """durable mutation：整轮 ReAct 被 @retry 包着，重放会把已经写过的库再写一遍。"""
+    from app.living.moment import LIFE_MOMENT_AGENT
+
     runner = stub_moment(said="继续")
 
     await regular_round(LANE, "akao", _at(14))
 
-    assert runner.runs[0][1]["max_retries"] == 1
+    assert runner.runs[0][1]["call"].agent == LIFE_MOMENT_PROMPT_ID
+    assert LIFE_MOMENT_AGENT.max_retries == 1
 
 
 # --------------------------------------------------------------------------
@@ -1462,16 +1465,16 @@ def test_one_wake_has_room_for_more_than_one_whole_thing():
     8 只够两件；而她 2026-09-11 实测那 12 只需要中间结果的工具一次都没用过。上限本身
     不是节奏——节奏由 ``stop_for_now`` 交给她自己，这个数只是兜底。
     """
-    from app.living.moment import _MOMENT_CFG
+    from app.living.moment import LIFE_MOMENT_AGENT
 
-    assert _MOMENT_CFG.recursion_limit == 12
+    assert LIFE_MOMENT_AGENT.recursion_limit == 12
 
 
 def test_the_moment_runs_on_the_life_model():
     """life 一天 432 个 moment × 三个人 —— 这条高频线走 ``life-model``，不占离线调用的档位。"""
-    from app.living.moment import _MOMENT_CFG
+    from app.living.moment import LIFE_MOMENT_AGENT
 
-    assert _MOMENT_CFG.model_id == "life-model"
+    assert LIFE_MOMENT_AGENT.model == "life-model"
 
 
 # --------------------------------------------------------------------------

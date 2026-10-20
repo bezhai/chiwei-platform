@@ -54,12 +54,13 @@ from app.agent.continuity import (
 )
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
+from app.agent.round import open_call
 from app.agent.session import load_session
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, Message
 from app.world import records, unfinished
 from app.world.actions import ACTIONS, ROUND_SCOPE, RoundScope
-from app.world.agents import WORLD_MODEL_KEY, AgentKind, run_agent, session_key, when
+from app.world.agents import lane, run_agent, session_key, when, world_agent
 from app.world.perception import Told, render_told, tell
 from app.world.sources import material_tools, query_tools
 from app.world.sources.records import RECORDS_READ
@@ -67,9 +68,10 @@ from app.world.wake import NextWake, is_own_wake, read_next_wake, set_next_wake
 
 logger = logging.getLogger(__name__)
 
-# 主 agent 这一类：Langfuse prompt（泳道 label 取不到时退回 production，见
-# :func:`app.agent.prompts.get_prompt`）、trace 名、模型键。
-ROUND = AgentKind(prompt_id="world_round", trace_name="world-round", model_key=WORLD_MODEL_KEY)
+# 主 agent 这一类：名字就是它的 Langfuse prompt（泳道 label 取不到时退回 production，见
+# :func:`app.agent.prompts.get_prompt`），模型用主 agent 的键。
+ROUND = "world_round"
+ROUND_AGENT = world_agent(ROUND, "world-round")
 
 # 一轮最多跑多久，超过就取消、算这一轮没跑完（:class:`app.world.rounds.Rounds` 管它，收件箱的
 # 处理时限和占位租约按它放长）。正常一轮 30 到 70 秒，10 分钟是将近十倍的余量。不能再长：一次投递
@@ -199,12 +201,11 @@ async def run_round(messages: Sequence[Message]) -> None:
         ),
     )
     scope = RoundScope(messages=tuple(messages))
-    context = AgentContext(
-        session_id=key, features={ROUND_SCOPE: scope, RECORDS_READ: {}}
-    )
+    context = AgentContext(features={ROUND_SCOPE: scope, RECORDS_READ: {}})
     produced: list[Turn] = []
     reply = await run_agent(
-        ROUND,
+        open_call(ROUND, ROUND_AGENT, lane=lane()),
+        ROUND_AGENT,
         [*history, round_input],
         tools=[*await query_tools(), *ACTIONS],
         context=context,

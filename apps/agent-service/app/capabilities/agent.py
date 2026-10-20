@@ -1,30 +1,26 @@
 """AgentRunner — thin adapter over ``app.agent.core.Agent``.
 
-Holds a preconfigured ``Agent`` so dataflow nodes can declare an agent field
-once at node definition and call ``run`` / ``stream`` / ``extract`` per event.
+Holds a preconfigured ``Agent`` so a caller can declare an agent once and call
+``run`` / ``stream`` / ``extract`` per event.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any
 
 from pydantic import BaseModel
 
-from app.agent.core import Agent, AgentConfig
+from app.agent.contracts import AgentSpec
+from app.agent.core import Agent
+from app.agent.tooling import Tool
 
 
 class AgentRunner:
     """Adapter over ``app.agent.core.Agent`` — one preconfigured agent per instance."""
 
-    def __init__(
-        self,
-        config: AgentConfig,
-        *,
-        tools: list[Any] | None = None,
-        model_kwargs: dict[str, Any] | None = None,
-    ) -> None:
-        self._agent = Agent(config, tools=tools, model_kwargs=model_kwargs)
+    def __init__(self, spec: AgentSpec, *, tools: Sequence[Tool] = ()) -> None:
+        self._agent = Agent(spec, tools=tools)
 
     async def run(self, messages: list[Any], **kwargs: Any) -> Any:
         return await self._agent.run(messages, **kwargs)

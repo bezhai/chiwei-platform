@@ -120,8 +120,9 @@ from app.agent.continuity import (
     next_transcript,
     trim_for_round,
 )
-from app.agent.core import AgentConfig
+from app.agent.contracts import AgentSpec
 from app.agent.neutral import Message, Role
+from app.agent.round import open_call
 from app.agent.runtime_context import agent_context, get_context
 from app.agent.session import load_session
 from app.agent.tooling import tool
@@ -212,11 +213,16 @@ LIFE_MOMENT_PROMPT_ID = "living_life_moment"
 #
 # **往上调之前先看它乘在哪里**：每轮新增的 token 跟着它走（实测每轮 5k–10k），而上下文
 # 的硬顶是 200k（:data:`MOMENT_TRIM_POLICY`）。翻倍这个数等于把撞硬顶的时间减半。
-_MOMENT_CFG = AgentConfig(
-    LIFE_MOMENT_PROMPT_ID,
-    "life-model",
-    "living-life-moment",
+#
+# 一个人的一整天在 langfuse 里读成一条流（session），逐个 moment 翻起来才不用大海捞针。
+# 模型的临时失败不整轮重来（``max_retries`` 1）：重放会把已经执行过的 durable 写再执行一遍，
+# 派生 id 让它无害，但仍是白花的一次钱，下一拍再来就行。
+LIFE_MOMENT_AGENT = AgentSpec(
+    segments=(LIFE_MOMENT_PROMPT_ID,),
+    model="life-model",
+    trace_name="living-life-moment",
     recursion_limit=12,
+    session="living-life:{lane}:{participant}",
 )
 
 # Dynamic Config key：两个 moment 之间至少隔多少分钟。改它不用重新部署。
@@ -334,8 +340,8 @@ def transcript_key(*, lane: str, persona_id: str) -> str:
 
     **一个 moment 的键只算一次，读和写用同一个**（:func:`run_due_moment`）。
 
-    跟 langfuse 的 session 不是一回事：trace 的 session id 在 :func:`run_due_moment` 里另给
-    （``living-life:{lane}:{persona_id}``）。
+    跟 langfuse 的 session 不是一回事：trace 的 session 是 :data:`LIFE_MOMENT_AGENT` 的
+    （``living-life:{lane}:{participant}``）。
     """
     return f"{lane}:{persona_id}"
 
@@ -716,7 +722,7 @@ async def stop_for_now() -> str:
 # 它 world 那边不再答。
 #
 # 这个数只管一次环顾四周，管不住她这一轮。一次最多 55 秒（加上下面问出去那一步的上限），可一轮里
-# 环顾几次不由它定：recursion_limit（``_MOMENT_CFG``）数的是模型调用，一次模型调用可以连着要几只手，
+# 环顾几次不由它定：recursion_limit（``LIFE_MOMENT_AGENT``）数的是模型调用，一次模型调用可以连着要几只手，
 # 这些手一只接一只跑，模型调用本身也要花时间，所以一轮能花多久没有一个从这里乘得出来的上限。
 # 兜住一轮的是她轮次队列的占用上限（:data:`app.plugins.living.HOLD_LIMIT`，900 秒）：等回答时
 # 撞上它，这一轮照常被掐断、队列放开、下一拍重来。环顾四周不绕过它，掐断传进来的取消原样往上走，
@@ -1002,7 +1008,7 @@ async def moment_ran(*, lane: str, persona_id: str, moment_id: str) -> bool:
 
 def build_moment_runner() -> AgentRunner:
     """这个 moment 的 agent。模块级函数，测试替身从这里换掉，不碰真模型。"""
-    return AgentRunner(_MOMENT_CFG, tools=MOMENT_TOOLS)
+    return AgentRunner(LIFE_MOMENT_AGENT, tools=MOMENT_TOOLS)
 
 
 # 上下文写失败的计数。没有对应的库表列：下一个 moment 冷启动本身就在 trace 和日志里看得
@@ -1205,9 +1211,7 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
     之前，所以喂进去的和存下去的是同一份前缀；收尾那一步只剩 token 硬顶兜底
     （:func:`app.agent.continuity.next_transcript`）。
 
-    ``max_retries=1``：core 的 ``run`` 把整轮 ReAct 包在 ``@retry`` 里，一次模型
-    瞬时失败会整轮重放、重放已经执行过的 durable 写。派生 id 让重放无害，但重放
-    仍然是白花的一次钱，而且下一拍再来就行。
+    模型的临时失败不整轮重来（:data:`LIFE_MOMENT_AGENT` 的 ``max_retries``）。
     """
     lane, persona_id, now = due.lane, due.persona_id, due.now
     moment_id, nudged = due.moment_id, due.nudged
@@ -1253,8 +1257,6 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
     }
     context = AgentContext(
         persona_id=persona_id,
-        # 一个人的一整天在 langfuse 里读成一条流，逐个 moment 翻起来才不用大海捞针。
-        session_id=f"living-life:{lane}:{persona_id}",
         features={
             FEATURE_LANE: lane,
             FEATURE_NOW: now.isoformat(),
@@ -1329,12 +1331,15 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
     # 结论：langfuse 会系统性丢 trace（这一版实测整夜 225 个 moment 只到 125 条，丢
     # 44%），所以"这一晚花了多少"只能从 PG 数。usage 来自 LLM response 本身，
     # 跟 langfuse 死活无关。
+    call = open_call(
+        LIFE_MOMENT_PROMPT_ID, LIFE_MOMENT_AGENT, lane=lane, participant=persona_id
+    )
     with collect_usage() as usage:
         reply = await build_moment_runner().run(
             [*history, stimulus],
+            call=call,
             prompt_vars=prompt_vars,
             context=context,
-            max_retries=1,
             transcript_sink=produced,
         )
 

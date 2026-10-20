@@ -30,16 +30,26 @@ async def deep_research(task: str) -> str:
         task: 调研任务的详细描述，应包含用户的具体问题和需要关注的方面
     """
     # Lazy import to avoid circular dependency
-    from app.agent.core import Agent, AgentConfig
+    from app.agent.contracts import AgentSpec
+    from app.agent.core import Agent
     from app.agent.neutral import Message, Role
+    from app.agent.round import open_call
     from app.agent.tools.search import search_web
+    from app.infra.lane_policy import current_deployment_lane
 
-    _RESEARCH_CFG = AgentConfig("research_agent", "research-model", "research")
-    context = get_context()
-    agent = Agent(_RESEARCH_CFG, tools=[search_web], update_trace=False)
+    research = AgentSpec(
+        segments=("research_agent",),
+        model="research-model",
+        trace_name="research",
+        max_retries=2,
+        update_trace=False,
+    )
+    call = open_call("research_agent", research, lane=current_deployment_lane() or "prod")
+    agent = Agent(research, tools=[search_web])
     result = await agent.run(
         [Message(role=Role.USER, content=task)],
-        context=context,
+        call=call,
+        context=get_context(),
     )
 
     text = result.text()

@@ -195,6 +195,19 @@ class TrimPolicy:
     trim_target_tokens: int
 
 
+@dataclass(frozen=True)
+class HistoryView:
+    """A participant's history as one round read it: the messages (trimmed for the round), the
+    version they were stored as (the round writes the next one), whether the round before lost
+    its write (:data:`GAP_HEAD`), and whether the history still carries what she last said
+    (:func:`continues_unbroken`)."""
+
+    messages: list[Message]
+    version: int
+    lost_last_round: bool
+    continues_unbroken: bool
+
+
 def estimate_tokens(messages: list[Message]) -> int:
     """这一份上下文大概多少 token —— 往高了估。
 

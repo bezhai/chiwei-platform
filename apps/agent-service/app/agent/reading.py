@@ -42,7 +42,7 @@ langfuse prompt、硬超时、独立成本入账、空产出拦截），但它**
   * **成本独立入账**：``collect_usage`` 包住 run、``record_round_cost(actor=
     f"{persona}:reading")``——阅读的 token 绝不混进 life 本体账。
 
-模型 **deepseek-v4-flash**：``_READING_CFG`` 的 model_id 指向它（解析见 app/agent/models.py）。
+模型 **deepseek-v4-flash**：:data:`READING_AGENT` 的 model 指向它（解析见 app/agent/models.py）。
 """
 
 from __future__ import annotations
@@ -51,12 +51,13 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from app.agent.context import AgentContext
-from app.agent.core import Agent, AgentConfig
+from app.agent.contracts import AgentSpec
+from app.agent.core import Agent
 from app.agent.neutral import Message, Role
+from app.agent.round import open_call
 from app.agent.tooling import Tool
 from app.agent.tools._common import tool_error
-from app.agent.trace import collect_usage, make_session_id
+from app.agent.trace import collect_usage
 from app.domain.reading_source import (  # module-level so tests can monkeypatch
     BookParseError,
     decode_pages,
@@ -76,13 +77,18 @@ READING_TIMEOUT_SECONDS = 180
 # 只回一句停读提示。**不规定她读多少**（用户明确）——这只是防失控的上界。
 MAX_READ_CALLS = 40
 
-# AgentConfig：deepseek-v4-flash + langfuse prompt id "book_reading_impression" +
+# 读一程的 agent：deepseek-v4-flash + langfuse prompt id "book_reading_impression" +
 # recursion_limit 给够（让它在一程里连续 read 多页再产出，不被默认 6 卡住）。
-_READING_CFG = AgentConfig(
-    "book_reading_impression",
-    "deepseek-v4-flash",
-    "book-reading",
+#
+# session 把这一程读书的 LLM 调用归进她当天的那一条（泳道、她、读一程开始时那一天）。这只是
+# trace 标签，不是续接——读书是一次性整篇产出，上一程读到哪由 ``FileRead`` 的页号答，不靠上下文。
+READING = "book_reading_impression"
+READING_AGENT = AgentSpec(
+    segments=(READING,),
+    model="deepseek-v4-flash",
+    trace_name="book-reading",
     recursion_limit=MAX_READ_CALLS + 4,
+    session="{lane}:{participant}:{date}",
 )
 
 
@@ -245,22 +251,18 @@ async def run_reading_round(
         f"【你此前读这本书的印象】\n{prior_text}\n\n"
         f"【从第几页接着读】第 {start_page} 页（用 read({start_page}) 开始往后读）"
     )
-    # langfuse 归组：把这一程读书的 LLM 调用归进她当天的 session。这只是 trace 标签，
-    # 不是续接——读书是一次性整篇产出，上一程读到哪由 ``FileRead`` 的页号答，不靠上下文。
-    session_id = make_session_id(lane, persona_id, now.strftime("%Y-%m-%d"))
-    context = AgentContext(persona_id=persona_id, session_id=session_id)
+    call = open_call(READING, READING_AGENT, lane=lane, participant=persona_id, at=now)
 
     try:
         with collect_usage() as usage:
             result = await asyncio.wait_for(
-                Agent(_READING_CFG, tools=tools).run(
+                Agent(READING_AGENT, tools=tools).run(
                     [Message(role=Role.USER, content=user_content)],
+                    call=call,
                     prompt_vars={
                         "persona_name": pc.display_name,
                         "persona_lite": pc.persona_lite,
                     },
-                    context=context,
-                    max_retries=1,
                 ),
                 timeout=READING_TIMEOUT_SECONDS,
             )

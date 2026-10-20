@@ -21,14 +21,24 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
-from app.agent.core import Agent, AgentConfig
+from app.agent.contracts import AgentSpec
+from app.agent.core import Agent
+from app.agent.round import open_call
 from app.capabilities import banned_words
+from app.infra.lane_policy import current_deployment_lane
 
 logger = logging.getLogger(__name__)
 
-# 判词那一步的 agent。prompt 在 langfuse 上，两条链共用同一份。
-_GUARD_OUTPUT = AgentConfig(
-    "guard_output_safety", "guard-model", "post-safety-check"
+# 判词那一步的 agent。prompt 在 langfuse 上，两条链共用同一份。它不改调用它的那条 trace 的名字，
+# 没有自己的 session；模型的临时失败整次重来，最多两次。
+GUARD_OUTPUT = "guard_output_safety"
+GUARD_OUTPUT_AGENT = AgentSpec(
+    segments=(GUARD_OUTPUT,),
+    model="guard-model",
+    trace_name="post-safety-check",
+    max_retries=2,
+    model_kwargs={"reasoning_effort": "low"},
+    update_trace=False,
 )
 
 # 模型说"不安全"、但它自己有多确定才算数。
@@ -70,16 +80,15 @@ class OutputVerdict:
 
 def build_guard() -> Agent:
     """判词那一步的 agent。模块级函数，测试替身从这里换，不碰真模型。"""
-    return Agent(
-        _GUARD_OUTPUT,
-        model_kwargs={"reasoning_effort": "low"},
-        update_trace=False,
-    )
+    return Agent(GUARD_OUTPUT_AGENT)
 
 
 async def _ask_guard(text: str) -> _OutputSafetyResult:
+    call = open_call(
+        GUARD_OUTPUT, GUARD_OUTPUT_AGENT, lane=current_deployment_lane() or "prod"
+    )
     return await build_guard().extract(
-        _OutputSafetyResult, messages=[], prompt_vars={"response": text}
+        _OutputSafetyResult, messages=[], call=call, prompt_vars={"response": text}
     )
 
 

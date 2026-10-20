@@ -45,9 +45,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
-from app.agent.context import AgentContext
-from app.agent.core import AgentConfig
+from app.agent.contracts import AgentSpec
 from app.agent.neutral import Message, Role
+from app.agent.round import open_call
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
 from app.data.queries import find_persona
@@ -87,11 +87,14 @@ PERSONA_REVIEW_PROMPT_ID = "living_persona_review"
 # recursion_limit 1：这一轮**没有工具**，一次生成就完。理由同 day_page —— 有工具的话
 # "她调了工具但正文写空了"是一种既没报错、也没有新版本的状态；这里她的回复正文就是
 # 新那一版，写没写成只有一个判据。
-_CFG = AgentConfig(
-    PERSONA_REVIEW_PROMPT_ID,
-    "offline-model",
-    "living-persona-review",
+#
+# 一个人的每周回看在 langfuse 里读成一条流（session），逐周翻起来才不用大海捞针。
+PERSONA_REVIEW_AGENT = AgentSpec(
+    segments=(PERSONA_REVIEW_PROMPT_ID,),
+    model="offline-model",
+    trace_name="living-persona-review",
     recursion_limit=1,
+    session="living-persona-review:{lane}:{participant}",
 )
 
 
@@ -157,9 +160,9 @@ async def persona_review_vars(*, persona_id: str) -> dict[str, str]:
 def build_persona_review_runner() -> AgentRunner:
     """重写身份正文的 agent。模块级函数，测试替身从这里换掉，不碰真模型。
 
-    **不带任何工具**（见 :data:`_CFG`）：她的回复正文就是新那一版。
+    **不带任何工具**（见 :data:`PERSONA_REVIEW_AGENT`）：她的回复正文就是新那一版。
     """
-    return AgentRunner(_CFG)
+    return AgentRunner(PERSONA_REVIEW_AGENT)
 
 
 def _persona_review_prompt(
@@ -265,8 +268,8 @@ async def write_due_review(due: DueReview) -> PersonaVersion | None:
     ``written_at`` 和这里写的 ``written_at`` 必须是同一个时刻，两次读钟之间那点差可以正好跨过周界，
     于是同一周写两版、或者下一周的班被当成已经跑过。
 
-    ``max_retries=1``：core 的 ``run`` 把整轮包在 ``@retry`` 里，一次模型瞬时失败会整轮重放、白花
-    一次钱；这一轮本来就一周一次，五分钟后那一拍再来就行。模型失败往外抛，由她回看队列上的钟记
+    模型的临时失败不整轮重来（:data:`PERSONA_REVIEW_AGENT` 的 ``max_retries`` 是 1）：重放白花一次
+    钱；这一轮本来就一周一次，五分钟后那一拍再来就行。模型失败往外抛，由她回看队列上的钟记
     一条 warning（一个人的失败不拖累另两个人）。
     """
     lane, persona_id, since, until = due.lane, due.persona_id, due.since, due.until
@@ -278,11 +281,8 @@ async def write_due_review(due: DueReview) -> PersonaVersion | None:
             raise RuntimeError(f"seed 之后链仍然是空的 lane={lane} persona={persona_id}")
 
     prompt_vars = await persona_review_vars(persona_id=persona_id)
-    # 一个人的每周回看在 langfuse 里读成一条流，逐周翻起来才不用大海捞针。没有
-    # 工具，所以不需要任何 ambient feature。
-    context = AgentContext(
-        persona_id=persona_id,
-        session_id=f"living-persona-review:{lane}:{persona_id}",
+    call = open_call(
+        PERSONA_REVIEW_PROMPT_ID, PERSONA_REVIEW_AGENT, lane=lane, participant=persona_id
     )
     # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
     # 会系统性丢 trace，"这一周花了多少"只能从 PG 数。
@@ -299,9 +299,8 @@ async def write_due_review(due: DueReview) -> PersonaVersion | None:
                     ),
                 )
             ],
+            call=call,
             prompt_vars=prompt_vars,
-            context=context,
-            max_retries=1,
         )
 
     await record_round_cost(

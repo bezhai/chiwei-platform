@@ -23,7 +23,7 @@ from app.world.actions import ACTIONS, report_change
 from app.world.agents import when
 from app.world.sources import query_tools
 
-from .conftest import LANE, ScriptedAgent, sets_wake, tools_built_for
+from .conftest import LANE, ScriptedAgent, sets_wake, spec_called, tools_built_for
 
 
 def judges(*judgments: tuple, said: str = "判断完了。"):
@@ -68,7 +68,7 @@ async def _a_round(world, plan):
 
 async def test_a_reported_change_is_judged_once_and_each_judged_recipient_is_told_once(world):
     judge = judges(("ayana", "你听见楼下的门响了一声。"), ("akao", "厨房的灯闪了一下。"))
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[perception.PERCEPTION] = judge
     world.open_inboxes = {"ayana"}
 
     [result] = await _a_round(world, reports("楼下的门被风吹得响了一声。"))
@@ -84,7 +84,7 @@ async def test_a_reported_change_is_judged_once_and_each_judged_recipient_is_tol
 
 
 async def test_judging_the_same_person_twice_tells_them_once_with_the_last_judgment(world):
-    world.agents[perception.PERCEPTION.prompt_id] = judges(
+    world.agents[perception.PERCEPTION] = judges(
         ("ayana", "先这么想。"), ("ayana", "改成这样。")
     )
 
@@ -94,7 +94,7 @@ async def test_judging_the_same_person_twice_tells_them_once_with_the_last_judgm
 
 
 async def test_a_change_nobody_notices_tells_nobody(world):
-    world.agents[perception.PERCEPTION.prompt_id] = judges()
+    world.agents[perception.PERCEPTION] = judges()
 
     [result] = await _a_round(world, reports("后院的一片叶子落了。"))
 
@@ -104,7 +104,7 @@ async def test_a_change_nobody_notices_tells_nobody(world):
 
 async def test_each_change_is_its_own_perception_call(world):
     judge = judges(("ayana", "x"))
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[perception.PERCEPTION] = judge
 
     await _a_round(world, reports("一。", "二。"))
 
@@ -113,11 +113,11 @@ async def test_each_change_is_its_own_perception_call(world):
 
 
 async def test_perception_runs_with_its_own_prompt_trace_and_the_sources_tools(world):
-    world.agents[perception.PERCEPTION.prompt_id] = judges()
+    world.agents[perception.PERCEPTION] = judges()
 
     await _a_round(world, reports("起风了。"))
 
-    [config] = [c for c, _ in world.built if c.prompt_id == "world_perception"]
+    config = spec_called(world, "world_perception")
     assert config.trace_name == "world-perception"
     expected = [t.name for t in await query_tools()] + ["someone_notices"]
     assert tools_built_for(world, "world_perception") == expected
@@ -143,7 +143,7 @@ async def test_a_judgment_naming_world_itself_or_an_unusable_name_is_refused(wor
         ]
         return "好。"
 
-    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+    world.agents[perception.PERCEPTION] = ScriptedAgent(plan)
 
     await _a_round(world, reports("下雪了。"))
 
@@ -175,7 +175,7 @@ async def test_a_body_messaging_would_refuse_goes_back_to_perception_and_is_neve
         )
         return "好。"
 
-    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+    world.agents[perception.PERCEPTION] = ScriptedAgent(plan)
 
     await _a_round(world, reports("门被风吹得响了一声。"))
 
@@ -190,7 +190,7 @@ async def test_a_change_messaging_could_not_carry_is_handed_back_before_anyone_j
 ):
     """变化原文要记进 unfinished 给下一轮看，存不下的字在报告那一刻就退回给主 agent。"""
     judge = judges(("ayana", "x"))
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[perception.PERCEPTION] = judge
 
     [result] = await _a_round(world, reports("门响了\x00一声。"))
 
@@ -205,7 +205,7 @@ async def test_a_change_messaging_could_not_carry_is_handed_back_before_anyone_j
 
 
 async def test_each_notice_wakes_its_recipient_or_not_as_perception_judged(world):
-    world.agents[perception.PERCEPTION.prompt_id] = judges(
+    world.agents[perception.PERCEPTION] = judges(
         ("ayana", "楼下有人喊你的名字。", True), ("akao", "窗外的雨小了一点。", False)
     )
 
@@ -216,7 +216,7 @@ async def test_each_notice_wakes_its_recipient_or_not_as_perception_judged(world
 
 
 async def test_judging_the_same_person_again_also_replaces_whether_to_wake_them(world):
-    world.agents[perception.PERCEPTION.prompt_id] = judges(
+    world.agents[perception.PERCEPTION] = judges(
         ("ayana", "先这么想。", True), ("ayana", "改成这样。", False)
     )
 
@@ -255,7 +255,7 @@ async def test_a_judgment_that_leaves_out_or_garbles_whether_to_wake_is_refused(
         ]
         return "好。"
 
-    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+    world.agents[perception.PERCEPTION] = ScriptedAgent(plan)
 
     await _a_round(world, reports("下雨了。"))
 
@@ -272,7 +272,7 @@ async def test_perception_sees_who_sent_the_message_that_woke_this_round_and_wha
     world,
 ):
     judge = judges()
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[perception.PERCEPTION] = judge
     world.runner.plan = reports("窗关上之后，屋里的雨声小了。")
     trigger = new_message(
         sender="赤尾", recipient="world", body="我起身把窗关上了。", kind=Kind.MESSAGE
@@ -294,7 +294,7 @@ async def test_perception_is_told_when_world_woke_on_its_own(world):
     """world 给自己排的醒来，正文是它当时给自己留的话，用的是"你"。感知判断那边的"你"是它自己，
     所以要说清楚这段话是谁写给谁的。正文用 world 真的排出去的那一条，不另编。"""
     judge = judges()
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[perception.PERCEPTION] = judge
     world.runner.plan = sets_wake(reason="看看傍晚的街上。")
     await world.deliver(
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
@@ -327,7 +327,7 @@ async def test_perception_is_told_when_world_woke_on_its_own(world):
 async def test_perception_sees_every_message_of_the_round_with_sender_and_time(world, volume):
     """一轮带着几条消息时，感知判断看到的是这一轮的全部：每条谁发的、什么时候、原文，按到达的先后。"""
     judge = judges()
-    world.agents[perception.PERCEPTION.prompt_id] = judge
+    world.agents[perception.PERCEPTION] = judge
     world.runner.plan = reports("窗关上之后，屋里的雨声小了。")
     current = await wake.set_next_wake(now_cst(), "看看雨停了没有。")
     akao = new_message(sender="赤尾", recipient="world", body="我起身把窗关上了。", kind=Kind.MESSAGE)
@@ -409,7 +409,7 @@ async def test_a_transient_model_failure_is_retried_and_only_the_retrys_judgment
         )
         return "判断完了。"
 
-    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+    world.agents[perception.PERCEPTION] = ScriptedAgent(plan)
     world.open_inboxes = {"ayana"}
 
     [result] = await _a_round(world, reports("楼下的门被风吹得响了一声。"))
@@ -435,7 +435,7 @@ async def test_when_every_attempt_fails_nothing_is_sent_and_the_failure_shows(
         )
         raise _server_error()
 
-    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+    world.agents[perception.PERCEPTION] = ScriptedAgent(plan)
 
     with caplog.at_level(logging.WARNING):
         [result] = await _a_round(world, reports("楼下的门被风吹得响了一声。"))
@@ -457,7 +457,7 @@ async def test_a_failure_that_is_not_transient_is_not_retried(world, no_backoff)
         attempts.append(perception_input)
         raise ValueError("模型交回来的东西解不开")
 
-    world.agents[perception.PERCEPTION.prompt_id] = ScriptedAgent(plan)
+    world.agents[perception.PERCEPTION] = ScriptedAgent(plan)
 
     [result] = await _a_round(world, reports("下雨了。"))
 
@@ -471,11 +471,11 @@ async def test_a_failure_that_is_not_transient_is_not_retried(world, no_backoff)
 
 
 async def test_the_main_agent_has_no_tool_that_messages_anyone(world):
-    world.agents[perception.PERCEPTION.prompt_id] = judges()
+    world.agents[perception.PERCEPTION] = judges()
 
     await _a_round(world, reports())
 
-    main_tools = tools_built_for(world, main_agent.ROUND.prompt_id)
+    main_tools = tools_built_for(world, main_agent.ROUND)
     assert main_tools == [t.name for t in await query_tools()] + [t.name for t in ACTIONS]
     assert [t.name for t in ACTIONS] == [
         "write_record",

@@ -18,7 +18,7 @@ from app.messaging.message import Kind, new_message
 from app.world import main_agent, wake
 from app.world.agents import when
 
-from .conftest import LANE, self_message, sets_nothing, sets_wake, tools_built_for
+from .conftest import LANE, self_message, sets_nothing, sets_wake, spec_called, tools_built_for
 
 
 def _round_input(world_handle, run: int = -1) -> str:
@@ -219,7 +219,7 @@ async def test_the_main_agent_gets_every_enabled_sources_query_tools_and_its_own
     )
 
     expected = [t.name for t in await query_tools()] + [t.name for t in ACTIONS]
-    assert tools_built_for(world, main_agent.ROUND.prompt_id) == expected
+    assert tools_built_for(world, main_agent.ROUND) == expected
     assert {
         "list_records", "read_record", "search_web",
         "check_current_weather", "check_hourly_forecast", "check_daily_forecast",
@@ -231,8 +231,8 @@ async def test_the_round_runs_as_its_own_trace_with_its_own_prompt(world):
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
-    config = world.runner.configs[0]
-    assert (config.prompt_id, config.trace_name) == ("world_round", "world-round")
+    config = spec_called(world, "world_round")
+    assert config.trace_name == "world-round"
     assert world.costs[0]["round_id"].startswith("world-round:")
 
 
