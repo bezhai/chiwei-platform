@@ -5,8 +5,8 @@ unset. A directory that does not exist leaves the registry empty with a warning
 (:meth:`app.skills.registry.SkillRegistry.load_all`). The reload task checks the files every
 30 s and loads them again when they changed.
 
-Provides ``skills``, the registry: living's guides read it (:mod:`app.living.guides`), so living
-is set up after this plugin and is refused without it.
+Provides ``skills``, the registry: her guides read it (:mod:`app.living.guides`), so the guides
+plugin is set up after this plugin and is refused without it.
 """
 from __future__ import annotations
 

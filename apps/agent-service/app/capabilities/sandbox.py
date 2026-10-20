@@ -11,7 +11,7 @@ Lane and trace headers are auto-injected by ``HTTPClient``.
 整轮就废了。
 
 裁在这里而不是在调用方，是因为这个 capability 是**两条路唯一都要经过的地方**：她自己
-跑一条命令（``app.living.guides.run_a_script``），和一份说明里那条 ``!`cmd``` 的结果被
+跑一条命令（``app.living.guides.at_hand.run_a_script``），和一份说明里那条 ``!`cmd``` 的结果被
 替换进正文（``app.skills.renderer.render_skill``，那一份同样没有上限）。裁在调用方就
 是两份实现、迟早漏一条；将来多一个调用方还会再漏一次。
 
@@ -49,7 +49,7 @@ _CLIENT = HTTPClient(service="sandbox-worker", timeout=45.0, retries=0)
 OUTPUT_MAX_CHARS = 4_000
 
 # 截过之后接在后面那句话里的固定一段。**只在这里定义一次**：她读到的是它，调用方
-# 事后想认出"这段被截过"认的也是它（``app.living.guides.read_a_guide`` 那条路拿不到
+# 事后想认出"这段被截过"认的也是它（``app.living.guides.at_hand.read_a_guide`` 那条路拿不到
 # 计数，只看得见正文）。两边各写一遍字面量的话，改一个字就认不回来了。
 OUTPUT_CUT_MARK = "个字没给你"
 
