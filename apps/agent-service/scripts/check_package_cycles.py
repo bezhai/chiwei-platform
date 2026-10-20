@@ -1,6 +1,6 @@
 """CI 规则：``app/`` 下的包之间不许出现新的环，也不许出现名单上禁止的边。
 
-``app/`` 下每个子包（``app/runtime/``、``app/data/`` ……）和每个顶层模块（``app/main.py``）
+``app/`` 下每个子包（``app/host/``、``app/data/`` ……）和每个顶层模块（``app/main.py``）
 是一个节点；包里任何一个模块 import 了另一个包里的东西，就是一条从前者指向后者的边。认
 import 的方式和 ``scripts/check_world_life_imports.py`` 是同一套语法树扫描（函数里面的
 import、``importlib.import_module`` / ``__import__`` 的字符串字面量都算，docstring 和注释
@@ -32,13 +32,10 @@ KNOWN_CYCLES: list[frozenset[str]] = [
 ]
 
 # 不管成不成环都不许出现的边（从哪个包，到哪个包）。消息机制是宿主下面的一层：宿主启停它，
-# 插件经宿主开设收件箱，所以它不依赖宿主；它也不依赖 dataflow 的 runtime（出站边和 ``@node``），
-# runtime 也不依赖它。一轮的契约类型（``app/agent/contracts.py``）放在 agent 层，宿主 import 它们、
-# 负责组装，所以 agent 层不依赖宿主。
+# 插件经宿主开设收件箱，所以它不依赖宿主。一轮的契约类型（``app/agent/contracts.py``）放在
+# agent 层，宿主 import 它们、负责组装，所以 agent 层不依赖宿主。
 FORBIDDEN_EDGES: list[tuple[str, str]] = [
-    ("messaging", "runtime"),
     ("messaging", "host"),
-    ("runtime", "messaging"),
     ("agent", "host"),
 ]
 
@@ -54,7 +51,7 @@ def _nodes(root: Path) -> set[str]:
 
 
 def _node_of(parts: list[str]) -> str | None:
-    """模块名各段（``["app", "runtime", "db"]``）属于哪个节点；``app`` 本身不算。"""
+    """模块名各段（``["app", "data", "tx"]``）属于哪个节点；``app`` 本身不算。"""
     return parts[1] if len(parts) > 1 else None
 
 

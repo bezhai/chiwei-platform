@@ -182,7 +182,7 @@ def test_the_real_code_tree_has_only_the_listed_cycles():
     groups = _groups(root)
     assert groups == [frozenset({"agent", "capabilities", "living", "memory", "skills"})]
     in_a_cycle = set().union(*groups)
-    assert {"runtime", "data", "messaging"}.isdisjoint(in_a_cycle)
+    assert {"data", "messaging", "host"}.isdisjoint(in_a_cycle)
 
 
 def test_the_command_fails_on_a_new_cycle_and_passes_when_clean(tmp_path):
@@ -216,17 +216,15 @@ def test_the_command_fails_on_a_new_cycle_and_passes_when_clean(tmp_path):
 # ---------------------------------------------------------------------------
 
 THE_FORBIDDEN_EDGES = [
-    ("messaging", "runtime"),
     ("messaging", "host"),
-    ("runtime", "messaging"),
     ("agent", "host"),
 ]
 
 
-def test_the_list_forbids_messaging_and_runtime_reaching_each_other_and_messaging_reaching_the_host():
-    assert {("messaging", "runtime"), ("messaging", "host"), ("runtime", "messaging")} <= set(
-        FORBIDDEN_EDGES
-    )
+def test_the_list_forbids_messaging_reaching_the_host():
+    """The host starts and stops messaging and plugins open their inboxes through the host, so
+    messaging never imports the host."""
+    assert ("messaging", "host") in FORBIDDEN_EDGES
 
 
 def test_the_list_forbids_the_agent_layer_reaching_the_host():
@@ -258,10 +256,10 @@ def test_every_import_along_a_forbidden_edge_is_listed(tmp_path):
         tmp_path,
         {
             "messaging/__init__.py": "",
-            "messaging/one.py": "from app.runtime import x\n",
-            "messaging/two.py": "def later():\n    import app.runtime.x\n",
-            "runtime/__init__.py": "",
-            "runtime/x.py": "",
+            "messaging/one.py": "from app.host import x\n",
+            "messaging/two.py": "def later():\n    import app.host.x\n",
+            "host/__init__.py": "",
+            "host/x.py": "",
         },
     )
 
@@ -275,11 +273,11 @@ def test_the_other_directions_are_allowed(tmp_path):
     root = _tree(
         tmp_path,
         {
-            "host/__init__.py": "from app.messaging import x\nfrom app.runtime import y\n",
+            "host/__init__.py": "from app.messaging import x\nfrom app.agent import y\n",
             "messaging/__init__.py": "from app.data import z\n",
             "messaging/x.py": "",
-            "runtime/__init__.py": "from app.data import z\n",
-            "runtime/y.py": "",
+            "agent/__init__.py": "from app.data import z\n",
+            "agent/y.py": "",
             "data/__init__.py": "",
             "data/z.py": "",
         },
@@ -308,7 +306,7 @@ def test_the_command_fails_on_a_forbidden_edge_even_when_the_cycles_are_the_list
         {
             **_THE_LISTED_RING,
             "messaging/__init__.py": "",
-            "runtime/__init__.py": "",
+            "host/__init__.py": "",
         },
     )
     dirty = _tree(
@@ -316,9 +314,9 @@ def test_the_command_fails_on_a_forbidden_edge_even_when_the_cycles_are_the_list
         {
             **_THE_LISTED_RING,
             "messaging/__init__.py": "",
-            "messaging/broker.py": "from app.runtime import emit\n",
-            "runtime/__init__.py": "",
-            "runtime/emit.py": "",
+            "messaging/broker.py": "from app.host import lifecycle\n",
+            "host/__init__.py": "",
+            "host/lifecycle.py": "",
         },
     )
 
@@ -333,5 +331,5 @@ def test_the_command_fails_on_a_forbidden_edge_even_when_the_cycles_are_the_list
     assert run(clean).returncode == 0, run(clean).stdout
     failed = run(dirty)
     assert failed.returncode == 1, failed.stdout + failed.stderr
-    assert "messaging -> runtime" in failed.stdout
+    assert "messaging -> host" in failed.stdout
     assert "app/messaging/broker.py:1" in failed.stdout

@@ -15,12 +15,12 @@ name: dataflow grep gate
 #
 #     agent  living  memory  nodes  skills  world
 #
-# 不在里面的是框架和基建：host / plugins / runtime / data / infra / api / capabilities /
-# messaging / domain。plugins 是各 App 的组装（插件把业务登记到宿主上，相当于原来的
-# 接线），跟 host 一样归框架层。加一个业务包就要把它加进每一处清单 —— 漏一处等于
-# 那个包不受任何一条 gap 管，这正是 app/living/ 建起来之后发生过的事（22 个
-# 文件、一条 gap 都没扫到）。删一个包同理要从每一处摘掉，否则清单会慢慢变成
-# 一份指向空目录的名单，每条断言都因为扫不到东西而通过。
+# 不在里面的是框架和基建：host / plugins / manifests / data / infra / api / capabilities /
+# messaging / domain。plugins 和 manifests 是各 App 的组装（插件把业务登记到宿主上，相当于
+# 原来的接线；清单写一个 App 由哪些插件、agent、profile 组成），跟 host 一样归框架层。
+# 加一个业务包就要把它加进每一处清单 —— 漏一处等于那个包不受任何一条 gap 管，这正是
+# app/living/ 建起来之后发生过的事（22 个文件、一条 gap 都没扫到）。删一个包同理要从每一处
+# 摘掉，否则清单会慢慢变成一份指向空目录的名单，每条断言都因为扫不到东西而通过。
 
 on:
   pull_request:
@@ -53,11 +53,11 @@ jobs:
         run: |
           set -e
           # trace_id_var / lane_var allowlist: infra/{propagation,rabbitmq},
-          # runtime/{middleware,sink_dispatch}, api/middleware,
-          # capabilities/* (HTTP capability injects trace into outbound calls).
+          # api/middleware, capabilities/* (HTTP capability injects trace into
+          # outbound calls).
           c=$(grep -rn "trace_id_var\|lane_var" apps/agent-service/app/ \
               2>/dev/null \
-              | grep -v "infra/propagation.py\|runtime/middleware.py\|api/middleware.py\|infra/rabbitmq.py\|runtime/sink_dispatch.py\|capabilities/\|__pycache__\|/test_" \
+              | grep -v "infra/propagation.py\|api/middleware.py\|infra/rabbitmq.py\|capabilities/\|__pycache__\|/test_" \
               | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c contextvar reads outside allowlist"; exit 1; }
           # nobody reads message.headers["trace_id"|"lane"] except propagation
@@ -125,7 +125,7 @@ jobs:
               2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c don't-catch comments in business code"; exit 1; }
           # Manual ack/nack/requeue=False belongs to the framework
-          # (runtime/*). The DLQ admin tooling at
+          # (messaging/*). The DLQ admin tooling at
           # nodes/dlq_admin.py is the business-facing exception
           # (the 6-step requeue protocol). nodes/reading_carry_over.py is a
           # one-off second one: it takes the old reading queue's messages and
@@ -145,7 +145,7 @@ jobs:
         run: |
           set -e
           # 数据库只有 app/data 一个包碰：它建 engine、开 session、管事务。别的包——业务、
-          # 宿主、runtime、messaging，没有例外——读写走 app.data.persist 的函数（读用
+          # 宿主、messaging，没有例外——读写走 app.data.persist 的函数（读用
           # fetch_all / fetch_one / fetch_value + from_row，写用 insert_*），几条语句要一起
           # 落地就包一层 ``async with tx():``。所以在 app/data 之外：不 import app.data.session，
           # 不调 get_session，不提 AsyncSession。
@@ -157,7 +157,7 @@ jobs:
             grep -nE "app\.data\.session|from app\.data import (.*[ ,])?session\b|get_session|AsyncSession" \
               $OUTSIDE_DATA || true
             echo "Gap 13 violation: $c session uses outside app/data"; exit 1; }
-          # ``current_session`` 是 app/data 和框架（runtime / messaging）自己用的：业务包拿到它就能
+          # ``current_session`` 是 app/data 和框架（messaging）自己用的：业务包拿到它就能
           # 在 tx() 里跑任意语句，绕开 persist 的那几个函数。``from app.data import tx`` 拿到的是
           # 整个模块，同样够得着它。
           BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
@@ -290,8 +290,8 @@ jobs:
           # app/ 下每个子包和顶层模块是一个节点，包里任何一处 import 另一个包就是一条边
           # （函数里的 import、import_module 的字符串字面量都算）。互相走得到的几个包
           # 是一组环：不在 KNOWN_CYCLES 里的环失败，名单上的环消失或缩小了也失败，
-          # 所以名单只能缩。FORBIDDEN_EDGES 里的边（messaging -> runtime、
-          # messaging -> host、runtime -> messaging、agent -> host）不管成不成环，出现就失败。
+          # 所以名单只能缩。FORBIDDEN_EDGES 里的边（messaging -> host、agent -> host）
+          # 不管成不成环，出现就失败。
           # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_package_cycles.py
           python3 -m scripts.check_package_cycles app
 
