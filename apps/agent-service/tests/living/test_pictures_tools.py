@@ -24,18 +24,21 @@ import re
 
 import pytest
 
-from app.living import pictures as pictures_mod
-from app.living.pictures import (
+from app.agent.tooling import Tool
+from app.living.pictures.album import (
     PICTURE_LIST_LIMIT,
     PICTURE_SEARCH_COUNT,
+    Album,
     Picture,
     handle_for,
     her_picture,
     pictures_she_made,
     remember_a_picture,
 )
-from tests.living.conftest import her_tool
+from app.living.pictures import album as pictures_mod
 
+# 四只手跟 pictures 插件登记的一样，是插件对象上的方法。
+_ALBUM = Album()
 _HANDS = (
     "draw_a_picture",
     "find_a_picture_online",
@@ -43,7 +46,7 @@ _HANDS = (
     "look_at_a_picture",
 )
 draw_a_picture, find_a_picture_online, look_through_your_pictures, look_at_a_picture = (
-    her_tool(name) for name in _HANDS
+    Tool(getattr(_ALBUM, name)) for name in _HANDS
 )
 
 LANE = "coe-living"
@@ -662,7 +665,7 @@ def test_her_instruction_manual_is_written_for_her():
 
     空 docstring = 她拿到一只不知道干什么用的手。
     """
-    for t in (her_tool(name) for name in _HANDS):
+    for t in (draw_a_picture, find_a_picture_online, look_through_your_pictures, look_at_a_picture):
         assert t.definition.description.strip(), f"{t.name} 没有给她的说明"
 
 
@@ -801,4 +804,33 @@ async def test_she_can_walk_back_past_the_list_limit_without_remembering_anythin
     assert isinstance(further, str), further
     assert oldest.what in further, f"往前翻还是够不到最早那张：{further!r}"
     assert handle_for(oldest.file_name) in _handles(further)
+
+
+# ---------------------------------------------------------------------------
+# 别的插件经 ``pictures`` 服务认她的图
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_the_pictures_service_answers_with_what_her_hands_keep(pictures_db, her_hands):  # noqa: F811
+    """手机和嘴经 ``pictures`` 服务认她的图（:class:`app.living.services.Pictures`）：认出来的、印出来
+    的、取回来的，跟这四只手存下、印给她的是同一份。"""
+    picture = await remember_a_picture(
+        lane=LANE,
+        persona_id="akao",
+        file_name="f-1",
+        what="一张猫",
+        made_at=dt.datetime(2026, 7, 25, 21, 30, tzinfo=_CST),
+    )
+    handle = _ALBUM.printed_handle(picture.file_name)
+
+    assert handle == pictures_mod.printed_handle(picture.file_name)
+    assert _ALBUM.picture_id_in(handle) == picture.picture_id
+    assert await _ALBUM.hers_among(
+        lane=LANE, persona_id="akao", file_names={"f-1", "not-hers"}
+    ) == {"f-1"}
+    found = await _ALBUM.her_picture(
+        lane=LANE, persona_id="akao", picture_id=picture.picture_id
+    )
+    assert found is not None and found.file_name == "f-1"
 

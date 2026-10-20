@@ -420,11 +420,14 @@ async def test_what_a_search_brings_back_cannot_carry_markup_either(
 async def test_an_image_title_from_the_internet_cannot_carry_markup(
     pictures_db, in_a_moment, her_hands  # noqa: F811 — 形参名就是 fixture 名
 ):
+    from app.agent.tooling import Tool
     from app.capabilities.image_search import ImageHit
+    from app.living.pictures.album import Album
 
-    find_a_picture_online = her_tool("find_a_picture_online")
-    look_at_a_picture = her_tool("look_at_a_picture")
-    look_through_your_pictures = her_tool("look_through_your_pictures")
+    album = Album()
+    find_a_picture_online = Tool(album.find_a_picture_online)
+    look_at_a_picture = Tool(album.look_at_a_picture)
+    look_through_your_pictures = Tool(album.look_through_your_pictures)
 
     her_hands.hits = [
         ImageHit(

@@ -43,7 +43,7 @@ pic=…]``，:func:`_own_picture_label`），也不占展示名额。一页手�
 看过，跨过裁剪线之后她要的是"我发过一张图"这个事实加一个引用 —— 取不取回来是她自己的
 决定。**"是不是她发的"认 bot 不认 role**（见下面那段），否则姐姐发的每张图都会退化成
 一句"你发的图"。**句柄印出去之前先核一次她手上真有这张图**
-（:func:`app.living.pictures.hers_among`）：那一行是她发的保证不了这张图在当前
+（:meth:`app.living.services.Pictures.hers_among`）：那一行是她发的保证不了这张图在当前
 lane/persona 下还在她手上 —— 泳道跟 prod 共用一个库，而查会话那条 SQL 没有 lane 条件。
 核不到的只给标记、不给句柄。
 
@@ -214,8 +214,8 @@ from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import CST, to_cst_dated
 from app.infra.image import image_client, image_is_reachable
 from app.living.common import esc, require_aware
-from app.living.pictures import hers_among, printed_handle
 from app.living.records import MEDIUM_GROUP_CHAT, MEDIUM_PHONE, Happening
+from app.living.services import Pictures
 from app.living.whitelist import channels_in_sight
 
 logger = logging.getLogger(__name__)
@@ -1072,17 +1072,17 @@ def _one_message(row, *, now: datetime, pictures: Iterator[str]) -> str:
     return f"<msg {' '.join(attrs)}>{esc(_body_of(row, pictures=pictures))}</msg>"
 
 
-def _own_picture_label(picture: _Picture, in_hand: set[str]) -> str:
+def _own_picture_label(picture: _Picture, in_hand: set[str], her_pictures: Pictures) -> str:
     """她自己发过的那张图在正文里的写法：一个标记，加一串能把它取回来的句柄。
 
     ``in_hand`` 是这一眼里核过的、当前 lane/persona 下她手上真有的那几个位置
-    （:func:`app.living.pictures.hers_among`）。**不在里面的只给标记**：那一行是她发
+    （:meth:`app.living.services.Pictures.hers_among`）。**不在里面的只给标记**：那一行是她发
     的不代表这张图在她手上 —— 别条泳道发的图，切回来之后位置还在、记录不在。印一串
     她取不回来的句柄比什么都不印更糟（:data:`_OWN_PICTURE_UNKNOWN`）。
     """
     if picture.where is None or picture.where not in in_hand:
         return _OWN_PICTURE_UNKNOWN
-    return _OWN_PICTURE.format(handle=printed_handle(picture.where))
+    return _OWN_PICTURE.format(handle=her_pictures.printed_handle(picture.where))
 
 
 def _place_pictures(
@@ -1090,6 +1090,7 @@ def _place_pictures(
     urls: list[str | None],
     *,
     in_hand: set[str],
+    her_pictures: Pictures,
 ) -> tuple[list[str], list[tuple[Any, int, str]]]:
     """给这一眼里的每张图定下正文里的写法，并挑出真摆得出来的那几张。
 
@@ -1127,7 +1128,7 @@ def _place_pictures(
     for row, pictures in by_row:
         for picture in pictures:
             if picture.hers:
-                labels.append(_own_picture_label(picture, in_hand))
+                labels.append(_own_picture_label(picture, in_hand, her_pictures))
                 continue
             if picture.where is None:
                 labels.append(_PICTURE_SHUT)
@@ -1148,7 +1149,7 @@ def _place_pictures(
 def _shown_picture(row, number: int, url: str, *, now: datetime) -> list[dict[str, Any]]:
     """一张图摆到她眼前：一句说清它是哪条消息里的，再是图本身。
 
-    形状照 :func:`app.living.pictures._shown`（OpenAI 口径的内容块），
+    形状照 :func:`app.living.pictures.album._shown`（OpenAI 口径的内容块），
     :func:`app.agent.core._normalise_tool_result` 认的就是它，两个 adapter 各自把图片
     块送上自己的 wire。**这里绝不能只回一段文字** —— 那样她"看"到的只是一个标记。
 
@@ -1513,8 +1514,8 @@ async def look_at_phone(
     # 张和没写位置的那几张都不占（各自的理由见 _place_pictures）。
     theirs = [p.where for _, ps in by_row for p in ps if not p.hers and p.where]
     # 她自己那几张印句柄之前先核一次：这一行是她发的，不代表这张图在**当前**
-    # lane/persona 下还在她手上（理由写在 :func:`app.living.pictures.hers_among` 上）。
-    in_hand = await hers_among(
+    # lane/persona 下还在她手上（理由写在 :meth:`app.living.services.Pictures.hers_among` 上）。
+    in_hand = await self.pictures.hers_among(
         lane=lane,
         persona_id=persona_id,
         file_names={p.where for _, ps in by_row for p in ps if p.hers and p.where},
@@ -1523,6 +1524,7 @@ async def look_at_phone(
         by_row,
         await _open_pictures(theirs[:PHONE_PICTURE_LIMIT]),
         in_hand=in_hand,
+        her_pictures=self.pictures,
     )
     seen = _page_text(
         title=conv.title,

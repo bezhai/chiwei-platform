@@ -10,6 +10,7 @@ setup 里 ``ctx.provide(名字, 对象)`` 交出服务，使用方在 :class:`~a
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -141,6 +142,41 @@ class WhoLivesHere(Protocol):
 
     def residents(self) -> Residents:
         """读好的那份对照；还没读就抛 ``RuntimeError``。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# pictures：她自己做过的图（pictures 插件提供）
+# ---------------------------------------------------------------------------
+
+
+class HerPicture(Protocol):
+    """她手上的一张图，交给别的插件时用得到的那一点：它在对象存储里的位置。"""
+
+    file_name: str
+
+
+class Pictures(Protocol):
+    """她自己做过的那些图。手机和嘴经它认她的图：认法、印法跟她那几只看图的手是同一份。"""
+
+    async def hers_among(
+        self, *, lane: str, persona_id: str, file_names: Collection[str]
+    ) -> set[str]:
+        """``file_names``（对象存储里的位置）里哪几个是她在这条泳道上手上真有的图。"""
+        ...
+
+    async def her_picture(
+        self, *, lane: str, persona_id: str, picture_id: str
+    ) -> HerPicture | None:
+        """她在这条泳道上手上的这一张；不是她的、或者不在这条泳道上，返回 ``None``。"""
+        ...
+
+    def printed_handle(self, file_name: str) -> str:
+        """这张图印在她眼前的句柄（``pic=<id>``），她照抄回来的就是这一串。"""
+        ...
+
+    def picture_id_in(self, what_she_copied: str) -> str:
+        """她照抄回来的那串认回图的 id（带不带 ``pic=`` 前缀都认）。"""
         ...
 
 

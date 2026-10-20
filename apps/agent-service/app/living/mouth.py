@@ -114,7 +114,6 @@ from app.living.common import require_aware
 from app.living.happening import note_recorded, printed_handle, record_happening
 from app.living.output_safety import audit_output
 from app.living.phone import medium_for, reachable_conversation
-from app.living.pictures import her_picture, picture_id_in
 from app.living.records import KIND_SPEECH, OUTBOUND_HAPPENING_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -468,10 +467,10 @@ async def send_message(
     # 认领 —— 她同一轮里换成自己那张图还发得成。
     file_names: list[str] = []
     for handle in _handles_she_gave(pictures):
-        # 认回来那一步走 :func:`picture_id_in`，**不在这里自己解析**：印给她的是
+        # 认回来那一步走 :meth:`~app.living.services.Pictures.picture_id_in`，**不在这里自己解析**：印给她的是
         # ``pic=<id>``，每只手都在叫她原样抄回来，这里认裸 id 的话她照做就撞死路。
-        picture = await her_picture(
-            lane=lane, persona_id=persona_id, picture_id=picture_id_in(handle)
+        picture = await self.pictures.her_picture(
+            lane=lane, persona_id=persona_id, picture_id=self.pictures.picture_id_in(handle)
         )
         if picture is None:
             raise ValueError(

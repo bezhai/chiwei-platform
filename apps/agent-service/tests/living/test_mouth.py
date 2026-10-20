@@ -1263,7 +1263,7 @@ _NO_PICTURE_OUTBOUND_ID = "1f5ab29326e0548b83eebb0d8f54fa24"
 @pytest.fixture
 def a_picture(mouth_db):
     """造一张"她做过的图"。默认是这条泳道上、她自己名下的那种。"""
-    from app.living.pictures import remember_a_picture
+    from app.living.pictures.album import remember_a_picture
 
     async def make(
         *,
@@ -1550,12 +1550,12 @@ async def test_the_handle_she_copies_off_her_own_list_is_the_one_this_accepts(
 ):
     """印出去的那串和认回来的那串必须是同一串。
 
-    看图那边印给她的是 ``pic=<id>``（:func:`app.living.pictures._handle_of`），它的
+    看图那边印给她的是 ``pic=<id>``（:func:`app.living.pictures.album._handle_of`），它的
     docstring 反复对她说"原样抄回来"。两边各写一遍解析的话，印的是 ``pic=<id>``、认
     的是裸 id，她照做就撞死路 —— ``read_a_bit`` 在 coe-living 上实测踩过这个坑，而这
     次她收到的还不是"没找到"，是"这不是你做过的图"，等于系统告诉她自己的记录是假的。
     """
-    from app.living.pictures import _handle_of
+    from app.living.pictures.album import _handle_of
 
     pic = await a_picture(file_name="temp/tos_matcha_cat.jpg")
     await note_whereabouts(

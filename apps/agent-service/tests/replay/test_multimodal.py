@@ -21,7 +21,7 @@ from datetime import datetime
 import pytest
 
 from app.infra.cst_time import CST
-from app.living.pictures import remember_a_picture
+from app.living.pictures.album import remember_a_picture
 from tests.replay import seeds
 from tests.replay.harness import Reply, ToolUse
 

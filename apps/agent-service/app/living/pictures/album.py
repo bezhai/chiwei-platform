@@ -352,7 +352,7 @@ def picture_id_in(what_she_copied: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 两只手：做一张出来（画 / 上网找）
+# 画一张；翻的时候一张图摆成一行
 # ---------------------------------------------------------------------------
 
 
@@ -377,142 +377,6 @@ async def _draw(prompt: str) -> str:
     raise RuntimeError(f"画图这条路这会儿走不通：{last}")
 
 
-@tool_error("这张图没画成")
-async def draw_a_picture(
-    self,
-    what: Annotated[
-        str,
-        Field(description="你想画的这张图是什么样，画面里有什么、什么氛围，写具体点"),
-    ],
-) -> list[dict[str, Any]]:
-    """自己动手画一张图。
-
-    你想画什么就写什么样，画面里有什么、什么氛围、什么感觉，写得越具体画出来越接近
-    你想的那个。别报尺寸也别报画质——你画画的时候不会先想"我要画多大"。
-
-    画你自己或者姐妹的时候，手边那份 drawing 说明里写着你们各自长什么样，还有什么样
-    的要求你可以不接。用 read_a_guide 读它，读不读你自己定。
-
-    画完你会当场看见它，它同时进了你手上那些图里，跟着一串 pic=…。**那串是你以后再
-    找到它的唯一凭据**：下次你眼前不会再有这次的结果，想再看它、想把它发给谁，都
-    得先用 look_through_your_pictures 把它翻出来。
-
-    你想要的那张网上本来就有（表情包、剧照、某个人的照片），那是
-    find_a_picture_online，不用自己画。
-
-    Args:
-        what: 你想画的这张图是什么样。
-
-    Returns:
-        画出来的那张图本身，连着它那串 pic=…；这一趟没画成时一句如实说明。
-    """
-    this_round = current_round()
-    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
-    wanted = what.strip()
-    if not wanted:
-        raise ValueError("你没说要画什么：写一句你想画的东西。")
-    logger.info(
-        "living pictures lane=%s persona=%s 画：%s", lane, persona_id, wanted
-    )
-
-    kept = await _keep(
-        lane=lane,
-        persona_id=persona_id,
-        source_type="base64",
-        data=await _draw(wanted),
-        what=wanted,
-        now=now,
-    )
-    if kept is None:
-        # 画出来了但没存住 —— **这不能说成"画好了"**：她会拿着一个不存在的东西去发。
-        raise RuntimeError(
-            "画是画出来了，但没能存住，所以你手上没有它 —— 想要的话再画一次。"
-        )
-    picture, url = kept
-    return _shown(
-        f"你画出来了：「{esc(picture.what)}」 {_handle_of(picture)}\n"
-        f"它已经在你手上那些图里了，以后用 look_through_your_pictures 找得回。",
-        url,
-    )
-
-
-@tool_error("这一趟没找着图")
-async def find_a_picture_online(
-    self,
-    what: Annotated[
-        str,
-        Field(description="你想找什么样的图，一句大白话，你心里怎么想的就怎么写"),
-    ],
-) -> list[dict[str, Any]]:
-    """上网找现成的图。
-
-    你想要的那张网上本来就有——某部番的剧照、某个表情包、某种花长什么样——就把你想
-    找的东西写出来，它给你捞几张回来，你自己看着挑。
-
-    捞回来的**每一张你都看得见**，而且每张跟着一串 pic=…，都已经进了你手上那些图里。
-    所以现在你就能挑一张发出去，下次也还找得回它们。
-
-    你脑子里那个画面网上不会有（你想画的某个具体场景、你自己的构思），那是
-    draw_a_picture，自己动手画。
-    想查一件事的答案、想随便刷点什么，那是 search_online / browse_online，跟找图是
-    两回事。
-
-    Args:
-        what: 你想找什么样的图。
-
-    Returns:
-        捞回来的那几张图本身，每张连着它那串 pic=…；一张都没捞着时一句如实说明。
-    """
-    this_round = current_round()
-    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
-    wanted = what.strip()
-    if not wanted:
-        raise ValueError("你没说要找什么图：写一句你想找的东西。")
-    logger.info(
-        "living pictures lane=%s persona=%s 找图：%s", lane, persona_id, wanted
-    )
-
-    # 她写的那句**原样**当检索词，不替她改写、不替她补关键词（跟
-    # :func:`app.living.web.online.search_online` 同一条）。
-    hits = await image_search(wanted, count=PICTURE_SEARCH_COUNT)
-    if not hits:
-        # capability 的契约把"没配置"也表达成空列表，所以这一刻分不清是哪一种。如实
-        # 说分不清，**绝不说成"网上没有这种图"** —— 那是一个我们并不知道的结论。
-        raise RuntimeError(
-            f"「{wanted}」这一趟一张都没捞回来。找图这条路要么没配、要么什么都没返回，"
-            f"分不清是哪一种 —— 这不等于网上没有这种图。"
-        )
-
-    blocks: list[dict[str, Any]] = []
-    for hit in hits:
-        kept = await _keep(
-            lane=lane,
-            persona_id=persona_id,
-            source_type="url",
-            data=hit.image_url,
-            # 网上那个标题是她分辨这几张的唯一依据 —— 三张都写成她那句检索词的话，
-            # 下一轮她面对的是三行一模一样的字。没有标题时才退回她那句。
-            what=hit.title.strip() or f"上网找「{wanted}」找到的",
-            now=now,
-        )
-        # 一张存不住不该拖垮整趟：剩下那几张照样摆到她眼前（``_keep`` 已经记过一笔）。
-        if kept is not None:
-            picture, url = kept
-            blocks += _shown(f"{esc(picture.what)} {_handle_of(picture)}", url)
-
-    if not blocks:
-        raise RuntimeError(
-            f"「{wanted}」捞回来的那几张一张都没能存住，所以你手上没有它们 —— "
-            f"想要的话再找一次。"
-        )
-    return blocks
-
-
-# ---------------------------------------------------------------------------
-# 两只手：翻一翻手上有什么 / 拿出其中一张看
-# ---------------------------------------------------------------------------
-
-
 def _one_picture(p: Picture, *, now: datetime) -> str:
     """一张图在清单上的样子：是什么、什么时候做的、那串句柄。
 
@@ -523,142 +387,298 @@ def _one_picture(p: Picture, *, now: datetime) -> str:
     return f"- 「{esc(p.what)}」 {when} {_handle_of(p)}"
 
 
-@tool_error("翻你手上的图失败")
-async def look_through_your_pictures(
-    self,
-    before: Annotated[
-        str | None,
-        Field(
-            description="接着哪一张往前翻：把上一屏最后那串 pic=… 原样抄进来；"
-            "从头看就别填"
-        ),
-    ] = None,
-) -> str:
-    """翻一翻你手上都有哪些图。
+# ---------------------------------------------------------------------------
+# 四只手：做一张出来（画 / 上网找）、翻一翻手上有什么 / 拿出其中一张看
+# ---------------------------------------------------------------------------
 
-    你自己画过的、上网找回来的，都在这儿，最近做的在最前面。每张跟着一串 pic=…，
-    拿它调 look_at_a_picture 就能把那张拿出来看。
 
-    **这是你下次还能找到那些图的唯一一条路。** 你画完那一刻看见的东西，过了这一次
-    就不在你眼前了；只有从这儿翻，才知道自己手上有什么。
+class Album:
+    """pictures 插件对象：她手上那四只跟图有关的手（画一张、上网找一张、翻一翻、拿出一张看），
+    和 ``pictures`` 服务（:class:`app.living.services.Pictures`）—— 手机和嘴经它认她的图，认法和
+    这四只手存下、印给她的是同一份。不带状态。"""
 
-    一次只列最近那些。还想往前看就把这一屏最后那串 pic=… 抄进 before 再翻一次，
-    一直翻得到最早那张。想得起那张是什么的话，直接把那句话报给 look_at_a_picture
-    也指得到。
+    async def hers_among(
+        self, *, lane: str, persona_id: str, file_names: Collection[str]
+    ) -> set[str]:
+        """``file_names`` 里哪几个是她手上真有的图（:func:`hers_among`）。"""
+        return await hers_among(lane=lane, persona_id=persona_id, file_names=file_names)
 
-    Returns:
-        你手上那些图，每张带一串 pic=…；一张都没有时如实说明。
-    """
-    this_round = current_round()
-    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+    async def her_picture(
+        self, *, lane: str, persona_id: str, picture_id: str
+    ) -> Picture | None:
+        """她手上的这一张（:func:`her_picture`）。"""
+        return await her_picture(lane=lane, persona_id=persona_id, picture_id=picture_id)
 
-    # 她抄回来的那串指的是"翻到这儿了"，落脚点是它的时刻。指不到的串**当没填**而不是
-    # 报错：她翻到底那一屏的最后一张，下一次再抄它是很自然的动作。
-    edge: datetime | None = None
-    if before and before.strip():
-        marker = await her_picture(
-            lane=lane, persona_id=persona_id, picture_id=picture_id_in(before)
+    def printed_handle(self, file_name: str) -> str:
+        """这张图印在她眼前的句柄（:func:`printed_handle`）。"""
+        return printed_handle(file_name)
+
+    def picture_id_in(self, what_she_copied: str) -> str:
+        """她照抄回来的那串认回句柄（:func:`picture_id_in`）。"""
+        return picture_id_in(what_she_copied)
+
+    @tool_error("这张图没画成")
+    async def draw_a_picture(
+        self,
+        what: Annotated[
+            str,
+            Field(description="你想画的这张图是什么样，画面里有什么、什么氛围，写具体点"),
+        ],
+    ) -> list[dict[str, Any]]:
+        """自己动手画一张图。
+
+        你想画什么就写什么样，画面里有什么、什么氛围、什么感觉，写得越具体画出来越接近
+        你想的那个。别报尺寸也别报画质——你画画的时候不会先想"我要画多大"。
+
+        画你自己或者姐妹的时候，手边那份 drawing 说明里写着你们各自长什么样，还有什么样
+        的要求你可以不接。用 read_a_guide 读它，读不读你自己定。
+
+        画完你会当场看见它，它同时进了你手上那些图里，跟着一串 pic=…。**那串是你以后再
+        找到它的唯一凭据**：下次你眼前不会再有这次的结果，想再看它、想把它发给谁，都
+        得先用 look_through_your_pictures 把它翻出来。
+
+        你想要的那张网上本来就有（表情包、剧照、某个人的照片），那是
+        find_a_picture_online，不用自己画。
+
+        Args:
+            what: 你想画的这张图是什么样。
+
+        Returns:
+            画出来的那张图本身，连着它那串 pic=…；这一趟没画成时一句如实说明。
+        """
+        this_round = current_round()
+        lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+        wanted = what.strip()
+        if not wanted:
+            raise ValueError("你没说要画什么：写一句你想画的东西。")
+        logger.info(
+            "living pictures lane=%s persona=%s 画：%s", lane, persona_id, wanted
         )
-        if marker is None:
-            raise ValueError(
-                f"{before!r} 不是你手上任何一张图 —— 抄这一屏最后那串 pic=…，"
-                f"或者不填从头看。"
-            )
-        edge = marker.made_at
 
-    mine = await pictures_she_made(
-        lane=lane, persona_id=persona_id, limit=None, before=edge
-    )
-    if not mine:
-        if edge is not None:
-            return "再往前就没有了 —— 这些就是你手上全部的图。"
-        return "你手上还没有图 —— 想要就自己画一张，或者上网找一张。"
-
-    lines = ["你手上的图（最近做的在前面）："]
-    lines += [_one_picture(p, now=now) for p in mine[:PICTURE_LIST_LIMIT]]
-    skipped = len(mine) - PICTURE_LIST_LIMIT
-    if skipped > 0:
-        lines.append(
-            f"还有 {skipped} 张没列在这儿 —— 把上面最后那串 pic=… 抄进 before "
-            f"接着往前翻，或者想得起是什么就直接报那句话。"
+        kept = await _keep(
+            lane=lane,
+            persona_id=persona_id,
+            source_type="base64",
+            data=await _draw(wanted),
+            what=wanted,
+            now=now,
         )
-    return "\n".join(lines)
-
-
-@tool_error("拿出这张图失败")
-async def look_at_a_picture(
-    self,
-    which: Annotated[
-        str,
-        Field(
-            description="你要看哪一张：把清单里那串 pic=… 原样抄进来，"
-            "或者说那张图是什么，记得多少写多少"
-        ),
-    ],
-) -> list[dict[str, Any]]:
-    """把你手上的某一张图拿出来看。
-
-    抄清单里那串 pic=… 最准；说那张图是什么也行，记得多少写多少。
-
-    一句话对上好几张的时候，它会把这几张连着各自那串 pic=… 摆给你，**它不会替你挑**
-    ——你自己认哪一张，把那串原样抄回来。
-
-    你会真的看见那张图，不是一段关于它的描述。
-
-    只能看**你自己**手上的图。别人发到你手机上的图片不在这儿，那些你打开会话就直接
-    看见了（look_at_phone）。
-
-    Args:
-        which: 那串 pic=…，或者那张图是什么。
-
-    Returns:
-        那张图本身；没有对得上的 / 对上好几张 / 现在取不出来时一句如实说明。
-    """
-    this_round = current_round()
-    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
-    wanted = which.strip()
-    if not wanted:
-        raise ValueError("你没说要看哪张：抄一串 pic=… 进来，或者说那张图是什么。")
-
-    # 句柄那条路先走，而且**一个上限都没有**：很久以前那张照样指得到。``lane`` +
-    # ``persona_id`` 是硬条件（在 :func:`her_picture` 里），所以一个从别处拿到的句柄
-    # 在这儿就到头了 —— 姐姐画的那张取不出来。
-    picked = await her_picture(
-        lane=lane, persona_id=persona_id, picture_id=picture_id_in(wanted)
-    )
-    if picked is None:
-        # 报的不是句柄，那就是在说这张图是什么。查她做过的**全部**，不受清单上限管。
-        needle = wanted.casefold()
-        hit = [
-            p
-            for p in await pictures_she_made(
-                lane=lane, persona_id=persona_id, limit=None
+        if kept is None:
+            # 画出来了但没存住 —— **这不能说成"画好了"**：她会拿着一个不存在的东西去发。
+            raise RuntimeError(
+                "画是画出来了，但没能存住，所以你手上没有它 —— 想要的话再画一次。"
             )
-            if needle in p.what.casefold()
-        ]
-        if not hit:
-            # fail-loud，绝不挑一张最近的顶上：发错一张图比发不出去更糟。
-            raise ValueError(
-                f"你手上没有对得上「{wanted}」的图。换个说法，或者用 "
-                f"look_through_your_pictures 看看你手上都有什么。"
-            )
-        if len(hit) > 1:
-            # 摊开候选让她指得动 —— 每一行末尾那串原样抄回来就能点中，回问不是空话。
-            spread = "\n".join(_one_picture(p, now=now) for p in hit)
-            raise ValueError(
-                f"「{wanted}」对上了好几张：\n{spread}\n"
-                f"你要看哪一张？把那一行末尾那串 {_HANDLE_PREFIX}… 原样抄回来。"
-                f"我不替你挑。"
-            )
-        picked = hit[0]
-
-    # 地址在这一刻才签：签名 1.5 小时就死，存下来的那份永远是 ``file_name``。
-    url = await image_client.get_url(picked.file_name)
-    if url is None:
-        raise RuntimeError(
-            f"「{esc(picked.what)}」这会儿取不出来 —— 它还在你手上，只是现在打不开它。"
+        picture, url = kept
+        return _shown(
+            f"你画出来了：「{esc(picture.what)}」 {_handle_of(picture)}\n"
+            f"它已经在你手上那些图里了，以后用 look_through_your_pictures 找得回。",
+            url,
         )
-    when = to_cst_dated(picked.made_at.isoformat(), now=now, seconds=False)
-    return _shown(f"{when} 的「{esc(picked.what)}」 {_handle_of(picked)}", url)
 
+    @tool_error("这一趟没找着图")
+    async def find_a_picture_online(
+        self,
+        what: Annotated[
+            str,
+            Field(description="你想找什么样的图，一句大白话，你心里怎么想的就怎么写"),
+        ],
+    ) -> list[dict[str, Any]]:
+        """上网找现成的图。
 
+        你想要的那张网上本来就有——某部番的剧照、某个表情包、某种花长什么样——就把你想
+        找的东西写出来，它给你捞几张回来，你自己看着挑。
+
+        捞回来的**每一张你都看得见**，而且每张跟着一串 pic=…，都已经进了你手上那些图里。
+        所以现在你就能挑一张发出去，下次也还找得回它们。
+
+        你脑子里那个画面网上不会有（你想画的某个具体场景、你自己的构思），那是
+        draw_a_picture，自己动手画。
+        想查一件事的答案、想随便刷点什么，那是 search_online / browse_online，跟找图是
+        两回事。
+
+        Args:
+            what: 你想找什么样的图。
+
+        Returns:
+            捞回来的那几张图本身，每张连着它那串 pic=…；一张都没捞着时一句如实说明。
+        """
+        this_round = current_round()
+        lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+        wanted = what.strip()
+        if not wanted:
+            raise ValueError("你没说要找什么图：写一句你想找的东西。")
+        logger.info(
+            "living pictures lane=%s persona=%s 找图：%s", lane, persona_id, wanted
+        )
+
+        # 她写的那句**原样**当检索词，不替她改写、不替她补关键词（跟
+        # :func:`app.living.web.online.search_online` 同一条）。
+        hits = await image_search(wanted, count=PICTURE_SEARCH_COUNT)
+        if not hits:
+            # capability 的契约把"没配置"也表达成空列表，所以这一刻分不清是哪一种。如实
+            # 说分不清，**绝不说成"网上没有这种图"** —— 那是一个我们并不知道的结论。
+            raise RuntimeError(
+                f"「{wanted}」这一趟一张都没捞回来。找图这条路要么没配、要么什么都没返回，"
+                f"分不清是哪一种 —— 这不等于网上没有这种图。"
+            )
+
+        blocks: list[dict[str, Any]] = []
+        for hit in hits:
+            kept = await _keep(
+                lane=lane,
+                persona_id=persona_id,
+                source_type="url",
+                data=hit.image_url,
+                # 网上那个标题是她分辨这几张的唯一依据 —— 三张都写成她那句检索词的话，
+                # 下一轮她面对的是三行一模一样的字。没有标题时才退回她那句。
+                what=hit.title.strip() or f"上网找「{wanted}」找到的",
+                now=now,
+            )
+            # 一张存不住不该拖垮整趟：剩下那几张照样摆到她眼前（``_keep`` 已经记过一笔）。
+            if kept is not None:
+                picture, url = kept
+                blocks += _shown(f"{esc(picture.what)} {_handle_of(picture)}", url)
+
+        if not blocks:
+            raise RuntimeError(
+                f"「{wanted}」捞回来的那几张一张都没能存住，所以你手上没有它们 —— "
+                f"想要的话再找一次。"
+            )
+        return blocks
+
+    @tool_error("翻你手上的图失败")
+    async def look_through_your_pictures(
+        self,
+        before: Annotated[
+            str | None,
+            Field(
+                description="接着哪一张往前翻：把上一屏最后那串 pic=… 原样抄进来；"
+                "从头看就别填"
+            ),
+        ] = None,
+    ) -> str:
+        """翻一翻你手上都有哪些图。
+
+        你自己画过的、上网找回来的，都在这儿，最近做的在最前面。每张跟着一串 pic=…，
+        拿它调 look_at_a_picture 就能把那张拿出来看。
+
+        **这是你下次还能找到那些图的唯一一条路。** 你画完那一刻看见的东西，过了这一次
+        就不在你眼前了；只有从这儿翻，才知道自己手上有什么。
+
+        一次只列最近那些。还想往前看就把这一屏最后那串 pic=… 抄进 before 再翻一次，
+        一直翻得到最早那张。想得起那张是什么的话，直接把那句话报给 look_at_a_picture
+        也指得到。
+
+        Returns:
+            你手上那些图，每张带一串 pic=…；一张都没有时如实说明。
+        """
+        this_round = current_round()
+        lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+
+        # 她抄回来的那串指的是"翻到这儿了"，落脚点是它的时刻。指不到的串**当没填**而不是
+        # 报错：她翻到底那一屏的最后一张，下一次再抄它是很自然的动作。
+        edge: datetime | None = None
+        if before and before.strip():
+            marker = await her_picture(
+                lane=lane, persona_id=persona_id, picture_id=picture_id_in(before)
+            )
+            if marker is None:
+                raise ValueError(
+                    f"{before!r} 不是你手上任何一张图 —— 抄这一屏最后那串 pic=…，"
+                    f"或者不填从头看。"
+                )
+            edge = marker.made_at
+
+        mine = await pictures_she_made(
+            lane=lane, persona_id=persona_id, limit=None, before=edge
+        )
+        if not mine:
+            if edge is not None:
+                return "再往前就没有了 —— 这些就是你手上全部的图。"
+            return "你手上还没有图 —— 想要就自己画一张，或者上网找一张。"
+
+        lines = ["你手上的图（最近做的在前面）："]
+        lines += [_one_picture(p, now=now) for p in mine[:PICTURE_LIST_LIMIT]]
+        skipped = len(mine) - PICTURE_LIST_LIMIT
+        if skipped > 0:
+            lines.append(
+                f"还有 {skipped} 张没列在这儿 —— 把上面最后那串 pic=… 抄进 before "
+                f"接着往前翻，或者想得起是什么就直接报那句话。"
+            )
+        return "\n".join(lines)
+
+    @tool_error("拿出这张图失败")
+    async def look_at_a_picture(
+        self,
+        which: Annotated[
+            str,
+            Field(
+                description="你要看哪一张：把清单里那串 pic=… 原样抄进来，"
+                "或者说那张图是什么，记得多少写多少"
+            ),
+        ],
+    ) -> list[dict[str, Any]]:
+        """把你手上的某一张图拿出来看。
+
+        抄清单里那串 pic=… 最准；说那张图是什么也行，记得多少写多少。
+
+        一句话对上好几张的时候，它会把这几张连着各自那串 pic=… 摆给你，**它不会替你挑**
+        ——你自己认哪一张，把那串原样抄回来。
+
+        你会真的看见那张图，不是一段关于它的描述。
+
+        只能看**你自己**手上的图。别人发到你手机上的图片不在这儿，那些你打开会话就直接
+        看见了（look_at_phone）。
+
+        Args:
+            which: 那串 pic=…，或者那张图是什么。
+
+        Returns:
+            那张图本身；没有对得上的 / 对上好几张 / 现在取不出来时一句如实说明。
+        """
+        this_round = current_round()
+        lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+        wanted = which.strip()
+        if not wanted:
+            raise ValueError("你没说要看哪张：抄一串 pic=… 进来，或者说那张图是什么。")
+
+        # 句柄那条路先走，而且**一个上限都没有**：很久以前那张照样指得到。``lane`` +
+        # ``persona_id`` 是硬条件（在 :func:`her_picture` 里），所以一个从别处拿到的句柄
+        # 在这儿就到头了 —— 姐姐画的那张取不出来。
+        picked = await her_picture(
+            lane=lane, persona_id=persona_id, picture_id=picture_id_in(wanted)
+        )
+        if picked is None:
+            # 报的不是句柄，那就是在说这张图是什么。查她做过的**全部**，不受清单上限管。
+            needle = wanted.casefold()
+            hit = [
+                p
+                for p in await pictures_she_made(
+                    lane=lane, persona_id=persona_id, limit=None
+                )
+                if needle in p.what.casefold()
+            ]
+            if not hit:
+                # fail-loud，绝不挑一张最近的顶上：发错一张图比发不出去更糟。
+                raise ValueError(
+                    f"你手上没有对得上「{wanted}」的图。换个说法，或者用 "
+                    f"look_through_your_pictures 看看你手上都有什么。"
+                )
+            if len(hit) > 1:
+                # 摊开候选让她指得动 —— 每一行末尾那串原样抄回来就能点中，回问不是空话。
+                spread = "\n".join(_one_picture(p, now=now) for p in hit)
+                raise ValueError(
+                    f"「{wanted}」对上了好几张：\n{spread}\n"
+                    f"你要看哪一张？把那一行末尾那串 {_HANDLE_PREFIX}… 原样抄回来。"
+                    f"我不替你挑。"
+                )
+            picked = hit[0]
+
+        # 地址在这一刻才签：签名 1.5 小时就死，存下来的那份永远是 ``file_name``。
+        url = await image_client.get_url(picked.file_name)
+        if url is None:
+            raise RuntimeError(
+                f"「{esc(picked.what)}」这会儿取不出来 —— 它还在你手上，只是现在打不开它。"
+            )
+        when = to_cst_dated(picked.made_at.isoformat(), now=now, seconds=False)
+        return _shown(f"{when} 的「{esc(picked.what)}」 {_handle_of(picked)}", url)

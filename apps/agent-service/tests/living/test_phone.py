@@ -3868,7 +3868,7 @@ def _her_picture_item(file_name: str, key: str = "img_v3_sent") -> dict:
 
 async def _in_her_hand(file_name: str, *, what: str = "她做过的一张图") -> str:
     """把这张图记进**当前泳道、当前 persona** 名下 —— 她手上真有它。"""
-    from app.living.pictures import remember_a_picture
+    from app.living.pictures.album import remember_a_picture
 
     made = await remember_a_picture(
         lane=LANE,
@@ -3885,7 +3885,7 @@ async def test_her_own_picture_is_a_mark_and_a_handle_not_the_picture(
     living_db, in_a_moment, pictures
 ):
     """她自己发过的那张图不摆到她眼前，只在正文里留一句"我发过图" ＋ 一串句柄。"""
-    from app.living.pictures import handle_for
+    from app.living.pictures.album import handle_for
 
     await _seed_world()
     await _incoming(_DM, text_body="发张图看看", at=_at(22, 19))
@@ -3922,7 +3922,7 @@ async def test_the_handle_on_her_own_picture_is_the_one_her_hand_takes(
 
     各算各的话，她照抄回来撞的是死路：系统等于告诉她自己的记录是假的。
     """
-    from app.living.pictures import (
+    from app.living.pictures.album import (
         handle_for,
         her_picture,
         picture_id_in,
@@ -4035,7 +4035,7 @@ async def test_a_picture_she_sent_on_another_lane_gets_no_handle(
     印出去的后果是静默的：她看见一个摆在眼前的引用，抄回去被告知"你手上没有这张图" ——
     系统等于告诉她自己的记录是假的。
     """
-    from app.living.pictures import remember_a_picture
+    from app.living.pictures.album import remember_a_picture
 
     await _seed_world()
     await _incoming(_DM, text_body="发张图看看", at=_at(22, 19))
@@ -4070,7 +4070,7 @@ async def test_a_picture_that_is_a_sisters_record_gets_no_handle(
     living_db, in_a_moment, pictures
 ):
     """那张图记在姐姐名下：同样不印句柄 —— 隔离的两半都是硬条件，不只 lane。"""
-    from app.living.pictures import remember_a_picture
+    from app.living.pictures.album import remember_a_picture
 
     await _seed_world()
     await _incoming(_DM, text_body="发张图看看", at=_at(22, 19))
@@ -4102,7 +4102,7 @@ async def test_the_ones_she_still_has_keep_their_handles(
 
     核验那一步一刀切成"有一张对不上就全不印"的话，代价是她手上明明还在的图也取不回来。
     """
-    from app.living.pictures import handle_for
+    from app.living.pictures.album import handle_for
 
     await _seed_world()
     await _incoming(_DM, text_body="发几张图看看", at=_at(22, 19))

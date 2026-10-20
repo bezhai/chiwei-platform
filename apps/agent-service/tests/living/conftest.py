@@ -264,11 +264,14 @@ async def settled() -> None:
 def her_tool(name: str, *, residents=None) -> Tool:
     """她还没拆成插件的一只手：living 插件对象（:class:`app.plugins.living.NotSplitYet`）上的方法，
     包成跟插件登记给模型的同一种 :class:`~app.agent.tooling.Tool`。``residents`` 是交给它的
-    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）。"""
+    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）；``pictures`` 服务是 pictures
+    插件对象本身（不带状态，读写的是用例的库）。"""
     from app.agent.tooling import Tool
+    from app.living.pictures.album import Album
     from app.plugins.living import NotSplitYet
 
-    return Tool(getattr(NotSplitYet(residents=residents or NamesRead()), name))
+    living = NotSplitYet(residents=residents or NamesRead(), pictures=Album())
+    return Tool(getattr(living, name))
 
 
 def glance_text(shown) -> str:
@@ -335,7 +338,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
     from app.living.persona.chain import PersonaVersion
     from app.living.phone import PhoneRead
-    from app.living.pictures import Picture
+    from app.living.pictures.album import Picture
     from app.living.received import ReceivedMessage, ReceivedRead
     from app.living.records import Happening, Whereabouts
     from tests.runtime.conftest import migrate

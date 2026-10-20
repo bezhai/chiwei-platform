@@ -117,7 +117,6 @@ from app.living import (
     moment,
     mouth,
     phone,
-    pictures,
     reading,
     records,  # noqa: F401
     takeback,
@@ -151,7 +150,7 @@ from app.living.persona_review import DueReview, persona_review_due, write_due_r
 from app.living.reading import read_a_round
 from app.living.received import open_inboxes
 from app.living.records import living_lane
-from app.living.services import READING, Persona, PersonaText, WhoLivesHere
+from app.living.services import READING, Persona, PersonaText, Pictures, WhoLivesHere
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
 
 # How often her wakes tick (see "Clocks tick denser than the work they drive").
@@ -207,13 +206,10 @@ class NotSplitYet:
     take_back_message = takeback.take_back_message
     look_for_something_to_read = reading.look_for_something_to_read
     read_a_bit = reading.read_a_bit
-    draw_a_picture = pictures.draw_a_picture
-    find_a_picture_online = pictures.find_a_picture_online
-    look_through_your_pictures = pictures.look_through_your_pictures
-    look_at_a_picture = pictures.look_at_a_picture
 
-    def __init__(self, *, residents: WhoLivesHere) -> None:
+    def __init__(self, *, residents: WhoLivesHere, pictures: Pictures) -> None:
         self.residents = residents
+        self.pictures = pictures
 
 
 def regular(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
@@ -303,7 +299,7 @@ def setup(ctx: Context) -> None:
         ctx.wake(diary, pages, every=DAY_PAGE_EVERY)
         look_back = ctx.turns(persona_id, "persona-review", hold_limit=HOLD_LIMIT)
         ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
-    _her_round(ctx, NotSplitYet(residents=residents))
+    _her_round(ctx, NotSplitYet(residents=residents, pictures=ctx.service("pictures")))
     ctx.clock(
         "landing",
         LANDING_EVERY.total_seconds(),
@@ -406,14 +402,10 @@ def _her_tools(ctx: Context, living: NotSplitYet) -> None:
     # ``file=``（:mod:`app.living.reading`）。
     ctx.tool(Tool(living.look_for_something_to_read), trim="kept")
     ctx.tool(Tool(living.read_a_bit), trim="kept")
-    # 她的图的四只手，返回里都留着 ``pic=<32 位十六进制>``：它们是她后面还要原样抄回去的凭据
-    # （``send_message(pictures=[...])`` / ``look_at_a_picture(which=...)`` /
-    # ``look_through_your_pictures(before=...)`` 吃；翻页那只手的最后一串还是往前翻的游标），所以
-    # 跟她自己的话一样留着，不当素材裁（:mod:`app.living.pictures`）。
-    ctx.tool(Tool(living.draw_a_picture), trim="kept")
-    ctx.tool(Tool(living.find_a_picture_online), trim="kept")
-    ctx.tool(Tool(living.look_through_your_pictures), trim="kept")
-    ctx.tool(Tool(living.look_at_a_picture), trim="kept")
 
 
-PLUGIN = Plugin(name="living", setup=setup, requires=("persona", "residents", "loose_ends"))
+PLUGIN = Plugin(
+    name="living",
+    setup=setup,
+    requires=("persona", "residents", "pictures", "loose_ends"),
+)
