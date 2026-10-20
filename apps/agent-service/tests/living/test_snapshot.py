@@ -11,7 +11,7 @@
   她刚做过 / 说过     她自己的 Happening    最近 N 条
   ==================  ====================  ==========================
 
-别人做了什么不从这里读：传到她这里的那一段在 :mod:`app.living.received`，由
+别人做了什么不从这里读：传到她这里的那一段在 :mod:`app.living.household.received`，由
 ``run_due_moment`` 另摆进这一轮（``tests/living/test_received.py``）。"她刚做过、说过"那层
 单独存在的理由：她的上下文会被裁剪，传到她这里的消息也只摆一次。少了这一层，她上一轮
 答应姐姐的话下一轮就凭空消失，"接得上昨天"永远无从谈起。
@@ -164,7 +164,7 @@ async def test_the_state_she_stands_in_carries_nothing_that_just_happened(snap_d
 @pytest.mark.integration
 async def test_what_is_new_is_the_clock_the_gap_and_where_she_is(snap_db):
     """每轮送到她眼前的实况：几点了、隔了多久、她在哪在做什么。别人做了什么不在这里：
-    传到她这里的那一段由收件箱来（:mod:`app.living.received`）。"""
+    传到她这里的那一段由收件箱来（:mod:`app.living.household.received`）。"""
     await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(14))
     await _stand("ayana", "家/厨房", "煮东西", _at(13))
     await _keep("周末陪绫奈去祭典", at=_at(12))

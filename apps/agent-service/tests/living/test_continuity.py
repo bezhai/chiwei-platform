@@ -27,8 +27,8 @@ from app.agent.session import load_session
 from app.data.persist import fetch_value, insert_idempotent
 from app.living.her_records.deeds import record_happening
 from app.living.her_records.whereabouts import note_whereabouts
+from app.living.household.received import ReceivedMessage, ReceivedRead
 from app.living.moment import LifeMoment, latest_moment
-from app.living.received import ReceivedMessage, ReceivedRead
 from app.living.services import KIND_SPEECH
 from app.manifests.agent_service import RESIDENT
 from app.manifests.history import HISTORY_TEXTS
@@ -79,7 +79,7 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
 
 
 async def _reaches_her(body: str, at: dt.datetime) -> None:
-    """一条传到赤尾这里的消息，跟收件箱存下的一样（:func:`app.living.received.receive`）。"""
+    """一条传到赤尾这里的消息，跟收件箱存下的一样（:func:`app.living.household.received.receive`）。"""
     await insert_idempotent(
         ReceivedMessage(
             lane=LANE,

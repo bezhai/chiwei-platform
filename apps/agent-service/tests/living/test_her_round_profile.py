@@ -14,10 +14,10 @@ from app.agent.contracts import Continue, CostSpec
 from app.agent.round import Round, in_round
 from app.living.day_page import LivingDayPage
 from app.living.her_records.records import Happening, Whereabouts
+from app.living.household.received import ReceivedMessage
 from app.living.loose_ends.threads import LooseEnd
 from app.living.moment import DueMoment
 from app.living.phone.handset import Envelope
-from app.living.received import ReceivedMessage
 from app.living.services import Sender
 from app.living.snapshot import MomentSnapshot
 
@@ -76,6 +76,10 @@ def test_living_places_every_part_of_her_round_the_manifest_lists(resident):
         "phone.unread": "phone",
         "phone.arrived": "phone",
         "phone.glances": "phone",
+        "outgoing.before": "household",
+        "household.received": "household",
+        "household.read": "household",
+        "outgoing.after": "household",
     }
     assert resident.profile.history.key == "{lane}:{participant}"
     assert resident.profile.cost == CostSpec(
@@ -187,6 +191,7 @@ def _reads(
     并数每样读了几次。"""
     from app.living import moment as moment_mod
     from app.living.her_records import book as book_mod
+    from app.living.household import mailbox as mailbox_mod
     from app.living.loose_ends import mind as mind_mod
     from app.living.phone import handset as handset_mod
 
@@ -234,7 +239,7 @@ def _reads(
     monkeypatch.setattr(book_mod, "recent_own_happenings", recent_own_happenings)
     monkeypatch.setattr(mind_mod, "list_open_loose_ends", list_open_loose_ends)
     monkeypatch.setattr(handset_mod, "envelopes_for", envelopes_for)
-    monkeypatch.setattr(moment_mod, "unread_received", unread_received)
+    monkeypatch.setattr(mailbox_mod, "unread_received", unread_received)
     return reads
 
 

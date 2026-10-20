@@ -78,6 +78,7 @@ def test_the_agent_service_app_loads_its_own_plugins():
         "loose_ends",
         "pictures",
         "phone",
+        "household",
         "web",
         "guides",
         "living",
@@ -87,7 +88,7 @@ def test_the_agent_service_app_loads_its_own_plugins():
     # 三姐妹的收件箱名字在人设表里，setup 时只声明"开始接收时再开"，所以起完 setup 只看得到
     # ``operator`` 和读书收件箱；开出来的是哪几个名字由 ``tests/living/test_received.py`` 验。
     assert loaded["inboxes"] == ["operator", "reading"]
-    assert loaded["inboxes_at_start"] == ["app.living.received.open_inboxes"]
+    assert loaded["inboxes_at_start"] == ["app.living.household.mailbox.Mailbox.open_inboxes"]
 
 
 def test_an_app_nobody_declared_cannot_start():

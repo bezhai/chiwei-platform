@@ -137,9 +137,9 @@ async def _stand(persona: str, place: str, doing: str, at: dt.datetime) -> None:
 
 
 async def _reaches_her(persona: str, sender: str, body: str, at: dt.datetime) -> None:
-    """一条传到她这里的消息，跟收件箱存下的一样（:func:`app.living.received.receive`）。"""
+    """一条传到她这里的消息，跟收件箱存下的一样（:func:`app.living.household.received.receive`）。"""
     from app.data.persist import insert_idempotent
-    from app.living.received import ReceivedMessage
+    from app.living.household.received import ReceivedMessage
 
     await insert_idempotent(
         ReceivedMessage(
@@ -291,7 +291,7 @@ async def test_switching_nowhere_is_refused_instead_of_silently_losing_her(
 async def test_what_she_says_reaches_her_sister_word_for_word(
     moment_db, stub_moment, post, resident
 ):
-    """按世界里的名字说给姐妹的，原话直接送到她那里，跟她在哪没关系（:mod:`app.living.outgoing`）。"""
+    """按世界里的名字说给姐妹的，原话直接送到她那里，跟她在哪没关系（:mod:`app.living.household.outgoing`）。"""
     await _stand("akao", "家/客厅", "待着", _at(13))
     await _stand("ayana", "家/楼上/绫奈房间", "画画", _at(13))
     stub_moment(("say", {"what": "周末祭典我陪你去。", "to": ["绫奈"]}))
@@ -1469,13 +1469,16 @@ def test_the_moment_runs_on_the_life_model():
 
 
 async def _early_round(resident, at: dt.datetime, *, woken_by: str) -> LifeMoment:
-    """被一条消息叫来提前的一轮，直接跑。这一节问的是它落地之后常规节奏和"上一轮"怎么算；判不判
-    它、身份怎么来在 ``tests/living/test_nudge.py``。"""
+    """被一条消息叫来提前的一轮，判好了直接在她的轮次队列上跑。这一节问的是它落地之后常规节奏和
+    "上一轮"怎么算；判不判它、身份怎么来在 ``tests/living/test_nudge.py``。"""
+    from functools import partial
+
+    from app.host import Coalesce, Signal, WakeSource
     from app.living.moment import DueMoment, nudged_moment_id, run_due_moment
 
-    return await run_due_moment(
-        resident,
-        DueMoment(
+    async def due(participant, batch, clock) -> DueMoment:
+        batch.close()
+        return DueMoment(
             reason=f"被 {woken_by} 叫醒",
             lane=LANE,
             persona_id="akao",
@@ -1483,6 +1486,10 @@ async def _early_round(resident, at: dt.datetime, *, woken_by: str) -> LifeMomen
             now=at,
             nudged=True,
         )
+
+    return await her_queue("akao", clock=clock_at(at)).take(
+        WakeSource("nudge", Coalesce.QUEUE_EACH, due, partial(run_due_moment, resident)),
+        Signal(at=at),
     )
 
 

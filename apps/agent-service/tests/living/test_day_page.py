@@ -39,13 +39,14 @@ from app.living.day_page import (
 )
 from app.living.her_records.deeds import record_happening
 from app.living.her_records.whereabouts import note_whereabouts
+from app.living.household.received import ReceivedMessage
 from app.living.loose_ends.threads import LooseEnd
-from app.living.received import ReceivedMessage
 from app.living.services import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, MEDIUM_PHONE
 from app.living.snapshot import read_snapshot
 from tests.living.conftest import (
     Calls,
     clock_at,
+    her_mailbox,
     her_queue,
     her_round_runs,
     own_records,
@@ -54,6 +55,7 @@ from tests.living.conftest import (
 
 LANE = "coe-living"
 HER_RECORDS = own_records()
+RECEIVED = her_mailbox(her_records=HER_RECORDS)
 _CST = dt.timezone(dt.timedelta(hours=8))
 
 # 被复盘的那一个生活日：2026-07-25 04:00 → 2026-07-26 04:00。
@@ -66,11 +68,11 @@ def _on(day: int, hour: int, minute: int = 0) -> dt.datetime:
 
 def _day_pages():
     """日记这个唤醒来源，跟 living 插件给她登记的一样（:mod:`app.plugins.living`）：「她是谁」从
-    persona 服务取。"""
+    persona 服务取，传到她这里的从 received 服务取。"""
     from app.living.persona.chain import PersonaChain
     from app.plugins.living import day_page
 
-    return day_page(LANE, PersonaChain(), HER_RECORDS)
+    return day_page(LANE, PersonaChain(), HER_RECORDS, RECEIVED)
 
 
 async def _tick(at: dt.datetime, persona_id: str = "akao") -> LivingDayPage | None:
@@ -148,7 +150,7 @@ async def _happened(
 async def _received(
     persona: str, sender: str, body: str, at: dt.datetime, *, wakes_her: bool = True
 ) -> None:
-    """一条传到她这里的消息，跟收件箱存下的一样（:func:`app.living.received.receive`）。"""
+    """一条传到她这里的消息，跟收件箱存下的一样（:func:`app.living.household.received.receive`）。"""
     from app.data.persist import insert_idempotent
 
     await insert_idempotent(
@@ -301,7 +303,7 @@ async def test_a_round_that_writes_nothing_leaves_no_page(page_db, stub_page):
 async def test_what_she_did_herself_is_in_it(page_db):
     await _a_day_worth_of_stuff()
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
 
     assert any("把胶片摊了一茶几" in line for line in lines), (
         f"她自己那一天做的事不在材料里：{lines}"
@@ -312,7 +314,7 @@ async def test_what_she_did_herself_is_in_it(page_db):
 async def test_what_reached_her_is_in_it_with_who_sent_it(page_db):
     await _a_day_worth_of_stuff()
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
 
     assert "15:00 CST 绫奈：当面对你说：「今天要下雨吧」" in lines, lines
 
@@ -322,7 +324,7 @@ async def test_what_world_told_her_is_in_it_as_it_was_told(page_db):
     """world 告诉她的是她察觉到的事，原样摆，不标是谁说的（跟她每一轮读到的一样）。"""
     await _received("akao", "world", "窗外开始下雨了。", _on(25, 16))
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
 
     assert lines == ["16:00 CST 窗外开始下雨了。"], lines
 
@@ -332,7 +334,7 @@ async def test_what_reached_her_without_waking_her_is_in_her_day_too(page_db):
     """不叫醒她的告知只是没把她提前叫来，照样是她那一天传到她这里的事。"""
     await _received("akao", "world", "窗外的雨小了一点。", _on(25, 16), wakes_her=False)
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
 
     assert lines == ["16:00 CST 窗外的雨小了一点。"], lines
 
@@ -347,7 +349,7 @@ async def test_what_her_sisters_did_never_enters_her_day_on_its_own(page_db):
     await _happened("ayana", "把伞挂到了门口", _on(25, 15, 1), kind=KIND_ACT)
     await _happened("akao", "煮了壶抹茶", _on(25, 12), kind=KIND_ACT)
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
     joined = "\n".join(lines)
 
     assert "煮了壶抹茶" in joined
@@ -369,7 +371,7 @@ async def test_her_phone_messages_and_take_backs_stay_in_her_day(page_db):
         medium=MEDIUM_PHONE,
     )
 
-    joined = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS))
+    joined = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED))
 
     assert "你对 bezhai 说：「你去过那家抹茶店吗？」" in joined
     assert "去撤回自己说过的那句" in joined
@@ -380,7 +382,7 @@ async def test_a_sister_named_by_id_in_her_day_reads_as_her_name(page_db):
     """那一天的记录里说给谁记的是 life 内部的 id 时，摆给她写日记的材料里换成姐妹的名字。"""
     await _happened("akao", "开饭了。", _on(25, 18), to=["chinagi", "许阿姨"])
 
-    joined = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS))
+    joined = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED))
 
     assert "你对 千凪、许阿姨 说：「开饭了。」" in joined
     assert "chinagi" not in joined
@@ -395,7 +397,7 @@ async def test_her_day_reads_in_the_order_things_happened(page_db):
     await _received("akao", "world", "九点半的时候楼下的猫跑掉了。", _on(25, 9, 30))
     await _happened("akao", "在车站买了票", _on(25, 11), kind=KIND_ACT)
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
 
     assert lines == [
         "09:30 CST 九点半的时候楼下的猫跑掉了。",
@@ -411,7 +413,7 @@ async def test_what_reached_her_comes_before_what_she_did_at_the_same_moment(pag
     await _happened("akao", "去开门", _on(25, 10), kind=KIND_ACT)
     await _received("akao", "world", "有人敲门。", _on(25, 10))
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
 
     assert lines == ["10:00 CST 有人敲门。", "10:00 CST 你 去开门"], lines
 
@@ -423,7 +425,7 @@ async def test_her_own_things_keep_the_order_she_did_them_in(page_db):
     await _happened("akao", "被叫醒去接电话", _on(25, 21, 34), kind=KIND_ACT)
     await _happened("akao", "接着看胶片", _on(25, 21, 30), kind=KIND_ACT)
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
 
     assert lines == ["21:34 CST 你 被叫醒去接电话", "21:30 CST 你 接着看胶片"], lines
 
@@ -435,7 +437,7 @@ async def test_messages_outside_that_day_are_not_in_that_page(page_db):
     await _received("akao", "world", "凌晨一点打雷了。", _on(26, 1))
     await _received("akao", "world", "新的一天出太阳了。", _on(26, 5))
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
 
     assert lines == ["07-26 01:00 CST 凌晨一点打雷了。"], lines
 
@@ -447,8 +449,8 @@ async def test_three_sisters_get_three_different_days(page_db):
     await _happened("chinagi", "把球踢进了树丛", _on(25, 11), kind=KIND_ACT)
     await _received("chinagi", "world", "操场边的树丛里有只猫。", _on(25, 11, 5))
 
-    mine = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS))
-    hers = "\n".join(await day_material(lane=LANE, persona_id="chinagi", day=_DAY, her_records=HER_RECORDS))
+    mine = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED))
+    hers = "\n".join(await day_material(lane=LANE, persona_id="chinagi", day=_DAY, her_records=HER_RECORDS, received=RECEIVED))
 
     assert "今天要下雨吧" in mine and "把胶片摊了一茶几" in mine
     assert "树丛" not in mine, mine
@@ -478,7 +480,7 @@ async def test_only_that_day_goes_into_that_page(page_db):
     await _happened("akao", "凌晨还在翻论坛", _on(26, 1), kind=KIND_ACT)
     await _happened("akao", "新的一天煮了咖啡", _on(26, 5), kind=KIND_ACT)
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
     joined = "\n".join(lines)
 
     assert "凌晨还在翻论坛" in joined, "07-26 凌晨一点属于 07-25 这个生活日"
@@ -493,7 +495,7 @@ async def test_the_small_hours_are_dated_so_she_can_tell_them_apart(page_db):
     await _happened("akao", "凌晨还在翻论坛", _on(26, 1), kind=KIND_ACT)
 
     (line,) = [
-        line for line in await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS)
+        line for line in await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
         if "翻论坛" in line
     ]
     assert "07-26" in line, f"跨过午夜那几行没标日子：{line!r}"

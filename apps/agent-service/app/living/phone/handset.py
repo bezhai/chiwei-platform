@@ -62,7 +62,7 @@ lane/persona 下还在她手上 —— 泳道跟 prod 共用一个库，而查�
 **游标是她的，不是钟的。**
 
   * 传到她这里的消息（world 的告知、姐妹当面说的话）逐条记看过没有，跟着那一轮落地
-    （:mod:`app.living.received`）；
+    （:mod:`app.living.household.received`）；
   * 手机走**持久游标**，因为已读是她的动作。
 
 **"看手机"什么时候算数：这一轮跑完的时候。** 工具返回**不等于**她看见了——工具结果还
@@ -1612,7 +1612,7 @@ class Handset:
 
 
 # medium 由会话本身决定：私聊是手机上一对一，群是群里说话。两者都隔着设备，所以坐在
-# 她旁边的姐姐一个字都看不见：这两档不进 world 的汇总（app.living.outgoing 按 medium 分）。
+# 她旁边的姐姐一个字都看不见：这两档不进 world 的汇总（app.living.household.outgoing 按 medium 分）。
 _MEDIUM_BY_SCOPE = {"direct": MEDIUM_PHONE, "group": MEDIUM_GROUP_CHAT}
 
 

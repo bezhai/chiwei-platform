@@ -55,7 +55,7 @@ class NamesRead:
 def residents_named(monkeypatch):
     """三姐妹的名字已经读好了，跟线上一样。
 
-    线上进程开始接收消息时就读好这份对照（开收件箱那一下，:func:`app.living.received.open_inboxes`），
+    线上进程开始接收消息时就读好这份对照（开收件箱那一下，:meth:`app.living.household.mailbox.Mailbox.open_inboxes`），
     在任何一条钟开始拍之前；之后她每一轮发消息查地址、按名字认出她对谁说话，用的都是这一份。用例起的
     宿主只跑 setup、不开收件箱，所以它的 residents 插件对象在这里当成已经读好的。验"还没读"和"读的
     时候出错"的用例自己覆盖这个 fixture。
@@ -82,10 +82,19 @@ def her_phone(her_records=None):
     return Handset(her_records=her_records or own_records(), pictures=Album())
 
 
+def her_mailbox(residents=None, her_records=None):
+    """``received`` 服务：household 插件对象本身（不带状态，读写的是用例的库）。``residents`` 默认是
+    名字已经读好的替身（:class:`NamesRead`），``her_records`` 默认是 :func:`own_records`。"""
+    from app.living.household.mailbox import Mailbox
+
+    names = residents or NamesRead()
+    return Mailbox(residents=names, her_records=her_records or own_records(names))
+
+
 async def receive(message) -> None:
     """一条消息进了她的收件箱：跟三姐妹收件箱的处理函数一样存下
-    （:func:`app.living.received.receive`），收件人按读好的名字认。"""
-    from app.living.received import receive as store
+    （:func:`app.living.household.received.receive`），收件人按读好的名字认。"""
+    from app.living.household.received import receive as store
 
     await store(message, residents=RESIDENTS)
 
@@ -134,7 +143,7 @@ class Post:
 @pytest.fixture
 def post(monkeypatch) -> Post:
     """她往外发消息走这个替身，不碰 broker。"""
-    from app.living import outgoing as outgoing_mod
+    from app.living.household import outgoing as outgoing_mod
 
     stand_in = Post()
     monkeypatch.setattr(outgoing_mod, "send", stand_in.send)
@@ -231,7 +240,7 @@ async def nudged_round(
     from app.plugins.living import nudge
 
     return await her_queue(persona_id, clock=clock_at(at)).take(
-        nudge(resident, her_phone()), Signal(at=at)
+        nudge(resident, her_phone(), her_mailbox()), Signal(at=at)
     )
 
 
@@ -357,12 +366,16 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     from app.domain.session_transcript import SessionTranscript
     from app.living.day_page import LivingDayPage
     from app.living.her_records.records import Happening, Whereabouts
+    from app.living.household.outgoing import (
+        OutgoingMessage,
+        OutgoingResult,
+        OutgoingUpTo,
+    )
+    from app.living.household.received import ReceivedMessage, ReceivedRead
     from app.living.mouth import SpokenOutbound
-    from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
     from app.living.persona.chain import PersonaVersion
     from app.living.phone.handset import PhoneRead
     from app.living.pictures.album import Picture
-    from app.living.received import ReceivedMessage, ReceivedRead
     from tests.runtime.conftest import migrate
 
     # ``LivingDayPage`` 跟手机那几张一样建在这里：**每一轮都读那一页**（``read_snapshot``
@@ -371,8 +384,8 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     # 一轮、日记、开口三条路都要先问一遍"她是谁"（persona 服务读这条链）。
     # ``SessionTranscript`` 也是：每一轮开头读连续上下文、结尾写回下一版
     # （``app.agent.continuity``），少了它她的一轮第一步就炸。收到的消息那两张
-    # 也是：每一轮都读她还没看过的收件、收尾时记下看过哪几条（``app.living.received``）。
-    # 她往外发的那三张也是：每一轮开始前和结束时都把她做的事发出去（``app.living.outgoing``）。
+    # 也是：每一轮都读她还没看过的收件、收尾时记下看过哪几条（``app.living.household.received``）。
+    # 她往外发的那三张也是：每一轮开始前和结束时都把她做的事发出去（``app.living.household.outgoing``）。
     for cls in (
         Happening, Whereabouts, PhoneRead, SpokenOutbound, Picture,
         LivingDayPage, PersonaVersion, SessionTranscript,

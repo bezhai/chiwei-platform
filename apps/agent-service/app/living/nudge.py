@@ -13,7 +13,7 @@
 
 群里不点名的消息不提前——它在下一个常规轮次照样被她看到，一条都不会丢。
 
-**传到她这里的消息也提前**（:mod:`app.living.received`）：world 告诉她察觉到了什么、姐妹
+**传到她这里的消息也提前**（:mod:`app.living.household.received`）：world 告诉她察觉到了什么、姐妹
 直接对她说的话，有她还没看过、**发件方要叫醒她**的，就把她带到那一刻。要不要叫醒是发件方在
 消息上说的（通信机制信封上的 ``wakes_recipient``）：world 的每条告知由 world 的感知判断自己定，
 姐妹直接说的话都叫醒她。这里不分 world 还是姐妹、不分说了什么，只认"有一条要叫醒她的她没看过"
@@ -22,10 +22,10 @@
 里的新消息：两边各认各的那条。
 
 收件箱里取的是**最早**那条没看过、要叫醒她的，不是最新那条：她那一轮按消息自带的时间从最早的
-摆起（一轮最多摆 :data:`app.living.received.RECEIVED_LIMIT` 条），积压的时候最早的先被看掉，
+摆起（一轮最多摆 :data:`app.living.household.received.RECEIVED_LIMIT` 条），积压的时候最早的先被看掉，
 后面的接着一条一条叫醒她。"要叫醒她"在查询里就筛掉不叫醒的，不是先取最早那条再看：那样一条更早
 的不叫醒的会一直占住最前面，挡住后面所有该叫醒她的。叫醒她的那条**一定**在那一轮里（``must_show``，见
-:func:`app.living.moment.received_section`）：叫醒她之后才到、发生得更早的消息再多，也挤不掉
+:meth:`app.living.household.mailbox.Mailbox.received_section`）：叫醒她之后才到、发生得更早的消息再多，也挤不掉
 它。那一轮的身份就是它，那一轮落地它就算看过；不然它会一直排在最前，每一拍拿它叫醒她都撞上
 "这一轮跑过了"，收件箱的提前叫醒就卡在那儿。
 
@@ -67,7 +67,7 @@
 （``nudge:<message_id>``）：跑过就是跑过了，新消息才是新的一轮。真人手机就是这样——
 新消息才震，躺着的未读不会一直震。收件箱里的消息同一个做法，身份是
 ``nudge:inbox:<消息 id>``：前缀把它跟手机消息的 id 分开，两边的 id 不是同一套。同一条重投
-一遍只存一行（:func:`app.living.received.receive`），也就不会再叫醒她。
+一遍只存一行（:func:`app.living.household.received.receive`），也就不会再叫醒她。
 """
 
 from __future__ import annotations
@@ -83,8 +83,7 @@ from app.living.moment import (
     moment_ran,
     nudged_moment_id,
 )
-from app.living.received import unread_received
-from app.living.services import Phone
+from app.living.services import Phone, Received
 
 # 收件箱里的消息叫醒她时，那一轮身份里 id 前面的这一截（见模块说明）。
 _INBOX = "inbox:"
@@ -112,15 +111,20 @@ _BEGUN_TABLE = table_name(NudgeBegun)
 
 
 async def nudged_moment_due(
-    *, lane: str, persona_id: str, clock: Callable[[], datetime], phone: Phone
+    *,
+    lane: str,
+    persona_id: str,
+    clock: Callable[[], datetime],
+    phone: Phone,
+    received: Received,
 ) -> DueMoment | None:
     """有什么在叫她、而且还没叫醒过她，就判出被它叫醒的那一轮；没有返回 ``None``。
 
     先读钟（她这一轮的『现在』，理由见 :class:`app.living.moment.DueMoment`），再看有没有开始了而
     没落地的那一轮（:class:`NudgeBegun`），有就原样判出它，不再看手机和收件箱；没有再看现在有
-    什么在叫她（:func:`_calling_her`，手机上的问 ``phone`` 服务）。判出新的一轮时先写下"开始了"再
-    交回，模型还没调、她还什么都没做：之后这一轮失败，重跑的还是它。除了这一行它什么都不记，一个刚
-    起来的进程从库里判出的跟一直跑着的进程一样。
+    什么在叫她（:func:`_calling_her`，手机上的问 ``phone`` 服务，收件箱的问 ``received`` 服务）。判出
+    新的一轮时先写下"开始了"再交回，模型还没调、她还什么都没做：之后这一轮失败，重跑的还是它。除了这
+    一行它什么都不记，一个刚起来的进程从库里判出的跟一直跑着的进程一样。
     """
     now = clock()
     nudged_by = await _begun_not_landed(lane=lane, persona_id=persona_id)
@@ -128,7 +132,7 @@ async def nudged_moment_due(
         reason = f"重跑被 {nudged_by} 叫醒、开始了没落地的那一轮"
     else:
         nudged_by = await _calling_her(
-            lane=lane, persona_id=persona_id, now=now, phone=phone
+            lane=lane, persona_id=persona_id, now=now, phone=phone, received=received
         )
         if nudged_by is None:
             return None
@@ -169,7 +173,7 @@ async def _begun_not_landed(*, lane: str, persona_id: str) -> str | None:
 
 
 async def _calling_her(
-    *, lane: str, persona_id: str, now: datetime, phone: Phone
+    *, lane: str, persona_id: str, now: datetime, phone: Phone, received: Received
 ) -> str | None:
     """现在有什么在叫她、而且还没叫醒过她：先看手机，再看收件箱；都没有返回 ``None``。
 
@@ -185,12 +189,10 @@ async def _calling_her(
         lane=lane, persona_id=persona_id, nudged_by=summons.message_id
     ):
         return summons.message_id
-    earliest = await unread_received(
-        lane=lane, persona_id=persona_id, limit=1, waking_only=True
-    )
-    if not earliest:
+    earliest = await received.earliest_waking_unread(lane=lane, persona_id=persona_id)
+    if earliest is None:
         return None
-    nudged_by = f"{_INBOX}{earliest[0].message_id}"
+    nudged_by = f"{_INBOX}{earliest}"
     if await _woke_her(lane=lane, persona_id=persona_id, nudged_by=nudged_by):
         return None
     return nudged_by

@@ -1,9 +1,10 @@
 """她收到的消息：三姐妹的收件箱，收件只存储；她下一轮醒来时读。
 
 **收件箱开在 agent-service 进程里，名字是她们在世界里的名字**（:mod:`app.living.residents`）。
-名字存在人设表里，插件 setup 的时候还不读库，所以 living 插件只声明"开始接收时再开"
-（:func:`app.messaging.receiving.inboxes_at_start`），:func:`open_inboxes` 在那时读名字、检查、
-经宿主交来的声明函数逐个开设。名字有问题就抛，进程起不来。
+名字存在人设表里，插件 setup 的时候还不读库，所以 household 插件只声明"开始接收时再开"
+（:func:`app.messaging.receiving.inboxes_at_start`），
+:meth:`app.living.household.mailbox.Mailbox.open_inboxes` 在那时读名字、检查、经宿主交来的声明
+函数逐个开设。名字有问题就抛，进程起不来。
 
 **收件处理只做存储，不调模型**（:func:`receive`）。没选"收到就当场跑她一轮"：她每一轮已经
 有自己的锁和节奏（:mod:`app.living.moment`），收件处理只负责把消息存好，不碰她的循环；
@@ -25,7 +26,7 @@
 不是她经历的事，只留一条日志。
 
 **她下一轮醒来时读**（:func:`unread_received` → :func:`render_received`，由
-:func:`app.living.moment.received_section` 摆进这一轮的输入）。按每条消息自带的时间排，不按到达
+:meth:`app.living.household.mailbox.Mailbox.received_section` 摆进这一轮的输入）。按每条消息自带的时间排，不按到达
 先后。收件箱里一条消息把她提前叫醒的那一轮，那一条一定在里面（``including``）。world 发来的是她察觉到的事，原样摆，不标是谁说的；别人发来的带着发送方的名字。
 
 **读到哪里逐条记，不是一个水位**（:class:`ReceivedRead`）。按消息自带的时间开水位会漏：
@@ -42,7 +43,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from functools import partial
 from typing import Annotated
 
 from pydantic import field_validator
@@ -51,9 +51,8 @@ from app.data.persist import fetch_all, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import dated_clock
 from app.living.common import esc, legacy_null_is, living_lane, require_aware
-from app.living.services import WORLD, Residents, WhoLivesHere
+from app.living.services import WORLD, Residents
 from app.messaging.message import Kind, Message
-from app.messaging.receiving import Declare
 
 logger = logging.getLogger(__name__)
 
@@ -123,15 +122,6 @@ class ReceivedRead(Data):
 
 _RECEIVED_TABLE = table_name(ReceivedMessage)
 _READ_TABLE = table_name(ReceivedRead)
-
-
-async def open_inboxes(declare: Declare, *, residents: WhoLivesHere) -> None:
-    """读三姐妹的名字（``residents`` 服务，读的时候检查），按名字各开一个收件箱：对每个名字调
-    ``declare``（宿主交来的，参数和 :func:`app.messaging.receiving.inbox` 一样）。通信机制开始接收
-    之前调一次。"""
-    known = await residents.load()
-    for name in known.by_persona.values():
-        declare(name, on_message=partial(receive, residents=known))
 
 
 async def receive(message: Message, *, residents: Residents) -> None:

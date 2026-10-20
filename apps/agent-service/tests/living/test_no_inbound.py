@@ -6,7 +6,7 @@
 读。纪律会被下一个人绕过去，结构不会。
 
 第二期之前 life 一个收件箱都没有。现在三姐妹各有一个收件箱（通信机制，
-:mod:`app.living.received`），这是她唯一的入口：world 告诉她察觉到了什么、姐妹直接对她说
+:mod:`app.living.household.received`），这是她唯一的入口：world 告诉她察觉到了什么、姐妹直接对她说
 的话都从这里来。另有一个读书收件箱（:mod:`app.living.reading`）：她在自己的一轮里拿起一个
 文件时发一条消息到这里，读那一程。所以这里验的是（看的是 agent-service 的插件宿主上登记的
 东西）：
@@ -14,7 +14,7 @@
   * 实验泳道上没有任何一条路由能到达 ``app.living`` 里的处理函数，路由之外能把东西送进进程的
     登记（收件箱、将来别的种类）都逐种过一遍；
   * life 开设的收件箱只有三姐妹那一组和读书收件箱。三姐妹的处理函数是
-    :func:`app.living.received.receive`，它只存一行、不碰模型：跑一遍看得到一行、看不到任何一次
+    :func:`app.living.household.received.receive`，它只存一行、不碰模型：跑一遍看得到一行、看不到任何一次
     模型调用；它所在的模块连同它 import 的一切，一行能跑模型的代码都没有；
   * 读书收件箱和别的收件箱一样，运维入口（``/admin/messaging/send``）能以任何身份往里投。投进来
     能做到的只有读一程：处理函数 :func:`app.living.reading.read_a_round` 所在的模块连同它 import
@@ -155,7 +155,7 @@ _OPS_ONLY_ROUTES = frozenset({
     # **它们的处理函数不在 app.living 里。** 这六条把消息投进具名收件箱、读通信记录、看或
     # 重放本泳道的死信。第二期起三姐妹有了收件箱，所以 ``send`` / ``send-at`` / 死信重放
     # 送出的消息能到她的收件箱——跟 world 发来的一样，只经过
-    # :func:`app.living.received.receive` 存一行，等她自己醒来再读，一次模型都不当场跑
+    # :func:`app.living.household.received.receive` 存一行，等她自己醒来再读，一次模型都不当场跑
     # （下面 ``test_her_inbox_only_stores`` 那几条守着）。这六条要内网凭据、经 dashboard
     # 落审计，用来以 world 或任何身份给她发一条验证用的消息。``ask`` 到不了她：她的收件箱
     # 不接受提问。
@@ -231,7 +231,7 @@ def test_nothing_from_outside_reaches_the_living_engine():
         "外面的东西能到达 living 的处理函数了 —— 新引擎长出了耳朵：\n  "
         + "\n  ".join(ears)
         + "\nliving 只能自己按钟醒；手机上的消息她每一轮直接查 common_message，"
-        "别人发给她的消息只经她的收件箱存下（app.living.received），"
+        "别人发给她的消息只经她的收件箱存下（app.living.household.received），"
         "不接任何人推进来、直接调进 living 的东西。"
     )
 
@@ -250,8 +250,8 @@ def test_nothing_from_outside_reaches_the_living_engine():
 
 
 # 她的收件箱：开设它的那一个函数、处理每一条消息的那一个函数。
-_OPEN_HER_INBOXES = "app.living.received.open_inboxes"
-_HER_INBOX_HANDLER = "app.living.received"
+_OPEN_HER_INBOXES = "app.living.household.mailbox.Mailbox.open_inboxes"
+_HER_INBOX_HANDLER = "app.living.household.received"
 
 # 读书收件箱：名字、处理函数。
 _READING_INBOX = ["reading", "app.living.reading.read_a_round"]
@@ -265,7 +265,7 @@ _MODEL_RUNNING = ("app.agent", "app.capabilities", _HER_ROUND)
 
 
 def test_the_only_inboxes_living_opens_are_the_residents_and_reading():
-    """life 开设的收件箱只有两类：三姐妹那一组，由 :func:`app.living.received.open_inboxes` 在开始
+    """life 开设的收件箱只有两类：三姐妹那一组，由 :meth:`app.living.household.mailbox.Mailbox.open_inboxes` 在开始
     接收时开；读书收件箱，setup 时直接开，处理函数是 :func:`app.living.reading.read_a_round`。
 
     三姐妹的名字在人设表里，setup 时只声明"开始接收时再开"；所以宿主起完 setup 之后，直接开设的
@@ -280,20 +280,33 @@ def test_the_only_inboxes_living_opens_are_the_residents_and_reading():
     assert registered["at_start"] == [_OPEN_HER_INBOXES]
 
 
+# 在干净进程里只 import 一个模块。它在她的某个插件目录里时，那个目录的 ``__init__`` 不跑：那是插件
+# 向宿主登记自己（import 宿主，宿主又 import 整个 agent 层），不是处理函数手边的代码；跑了它，每个插件
+# 目录里的模块都"碰得到模型"，这条检查就什么都分不出来了。目录照样是那个目录，模块按原路径 import。
+_IMPORT_ALONE = """
+import importlib, pathlib, sys, types
+import app.living
+module = {module!r}
+package = module.rpartition(".")[0]
+if package.startswith("app.living."):
+    plugin = types.ModuleType(package)
+    plugin.__path__ = [str(pathlib.Path(app.living.__file__).parent / package.rpartition(".")[2])]
+    sys.modules[package] = plugin
+importlib.import_module(module)
+print(repr(sorted(m for m in sys.modules if m.startswith("app."))))
+"""
+
+
 def _app_modules_loaded_by_importing(module: str) -> list[str]:
-    """在一个干净进程里只 import ``module``，交回那之后 ``sys.modules`` 里的 ``app.*``。
+    """在一个干净进程里只 import ``module``（连同它 import 的一切，不含它所在插件目录的登记，见
+    :data:`_IMPORT_ALONE`），交回那之后 ``sys.modules`` 里的 ``app.*``。
 
     不走 ``in_a_fresh_process``：它先起整个 agent-service，那时什么模块都早就在了。
     """
     env = dict(os.environ)
     env["LANE"] = LANE
     proc = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            f"import sys; import {module};"
-            "print(repr(sorted(m for m in sys.modules if m.startswith('app.'))))",
-        ],
+        [sys.executable, "-c", _IMPORT_ALONE.format(module=module)],
         capture_output=True,
         text=True,
         timeout=180,
@@ -344,11 +357,11 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
 
     from app.data.persist import fetch_all
     from app.living import moment as moment_mod
-    from app.living.received import open_inboxes
     from app.living.residents import names as names_mod
     from app.living.residents.names import PersonaNames
     from app.messaging.message import Kind, new_message
     from app.messaging.receiving import INBOX_REGISTRY, inbox
+    from tests.living.conftest import her_mailbox
 
     monkeypatch.setenv("LANE", LANE)
     names = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
@@ -364,7 +377,7 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
     monkeypatch.setattr("app.agent.core.build_model_client", no_model)
     monkeypatch.setattr(moment_mod, "run_due_moment", no_model)
 
-    await open_inboxes(inbox, residents=PersonaNames(tuple(names)))
+    await her_mailbox(PersonaNames(tuple(names))).open_inboxes(inbox)
     for name in names.values():
         await INBOX_REGISTRY[name].on_message(
             new_message(sender="world", recipient=name, body="窗外下起了雨。", kind=Kind.MESSAGE)

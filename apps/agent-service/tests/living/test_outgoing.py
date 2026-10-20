@@ -16,12 +16,16 @@ from app.agent.tooling import Tool
 from app.data.persist import fetch_all, from_row
 from app.data.schema import table_name
 from app.living import moment as moment_mod
-from app.living import outgoing as outgoing_mod
 from app.living.her_records.deeds import record_happening
 from app.living.her_records.records import Happening, Whereabouts
 from app.living.her_records.whereabouts import note_whereabouts
+from app.living.household import outgoing as outgoing_mod
+from app.living.household.outgoing import (
+    OutgoingResult,
+    OutgoingUpTo,
+    send_what_she_did,
+)
 from app.living.loose_ends.mind import OnHerMind
-from app.living.outgoing import OutgoingResult, OutgoingUpTo, send_what_she_did
 from app.living.services import KIND_ACT, KIND_SPEECH, MEDIUM_GROUP_CHAT, MEDIUM_PHONE
 from tests.living.conftest import (
     RESIDENT_NAMES,
@@ -370,7 +374,7 @@ async def test_her_messages_are_numbered_on_from_her_last_one_in_the_order_they_
 ):
     """她要发的消息每人一条轴，一段接一段往后数；一段里按写下的先后，给 world 的那条在最后。
 
-    同一位收件人按这个号的先后发（:func:`app.living.outgoing.unsent`），所以下一段不能从头数：
+    同一位收件人按这个号的先后发（:func:`app.living.household.outgoing.unsent`），所以下一段不能从头数：
     从头数的话，上一段还没确认的那句和这一段的新话号码相同，谁先发就说不准了。
     """
     async with in_a_moment("akao", now=_at(21, 30), moment_id="m-1"):
@@ -1054,7 +1058,7 @@ async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_
     her_turn = stub_moment(said="继续")
 
     async def she_has_it() -> bool:
-        from app.living.received import unread_received
+        from app.living.household.received import unread_received
 
         return bool(await unread_received(lane=lane, persona_id="ayana"))
 
@@ -1072,7 +1076,7 @@ async def test_through_messaging_her_sister_reads_words_in_the_order_they_were_s
     """真的通信机制：赤尾 21:30 对绫奈说的那句第一次没发出去，千凪 21:35 对她说的那句先到了，
     赤尾那句之后补发。绫奈读到的还是先赤尾、后千凪：她那边按消息上的时间排，那是说出口的时间。"""
     from app.living.common import living_lane
-    from app.living.received import unread_received
+    from app.living.household.received import unread_received
     from app.living.residents import names as names_mod
     from app.living.services import WORLD
     from app.messaging.lifecycle import start_messaging

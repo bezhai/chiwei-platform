@@ -51,14 +51,14 @@ class Happening(Data):
     ``seq`` 是**本 lane 内的提交序**，三个人共用一条轴，由
     :func:`app.data.ordered.insert_in_commit_order` 分配：号的先后 == 提交的先后，哪个进程
     写的都一样，可见的 seq 集合永远是一段连续前缀。读侧的游标因此可以放心推到"本次读到的
-    最大 seq"，不会把一条还在飞的记录永久越过去（:class:`app.living.outgoing.OutgoingUpTo`）。
+    最大 seq"，不会把一条还在飞的记录永久越过去（:class:`app.living.household.outgoing.OutgoingUpTo`）。
     读的一侧只读她自己的那几行，按这条轴排先后。
     **不要用 ``occurred_at`` 当游标**——同一轮里的几件钟点都一样，而常规那一轮还记着格子的
     旧记录里，提前来的那一轮和钟点上该来的那一轮落地的先后可以跟钟点反过来。
 
     ``audience`` 是"说给谁"，**可以是好几个人**：她自己在 ``say`` 的 ``to`` 里写下的名字。
     空 = 没有特定对象。做成列表而不是一个名字，是因为"同时对两个姐妹说一句话"是一件事：
-    姐妹各收到一条直达的，这句话本身只记一次（:mod:`app.living.outgoing`）。
+    姐妹各收到一条直达的，这句话本身只记一次（:mod:`app.living.household.outgoing`）。
 
     ``channel_id`` 是**哪一条会话**（``common_conversation.common_conversation_id``），
     只有 ``phone`` / ``group_chat`` 这两个 medium 有；当面说的话是 ``None``。形状定成 common 口径的会话 id 而不是渠道裸 id（飞书 ``oc_*``），
@@ -124,7 +124,7 @@ class Whereabouts(Data):
 
     **只给她自己读**：她每一轮眼前那句"手上"、环顾四周时她告诉 world 自己在哪
     （:func:`app.living.moment.look_around`）、汇总末尾那句她在哪在做什么
-    （:mod:`app.living.outgoing`）。别人在哪，world 按各人自己报的位置判断，life 不读。
+    （:mod:`app.living.household.outgoing`）。别人在哪，world 按各人自己报的位置判断，life 不读。
     ``seq`` 同 :class:`Happening`（这里是 per-(lane, persona) 的轴），作用是让
     "最新一条"有唯一确定的答案，不靠 ``created_at`` 的同刻并列去猜。
     """

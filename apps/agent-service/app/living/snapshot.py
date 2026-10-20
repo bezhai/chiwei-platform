@@ -20,8 +20,8 @@
 （:mod:`app.living.her_records.book`）。这里只剩上一次写下的那天和"现在"。
 
 **几层全是她自己的。** 别人做了什么、说了什么，不从这里读：谁会察觉由 world 判断后告诉她，
-姐妹对她说的话直接送到她那里，都进她的收件箱，那一段由 :mod:`app.living.received` 读、由
-:func:`app.living.moment.received_section` 摆进这一轮（它要跟这一轮在同一个事务里记成看过）。
+姐妹对她说的话直接送到她那里，都进她的收件箱，那一段由 :mod:`app.living.household.received` 读、由
+:meth:`app.living.household.mailbox.Mailbox.received_section` 摆进这一轮（它要跟这一轮在同一个事务里记成看过）。
 
 **为什么这么长不会失真**：没有一层是"机器对历史的概括"。头两层是当下状态，读一
 百遍字字一样；最后一层是原文照搬的最近若干条，只是**少**，不是**歪**。失真来自压缩，

@@ -86,6 +86,6 @@ class PersonaNames:
         """读好的那份对照。还没读就抛：那是在通信机制开始接收之前就来查地址了。"""
         if self._known is None:
             raise RuntimeError(
-                "三姐妹的名字还没读：通信机制开始接收时才读（app.living.received.open_inboxes）"
+                "三姐妹的名字还没读：通信机制开始接收时才读（app.living.household.mailbox.Mailbox.open_inboxes）"
             )
         return self._known

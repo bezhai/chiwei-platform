@@ -407,6 +407,46 @@ class Phone(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# received：传到她这里的消息（household 插件提供）
+# ---------------------------------------------------------------------------
+
+
+class Letter(Protocol):
+    """传到她这里的一条消息（world 告诉她察觉到的、姐妹直接对她说的），交给别的插件时读得到的样子。
+    ``message_time`` 是消息自带的时间：它说的事发生在什么时候，不是到达的时刻。"""
+
+    message_id: str
+    sender: str
+    body: str
+    message_time: datetime
+
+
+class HerDue(Protocol):
+    """她一轮的 due（life 判出它）里别的插件读得到的那一样：收件箱里叫醒她这一轮的那条消息的 id，
+    没有是 ``None``。它还没看过就一定摆进这一轮（household 插件），这一轮落地它就算看过。"""
+
+    must_show: str | None
+
+
+class Received(Protocol):
+    """传到她这里的消息：收件只存储，她醒来时读；摆进哪一轮、记没记成看过由 household 插件自己管。"""
+
+    async def earliest_waking_unread(self, *, lane: str, persona_id: str) -> str | None:
+        """她还没看过、发件方要叫醒她的消息里最早那条的 id；没有返回 ``None``。"""
+        ...
+
+    async def between(
+        self, *, lane: str, persona_id: str, since: datetime, until: datetime
+    ) -> list[Letter]:
+        """她收到的、说的是 ``[since, until)`` 之间的事的那些，按消息自带的时间排，看没看过都算。"""
+        ...
+
+    def line(self, letter: Letter) -> str:
+        """收到的一条在她眼里的样子（她每一轮读到的、日记材料里摆的是同一个样子）。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
 # loose_ends：她心里挂着没了结的事（loose_ends 插件提供）
 # ---------------------------------------------------------------------------
 

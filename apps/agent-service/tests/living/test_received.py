@@ -9,17 +9,15 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
-from functools import partial
 from types import SimpleNamespace
 
 import pytest
 
 from app.data.persist import fetch_all, fetch_value, from_row
 from app.data.tx import current_session, tx
-from app.living import received as received_mod
-from app.living.received import (
+from app.living.household import received as received_mod
+from app.living.household.received import (
     ReceivedMessage,
-    open_inboxes,
     render_received,
     unread_received,
 )
@@ -27,7 +25,7 @@ from app.living.residents import names as names_mod
 from app.living.residents.names import PersonaNames
 from app.messaging.message import Kind, Message, new_message
 from app.messaging.receiving import INBOX_REGISTRY, inbox
-from tests.living.conftest import Calls, receive, regular_round
+from tests.living.conftest import Calls, her_mailbox, receive, regular_round
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
 from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture 名
@@ -58,7 +56,7 @@ async def inboxes(living_db, monkeypatch):
         return SimpleNamespace(persona_id=persona_id, display_name=_NAMES[persona_id])
 
     monkeypatch.setattr(names_mod, "find_persona", find_persona)
-    await open_inboxes(inbox, residents=PersonaNames(tuple(_NAMES)))
+    await her_mailbox(PersonaNames(tuple(_NAMES))).open_inboxes(inbox)
     return living_db
 
 
@@ -440,7 +438,7 @@ async def test_world_reaches_her_by_name_and_a_resend_is_stored_once(
     from tests.messaging.helpers import eventually, outcomes_become
 
     await _named_in_the_persona_table(living_db)
-    inboxes_at_start(partial(open_inboxes, residents=PersonaNames(tuple(_NAMES))))
+    inboxes_at_start(her_mailbox(PersonaNames(tuple(_NAMES))).open_inboxes)
     await start_messaging()
     delivery = await send(sender="world", recipient="绫奈", body="窗外下起了雨。")
 
@@ -508,7 +506,7 @@ async def test_a_quiet_message_stays_quiet_through_a_scheduled_hop_and_a_failed_
 
     monkeypatch.setattr(received_mod, "insert_idempotent", crash_the_first_time)
     await _named_in_the_persona_table(living_db)
-    inboxes_at_start(partial(open_inboxes, residents=PersonaNames(tuple(_NAMES))))
+    inboxes_at_start(her_mailbox(PersonaNames(tuple(_NAMES))).open_inboxes)
     await start_messaging()
 
     message_id = await send_at(

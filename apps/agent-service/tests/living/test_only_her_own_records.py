@@ -1,7 +1,7 @@
 """别人的经历和位置，life 里没有一条路读得到。
 
 谁察觉到谁做了什么，由 world 判断后告诉她（第二期）；传到她这里的只有收件箱里那一段
-（:mod:`app.living.received`）。life 这边每个人只读她自己的那几行：她自己做过、说过的
+（:mod:`app.living.household.received`）。life 这边每个人只读她自己的那几行：她自己做过、说过的
 （:class:`~app.living.her_records.records.Happening`），她自己在哪、在做什么
 （:class:`~app.living.her_records.records.Whereabouts`）。
 

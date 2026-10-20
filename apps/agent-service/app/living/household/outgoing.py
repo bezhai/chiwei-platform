@@ -43,9 +43,9 @@ id 去重。时间随消息发出去（通信机制里的 ``time``），对方�
 和"讲到哪了"一个事务；一次发送被取消，结果未知，没有结果的那条下一次原样再发；结果那一行
 写进去了就是送到了，没写进去就再发一次，对方按 id 去重。
 
-**什么时候发**：她每一轮开始前、结束时（:func:`app.living.moment.send_her_doings`）。开始前那
-一次接住上一轮没发完的（失败、超时、进程没了）；结束时那一次发这一轮做的。都在她的 moment
-占用里。
+**什么时候发**：她每一轮开始前、结束时
+（:meth:`app.living.household.mailbox.Mailbox.send_what_she_did`）。开始前那一次接住上一轮没发完的
+（失败、超时、进程没了）；结束时那一次发这一轮做的。都在她的轮次队列的占用里，不在就不发。
 
 **开始往外讲之前的经历不补发**：第一次调的时候她还没有"讲到哪了"，就从她那时最新的经历讲起。
 那些事发生的时候没有人在听，现在补成一条消息，world 会当成刚发生的事。
@@ -65,7 +65,7 @@ from app.data.persist import fetch_all, fetch_one, from_row, insert_append
 from app.data.schema import CommitOrder, Data, Key, table_name
 from app.data.tx import tx
 from app.infra.cst_time import dated_clock
-from app.living.common import require_aware
+from app.living.common import SEND_SECONDS, require_aware
 from app.living.services import (
     KIND_SPEECH,
     MEDIUM_IN_PERSON,
@@ -84,21 +84,6 @@ _ID_NS = uuid.UUID("5b0e2d71-9a4c-4f38-b6e1-7c2d94a0f153")
 
 # 给 world 的那条的开头和结尾。
 _DIGEST_HEAD = "我做了这些（按先后）："
-
-# 发一条最多等多久。到点不再等：这一次结果未知，跟没确认一样，留着下一次原样再发（对方按 id
-# 去重），接着发别的收件人的。不封顶的话，一次挂住的发送会占着她这一轮直到队列的占用上限掐断
-# （:data:`app.plugins.living.HOLD_LIMIT`），下一轮开始前又先去发同一条、又挂住，别的收件人
-# 永远轮不到。
-#
-# 正常一次发送是查一下对方的收件箱在不在、记几行记录、发给 broker 等确认，几十毫秒。里面最慢的
-# 合法一步是等 broker 确认，通信机制自己给它封了 5 秒（``mq.publish_with_confirm``）；10 秒是它
-# 的两倍，慢但还活着的 broker 掐不到。上限这一头：一次往外发最多碰到三位收件人（world 和两个
-# 姐妹；同一位收件人前一条没确认，后面的这一次不试），一轮发两次（开始前、结束时），最坏
-# 3 × 2 × 10 = 60 秒，比 900 秒的占用上限小得多。不做成配置：这是"别被挂死"的兜底，不是业务参数。
-#
-# 到点是协作式的取消（同她轮次队列的占用上限）：被取消的那次发送收拾自己（比如关掉
-# 查收件箱用的那条临时 channel）也要时间，这一段由 broker 客户端自己的超时兜着。
-SEND_SECONDS = 10.0
 
 
 class OutgoingMessage(Data):
@@ -179,8 +164,9 @@ async def send_what_she_did(
 ) -> None:
     """把她经历里还没讲出去的那一段变成要发的消息，再把还没有结果的逐条发出去。
 
-    **调用方必须在她的一轮里调**（她的轮次队列上一次只跑一轮，:mod:`app.plugins.living`）：讲到
-    哪了靠的是"她的经历这一刻全都落了库"，两处同时讲会把同一段讲两遍。
+    **调用方必须在她的一轮里调**（她的轮次队列上一次只跑一轮；household 插件登记的那两步调之前
+    查过，:meth:`app.living.household.mailbox.Mailbox.send_what_she_did`）：讲到哪了靠的是"她的经历
+    这一刻全都落了库"，两处同时讲会把同一段讲两遍。
     """
     await compose(
         lane=lane, persona_id=persona_id, residents=residents, her_records=her_records

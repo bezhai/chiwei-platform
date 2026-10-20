@@ -17,7 +17,7 @@
 
 **所以醒来只送新发生的事**：几点了、离上一次隔了多久、她在哪在做什么
 （:class:`app.living.snapshot.MomentSnapshot` 的那几段）、有什么到点了（loose_ends 插件那一段）、传到她这里的消息里还没看过的
-（:func:`app.living.received.render_received`；别人做了什么，只有传到她这里的这一段）、手机上刚来了什么
+（household 插件那一段，:mod:`app.living.household`；别人做了什么，只有传到她这里的这一段）、手机上刚来了什么
 （phone 插件那一段，:mod:`app.living.phone`）。她此刻的样子（在哪、在做什么、上一次写下的
 那天、心里挂着什么、手机上还有什么没看）读一百遍字字一样，上一轮读过的还在上下文里，
 所以它只在清理那一下作为新起点重铺一次（:func:`app.agent.continuity.trim_for_round`），
@@ -66,7 +66,8 @@
   * :func:`switch_to`    我现在改去做 X、在哪、什么把我带走的
   * :func:`move_to`      人挪了地方，手上的事没变
   * :func:`say` / :func:`act`  当面说一句话 / 做一个别人看得见的动作。这一轮结束时，她在
-    世界里做的事一条发给 world，只对姐妹说的话直接给那位姐妹（:mod:`app.living.outgoing`）
+    世界里做的事一条发给 world，只对姐妹说的话直接给那位姐妹（household 插件，
+    :mod:`app.living.household.outgoing`）
   * :func:`look_around`  问 world 她这里现在什么样、有谁在；没人回答就如实告诉她
   * :func:`stop_for_now` 这一轮我到此为止（零参数，调完这一轮就结束）
   * ``look_at_phone``    拿起手机打开某条会话，看说了什么（phone 插件，:mod:`app.living.phone`）
@@ -127,14 +128,7 @@ from app.data.ordered import insert_in_commit_order
 from app.data.persist import fetch_one, from_row
 from app.data.schema import CommitOrder, Data, Key, table_name
 from app.infra.cst_time import CST
-from app.living.common import esc, legacy_null_is, require_aware
-from app.living.outgoing import SEND_SECONDS, send_what_she_did
-from app.living.received import (
-    ReceivedMessage,
-    mark_read,
-    render_received,
-    unread_received,
-)
+from app.living.common import SEND_SECONDS, esc, legacy_null_is, require_aware
 from app.living.services import (
     KIND_ACT,
     KIND_SPEECH,
@@ -342,7 +336,7 @@ def _derive(*parts: str) -> str:
 #
 # 说这几句的是她那两只落位置的手（:func:`switch_to` / :func:`move_to`）。她写下的位置是她
 # 自己"手上"那一句，也是 world 判断谁会察觉到她的依据：一轮的汇总末尾写着她在哪
-# （:mod:`app.living.outgoing`），环顾四周时她先说自己在哪（:func:`look_around`）。三个人
+# （:mod:`app.living.household.outgoing`），环顾四周时她先说自己在哪（:func:`look_around`）。三个人
 # 写的是同一个世界里的地方，同一个地方说法一致，world 才认得出是同一处。
 #
 # **举例就是词表。** 她不读文档，唯一见过的地名样本就是这段描述，写在这儿的地名会被
@@ -584,7 +578,7 @@ async def _record(
     """``say`` / ``act`` 共用的落库：位置必须是真的，说给谁是她的事。
 
     位置这条 fail-loud：当面做的事这一轮结束时汇总给 world，汇总末尾那句她在哪、在做什么，
-    是 world 判断谁会察觉的依据（:mod:`app.living.outgoing` 靠这一条断言汇总一定说得出她在
+    是 world 判断谁会察觉的依据（:mod:`app.living.household.outgoing` 靠这一条断言汇总一定说得出她在
     哪）。没定下位置就做事，world 不知道这件事发生在哪，而她那边一片安静。位置本身不记进
     这件事里：它在她自己的位置记录上（:mod:`app.living.her_records.whereabouts`）。
 
@@ -595,7 +589,7 @@ async def _record(
 
     换成"去 world 那边查一遍有没有这个人"同样不对：life 不读 world 的存储，而且 world
     可能还没来得及记下这个人。名字原样记进这件事里；这一轮结束时，姐妹的名字直接把原话
-    送到她那里，其余的名字连同这句话交给 world（:mod:`app.living.outgoing`）。说给一个
+    送到她那里，其余的名字连同这句话交给 world（:mod:`app.living.household.outgoing`）。说给一个
     没人接的名字，那句话就落在世界里没人接——这本身是真实的，不是错误。
 
     **只有一处不原样：姐妹的内部 id 记成她的名字**（:meth:`~app.living.services.Residents.names_for`）。
@@ -687,7 +681,7 @@ def _looking_around_from(me: Place) -> str:
     """她问 world 的那一句：先说她自己此刻在哪、在做什么，再问这里现在什么样、有谁在。
 
     **她在哪必须写在问题里。** 她这一轮做的事要等这一轮结束才汇总发给 world
-    （:mod:`app.living.outgoing`），提问又不排在普通消息后面，所以同一轮里她刚换了地方就环顾
+    （:mod:`app.living.household.outgoing`），提问又不排在普通消息后面，所以同一轮里她刚换了地方就环顾
     四周，world 还不知道她挪了。她自己知道，就由她说；``me`` 是她此刻最新的那条位置，这一轮
     里 ``switch_to`` / ``move_to`` 刚写下的也在内。
     """
@@ -716,7 +710,7 @@ async def look_around(self) -> str:
         asker = self.residents.residents().by_persona[persona_id]
         # 通信机制只给等回答那一段封了顶。问出去那一步（查 world 开没开收件箱、记几行记录、
         # 发给 broker 等确认）跟发一条消息是同一套动作，broker 不应答时会一直挂着，所以整个
-        # 提问再按发一条消息的上限（:data:`app.living.outgoing.SEND_SECONDS`）多给一段。
+        # 提问再按发一条消息的上限（:data:`app.living.common.SEND_SECONDS`）多给一段。
         async with asyncio.timeout(LOOK_AROUND_ANSWER_SECONDS + SEND_SECONDS):
             answer = await ask(
                 sender=asker,
@@ -744,7 +738,7 @@ async def look_around(self) -> str:
         )
         return NOBODY_ANSWERED
     # 不加一个字、不少一个字，过 :func:`app.living.common.esc`。回答是 world 写下的字，跟 world
-    # 发来的消息是同一类，按同一条规矩交给她（:func:`app.living.received.render_received`）：别的
+    # 发来的消息是同一类，按同一条规矩交给她（:func:`app.living.household.received.render_received`）：别的
     # 参与者写下的字不归她管（esc 上"经过模型的不转义"说的是她自己的话和她自己留下的东西），它落进
     # 她这一轮的上下文、跟消息行摆在同一段文本里，不转义就能自己写出一行 ``rel="owner"``。
     return esc(answer.text)
@@ -944,7 +938,7 @@ class DueMoment:
     # 她这一轮的『现在』。
     now: datetime
     nudged: bool = False
-    # 收件箱里叫醒她这一轮的那条消息的 id（理由见 :func:`_received`）。
+    # 收件箱里叫醒她这一轮的那条消息的 id（理由见 :class:`app.living.services.HerDue`）。
     must_show: str | None = None
 
 
@@ -1057,11 +1051,10 @@ class _LastMoment:
 
 @dataclass
 class _InFront:
-    """这一轮摆到她眼前的东西（这一轮的状态），每样只读一次，由第一个要用它的段读：``snapshot``
-    她自己的那几层（:func:`app.living.snapshot.read_snapshot`），``received`` 收件箱里还没看过的。"""
+    """这一轮摆到她眼前的东西（这一轮的状态），只读一次，由第一个要用它的段读：``snapshot``
+    她自己的那几层（:func:`app.living.snapshot.read_snapshot`）。"""
 
     snapshot: MomentSnapshot | None = None
-    received: list[ReceivedMessage] | None = None
 
 
 @dataclass
@@ -1069,24 +1062,6 @@ class _Landed:
     """这一轮落了地的那一行（这一轮的状态），:func:`run_due_moment` 交回它。"""
 
     moment: LifeMoment | None = None
-
-
-async def send_her_doings(
-    round: Round, *, residents: WhoLivesHere, her_records: HerRecords
-) -> None:
-    """她做了的事一条发给 world，只对姐妹说的话直接发给那位姐妹（:mod:`app.living.outgoing`）。
-
-    登记两次。**一轮开始前**（``outgoing.before``，失败这一轮就失败）：上一轮失败、超时、赶上
-    部署时，那一轮走不到收尾那一次。**这一轮落地之后**（``outgoing.after``，失败只记日志，这一轮
-    照样算数）：她做了的事不随这一轮落不落地而改变，读的是她存下的经历；这一步没做完的，下一轮
-    开始前那一次接着做。
-    """
-    await send_what_she_did(
-        lane=round.lane,
-        persona_id=round.participant,
-        residents=residents.residents(),
-        her_records=her_records,
-    )
 
 
 async def previous_moment_at(round: Round) -> datetime | None:
@@ -1138,24 +1113,6 @@ async def _snapshot(round: Round) -> MomentSnapshot:
     return front.snapshot
 
 
-async def _received(round: Round) -> list[ReceivedMessage]:
-    """传到她这里、她还没看过的消息（:mod:`app.living.received`）。读在模型调用之前：只有这几条会
-    跟这一轮一起记成看过（:func:`mark_received_read`），这一轮跑着的时候新到的留给下一轮。
-
-    ``due.must_show`` 是收件箱里叫醒她这一轮的那条消息的 id：它还没看过，就一定摆进这一轮
-    （``including``），这一轮落地它就算看过。这一轮的身份就是它；它不在这一轮里的话，这一轮落地
-    了它还没看过，之后每一拍拿它叫醒她都撞上"这一轮跑过了"。
-    """
-    front = round.state(_InFront)
-    if front.received is None:
-        front.received = await unread_received(
-            lane=round.lane,
-            persona_id=round.participant,
-            including=round.due.must_show,
-        )
-    return front.received
-
-
 async def day_page_section(round: Round) -> str:
     """状态：她上一次写下的那一天。"""
     return (await _snapshot(round)).render_day_page()
@@ -1164,11 +1121,6 @@ async def day_page_section(round: Round) -> str:
 async def now_section(round: Round) -> str:
     """输入：几点了、离上一次隔了多久。"""
     return (await _snapshot(round)).render_now(round.previous_at)
-
-
-async def received_section(round: Round) -> str:
-    """输入：这段时间传到她这里的。"""
-    return render_received(await _received(round), now=round.now)
 
 
 # -- 落地 ----------------------------------------------------------------------
@@ -1209,11 +1161,6 @@ async def land_the_moment(
         nudged=round.due.nudged,
     )
     round.state(_Landed).moment = await insert_in_commit_order(moment)
-
-
-async def mark_received_read(round: Round) -> None:
-    """这一轮摆到她眼前的那几条收件记成看过；没摆的一条都不记。"""
-    await mark_read(round.state(_InFront).received or [], moment_id=round.round_id)
 
 
 async def remember_this_round(round: Round) -> None:

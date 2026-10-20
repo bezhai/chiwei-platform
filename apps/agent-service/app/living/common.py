@@ -1,10 +1,11 @@
-"""她这边各插件共用的几个纯函数：不读库、不调模型，也不属于哪一个插件。
+"""她这边各插件共用的几个纯函数和一个常量：不读库、不调模型，也不属于哪一个插件。
 
   * :func:`esc`             外面来的字串摆进她这一轮之前先过的那一道，全 living 只有这一份
   * :func:`require_aware`   时刻必须带时区，不带就当场炸（各张表的 validator 用它）
   * :func:`legacy_null_is`  后加的非 Optional 列：旧行读出来的 NULL 当成默认值
   * :func:`week_start_cst`  她的周界：自然周一 00:00 CST（她改写「我是谁」和回看哪一周都按它）
   * :func:`living_lane`     本进程所在的泳道，拿不到就是 ``"prod"``（她每张表的 Key 里那个 lane）
+  * :data:`SEND_SECONDS`    往通信机制发一条最多等多久（往外发和环顾四周共用）
   * :func:`message_handle` / :func:`printed_handle`  她发出去的那条消息的撤回编号，和它印在她眼前的
     样子：她的经历摆到她眼前时、发送回执上印的都是它，她照抄去撤回的也是它
 
@@ -20,6 +21,22 @@ from datetime import datetime, timedelta
 from app.infra.cst_time import CST
 from app.infra.lane_policy import current_deployment_lane
 from app.living.services import OUTBOUND_HAPPENING_PREFIX
+
+# 往通信机制发一条最多等多久（household 插件往外发的每一条；life 环顾四周时问 world，在等回答之外
+# 也多给这一段）。到点不再等：这一次结果未知，跟没确认一样，留着下一次原样再发（对方按 id
+# 去重），接着发别的收件人的。不封顶的话，一次挂住的发送会占着她这一轮直到队列的占用上限掐断
+# （:data:`app.plugins.living.HOLD_LIMIT`），下一轮开始前又先去发同一条、又挂住，别的收件人
+# 永远轮不到。
+#
+# 正常一次发送是查一下对方的收件箱在不在、记几行记录、发给 broker 等确认，几十毫秒。里面最慢的
+# 合法一步是等 broker 确认，通信机制自己给它封了 5 秒（``mq.publish_with_confirm``）；10 秒是它
+# 的两倍，慢但还活着的 broker 掐不到。上限这一头：一次往外发最多碰到三位收件人（world 和两个
+# 姐妹；同一位收件人前一条没确认，后面的这一次不试），一轮发两次（开始前、结束时），最坏
+# 3 × 2 × 10 = 60 秒，比 900 秒的占用上限小得多。不做成配置：这是"别被挂死"的兜底，不是业务参数。
+#
+# 到点是协作式的取消（同她轮次队列的占用上限）：被取消的那次发送收拾自己（比如关掉
+# 查收件箱用的那条临时 channel）也要时间，这一段由 broker 客户端自己的超时兜着。
+SEND_SECONDS = 10.0
 
 
 def esc(s: str | None) -> str:

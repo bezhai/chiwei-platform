@@ -38,6 +38,7 @@ from app.plugins.living import nudge, regular
 from tests.living.conftest import (
     Calls,
     clock_at,
+    her_mailbox,
     her_phone,
     her_queue,
     her_round_runs,
@@ -466,7 +467,7 @@ async def test_both_people_waiting_on_her_are_in_the_envelope(
 # --------------------------------------------------------------------------
 # 七 · 传到她这里的消息也提前叫醒她，每条只叫一次
 #
-# world 告诉她察觉到了什么、姐妹直接对她说的话，存进她的收件箱（:mod:`app.living.received`）。
+# world 告诉她察觉到了什么、姐妹直接对她说的话，存进她的收件箱（:mod:`app.living.household.received`）。
 # 有她没看过的就提前叫醒她，跟手机上有人叫她同一套：那一轮的身份就是那条消息，跑过就是
 # 跑过了。同一条重投一遍（world 补发没发完的告知）不是新消息，不再叫醒她。
 # --------------------------------------------------------------------------
@@ -669,7 +670,7 @@ async def test_more_quiet_messages_than_a_round_can_show_do_not_hold_back_one_th
 ):
     """不叫醒的攒得比一轮能摆的还多，后面一条要叫醒她的照样叫醒她，而且在那一轮里。剩下没摆进
     去的不叫醒的，也不会因为还没看过就接着叫醒她：它们等她下一轮。"""
-    from app.living.received import RECEIVED_LIMIT
+    from app.living.household.received import RECEIVED_LIMIT
     from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
@@ -725,7 +726,7 @@ async def test_a_message_stored_before_the_attribute_existed_wakes_her(
     """
     from app.data.migrator import plan_migration
     from app.data.schema import table_name
-    from app.living.received import ReceivedMessage
+    from app.living.household.received import ReceivedMessage
 
     table = table_name(ReceivedMessage)
     async with tx():
@@ -755,7 +756,7 @@ async def test_a_message_stored_before_the_attribute_existed_wakes_her(
             await s.execute(text(f"SELECT wakes_recipient FROM {table}"))
         ).scalar_one()
     assert stored is None, "前提没造出来：旧行这一列要是空的"
-    from app.living.received import unread_received
+    from app.living.household.received import unread_received
 
     (read_back,) = await unread_received(lane=LANE, persona_id="akao")
     assert read_back.wakes_recipient is True, "旧行读出来要当成叫醒，不是 None"
@@ -790,7 +791,7 @@ async def _acts(persona_id: str = "akao") -> int:
 
 
 async def _unread_ids(persona_id: str = "akao") -> set[str]:
-    from app.living.received import unread_received
+    from app.living.household.received import unread_received
 
     return {
         m.message_id
@@ -808,7 +809,7 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_p
 ):
     """她正在跑一轮，这条钟排在后面等；等的时候到了一批发生得更早的消息，多到一轮摆不下。
     醒来的那一轮是谁叫醒的，那条就得在那一轮里，落地后就算看过；剩下的接着一条一条叫醒她。"""
-    from app.living.received import RECEIVED_LIMIT
+    from app.living.household.received import RECEIVED_LIMIT
     from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
@@ -819,7 +820,7 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_p
     turns = her_queue("akao", clock=clock_at(_at(21, 32)))
     async with her_round_runs(turns):  # 她正在跑的那一轮
         waiting = asyncio.create_task(
-            turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 32)))
+            turns.take(nudge(resident, her_phone(), her_mailbox()), Signal(at=_at(21, 32)))
         )
         await settled()
         for i in range(RECEIVED_LIMIT):
@@ -866,7 +867,7 @@ async def test_a_nudge_that_waited_behind_a_stuck_round_happens_when_it_gets_her
     clock = [_at(21, 32)]
     turns = her_queue("akao", clock=lambda: clock[0])
     async with her_round_runs(turns):  # 挂住的那一轮
-        tick = asyncio.create_task(turns.take(nudge(resident, her_phone()), Signal(at=clock[0])))
+        tick = asyncio.create_task(turns.take(nudge(resident, her_phone(), her_mailbox()), Signal(at=clock[0])))
         await settled()
         clock[0] = _at(21, 47)
     await tick
@@ -900,8 +901,8 @@ async def test_two_ticks_queued_behind_her_round_wake_her_once(
     turns = her_queue("akao", clock=clock_at(_at(21, 33)))
     async with her_round_runs(turns):  # 她正在跑的那一轮
         ticks = asyncio.gather(
-            turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 32))),
-            turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 33))),
+            turns.take(nudge(resident, her_phone(), her_mailbox()), Signal(at=_at(21, 32))),
+            turns.take(nudge(resident, her_phone(), her_mailbox()), Signal(at=_at(21, 33))),
             return_exceptions=True,
         )
         await asyncio.sleep(0.5)  # 两拍都到了她的队列门口
@@ -928,7 +929,7 @@ async def test_ticks_while_her_round_is_stuck_do_not_pile_up_behind_it(
     turns = her_queue("akao", clock=clock_at(_at(21, 35)))
     async with her_round_runs(turns):  # 挂住的那一轮
         ticks = [
-            asyncio.create_task(turns.take(nudge(resident, her_phone()), Signal(at=_at(21, m))))
+            asyncio.create_task(turns.take(nudge(resident, her_phone(), her_mailbox()), Signal(at=_at(21, m))))
             for m in (32, 33, 34)
         ]
         await settled()
@@ -960,12 +961,12 @@ async def test_a_message_that_arrives_while_her_round_holds_her_wakes_her_after_
 
     async def it_arrives_and_the_clock_ticks():
         await receive(doorbell)
-        tick = asyncio.create_task(turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 33))))
+        tick = asyncio.create_task(turns.take(nudge(resident, her_phone(), her_mailbox()), Signal(at=_at(21, 33))))
         await asyncio.sleep(0.2)
         during.append(tick)
 
     stub_life.meanwhile = it_arrives_and_the_clock_ticks
-    woke_for_rain = await turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 32)))
+    woke_for_rain = await turns.take(nudge(resident, her_phone(), her_mailbox()), Signal(at=_at(21, 32)))
     stub_life.meanwhile = None
 
     assert woke_for_rain is not None and rain.message_id in woke_for_rain.moment_id
@@ -974,7 +975,7 @@ async def test_a_message_that_arrives_while_her_round_holds_her_wakes_her_after_
     assert "楼下有人按门铃。" not in stub_life.prompts[-1], "前提没造出来：那一轮看到了它"
 
     clock[0] = _at(21, 34)
-    woke_for_doorbell = await turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 34)))
+    woke_for_doorbell = await turns.take(nudge(resident, her_phone(), her_mailbox()), Signal(at=_at(21, 34)))
     assert woke_for_doorbell is not None
     assert doorbell.message_id in woke_for_doorbell.moment_id
     assert "楼下有人按门铃。" in stub_life.prompts[-1]
@@ -987,8 +988,8 @@ async def test_a_tick_that_waited_decides_on_what_is_true_when_it_gets_her(
     """这一拍排在她正在跑的那一轮后面；那一轮把叫她的那条看掉了。轮到这一拍时已经没有什么在叫
     她，它不跑、也不记"开始了"。判在轮到她之前的话，它会拿排队之前判的那条再跑一轮。"""
     from app.data.schema import table_name
+    from app.living.household.received import mark_read, unread_received
     from app.living.nudge import NudgeBegun
-    from app.living.received import mark_read, unread_received
     from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
@@ -996,7 +997,7 @@ async def test_a_tick_that_waited_decides_on_what_is_true_when_it_gets_her(
 
     turns = her_queue("akao", clock=clock_at(_at(21, 32)))
     async with her_round_runs(turns):  # 她正在跑的那一轮
-        tick = asyncio.create_task(turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 32))))
+        tick = asyncio.create_task(turns.take(nudge(resident, her_phone(), her_mailbox()), Signal(at=_at(21, 32))))
         await settled()
         seen = await unread_received(lane=LANE, persona_id="akao")
         async with tx():  # 那一轮落地，把它记成看过
@@ -1023,7 +1024,7 @@ async def test_the_two_clocks_still_queue_behind_each_other(
     turns = her_queue("akao", clock=lambda: next(turns_at))
     async with her_round_runs(turns):  # 挂住的那一轮
         nudged = asyncio.create_task(
-            turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 41)))
+            turns.take(nudge(resident, her_phone(), her_mailbox()), Signal(at=_at(21, 41)))
         )
         await settled()
         regular_tick = asyncio.create_task(
@@ -1047,7 +1048,7 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_a
     """那一轮已经定下是谁叫醒的、还没读收件箱的那一刻，到了一批发生得更早的消息，多到一轮
     摆不下：叫醒她的那条照样在那一轮里。"""
     from app.living import moment as moment_mod
-    from app.living.received import RECEIVED_LIMIT
+    from app.living.household.received import RECEIVED_LIMIT
     from tests.living.conftest import receive
 
     await regular_round(resident, "akao", _at(21, 30))
@@ -1076,7 +1077,7 @@ async def test_a_round_a_message_woke_that_failed_is_retried_as_itself_whatever_
 ):
     """收件箱里那条叫醒她，她做了一个动作，这一轮失败了。之后到了一批发生得更早的消息、手机
     上也有人叫她：下一拍重跑的还是那一轮，同一个动作不落第二遍；叫她的那些排在它之后。"""
-    from app.living.received import RECEIVED_LIMIT
+    from app.living.household.received import RECEIVED_LIMIT
     from tests.living.conftest import receive
 
     await note_whereabouts(
@@ -1243,7 +1244,7 @@ async def test_the_nudge_due_reads_the_clock_before_it_reads_anything(nudge_db, 
 
     monkeypatch.setattr(nudge_mod, "_begun_not_landed", begun)
 
-    assert await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock, phone=her_phone()) is None
+    assert await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock, phone=her_phone(), received=her_mailbox()) is None
     assert read[:2] == ["clock", "begun"]
 
 
@@ -1251,7 +1252,7 @@ async def test_the_nudge_due_reads_the_clock_before_it_reads_anything(nudge_db, 
 async def test_nothing_calling_her_is_no_round_and_nothing_written(nudge_db, stub_life):
     from app.living.nudge import nudged_moment_due
 
-    assert await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone()) is None
+    assert await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone(), received=her_mailbox()) is None
     assert await _begun() == []
 
 
@@ -1265,7 +1266,7 @@ async def test_the_nudge_due_writes_that_the_round_began_before_it_hands_it_back
 
     await receive(_to_her("窗外下起了雨。", at=_at(21, 31), message_id="rain"))
 
-    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone())
+    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone(), received=her_mailbox())
 
     assert (due.moment_id, due.now, due.nudged, due.must_show) == (
         "nudge:inbox:rain",
@@ -1285,7 +1286,7 @@ async def test_a_summons_on_her_phone_comes_before_her_inbox(nudge_db, stub_life
     await receive(_to_her("窗外下起了雨。", at=_at(21, 30), message_id="rain"))
     summons = await _incoming(_DM, body="在吗", at=_at(21, 31))
 
-    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone())
+    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone(), received=her_mailbox())
 
     assert (due.moment_id, due.must_show) == (f"nudge:{summons}", None)
     assert await _begun() == [summons]
@@ -1301,7 +1302,7 @@ async def test_her_inbox_wakes_her_for_the_earliest_message_she_has_not_seen(
     await receive(_to_her("楼下有人按门铃。", at=_at(21, 31), message_id="doorbell"))
     await receive(_to_her("窗外下起了雨。", at=_at(21, 20), message_id="rain"))
 
-    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone())
+    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone(), received=her_mailbox())
 
     assert due.moment_id == "nudge:inbox:rain"
 
@@ -1316,12 +1317,12 @@ async def test_a_round_that_began_and_never_landed_is_due_again_as_itself_before
     from tests.living.conftest import receive
 
     await receive(_to_her("窗外下起了雨。", at=_at(21, 31), message_id="rain"))
-    first = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone())
+    first = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone(), received=her_mailbox())
     # 那一轮没落地，进程没了。之后手机上来了叫她的一条，收件箱里也到了一条更早的。
     await _incoming(_DM, body="在吗", at=_at(21, 33))
     await receive(_to_her("千凪在厨房喊你。", at=_at(21, 0), message_id="dinner"))
 
-    again = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)), phone=her_phone())
+    again = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)), phone=her_phone(), received=her_mailbox())
 
     assert first.moment_id == again.moment_id == "nudge:inbox:rain"
     assert (again.now, again.must_show) == (_at(21, 34), "rain")

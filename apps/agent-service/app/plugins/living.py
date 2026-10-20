@@ -16,8 +16,9 @@ old reading queue.
   ChatResponseSegment -> chat_response_{channel}          what she says
   Recall              -> recall_{channel}                 what she takes back
 
-  the inboxes named after the three personas -> received  stored only; she reads them on her clock
-  the reading inbox                          -> read_a_round  one stretch of reading
+  the reading inbox  -> read_a_round  one stretch of reading
+  (the household plugin opens the inboxes named after the three personas: stored only, she reads
+  them on her clock)
 
   her round, which the manifest's ``resident`` profile places (app.living.moment):
     her tools (``ctx.tool``)    the methods of :class:`NotSplitYet`, each declared with how
@@ -25,17 +26,17 @@ old reading queue.
                                 profile lists them in the order she is given them)
     segments (``ctx.segment``)  her round's prompt (but who she is, which the persona plugin
                                 registers), and the output safety check's
-    before the round            outgoing.before   send what she did and has not sent yet
     the round before            life.moments      when her last round landed, and whether its
                                                   history was stored
     state sections              day_page.last_written
-    input sections              life.now, household.received
+    input sections              life.now
                                 (the loose_ends plugin registers keep_in_mind and the state and
                                 input sections about what is on her mind, the her_records plugin
                                 the ones about what she just did and where she is, the phone plugin
-                                her three phone tools and the sections about her phone)
-    commit (one transaction)    life.moment, household.read   (and the phone plugin's phone.glances)
-    after the commit            history, outgoing.after   (both Continue: logged, the round counts)
+                                her three phone tools and the sections about her phone, the
+                                household plugin what reached her and the sends before and after)
+    commit (one transaction)    life.moment   (and phone.glances, household.read of those plugins)
+    after the commit            history   (Continue: logged, the round counts)
 
   POST /admin/reading/carry-over  carry_over_reading  the old reading queue -> the reading inbox
 
@@ -92,11 +93,6 @@ lane's empty queue (:mod:`app.nodes.reading_carry_over`). Its handler is not in 
 has the inner credential and lane checks of the operator routes. It is removed once prod has
 switched over and the old queue is deleted.
 
-**The inboxes are opened at start**: their names come from the persona table, which cannot be read
-at import (:func:`app.living.received.open_inboxes` reads and checks them through the ``residents``
-service, and declares the inboxes through the function the host hands it). Whose queues are opened
-is the manifest's: the participants of the ``resident`` profile.
-
 **Her Data classes come in with the modules below.** A Data class registers when its module is
 imported, and the schema step builds tables only for registered classes; the split-out plugins
 import their own.
@@ -129,20 +125,16 @@ from app.living.moment import (
     day_page_section,
     land_the_moment,
     lost_the_last_round,
-    mark_received_read,
     now_section,
     previous_moment_at,
-    received_section,
     regular_moment_due,
     remember_this_round,
     run_due_moment,
-    send_her_doings,
 )
 from app.living.nudge import nudged_moment_due
 from app.living.output_safety import GUARD_OUTPUT_SEGMENT
 from app.living.persona_review import DueReview, persona_review_due, write_due_review
 from app.living.reading import read_a_round
-from app.living.received import open_inboxes
 from app.living.services import (
     READING,
     HerRecords,
@@ -150,6 +142,7 @@ from app.living.services import (
     PersonaText,
     Phone,
     Pictures,
+    Received,
     WhoLivesHere,
 )
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
@@ -236,16 +229,22 @@ def regular(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
     )
 
 
-def nudge(resident: AssembledProfile, phone: Phone) -> WakeSource[DueMoment, LifeMoment]:
+def nudge(
+    resident: AssembledProfile, phone: Phone, received: Received
+) -> WakeSource[DueMoment, LifeMoment]:
     """Her early wakes: a round when someone calls her on her phone (the ``phone`` service) or a
-    message for her wants to wake her (:func:`app.living.nudge.nudged_moment_due`), run from
-    ``resident`` on its lane."""
+    message for her wants to wake her (the ``received`` service;
+    :func:`app.living.nudge.nudged_moment_due`), run from ``resident`` on its lane."""
 
     async def due(
         persona_id: str, batch: Batch, clock: Callable[[], datetime]
     ) -> DueMoment | None:
         return await nudged_moment_due(
-            lane=resident.lane, persona_id=persona_id, clock=clock, phone=phone
+            lane=resident.lane,
+            persona_id=persona_id,
+            clock=clock,
+            phone=phone,
+            received=received,
         )
 
     return WakeSource(
@@ -254,11 +253,12 @@ def nudge(resident: AssembledProfile, phone: Phone) -> WakeSource[DueMoment, Lif
 
 
 def day_page(
-    lane: str, persona: Persona, her_records: HerRecords
+    lane: str, persona: Persona, her_records: HerRecords, received: Received
 ) -> WakeSource[DuePage, LivingDayPage | None]:
     """Her diary on ``lane``: the page of the living day that just ended, when the tick came in the
     window and the day has no page yet (:func:`app.living.day_page.day_page_due`); who she is
-    comes from the ``persona`` service, what she did that day from the ``her_records`` service."""
+    comes from the ``persona`` service, what she did that day from the ``her_records`` service,
+    what reached her from the ``received`` service."""
 
     async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DuePage | None:
         (tick,) = batch.close()
@@ -268,6 +268,7 @@ def day_page(
             at=tick.at,
             clock=clock,
             her_records=her_records,
+            received=received,
         )
 
     return WakeSource(
@@ -297,10 +298,11 @@ def setup(ctx: Context) -> None:
     persona = ctx.service("persona")
     residents = ctx.service("residents")
     resident = ctx.profile("resident")
-    phone = ctx.service("phone")
-    regular_rounds, early_wakes = regular(resident), nudge(resident, phone)
+    phone, received = ctx.service("phone"), ctx.service("received")
+    regular_rounds, early_wakes = regular(resident), nudge(resident, phone, received)
     her_records = ctx.service("her_records")
-    pages, reviews = day_page(lane, persona, her_records), persona_review(lane, persona)
+    pages = day_page(lane, persona, her_records, received)
+    reviews = persona_review(lane, persona)
     for persona_id in ctx.participants(profile="resident"):
         rounds = ctx.turns(persona_id, "round", hold_limit=HOLD_LIMIT)
         ctx.wake(rounds, regular_rounds, every=REGULAR_EVERY)
@@ -338,19 +340,14 @@ def setup(ctx: Context) -> None:
     )
     ctx.outbound(ChatResponseSegment, "chat_response")
     ctx.outbound(Recall, "recall")
-    ctx.inboxes_at_start(partial(open_inboxes, residents=residents))
 
 
 def _her_round(ctx: Context, living: NotSplitYet) -> None:
     """Everything her round is made of; the manifest's ``resident`` profile places it."""
     _her_tools(ctx, living)
-    send_doings = partial(
-        send_her_doings, residents=living.residents, her_records=living.her_records
-    )
     for segment in LIFE_MOMENT_SEGMENTS:
         ctx.segment(segment)
     ctx.segment(GUARD_OUTPUT_SEGMENT)
-    ctx.round_start("outgoing.before", send_doings)
     ctx.round_log(
         "life.moments",
         previous_at=previous_moment_at,
@@ -359,7 +356,6 @@ def _her_round(ctx: Context, living: NotSplitYet) -> None:
     for name, section in (
         ("day_page.last_written", day_page_section),
         ("life.now", now_section),
-        ("household.received", received_section),
     ):
         ctx.section(name, section)
     ctx.commit(
@@ -370,9 +366,7 @@ def _her_round(ctx: Context, living: NotSplitYet) -> None:
             her_records=living.her_records,
         ),
     )
-    ctx.commit("household.read", mark_received_read)
     ctx.after_commit("history", remember_this_round, on_failure=Continue())
-    ctx.after_commit("outgoing.after", send_doings, on_failure=Continue())
 
 
 def _her_tools(ctx: Context, living: NotSplitYet) -> None:
@@ -411,5 +405,13 @@ def _her_tools(ctx: Context, living: NotSplitYet) -> None:
 PLUGIN = Plugin(
     name="living",
     setup=setup,
-    requires=("persona", "residents", "her_records", "pictures", "loose_ends", "phone"),
+    requires=(
+        "persona",
+        "residents",
+        "her_records",
+        "pictures",
+        "loose_ends",
+        "phone",
+        "received",
+    ),
 )

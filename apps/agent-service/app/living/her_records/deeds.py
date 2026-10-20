@@ -6,8 +6,8 @@
 **这里只记她自己的，也只给她自己读。** 读这张表的每一条查询都按 ``actor`` 筛到一个人
 （``tests/living/test_only_her_own_records.py`` 守着）。别人能不能察觉到她做了什么，不由
 life 判断：当面做的事一轮一条汇总发给 world，只对姐妹说的话直接发给那位姐妹
-（:mod:`app.living.outgoing`）；别人做了什么、说了什么，由 world 判断后告诉她，或者姐妹
-直接对她说，都进她的收件箱（:mod:`app.living.received`）。
+（:mod:`app.living.household.outgoing`）；别人做了什么、说了什么，由 world 判断后告诉她，或者姐妹
+直接对她说，都进她的收件箱（:mod:`app.living.household.received`）。
 
 **渠道是客观事实**（``medium``）：当面说的、当面做的进 world 的汇总；手机和群聊隔着设备，
 只在她自己的记录里。
@@ -161,7 +161,7 @@ def own_line(h: Happening, *, residents: Residents) -> str:
     （``act``）、她去撤的那句原话，``audience`` 里也是她自己在 ``say`` 的 ``to`` 里写下的
     名字（三姐妹的 id 换成她们的名字，见 :meth:`app.living.services.Residents.names_for`）。
     没有任何一条逐字通道让第三方决定这里的字节。别的参与者写下的字（她收到的消息）
-    过，见 :func:`app.living.received.received_line`。给她自己的话套上 ``&quot;`` 是拿她读
+    过，见 :func:`app.living.household.received.received_line`。给她自己的话套上 ``&quot;`` 是拿她读
     自己记忆的清晰度，换一个这条路上根本不存在的威胁。完整判据写在
     :func:`app.living.common.esc` 上。
     """

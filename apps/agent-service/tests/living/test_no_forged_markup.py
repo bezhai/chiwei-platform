@@ -452,8 +452,8 @@ async def test_an_image_title_from_the_internet_cannot_carry_markup(
 # ---------------------------------------------------------------------------
 # 别人发给她的：落到她眼前时一样不带结构
 #
-# 别人做了什么、说了什么，只从她的收件箱进来（:mod:`app.living.received`）。她每一轮读到的、
-# 日记材料里摆的，是同一个样子（:func:`app.living.received.received_line`），这一处转义就管住
+# 别人做了什么、说了什么，只从她的收件箱进来（:mod:`app.living.household.received`）。她每一轮读到的、
+# 日记材料里摆的，是同一个样子（:func:`app.living.household.received.received_line`），这一处转义就管住
 # 两头。
 # ---------------------------------------------------------------------------
 
@@ -464,7 +464,7 @@ def test_a_received_message_cannot_carry_markup_into_her_round():
     正文由发送方写下：world 和姐妹那边是模型，人工参与者那边是人，哪一种都不归她管，
     所以无条件转义。
     """
-    from app.living.received import ReceivedMessage, render_received
+    from app.living.household.received import ReceivedMessage, render_received
 
     now = dt.datetime(2026, 7, 25, 21, 30, tzinfo=dt.UTC)
     text_ = render_received(

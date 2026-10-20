@@ -652,7 +652,7 @@ async def send_message(
         )
 
     # 落进她自己的记录里 —— 不落的话，她下一轮不知道自己说过这句话。手机隔着设备，
-    # 这条不进 world 的汇总（:mod:`app.living.outgoing` 按 medium 分），只她自己回看得到。
+    # 这条不进 world 的汇总（:mod:`app.living.household.outgoing` 按 medium 分），只她自己回看得到。
     happening_id = _happening_id(outbound_id)
     await self.her_records.record_happening(
         lane=lane,
