@@ -282,6 +282,43 @@ async def test_a_segment_an_agent_lists_and_nobody_registered_is_refused():
         await start_without_io(host)
 
 
+async def test_a_plugin_reads_the_participants_of_a_profile_in_the_manifest_order():
+    seen: dict[str, tuple[str, ...]] = {}
+
+    def setup(ctx) -> None:
+        ctx.segment(Segment("main", "main"))
+        seen["resident"] = ctx.participants(profile="resident")
+        seen["visitor"] = ctx.participants(profile="visitor")
+
+    manifest = App(
+        plugins=(),
+        agents={"main": MAIN},
+        profiles={"resident": Profile(agent="main"), "visitor": Profile(agent="main")},
+        participants=(
+            Participant("akao", "resident"),
+            Participant("world", "visitor"),
+            Participant("ayana", "resident"),
+        ),
+    )
+    host = Host("agent-service", [plugin("life", setup)], manifest=manifest)
+
+    await start_without_io(host)
+    await host.stop()
+
+    assert seen == {"resident": ("akao", "ayana"), "visitor": ("world",)}
+
+
+async def test_the_participants_of_a_profile_the_manifest_does_not_list_are_refused():
+    host = Host(
+        "agent-service",
+        [plugin("life", lambda ctx: ctx.participants(profile="tourist"))],
+        manifest=_manifest(Profile(agent="main")),
+    )
+
+    with pytest.raises(HostError, match="'tourist'"):
+        await start_without_io(host)
+
+
 async def test_a_participant_of_a_profile_the_manifest_does_not_list_is_refused():
     manifest = App(
         plugins=(),

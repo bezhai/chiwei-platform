@@ -5,7 +5,8 @@ and takes back everything they registered.
 it: queues of turns and the clocks that signal them, clocks, tasks, admin routes, inboxes,
 outbound queues, services, things to undo at stop, and what a round is made of (tools, segments,
 state and input sections, the steps before and after the model, the round log), which the
-manifest's profiles place (``ctx.profile`` gives a plugin the profile its rounds run from).
+manifest's profiles place (``ctx.profile`` gives a plugin the profile its rounds run from,
+``ctx.participants`` whose rounds run from it).
 Every registration returns a disposer that takes it back; :meth:`Host.stop` calls them all,
 plugins in reverse order, each plugin's in reverse order of registration. Registering outside
 setup is refused: the host has nothing that would start a late registration.
@@ -414,6 +415,19 @@ class Context:
                 f"{name!r}, which the manifest does not list "
                 f"(listed: {sorted(self._host._profiles)})"
             ) from None
+
+    def participants(self, *, profile: str) -> tuple[str, ...]:
+        """The names of the manifest's participants whose rounds run from ``profile``, in the
+        order the manifest lists them: who the plugin registers queues of turns and inboxes for."""
+        if profile not in self._host._manifest.profiles:
+            raise HostError(
+                f"app {self.app_name!r}: plugin {self._plugin.name!r} asked for the participants "
+                f"of profile {profile!r}, which the manifest does not list "
+                f"(listed: {sorted(self._host._manifest.profiles)})"
+            )
+        return tuple(
+            p.name for p in self._host._manifest.participants if p.profile == profile
+        )
 
     def outbound(self, data_type: type[Data], queue: str) -> Disposer:
         """A :func:`app.infra.outbound.publish` of a ``data_type`` goes to the outbound ``queue``.
