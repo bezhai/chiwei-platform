@@ -297,6 +297,34 @@ class AssembledProfile:
     assembled: bool = False
 
 
+@dataclass
+class AssembledAgent:
+    """An agent of the manifest as the host assembled it, for the code that calls it: its spec, and
+    the tools its spec lists replaced by what a plugin registered under them, in the spec's order
+    (``spec`` keeps the names). A participant's main agent takes its tools from its profile instead.
+
+    The host creates it when a plugin asks for the agent in its setup (``ctx.agent``) and fills it
+    in once every plugin has registered, before any IO; :meth:`tools_on` refuses one it has not
+    filled in (``assembled``)."""
+
+    app: str
+    name: str
+    spec: AgentSpec
+    tools: tuple[Placed[ToolSpec], ...] = ()
+    assembled: bool = False
+
+    def tools_on(self, switched_off: frozenset[str]) -> list[ToolSpec]:
+        """Its tools, in the spec's order, without those of a plugin in ``switched_off``: the
+        round's (``Round.switched_off``) when it is called in a round, what :func:`switched_off`
+        reads when it is called outside one."""
+        if not self.assembled:
+            raise RuntimeError(
+                f"agent {self.name!r} of app {self.app!r} is not assembled; "
+                f"the host fills it in when it starts"
+            )
+        return [t.value for t in _on(self.tools, switched_off)]
+
+
 @dataclass(frozen=True)
 class RoundResult:
     """A round that ran to its end: the round (with what it read and decided) and the main agent's

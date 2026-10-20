@@ -22,7 +22,7 @@ from langfuse.model import TextPromptClient
 from app.agent.client import ModelClient
 from app.agent.contracts import AgentSpec, Continue, Profile, Segment
 from app.agent.neutral import Message, Role, ToolDef
-from app.agent.round import AssembledProfile, Round, run_round
+from app.agent.round import AssembledAgent, AssembledProfile, Round, run_round
 from app.agent.tooling import tool
 from app.host import (
     App,
@@ -220,6 +220,88 @@ async def test_the_profile_a_plugin_asks_for_is_filled_in_when_the_host_starts()
         assert assembled.lane == "prod"
     finally:
         await host.stop()
+
+
+# A sub-agent: the manifest lists its tools in its spec, a tool its main agent also has first.
+HELPER = AgentSpec(
+    segments=("helper",),
+    model="helper-model",
+    trace_name="helper",
+    tools=("look_around", "check_weather"),
+)
+
+
+async def test_the_agent_a_plugin_asks_for_is_filled_in_with_its_tools_when_the_host_starts():
+    agents: dict[str, AssembledAgent] = {}
+
+    def life(ctx) -> None:
+        agents["helper"] = ctx.agent("helper")
+        ctx.segment(Segment("main", "main"))
+        ctx.segment(Segment("helper", "helper"))
+        ctx.tool(look_around, trim="material")
+
+    host = Host(
+        "agent-service",
+        [
+            plugin("life", life),
+            plugin("weather", lambda ctx: ctx.tool(check_weather, trim="kept")),
+        ],
+        manifest=_manifest(
+            Profile(agent="main", tools=("look_around",)), helper=HELPER
+        ),
+    )
+
+    await start_without_io(host)
+    try:
+        helper = agents["helper"]
+        assert helper.assembled
+        assert helper.spec is HELPER
+        assert [(t.name, t.plugin, t.value.trim) for t in helper.tools] == [
+            ("look_around", "life", "material"),
+            ("check_weather", "weather", "kept"),
+        ]
+        assert [t.tool.name for t in helper.tools_on(frozenset())] == [
+            "look_around",
+            "check_weather",
+        ]
+        assert [t.tool.name for t in helper.tools_on(frozenset({"weather"}))] == [
+            "look_around"
+        ]
+    finally:
+        await host.stop()
+
+
+def test_an_agent_the_host_has_not_assembled_gives_no_tools():
+    helper = AssembledAgent(app="agent-service", name="helper", spec=HELPER)
+
+    with pytest.raises(RuntimeError, match="'helper'"):
+        helper.tools_on(frozenset())
+
+
+async def test_an_agent_the_manifest_does_not_list_is_refused_in_setup():
+    host = Host(
+        "agent-service",
+        [plugin("life", lambda ctx: ctx.agent("tourist_guide"))],
+        manifest=_manifest(Profile(agent="main")),
+    )
+
+    with pytest.raises(HostError, match="'tourist_guide'"):
+        await start_without_io(host)
+
+
+async def test_a_tool_an_agent_lists_and_nobody_registered_is_refused():
+    host = Host(
+        "agent-service",
+        [plugin("life", _registers(segments=["main", "helper"]))],
+        manifest=_manifest(Profile(agent="main"), helper=HELPER),
+    )
+
+    with pytest.raises(UnknownContribution) as refused:
+        await start_without_io(host)
+
+    message = str(refused.value)
+    assert "agent 'helper'" in message
+    assert "'look_around'" in message and "'check_weather'" in message
 
 
 async def test_a_profile_the_manifest_does_not_list_is_refused_in_setup():

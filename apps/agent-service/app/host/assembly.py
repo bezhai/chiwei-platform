@@ -13,8 +13,9 @@ kind in one message listing every instance:
 * a registration no profile or agent lists (``UnplacedContribution``): something new has to be
   given its place in the manifest, which is what decides the order a round uses it in.
 
-Then it fills in each profile a plugin asked for (:class:`app.agent.round.AssembledProfile`) with
-what is registered under its names, in the profile's order.
+Then it fills in each profile (:class:`app.agent.round.AssembledProfile`) with what is registered
+under its names, in the profile's order, and each agent (:class:`app.agent.round.AssembledAgent`)
+with the tools registered under the names its spec lists, in the spec's order.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from app.agent.contracts import Profile
-from app.agent.round import AssembledProfile, Placed
+from app.agent.round import AssembledAgent, AssembledProfile, Placed
 from app.host.errors import (
     DuplicateContribution,
     UnknownContribution,
@@ -74,11 +75,12 @@ def assemble(
     manifest: App,
     contributions: Iterable[Contribution],
     profiles: Mapping[str, AssembledProfile],
+    agents: Mapping[str, AssembledAgent],
     *,
     lane: str,
 ) -> None:
     """Check ``manifest`` against ``contributions`` (see the module docstring), then fill in
-    ``profiles`` (by profile name) for ``lane``."""
+    ``profiles`` (by profile name) for ``lane`` and ``agents`` (by agent name)."""
     registered: dict[tuple[str, str], list[Contribution]] = defaultdict(list)
     for c in contributions:
         registered[(c.kind, c.name)].append(c)
@@ -144,6 +146,9 @@ def assemble(
             Placed(n, one[(kind, n)].plugin, one[(kind, n)].value) for n in names
         )
 
+    for agent in agents.values():
+        agent.tools = at("tool", agent.spec.tools)
+        agent.assembled = True
     for profile_name, assembled in profiles.items():
         profile = manifest.profiles[profile_name]
         agents = {n: manifest.agents[n] for n in (profile.agent, *profile.sub_agents)}

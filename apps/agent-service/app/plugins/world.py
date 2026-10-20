@@ -4,8 +4,10 @@
 
 **主 agent 的一轮**（:mod:`app.world.main_agent`），清单 ``world`` 排它们的位置：
 
-  segments (``ctx.segment``)   world_round，和一轮里调的 world_perception、world_npc
-  tools (``ctx.tool``)         write_record、wake_me_at、report_change、let_npc_appear（都 kept）
+  segments (``ctx.segment``)   world_round，和一轮里调的 world_perception、world_npc，以及
+                               一轮之外调的 world_answer
+  tools (``ctx.tool``)         write_record、wake_me_at、report_change、let_npc_appear，以及
+                               感知判断记判断的 someone_notices（都 kept）
   before the round             unfinished.resend        按原 id 补发没跑完的一轮的告知
   state section                records.listing          记录目录（只进清理标记）
   input sections               wake.woken_by、wake.planned、unfinished.happenings
@@ -51,7 +53,7 @@ from app.world.admin import (
     record_write_node,
 )
 from app.world.agents import world_segments
-from app.world.answer import answer_question
+from app.world.answer import ANSWER, answer_question
 from app.world.main_agent import (
     ROUND_SEGMENTS,
     ROUND_TIMEOUT,
@@ -66,7 +68,7 @@ from app.world.main_agent import (
     woken_by,
 )
 from app.world.npc import NPC
-from app.world.perception import PERCEPTION
+from app.world.perception import PERCEPTION, someone_notices
 from app.world.rounds import Rounds
 from app.world.volume import writer_lock
 from app.world.wake import WORLD, retry_latest_wake_without_limit, wake_on_start
@@ -113,9 +115,15 @@ def setup(ctx: Context) -> None:
 
 def _the_round(ctx: Context) -> None:
     """主 agent 的一轮由什么组成；清单 ``world`` 排它们的位置。"""
-    for segment in world_segments(*ROUND_SEGMENTS, PERCEPTION, NPC).values():
+    for segment in world_segments(*ROUND_SEGMENTS, PERCEPTION, NPC, ANSWER).values():
         ctx.segment(segment)
-    for action in (write_record, wake_me_at, report_change, let_npc_appear):
+    for action in (
+        write_record,
+        wake_me_at,
+        report_change,
+        let_npc_appear,
+        someone_notices,
+    ):
         ctx.tool(action, trim="kept")
     ctx.round_start("unfinished.resend", resend_left_over)
     ctx.section("records.listing", records_listing)

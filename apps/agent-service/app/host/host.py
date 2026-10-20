@@ -5,8 +5,9 @@ and takes back everything they registered.
 it: queues of turns and the clocks that signal them, clocks, tasks, admin routes, inboxes,
 outbound queues, services, things to undo at stop, and what a round is made of (tools, segments,
 state and input sections, the steps before and after the model, the round log), which the
-manifest's profiles place (``ctx.profile`` gives a plugin the profile its rounds run from,
-``ctx.participants`` whose rounds run from it).
+manifest's profiles and agents place (``ctx.profile`` gives a plugin the profile its rounds run
+from, ``ctx.participants`` whose rounds run from it, ``ctx.agent`` an agent it calls with the tools
+the manifest lists for it).
 Every registration returns a disposer that takes it back; :meth:`Host.stop` calls them all,
 plugins in reverse order, each plugin's in reverse order of registration. Registering outside
 setup is refused: the host has nothing that would start a late registration.
@@ -16,7 +17,8 @@ setup is refused: the host has nothing that would start a late registration.
 1. Dynamic Config reads the deployment lane.
 2. Every plugin's ``setup``, in order; right after each one, what it provided must match its
    ``provides``. Then the manifest is checked against what the plugins registered for the rounds
-   (tools, segments, sections, steps) and the profiles are filled in (:mod:`app.host.assembly`).
+   (tools, segments, sections, steps) and the profiles and agents are filled in
+   (:mod:`app.host.assembly`).
 3. Nothing so far touched the database or the broker: a manifest the host cannot run, or an
    outbound queue no route declares (checked when ``ctx.outbound`` registers it), fails before
    any IO.
@@ -66,6 +68,7 @@ from app import deployment
 from app.agent.contracts import Continue, FailRound, Segment, ToolSpec, Trim
 from app.agent.round import (
     AfterCommit,
+    AssembledAgent,
     AssembledProfile,
     Round,
     RoundLog,
@@ -429,6 +432,19 @@ class Context:
             p.name for p in self._host._manifest.participants if p.profile == profile
         )
 
+    def agent(self, name: str) -> AssembledAgent:
+        """The manifest's agent ``name``, with the tools its spec lists as the host fills them in
+        once every plugin has registered (before any IO): what the plugin calls it with, leaving out
+        the tools of a plugin that is switched off."""
+        try:
+            return self._host._agents[name]
+        except KeyError:
+            raise HostError(
+                f"app {self.app_name!r}: plugin {self._plugin.name!r} asked for agent "
+                f"{name!r}, which the manifest does not list "
+                f"(listed: {sorted(self._host._agents)})"
+            ) from None
+
     def outbound(self, data_type: type[Data], queue: str) -> Disposer:
         """A :func:`app.infra.outbound.publish` of a ``data_type`` goes to the outbound ``queue``.
         A queue no route declares, a queue partitioned by channel for a type with no ``channel``,
@@ -535,6 +551,10 @@ class Host:
         self._profiles = {
             name: AssembledProfile(app=app_name, name=name, profile=profile)
             for name, profile in self._manifest.profiles.items()
+        }
+        self._agents = {
+            name: AssembledAgent(app=app_name, name=name, spec=spec)
+            for name, spec in self._manifest.agents.items()
         }
         self._contributions: list[Contribution] = []
         self._entries: list[_Entry] = []
@@ -644,6 +664,7 @@ class Host:
             self._manifest,
             self._contributions,
             self._profiles,
+            self._agents,
             lane=current_deployment_lane() or "prod",
         )
 
