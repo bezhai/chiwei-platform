@@ -482,7 +482,7 @@ def test_neither_hand_can_be_mistaken_for_looking_at_her_phone():
 
 
 def test_both_hands_are_handed_over_as_one_set():
-    """两只手一起交出去 —— 汇进 ``MOMENT_TOOLS`` 的是这一份，不是散着的两个。"""
+    """两只手一起交出去 —— 登记进她的一轮的是这一份，不是散着的两个。"""
     assert [s.tool for s in WEB_TOOLS] == [search_online, browse_online]
 
 
@@ -503,14 +503,16 @@ def test_nothing_she_looks_up_survives_past_this_moment():
     assert tables == [], f"上网这两只手长出了库：{tables}"
 
 
-def test_both_hands_are_ones_she_actually_has():
+async def test_both_hands_are_ones_she_actually_has(resident):
     """这两只手要真在她的工具集里。
 
     没挂上去是**静默失败**：模块写好了、这个文件里的用例全绿，但她的工具列表
     里没有它们，于是永远不会调。同款用例见 ``test_phone.py`` 的
     ``test_finding_someone_is_one_of_the_hands_she_actually_has``。
     """
-    from app.living.moment import MOMENT_TOOLS
-
-    assert search_online in [s.tool for s in MOMENT_TOOLS], "她手里没有上网查这只手"
-    assert browse_online in [s.tool for s in MOMENT_TOOLS], "她手里没有刷一批这只手"
+    assert search_online in [t.value.tool for t in resident.tools], (
+        "她手里没有上网查这只手"
+    )
+    assert browse_online in [t.value.tool for t in resident.tools], (
+        "她手里没有刷一批这只手"
+    )

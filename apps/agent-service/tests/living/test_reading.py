@@ -981,17 +981,19 @@ def test_the_reading_inbox_is_opened_on_every_lane_and_no_route_takes_a_round():
         )
 
 
-def test_both_hands_are_ones_she_actually_has():
+async def test_both_hands_are_ones_she_actually_has(resident):
     """这两只手要真在她的工具集里。
 
     没挂上去是**静默失败**：模块写好了、这个文件里的用例全绿，读书收件箱也开着，
     但她的工具列表里没有它们，于是永远不会调、读书收件箱永远收不到东西。同款用例
     见 ``test_phone.py`` 的 ``test_finding_someone_is_one_of_the_hands_she_actually_has``。
     """
-    from app.living.moment import MOMENT_TOOLS
-
-    assert look_for_something_to_read in [s.tool for s in MOMENT_TOOLS], "她手里没有找东西读这只手"
-    assert read_a_bit in [s.tool for s in MOMENT_TOOLS], "她手里没有往下读一程这只手"
+    assert look_for_something_to_read in [t.value.tool for t in resident.tools], (
+        "她手里没有找东西读这只手"
+    )
+    assert read_a_bit in [t.value.tool for t in resident.tools], (
+        "她手里没有往下读一程这只手"
+    )
 
 
 # --------------------------------------------------------------------------

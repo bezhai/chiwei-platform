@@ -25,7 +25,7 @@
 不是她经历的事，只留一条日志。
 
 **她下一轮醒来时读**（:func:`unread_received` → :func:`render_received`，由
-:func:`app.living.moment.run_due_moment` 摆进这一轮的输入）。按每条消息自带的时间排，不按到达
+:func:`app.living.moment.received_section` 摆进这一轮的输入）。按每条消息自带的时间排，不按到达
 先后。收件箱里一条消息把她提前叫醒的那一轮，那一条一定在里面（``including``）。world 发来的是她察觉到的事，原样摆，不标是谁说的；别人发来的带着发送方的名字。
 
 **读到哪里逐条记，不是一个水位**（:class:`ReceivedRead`）。按消息自带的时间开水位会漏：

@@ -36,11 +36,7 @@ from app.agent.continuity import (
 )
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.agent.session import load_session
-from app.living.moment import (
-    MOMENT_TOOLS,
-    MOMENT_TRIM_POLICY,
-    transcript_key,
-)
+from app.living.moment import HISTORY_KEY, MOMENT_TRIM_POLICY
 from tests.living.conftest import regular_round
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
 
@@ -62,9 +58,11 @@ _PNG = (
 #
 # 本文件的默认策略就用它，等价性也以它为基准：搬完之后两侧各自那份跑出来的结果，
 # 必须跟拿这一份跑出来的逐条相同（见第七节）。
-# 她的手按声明分成两档（:data:`app.living.moment.MOMENT_TOOLS` 里每只的 ``trim``）。
-HER_MATERIAL = frozenset(t.tool.name for t in MOMENT_TOOLS if t.trim == "material")
-HER_KEPT = frozenset(t.tool.name for t in MOMENT_TOOLS if t.trim == "kept")
+# 她的手里落进"素材"那一档的几只（每只在各自模块里声明 ``trim``，
+# :func:`test_what_she_reads_is_material` 对照她这一轮登记的声明）。其余都是"留着"。
+HER_MATERIAL = frozenset(
+    {"look_around", "search_online", "browse_online", "read_a_guide", "run_a_script"}
+)
 
 
 BEFORE_THE_MOVE = TrimPolicy(
@@ -177,26 +175,22 @@ def _images(messages: list[Message]) -> list[ContentBlock]:
 # ---------------------------------------------------------------------------
 
 
-def test_what_she_reads_is_material():
+async def test_what_she_reads_is_material(resident):
     """她手上每一只手都声明了自己落进"素材"还是"留着"（``ToolSpec.trim`` 是必填的，漏不掉）。
     素材那一档恰好是读到的东西：环顾四周的回答、搜索和信息流、说明书、命令的输出。
 
     一只带图片句柄的新工具静默落进"素材"，就是她拿着一个失效的句柄去发图。
     """
-    assert HER_MATERIAL == {
-        "look_around",
-        "search_online",
-        "browse_online",
-        "read_a_guide",
-        "run_a_script",
-    }
+    declared = {t.name for t in resident.tools if t.value.trim == "material"}
+    assert declared == HER_MATERIAL
 
 
-def test_the_tools_that_hand_her_a_handle_are_all_kept():
+async def test_the_tools_that_hand_her_a_handle_are_all_kept(resident):
     """返回里带句柄的那几只，一只都不能在素材那一档。
 
     ``pic=`` / ``file=`` / ``channel_id=`` 是她后面调别的工具要原样抄回去的凭据。
     """
+    kept = {t.name for t in resident.tools if t.value.trim == "kept"}
     for name in (
         "draw_a_picture",
         "find_a_picture_online",
@@ -211,7 +205,7 @@ def test_the_tools_that_hand_her_a_handle_are_all_kept():
         # ``before=``（往前翻唯一的入口）。
         "look_at_phone",
     ):
-        assert name in HER_KEPT, f"{name} 的返回里有她后面还要用的东西"
+        assert name in kept, f"{name} 的返回里有她后面还要用的东西"
 
 
 # ---------------------------------------------------------------------------
@@ -1139,21 +1133,25 @@ def _assert_read_it_at_both_call_sites(
 
 @pytest.mark.integration
 async def test_her_round_trims_by_her_own_policy(
-    moment_db, stub_moment, monkeypatch
+    moment_db, stub_moment, monkeypatch, resident
 ):
-    """她这一轮裁剪和收尾各一次，两次读的都是 **moment 模块里那个名字**。
+    """她这一轮裁剪和收尾各一次，两次读的都是清单 ``resident`` 的 ``history`` 那份，而它就是
+    **moment 模块里那个名字**。
 
     她那份换成一个同值但不同一的替身：断言的是换进去的那个对象，所以"她拿的是别处
     的一份"会红。
     """
-    from app.living import moment as moment_mod
+    from app.agent import round as round_mod
 
+    assert resident.profile.history.policy is MOMENT_TRIM_POLICY
     hers = replace(MOMENT_TRIM_POLICY)  # 同值，不同对象
-    monkeypatch.setattr(moment_mod, "MOMENT_TRIM_POLICY", hers)
-    used = _spy_on_the_policy(monkeypatch, moment_mod)
+    resident.profile = replace(
+        resident.profile, history=replace(resident.profile.history, policy=hers)
+    )
+    used = _spy_on_the_policy(monkeypatch, round_mod)
 
     stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(13, 50))
+    await regular_round(resident, "akao", _at(13, 50))
 
     _assert_read_it_at_both_call_sites(used, hers, whose="她")
 
@@ -1206,21 +1204,23 @@ def test_the_target_is_strictly_below_the_cap():
 
 
 @pytest.mark.integration
-async def test_a_cleanup_lands_in_the_stored_transcript(moment_db, stub_moment):
+async def test_a_cleanup_lands_in_the_stored_transcript(
+    moment_db, stub_moment, resident
+):
     """真跑三个 moment 跨过一个清理点：存下来的那一份里状态重铺过、素材换成了短语。
 
     第二个 moment 立起第一根界桩，第三个才有得算年龄 —— 这就是一天头几轮的样子。
     """
     stub_moment(("look_around", {}), said="继续")
-    await regular_round(LANE, "akao", _at(13, 50))
+    await regular_round(resident, "akao", _at(13, 50))
 
     stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(14, 0))
+    await regular_round(resident, "akao", _at(14, 0))
 
     stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(15, 10))
+    await regular_round(resident, "akao", _at(15, 10))
 
-    tid = transcript_key(lane=LANE, persona_id="akao")
+    tid = HISTORY_KEY.format(lane=LANE, participant="akao")
     stored, _ver = await load_session(tid)
     joined = "\n".join(_texts(stored))
 
@@ -1230,7 +1230,9 @@ async def test_a_cleanup_lands_in_the_stored_transcript(moment_db, stub_moment):
 
 
 @pytest.mark.integration
-async def test_a_picture_is_gone_before_she_is_fed_again(moment_db, stub_moment):
+async def test_a_picture_is_gone_before_she_is_fed_again(
+    moment_db, stub_moment, resident
+):
     """停机跨过签名寿命再起来：喂给模型的那份里已经没有图片块了。
 
     裁剪如果只发生在收尾，这条路永远走不到 —— adapter 会在模型请求之前拿 403 抛错，
@@ -1239,7 +1241,7 @@ async def test_a_picture_is_gone_before_she_is_fed_again(moment_db, stub_moment)
     from app.agent.continuity import commit_transcript
 
     # 先塞一段带图片的历史，模拟上一个进程 13:00 那一轮画过一张
-    tid = transcript_key(lane=LANE, persona_id="akao")
+    tid = HISTORY_KEY.format(lane=LANE, participant="akao")
 
     await commit_transcript(
         tid,
@@ -1261,7 +1263,7 @@ async def test_a_picture_is_gone_before_she_is_fed_again(moment_db, stub_moment)
     )
 
     runner = stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(15, 10))
+    await regular_round(resident, "akao", _at(15, 10))
 
     fed = runner.runs[0][0]
     assert _images(fed) == [], "过期地址在模型看到它之前就该没了"

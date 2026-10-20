@@ -326,7 +326,7 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
         shown = await read_snapshot(
             lane=LANE, persona_id="akao", now=_at(21, 30)
         )
-        rendered = shown.render_state(her_words_in_view=False)
+        rendered = shown.render_own_recent()
         handles = re.findall(r"［([^］]+)］", rendered)
         assert len(handles) == 1, (
             f"快照没把她刚发出去那条的编号印出来（或者印了不止一个）—— "
@@ -760,10 +760,10 @@ async def test_she_is_told_the_outcome_comes_later_not_that_it_is_already_gone(
 # --------------------------------------------------------------------------
 
 
-def test_the_take_back_hand_is_in_her_hands():
-    from app.living.moment import MOMENT_TOOLS
-
-    assert take_back_message in [s.tool for s in MOMENT_TOOLS], "她手里没有撤回这只手"
+async def test_the_take_back_hand_is_in_her_hands(resident):
+    assert take_back_message in [t.value.tool for t in resident.tools], (
+        "她手里没有撤回这只手"
+    )
 
 
 def test_taking_something_back_takes_the_message_id_she_was_shown():

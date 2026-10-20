@@ -171,6 +171,12 @@ _FRAME_TOKENS = 8
 # 往它眼前塞一句假话。
 CHECKPOINT_HEAD = "【上下文清理 "
 GAP_HEAD = "【上一轮没存下来 "
+# 两种标记消息表头之后的那句说明。
+CHECKPOINT_NOTE = "再往前的那一段不在你眼前了，只剩你自己记下来的。"
+GAP_NOTE = (
+    "上一轮你做过说过的没能存下来，往上那一段停在它**之前** —— 中间那一轮的"
+    "经过接不回来了，它留下的东西在下面这份状态里。"
+)
 _MARKER_TAIL = "】"
 _MARKER_HEADS = (CHECKPOINT_HEAD, GAP_HEAD)
 
@@ -265,20 +271,12 @@ def _checkpoint(at: datetime, state: str) -> Message:
     那句"再往前的那一段不在你眼前了"只对最新这条是实话，下一条插入时它连同状态一起
     折叠掉（:func:`_folded`）。
     """
-    return _marker(
-        CHECKPOINT_HEAD, at, "再往前的那一段不在你眼前了，只剩你自己记下来的。", state
-    )
+    return _marker(CHECKPOINT_HEAD, at, CHECKPOINT_NOTE, state)
 
 
 def _gap_marker(at: datetime, state: str) -> Message:
     """上一轮的上下文没存下来时插入的那条：往前那一段一条没少，少的是中间那一轮的经过。"""
-    return _marker(
-        GAP_HEAD,
-        at,
-        "上一轮你做过说过的没能存下来，往上那一段停在它**之前** —— 中间那一轮的"
-        "经过接不回来了，它留下的东西在下面这份状态里。",
-        state,
-    )
+    return _marker(GAP_HEAD, at, GAP_NOTE, state)
 
 
 def _marker_at(message: Message) -> datetime | None:

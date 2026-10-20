@@ -644,22 +644,23 @@ async def test_what_she_did_before_she_started_telling_is_not_sent(
 
 
 async def _round(
+    resident,
     at: dt.datetime,
     persona: str = "akao",
     *,
-    lane: str = LANE,
     hold_limit: dt.timedelta | None = None,
 ):
-    """她的一拍常规节奏，在一条新的轮次队列上，钟停在 ``at``；``hold_limit`` 是这条队列的占用上限。"""
+    """她的一拍常规节奏，按 ``resident`` 跑，在一条新的轮次队列上，钟停在 ``at``；``hold_limit`` 是
+    这条队列的占用上限。"""
     from app.host import Signal
     from app.plugins.living import regular
 
     turns = her_queue(persona, clock=clock_at(at), hold_limit=hold_limit)
-    return await turns.take(regular(lane), Signal(at=at))
+    return await turns.take(regular(resident), Signal(at=at))
 
 
 @pytest.mark.integration
-async def test_a_round_tells_what_she_did_when_it_ends(started, stub_moment):  # noqa: F811
+async def test_a_round_tells_what_she_did_when_it_ends(started, stub_moment, resident):  # noqa: F811
     post = started
     stub_moment(
         ("switch_to", {"doing": "端菜", "place": "家/厨房", "because": "饭好了"}),
@@ -668,7 +669,7 @@ async def test_a_round_tells_what_she_did_when_it_ends(started, stub_moment):  #
         said="去吃饭",
     )
 
-    assert await _round(_at(21, 30)) is not None
+    assert await _round(resident, _at(21, 30)) is not None
 
     assert [(s.sender, s.recipient, s.body) for s in post.sent] == [
         ("赤尾", "绫奈", "当面对你说：「饭好了。」"),
@@ -684,18 +685,18 @@ async def test_a_round_tells_what_she_did_when_it_ends(started, stub_moment):  #
 
 
 @pytest.mark.integration
-async def test_a_round_that_carries_on_tells_nothing(started, stub_moment):  # noqa: F811
+async def test_a_round_that_carries_on_tells_nothing(started, stub_moment, resident):  # noqa: F811
     post = started
     stub_moment(said="继续")
 
-    await _round(_at(21, 30))
+    await _round(resident, _at(21, 30))
 
     assert post.sent == []
 
 
 @pytest.mark.integration
 async def test_a_round_that_waited_behind_a_stuck_one_happens_when_it_gets_her(
-    started, stub_moment  # noqa: F811 — 形参名就是 fixture 名
+    started, stub_moment, resident  # noqa: F811 — 形参名就是 fixture 名
 ):
     """前一轮挂住了（模型调用卡住，最长占着她 15 分钟），21:10 那一拍排在后面，21:26 才轮到。
     这一轮的『现在』是 21:26：她这一轮记下的事、发出去的消息带的都是这一刻，不是那一拍敲响的
@@ -718,7 +719,7 @@ async def test_a_round_that_waited_behind_a_stuck_one_happens_when_it_gets_her(
     clock = [_at(21, 10)]
     turns = her_queue("akao", clock=lambda: clock[0])
     async with her_round_runs(turns):  # 挂住的那一轮
-        tick = asyncio.create_task(turns.take(regular(LANE), Signal(at=clock[0])))
+        tick = asyncio.create_task(turns.take(regular(resident), Signal(at=clock[0])))
         await settled()
         clock[0] = _at(21, 26)
     await tick
@@ -761,7 +762,7 @@ def _notes_what_was_sent_before_the_model(runner, post):
 
 @pytest.mark.integration
 async def test_what_she_did_in_a_round_that_failed_is_told_before_her_next_round(
-    started, stub_moment  # noqa: F811 — 形参名就是 fixture 名
+    started, stub_moment, resident  # noqa: F811 — 形参名就是 fixture 名
 ):
     post = started
     runner = stub_moment(
@@ -770,11 +771,11 @@ async def test_what_she_did_in_a_round_that_failed_is_told_before_her_next_round
     )
     _fails_after_its_hands(runner, RuntimeError("这一轮的模型调用失败了"))
     with pytest.raises(RuntimeError, match="模型调用失败"):
-        await _round(_at(21, 30))
+        await _round(resident, _at(21, 30))
     assert post.sent == [], "失败的那一轮走不到收尾，前提没造出来"
 
     seen = _notes_what_was_sent_before_the_model(stub_moment(said="继续"), post)
-    await _round(_at(21, 40))
+    await _round(resident, _at(21, 40))
 
     (before_the_model,) = seen
     assert [(s.recipient, s.body) for s in before_the_model] == [
@@ -789,7 +790,7 @@ async def test_what_she_did_in_a_round_that_failed_is_told_before_her_next_round
 
 @pytest.mark.integration
 async def test_what_she_did_in_a_round_cut_off_for_taking_too_long_is_told_next_time(
-    started, stub_moment  # noqa: F811 — 形参名就是 fixture 名
+    started, stub_moment, resident  # noqa: F811 — 形参名就是 fixture 名
 ):
     """一轮占着她的时间到顶被掐断（她轮次队列的占用上限，线上是
     :data:`app.plugins.living.HOLD_LIMIT`），跟失败一样：做了的事下一轮开始前发出去。"""
@@ -797,11 +798,11 @@ async def test_what_she_did_in_a_round_cut_off_for_taking_too_long_is_told_next_
     runner = stub_moment(("act", {"what": "把锅端上桌"}))
     _fails_after_its_hands(runner, hangs=True)
     with pytest.raises(TimeoutError):
-        await _round(_at(21, 30), hold_limit=dt.timedelta(seconds=3))
+        await _round(resident, _at(21, 30), hold_limit=dt.timedelta(seconds=3))
     assert post.sent == []
 
     seen = _notes_what_was_sent_before_the_model(stub_moment(said="继续"), post)
-    await _round(_at(21, 40))
+    await _round(resident, _at(21, 40))
 
     (before_the_model,) = seen
     assert [s.body for s in before_the_model] == [
@@ -830,7 +831,7 @@ async def _composed() -> list:
 
 @pytest.mark.integration
 async def test_a_send_that_hangs_does_not_cut_off_her_rounds(
-    started, stub_moment, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+    started, stub_moment, monkeypatch, resident  # noqa: F811 — 形参名就是 fixture 名
 ):
     """发给绫奈的那一次挂住。不给一次发送封顶的话，这一轮在占用到顶时被掐断，下一轮开始前又先去
     发同一条、又挂住：她一轮一轮被掐断，千凪和 world 一直轮不到。"""
@@ -844,9 +845,9 @@ async def test_a_send_that_hangs_does_not_cut_off_her_rounds(
         ("act", {"what": "把锅端上桌"}),
     )
 
-    assert await _round(_at(21, 30), hold_limit=cap) is not None
+    assert await _round(resident, _at(21, 30), hold_limit=cap) is not None
     stub_moment(said="继续")
-    assert await _round(_at(21, 40), hold_limit=cap) is not None
+    assert await _round(resident, _at(21, 40), hold_limit=cap) is not None
 
     assert await _delivered_to() == ["world", "千凪"]
     assert [m.recipient for m in await outgoing_mod.unsent(lane=LANE, persona_id="akao")] == [
@@ -856,7 +857,7 @@ async def test_a_send_that_hangs_does_not_cut_off_her_rounds(
 
 @pytest.mark.integration
 async def test_a_round_cancelled_while_a_send_is_in_flight_loses_nothing_and_doubles_nothing(
-    started, stub_moment  # noqa: F811 — 形参名就是 fixture 名
+    started, stub_moment, resident  # noqa: F811 — 形参名就是 fixture 名
 ):
     """这一轮在一次发送还没结果时被取消（占用到顶、部署）。那一次结果未知，没有结果的那条下一次
     原样再发；已经有结果的不再发；要发的消息不多也不少。"""
@@ -866,7 +867,7 @@ async def test_a_round_cancelled_while_a_send_is_in_flight_loses_nothing_and_dou
         ("say", {"what": "抹茶煮多了，要不要？", "to": ["绫奈", "千凪"]}),
         ("act", {"what": "把锅端上桌"}),
     )
-    first = asyncio.create_task(_round(_at(21, 30)))
+    first = asyncio.create_task(_round(resident, _at(21, 30)))
     await _until(lambda: [s.recipient for s in post.sent] == ["绫奈", "千凪"])
     first.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -874,7 +875,7 @@ async def test_a_round_cancelled_while_a_send_is_in_flight_loses_nothing_and_dou
 
     post.hanging.clear()
     stub_moment(said="继续")
-    await _round(_at(21, 40))
+    await _round(resident, _at(21, 40))
 
     assert [s.recipient for s in post.sent] == ["绫奈", "千凪", "千凪", "world"]
     assert (post.sent[1].message_id, post.sent[1].body) == (
@@ -909,7 +910,7 @@ async def _her_seqs(table: str, persona_column: str, persona: str = "akao") -> l
 
 @pytest.mark.integration
 async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_others_live_on(
-    started, moment_db, stub_moment, in_a_moment, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+    started, moment_db, stub_moment, in_a_moment, monkeypatch, resident  # noqa: F811 — 形参名就是 fixture 名
 ):
     """world 的一条把她叫醒，那一轮在她做完事之后失败了两次，每一拍都以同一个身份重跑
     （:class:`app.living.nudge.NudgeBegun`）——哪怕中间又到了一条发生得更早的、按"最早没看过的
@@ -944,7 +945,7 @@ async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_othe
     _fails_after_its_hands(runner, RuntimeError("这一轮在她做完事之后失败了"))
     for minute in (32, 33):
         with pytest.raises(RuntimeError, match="做完事之后失败"):
-            await nudged_round(LANE, "akao", _at(21, minute))
+            await nudged_round(resident, "akao", _at(21, minute))
         await chinagi_does(f"搅了搅锅（{minute}）", _at(21, minute))
         if minute == 32:
             await receive(
@@ -955,9 +956,9 @@ async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_othe
             )
 
     stub_moment(said, closed, ("act", {"what": "把晾的衣服收进来了"}))
-    landed = await nudged_round(LANE, "akao", _at(21, 34))
+    landed = await nudged_round(resident, "akao", _at(21, 34))
     assert landed is not None and landed.moment_id == f"nudge:inbox:{rain.message_id}"
-    assert await nudged_round(LANE, "akao", _at(21, 35)) is None
+    assert await nudged_round(resident, "akao", _at(21, 35)) is None
 
     hers = await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor")
     others = await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor", "chinagi")
@@ -996,7 +997,7 @@ def test_the_say_hand_asks_for_names_in_the_world_and_offers_none():
 
 @pytest.mark.integration
 async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_rest(
-    broker, messaging_db, moment_db, stub_moment, monkeypatch  # noqa: F811
+    broker, messaging_db, moment_db, stub_moment, monkeypatch, resident  # noqa: F811
 ):
     """真的通信机制：姐妹的收件箱按人设表的名字开，world 那边用一个只记账的收件箱代替。
 
@@ -1004,10 +1005,9 @@ async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_
     的消息没有那句只对姐妹说的话。"""
     from app.living import participants as participants_mod
     from app.living.participants import WORLD
-    from app.living.received import open_inboxes
     from app.living.records import living_lane
     from app.messaging.lifecycle import start_messaging
-    from app.messaging.receiving import inbox, inboxes_at_start
+    from app.messaging.receiving import inbox
     from app.messaging.record import read_record
     from tests.messaging.helpers import Inbox, eventually
 
@@ -1018,7 +1018,7 @@ async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_
     monkeypatch.setattr(participants_mod, "_known", None)
     world = Inbox()
     inbox(WORLD, on_message=world.on_message)
-    inboxes_at_start(open_inboxes)
+    # 三姐妹的收件箱由宿主上的 living 在通信机制起来时打开（``resident``）。
     await start_messaging()
     lane = living_lane()
 
@@ -1027,7 +1027,7 @@ async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_
         ("say", {"what": "饭好了，下来吃。", "to": ["绫奈"]}),
         ("say", {"what": "谁把盐放这儿了？", "to": []}),
     )
-    await _round(_at(21, 30), lane=lane)
+    await _round(resident, _at(21, 30))
 
     await eventually(lambda: len(world.got) == 1)
     (told,) = world.got
@@ -1049,7 +1049,7 @@ async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_
         return bool(await unread_received(lane=lane, persona_id="ayana"))
 
     await eventually(she_has_it)
-    await _round(_at(21, 31), "ayana", lane=lane)
+    await _round(resident, _at(21, 31), "ayana")
 
     (what_she_read, _kwargs) = her_turn.runs[-1]
     assert "赤尾：当面对你说：「饭好了，下来吃。」" in what_she_read[-1].content
@@ -1057,17 +1057,17 @@ async def test_through_messaging_her_sister_hears_her_words_and_world_hears_the_
 
 @pytest.mark.integration
 async def test_through_messaging_her_sister_reads_words_in_the_order_they_were_said(
-    broker, messaging_db, moment_db, stub_moment, in_a_moment, monkeypatch  # noqa: F811
+    broker, messaging_db, moment_db, stub_moment, in_a_moment, monkeypatch, resident  # noqa: F811
 ):
     """真的通信机制：赤尾 21:30 对绫奈说的那句第一次没发出去，千凪 21:35 对她说的那句先到了，
     赤尾那句之后补发。绫奈读到的还是先赤尾、后千凪：她那边按消息上的时间排，那是说出口的时间。"""
     from app.living import participants as participants_mod
     from app.living.participants import WORLD
-    from app.living.received import open_inboxes, unread_received
+    from app.living.received import unread_received
     from app.living.records import living_lane
     from app.messaging.lifecycle import start_messaging
     from app.messaging.message import SendFailed
-    from app.messaging.receiving import inbox, inboxes_at_start
+    from app.messaging.receiving import inbox
     from tests.messaging.helpers import Inbox, eventually
 
     async def find_persona(persona_id: str):
@@ -1076,7 +1076,7 @@ async def test_through_messaging_her_sister_reads_words_in_the_order_they_were_s
     monkeypatch.setattr(participants_mod, "find_persona", find_persona)
     monkeypatch.setattr(participants_mod, "_known", None)
     inbox(WORLD, on_message=Inbox().on_message)
-    inboxes_at_start(open_inboxes)
+    # 三姐妹的收件箱由宿主上的 living 在通信机制起来时打开（``resident``）。
     await start_messaging()
     lane = living_lane()
 
@@ -1115,7 +1115,7 @@ async def test_through_messaging_her_sister_reads_words_in_the_order_they_were_s
     await eventually(lambda: she_has(2))
 
     her_turn = stub_moment(said="继续")
-    await _round(_at(21, 41), "ayana", lane=lane)
+    await _round(resident, _at(21, 41), "ayana")
 
     (what_she_read, _kwargs) = her_turn.runs[-1]
     seen = what_she_read[-1].content

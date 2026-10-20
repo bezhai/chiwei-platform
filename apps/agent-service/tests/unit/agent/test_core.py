@@ -617,7 +617,7 @@ class TestRun:
     async def test_whether_a_tool_ends_the_run_is_what_its_declaration_says(
         self, mock_deps, ends_round
     ):
-        from app.agent.core import _NEVER_RAN
+        from app.agent.core import NEVER_RAN
         from app.agent.neutral import ToolCall
         from app.agent.tooling import tool
 
@@ -652,7 +652,7 @@ class TestRun:
         answered = [m.text() for m in sink if m.role is Role.TOOL]
         if ends_round:
             assert mock_deps["model"].complete.await_count == 1
-            assert answered == ["done", _NEVER_RAN]
+            assert answered == ["done", NEVER_RAN]
         else:
             assert mock_deps["model"].complete.await_count == 2
             assert answered == ["done", "done"]

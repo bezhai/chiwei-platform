@@ -2167,15 +2167,15 @@ async def test_every_match_is_listed_without_picking_one(
 
 
 @pytest.mark.integration
-async def test_finding_someone_is_one_of_the_hands_she_actually_has(living_db):
+async def test_finding_someone_is_one_of_the_hands_she_actually_has(
+    living_db, resident
+):
     """这只手要真在她的工具集里。
 
     没注册是**静默失败**：代码写好了、测试也绿，但她那一轮的工具列表里没有它，
     于是永远不会调——症状跟"零未读就找不回这个人"一模一样，而且更难查。
     """
-    from app.living.moment import MOMENT_TOOLS
-
-    assert look_up_contact in [s.tool for s in MOMENT_TOOLS], "她手里没有这只手"
+    assert look_up_contact in [t.value.tool for t in resident.tools], "她手里没有这只手"
 
 
 # --------------------------------------------------------------------------
@@ -2319,11 +2319,11 @@ async def test_the_listed_address_sits_next_to_the_name(living_db, in_a_moment):
     )
 
 
-def test_looking_through_her_phone_is_one_of_the_hands_she_has():
+async def test_looking_through_her_phone_is_one_of_the_hands_she_has(resident):
     """这只手要真在她的工具集里 —— 没注册是静默失败（同「找人」那条）。"""
-    from app.living.moment import MOMENT_TOOLS
-
-    assert look_through_your_phone in [s.tool for s in MOMENT_TOOLS], "她手里没有这只手"
+    assert look_through_your_phone in [t.value.tool for t in resident.tools], (
+        "她手里没有这只手"
+    )
 
 
 # --------------------------------------------------------------------------

@@ -176,7 +176,7 @@ async def test_an_answer_cannot_carry_markup_into_her_round(
 
 @pytest.mark.integration
 async def test_after_switching_in_this_round_she_asks_about_where_she_is_now(
-    moment_db, stub_moment, world, post  # noqa: F811
+    moment_db, stub_moment, world, post, resident  # noqa: F811
 ):
     """同一轮里先换了地方再环顾四周：问的是新地方。这一轮的汇总这时还没发出去，world 只能从问题里
     知道她挪了。"""
@@ -188,7 +188,7 @@ async def test_after_switching_in_this_round_she_asks_about_where_she_is_now(
         ("look_around", {}),
     )
 
-    await regular_round(LANE, "akao", _at(21, 30))
+    await regular_round(resident, "akao", _at(21, 30))
 
     (asked,) = world.asked
     assert "家/厨房" in asked["body"] and "煮乌冬" in asked["body"], asked["body"]
@@ -198,12 +198,12 @@ async def test_after_switching_in_this_round_she_asks_about_where_she_is_now(
 
 @pytest.mark.integration
 async def test_after_moving_in_this_round_she_asks_about_the_new_place_still_doing_the_same(
-    moment_db, stub_moment, world  # noqa: F811
+    moment_db, stub_moment, world, resident  # noqa: F811
 ):
     await _stand("akao", "家/客厅", "看书", _at(21))
     stub_moment(("move_to", {"place": "家/阳台"}), ("look_around", {}))
 
-    await regular_round(LANE, "akao", _at(21, 30))
+    await regular_round(resident, "akao", _at(21, 30))
 
     (asked,) = world.asked
     assert "家/阳台" in asked["body"] and "看书" in asked["body"], asked["body"]
@@ -330,7 +330,7 @@ async def test_cancelling_her_round_while_she_looks_around_is_not_nobody_answeri
 
 @pytest.mark.integration
 async def test_her_round_cut_off_at_its_cap_while_she_waits_is_cut_and_let_go(
-    moment_db, stub_moment, world  # noqa: F811
+    moment_db, stub_moment, world, resident  # noqa: F811
 ):
     """等回答的时候她这一轮撞上了她轮次队列的占用上限（线上是
     :data:`app.plugins.living.HOLD_LIMIT`）：这一轮照常被掐断、队列放开，下一拍重来。环顾四周要是
@@ -345,7 +345,7 @@ async def test_her_round_cut_off_at_its_cap_while_she_waits_is_cut_and_let_go(
 
     async with asyncio.timeout(10):
         with pytest.raises(TimeoutError):
-            await turns.take(regular(LANE), Signal(at=_at(21, 30)))
+            await turns.take(regular(resident), Signal(at=_at(21, 30)))
 
     assert world.asked, "前提不成立：掐断时她不是在等 world 的回答"
     assert runner.results == [], f"掐断被吞成了一句话交给她：{runner.results}"

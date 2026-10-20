@@ -635,22 +635,20 @@ async def test_she_finds_a_picture_from_an_earlier_moment_with_nothing_handed_to
 # ---------------------------------------------------------------------------
 
 
-def test_all_four_hands_are_actually_in_her_tool_belt():
-    """模块写好了没挂进 ``MOMENT_TOOLS`` 是这类改动最典型的静默失败：
+async def test_all_four_hands_are_actually_in_her_tool_belt(resident):
+    """模块写好了没登记进她的一轮（清单 ``resident`` 的工具） 是这类改动最典型的静默失败：
 
     工具都在、测试都绿，而她这一轮的工具列表里一个都没有 —— 她从来没有过这四只手，
     却没有任何东西会因此报错。
     """
-    from app.living.moment import MOMENT_TOOLS
-
-    mounted = {s.tool.name for s in MOMENT_TOOLS}
+    mounted = {t.name for t in resident.tools}
     for hand in (
         "draw_a_picture",
         "find_a_picture_online",
         "look_through_your_pictures",
         "look_at_a_picture",
     ):
-        assert hand in mounted, f"{hand} 没挂进 MOMENT_TOOLS，她根本没有这只手"
+        assert hand in mounted, f"{hand} 没登记进她的一轮，她根本没有这只手"
     assert {s.tool.name for s in PICTURE_TOOLS} <= mounted
 
 

@@ -1553,8 +1553,8 @@ async def look_at_phone(
     #
     # **但不在这儿落库。** 工具返回不等于她看见了——结果还要进模型的上下文，这一轮才
     # 算真的把内容送到她眼前。当场提交的话，崩在中间就是"已读了但内容从没进过她的
-    # 上下文"，那几条永久消失且一句报错都没有。所以攒进本轮状态，由 ``run_due_moment``
-    # 的收尾跟 ``LifeMoment`` 一个事务落库（:func:`commit_glances`）。
+    # 上下文"，那几条永久消失且一句报错都没有。所以攒进本轮状态，由这一轮落地
+    # 时跟 ``LifeMoment`` 一个事务落库（:func:`commit_glances`）。
     newest_shown_unread = next((r for r in rows if r["is_unread"]), None)
     if newest_shown_unread is not None:
         this_round.state(Glances).pending.append(

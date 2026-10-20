@@ -19,12 +19,26 @@ old reading queue.
   the inboxes named after the three personas -> received  stored only; she reads them on her clock
   the reading inbox                          -> read_a_round  one stretch of reading
 
-  her tools (``ctx.tool``)  each of app.living.moment.MOMENT_TOOLS, with how trimming treats what
-                            it returns and whether it ends her round (the manifest's ``resident``
-                            profile lists them in the order she is given them)
-  segments (``ctx.segment``)  her round's prompt, and the output safety check's
+  her round, which the manifest's ``resident`` profile places (app.living.moment):
+    her tools (``ctx.tool``)    each declared where it lives, with how trimming treats what it
+                                returns and whether it ends her round (the profile lists them in the
+                                order she is given them)
+    segments (``ctx.segment``)  her round's prompt, and the output safety check's
+    before the round            outgoing.before   send what she did and has not sent yet
+    the round before            life.moments      when her last round landed, and whether its
+                                                  history was stored
+    state sections              day_page.last_written, loose_ends.open, her_records.recent,
+                                phone.unread
+    input sections              life.now, her_records.whereabouts, loose_ends.just_due,
+                                household.received, phone.arrived
+    commit (one transaction)    life.moment, phone.glances, household.read
+    after the commit            history, outgoing.after   (both Continue: logged, the round counts)
 
   POST /admin/reading/carry-over  carry_over_reading  the old reading queue -> the reading inbox
+
+**Her two wakes run her round from the assembled profile.** The plugin asks for ``resident`` in its
+setup (``ctx.profile``); the host fills it in once every plugin has registered, before any IO, and
+the wakes' ``run`` hands it to :func:`app.living.moment.run_due_moment`.
 
 **Her rounds take turns on one queue.** One person cannot think two things at once: her regular
 rhythm and her early wakes share her queue, a turn at a time, first come first served. Each of the
@@ -84,29 +98,54 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from functools import partial
 
+from app.agent.contracts import Continue
+from app.agent.round import AssembledProfile
 from app.capabilities.output_safety import GUARD_OUTPUT_SEGMENT
 from app.domain.chat_dataflow import ChatResponseSegment
 from app.domain.safety import Recall
 from app.host import Batch, Coalesce, Context, Plugin, WakeSource
 from app.living import pictures, records  # noqa: F401
 from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
+from app.living.guides import GUIDE_TOOLS
 from app.living.landing import reconcile_what_she_said
 from app.living.moment import (
     LIFE_MOMENT_SEGMENT,
-    MOMENT_TOOLS,
+    LIFE_TOOLS,
     DueMoment,
     LifeMoment,
+    commit_her_glances,
+    day_page_section,
+    just_due_section,
+    land_the_moment,
+    lost_the_last_round,
+    mark_received_read,
+    now_section,
+    open_ends_section,
+    own_recent_section,
+    phone_arrived_section,
+    phone_unread_section,
+    previous_moment_at,
+    received_section,
     regular_moment_due,
+    remember_this_round,
     run_due_moment,
+    send_her_doings,
+    whereabouts_section,
 )
+from app.living.mouth import MOUTH_TOOLS
 from app.living.nudge import nudged_moment_due
 from app.living.participants import READING
 from app.living.persona import LIVING_PERSONAS, PersonaVersion
 from app.living.persona_review import DueReview, persona_review_due, write_due_review
-from app.living.reading import read_a_round
+from app.living.phone import PHONE_TOOLS
+from app.living.pictures import PICTURE_TOOLS
+from app.living.reading import READING_TOOLS, read_a_round
 from app.living.received import open_inboxes
 from app.living.records import living_lane
+from app.living.takeback import TAKEBACK_TOOLS
+from app.living.web import WEB_TOOLS
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
 
 # How often her wakes tick (see "Clocks tick denser than the work they drive").
@@ -138,24 +177,37 @@ HOLD_LIMIT = timedelta(seconds=900)
 LANDING_EVERY = timedelta(minutes=5)
 
 
-def regular(lane: str) -> WakeSource[DueMoment, LifeMoment]:
-    """Her regular rhythm on ``lane``: a round when her current cell has none
-    (:func:`app.living.moment.regular_moment_due`)."""
+def regular(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
+    """Her regular rhythm: a round when her current cell has none
+    (:func:`app.living.moment.regular_moment_due`), run from ``resident`` on its lane (the
+    process's, read when the host has filled the profile in)."""
 
-    async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DueMoment | None:
-        return await regular_moment_due(lane=lane, persona_id=persona_id, clock=clock)
+    async def due(
+        persona_id: str, batch: Batch, clock: Callable[[], datetime]
+    ) -> DueMoment | None:
+        return await regular_moment_due(
+            lane=resident.lane, persona_id=persona_id, clock=clock
+        )
 
-    return WakeSource("regular", Coalesce.DROP_WHILE_ACTIVE, due, run_due_moment)
+    return WakeSource(
+        "regular", Coalesce.DROP_WHILE_ACTIVE, due, partial(run_due_moment, resident)
+    )
 
 
-def nudge(lane: str) -> WakeSource[DueMoment, LifeMoment]:
-    """Her early wakes on ``lane``: a round when someone calls her on her phone or a message for
-    her wants to wake her (:func:`app.living.nudge.nudged_moment_due`)."""
+def nudge(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
+    """Her early wakes: a round when someone calls her on her phone or a message for her wants to
+    wake her (:func:`app.living.nudge.nudged_moment_due`), run from ``resident`` on its lane."""
 
-    async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DueMoment | None:
-        return await nudged_moment_due(lane=lane, persona_id=persona_id, clock=clock)
+    async def due(
+        persona_id: str, batch: Batch, clock: Callable[[], datetime]
+    ) -> DueMoment | None:
+        return await nudged_moment_due(
+            lane=resident.lane, persona_id=persona_id, clock=clock
+        )
 
-    return WakeSource("nudge", Coalesce.DROP_WHILE_ACTIVE, due, run_due_moment)
+    return WakeSource(
+        "nudge", Coalesce.DROP_WHILE_ACTIVE, due, partial(run_due_moment, resident)
+    )
 
 
 def day_page(lane: str) -> WakeSource[DuePage, LivingDayPage | None]:
@@ -183,7 +235,8 @@ def persona_review(lane: str) -> WakeSource[DueReview, PersonaVersion | None]:
 
 def setup(ctx: Context) -> None:
     lane = living_lane()
-    regular_rounds, early_wakes = regular(lane), nudge(lane)
+    resident = ctx.profile("resident")
+    regular_rounds, early_wakes = regular(resident), nudge(resident)
     pages, reviews = day_page(lane), persona_review(lane)
     for persona_id in LIVING_PERSONAS:
         rounds = ctx.turns(persona_id, "round", hold_limit=HOLD_LIMIT)
@@ -193,10 +246,7 @@ def setup(ctx: Context) -> None:
         ctx.wake(diary, pages, every=DAY_PAGE_EVERY)
         look_back = ctx.turns(persona_id, "persona-review", hold_limit=HOLD_LIMIT)
         ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
-    for her_tool in MOMENT_TOOLS:
-        ctx.tool(her_tool.tool, trim=her_tool.trim, ends_round=her_tool.ends_round)
-    ctx.segment(LIFE_MOMENT_SEGMENT)
-    ctx.segment(GUARD_OUTPUT_SEGMENT)
+    _her_round(ctx)
     ctx.clock(
         "landing",
         LANDING_EVERY.total_seconds(),
@@ -220,6 +270,46 @@ def setup(ctx: Context) -> None:
     ctx.outbound(ChatResponseSegment, "chat_response")
     ctx.outbound(Recall, "recall")
     ctx.inboxes_at_start(open_inboxes)
+
+
+def _her_round(ctx: Context) -> None:
+    """Everything her round is made of; the manifest's ``resident`` profile places it."""
+    for spec in (
+        *LIFE_TOOLS,
+        *PHONE_TOOLS,
+        *MOUTH_TOOLS,
+        *TAKEBACK_TOOLS,
+        *WEB_TOOLS,
+        *READING_TOOLS,
+        *PICTURE_TOOLS,
+        *GUIDE_TOOLS,
+    ):
+        ctx.tool(spec.tool, trim=spec.trim, ends_round=spec.ends_round)
+    ctx.segment(LIFE_MOMENT_SEGMENT)
+    ctx.segment(GUARD_OUTPUT_SEGMENT)
+    ctx.round_start("outgoing.before", send_her_doings)
+    ctx.round_log(
+        "life.moments",
+        previous_at=previous_moment_at,
+        lost_last_round=lost_the_last_round,
+    )
+    for name, section in (
+        ("day_page.last_written", day_page_section),
+        ("loose_ends.open", open_ends_section),
+        ("her_records.recent", own_recent_section),
+        ("phone.unread", phone_unread_section),
+        ("life.now", now_section),
+        ("her_records.whereabouts", whereabouts_section),
+        ("loose_ends.just_due", just_due_section),
+        ("household.received", received_section),
+        ("phone.arrived", phone_arrived_section),
+    ):
+        ctx.section(name, section)
+    ctx.commit("life.moment", land_the_moment)
+    ctx.commit("phone.glances", commit_her_glances)
+    ctx.commit("household.read", mark_received_read)
+    ctx.after_commit("history", remember_this_round, on_failure=Continue())
+    ctx.after_commit("outgoing.after", send_her_doings, on_failure=Continue())
 
 
 PLUGIN = Plugin(name="living", setup=setup, requires=("skills",))

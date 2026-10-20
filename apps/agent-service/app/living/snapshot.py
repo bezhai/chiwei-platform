@@ -18,24 +18,27 @@
 
 **四层全是她自己的。** 别人做了什么、说了什么，不从这里读：谁会察觉由 world 判断后告诉她，
 姐妹对她说的话直接送到她那里，都进她的收件箱，那一段由 :mod:`app.living.received` 读、由
-:func:`app.living.moment.run_due_moment` 摆进这一轮（它要跟这一轮在同一个事务里记成看过）。
+:func:`app.living.moment.received_section` 摆进这一轮（它要跟这一轮在同一个事务里记成看过）。
 
 **为什么这么长不会失真**：四层没有一层是"机器对历史的概括"。头两层是当下状态，读一
 百遍字字一样；最后一层是原文照搬的最近若干条，只是**少**，不是**歪**。失真来自压缩，
 这里一处压缩都没有。会被遗忘的只有最后一层滚出窗口的那些——而第三层正是她把重要的东
 西从滚动窗口里救出来的那只手，救不救是她的决定（见 :mod:`app.living.loose_ends`）。
 
-**这几层分两半送，因为她的上下文是连续的。**
+**这几层分两半送，因为她的上下文是连续的。** 每层一段，各是她一轮里的一个状态段或输入段
+（:mod:`app.living.moment` 摆进去，清单 ``resident`` 定顺序）：
 
-  * :meth:`MomentSnapshot.render_state` —— **她此刻的样子**（上一次写下的那天、心里挂着
-    什么、刚做过说过什么）。读一百遍字字一样，所以每轮重发就是把同一段话抄一遍。只在
-    清理那一下作为新起点重铺（:func:`app.agent.continuity.trim_for_round`），默认一小时一次。
-    「刚做过说过什么」那段只在这份历史接不住她最近说过的话时才带（上下文是空的、硬顶
-    把标记消息全裁掉了、上一轮没存下来，判据见 :func:`app.agent.continuity.continues_unbroken`）：
+  * **她此刻的样子**：上一次写下的那天（:meth:`MomentSnapshot.render_day_page`）、心里挂着
+    什么（:meth:`MomentSnapshot.render_open_ends`）、刚做过说过什么
+    （:meth:`MomentSnapshot.render_own_recent`）。读一百遍字字一样，所以每轮重发就是把同一段话
+    抄一遍。只在清理那一下作为新起点重铺（:func:`app.agent.continuity.trim_for_round`），默认
+    一小时一次。「刚做过说过什么」那段只在这份历史接不住她最近说过的话时才带（上下文是空的、
+    硬顶把标记消息全裁掉了、上一轮没存下来，判据见 :func:`app.agent.continuity.continues_unbroken`）：
     其余时候她 4 小时内说过的话都原样在上下文里，每小时再抄一份就是同一句话在一轮输入里
     出现好几遍。
-  * :meth:`MomentSnapshot.render_new` —— **这一轮的实况**：几点了、离上一次隔了多久、她在
-    哪在做什么、有什么到点了。每轮都送，因为每轮都不一样。
+  * **这一轮的实况**：几点了、离上一次隔了多久（:meth:`MomentSnapshot.render_now`）、她在哪在做
+    什么（:meth:`MomentSnapshot.render_hands`）、有什么到点了
+    （:meth:`MomentSnapshot.render_just_due`）。每轮都送，因为每轮都不一样。
 
 "刚到点的"是这条线上唯一一处从状态里**分出来**的东西：那份清单跟着状态走，但"这件事
 到点了"是这一轮真的发生的变化。等下一次重铺的话，一件 15:30 该做的事要到 16:00 她才
@@ -99,52 +102,11 @@ class MomentSnapshot:
     open_ends: list[LooseEnd]
     own_recent: list[Happening]
 
-    def render_state(self, *, her_words_in_view: bool) -> str:
-        """她此刻的样子：上一次写下的那一天、心里挂着什么，她自己的话不在眼前时再加上
-        刚做过说过什么。每段空的时候如实说空，不留白洞。
+    # -- 这一轮的实况 ----------------------------------------------------
 
-        **这一份不是每轮都送的**，只在清理那一下当作新起点重铺一次
-        （:func:`app.agent.continuity.trim_for_round`）。四段读一百遍字字一样，连续
-        上下文里她上一轮已经读过；每轮重发只是把同一段话抄二十四遍。
-
-        **``her_words_in_view`` 是这一轮的历史接不接得住她最近说过的话**，由组装那一
-        层判（:func:`app.agent.continuity.continues_unbroken`），这里只照着摆：
-        接得住就不给「你刚做过、说过」那一段 —— 她 4 小时内说过的话都原样在上下文里，
-        再抄一份最近 12 句就是同一句话在一轮输入里出现好几遍。这里判不了：渲染在裁剪
-        之前，不知道这一轮会立哪种界桩，也看不见历史。
-
-        **不带时刻。** 界桩自己头上就印着这次清理的时刻，这里再报一次就是同一份输入里
-        两个"现在"，而且两个数还不一样（界桩取整点，这一轮的 ``now`` 不是）。
-
-        **"她在哪、在做什么"不在这一半里**，它归 :meth:`render_new`。"读一百遍字字
-        一样"这条对下面三段成立，对位置不成立：她自己每一轮都可能改（``move_to`` /
-        ``switch_to``），改完到下一个清理点之间，重铺那份说的还是旧位置 —— 而她在哪是
-        这一轮里最不能过期的一样（world 按她报的位置判断谁看得见她）。
-        """
-        parts = [self._render_day_page(), self._render_open_ends()]
-        if not her_words_in_view:
-            parts.append(self._render_own_recent())
-        return "\n\n".join(parts)
-
-    def render_new(self, *, previous_at: datetime | None) -> str:
-        """这一轮的实况：几点了、离上一次隔了多久、**你在哪在干嘛**、有什么到点了。
-
-        ``previous_at`` 是上一个落地的 moment 的『现在』；一个都没跑过传 ``None``。
-
-        **"刚到点的"是事件，不是清单。** 她挂着的那份清单跟着状态走、清理时才重铺一
-        次（默认一小时），但"这件事到点了"是这一轮真的发生的变化 —— 等重铺的话一件
-        15:30 该做的事要到 16:00 她才看得见，而 :func:`app.living.moment.keep_in_mind`
-        的文案对她的承诺是"到点之后你眼前那条会写着「到点了」"。
-        """
-        parts = [self._render_now(previous_at), self._render_hands()]
-        just_due = self._render_just_due(previous_at)
-        if just_due is not None:
-            parts.append(just_due)
-        return "\n\n".join(parts)
-
-    # -- 各段 ------------------------------------------------------------
-
-    def _render_now(self, previous_at: datetime | None) -> str:
+    def render_now(self, previous_at: datetime | None) -> str:
+        """几点了、离上一次隔了多久。``previous_at`` 是上一个落地的 moment 的『现在』；一个都
+        没跑过传 ``None``。"""
         # 完整口径（年月日 + 星期），不是裸时分：下面几段跨天的行渲染成 ``07-24 23:41
         # CST``，而这一轮喂给她的全部新东西就是这一段加手机信封（``app.living.moment``），
         # 没有第二个地方说今天几号 —— 不说的话 ``07-24`` 是昨天还是上个月她算不出来，
@@ -161,8 +123,13 @@ class MomentSnapshot:
             return f"{now}，上一次就在刚才。"
         return f"{now}，离上一次过了 {_gap(gap)}。"
 
-    def _render_just_due(self, previous_at: datetime | None) -> str | None:
+    def render_just_due(self, previous_at: datetime | None) -> str | None:
         """这期间到点的那几件；一件都没有返回 ``None``（不写一行空标题）。
+
+        **"刚到点的"是事件，不是清单。** 她挂着的那份清单跟着状态走、清理时才重铺一
+        次（默认一小时），但"这件事到点了"是这一轮真的发生的变化 —— 等重铺的话一件
+        15:30 该做的事要到 16:00 她才看得见，而 :func:`app.living.moment.keep_in_mind`
+        的文案对她的承诺是"到点之后你眼前那条会写着「到点了」"。
 
         ``previous_at`` 是 ``None``（一个 moment 都没跑过）时也返回 ``None``：没有
         "这期间"可言，把一堆早就过期的事当成刚刚发生是往她眼前塞假话。
@@ -179,14 +146,26 @@ class MomentSnapshot:
         lines = [f"- {format_entry(e.what, e.due_at)}" for e in came_due]
         return "刚到点的：\n" + "\n".join(lines)
 
-    def _render_hands(self) -> str:
+    def render_hands(self) -> str:
+        """她在哪、在做什么。
+
+        **这一段是实况，不是她此刻的样子。** "读一百遍字字一样"这条对日记、挂念、刚做过说过
+        成立，对位置不成立：她自己每一轮都可能改（``move_to`` / ``switch_to``），改完到下一个
+        清理点之间，重铺那份说的还是旧位置 —— 而她在哪是这一轮里最不能过期的一样（world 按她
+        报的位置判断谁看得见她）。
+        """
         if self.doing is None:
             return "手上：你还没定下自己在哪、在做什么。"
         return f"手上：你在 {self.doing.place}，正在 {self.doing.doing}。"
 
-    def _render_day_page(self) -> str:
-        """她上一次写下的那一天。摆在「手上」之后、当下那三段之前：它是背景，不是
-        此刻正在发生的事。
+    # -- 她此刻的样子 ----------------------------------------------------
+    #
+    # 每段空的时候如实说空，不留白洞。**不带时刻**：界桩自己头上就印着这次清理的时刻，这里
+    # 再报一次就是同一份输入里两个"现在"，而且两个数还不一样（界桩取整点，这一轮的 ``now``
+    # 不是）。
+
+    def render_day_page(self) -> str:
+        """她上一次写下的那一天。它是背景，不是此刻正在发生的事。
 
         **日子必须印出来，而且"昨天"这个词只在真的是昨天时才用。** 服务停过几天、
         某天她一个字都没写下的时候，最近的一页可能是三天前的；把它说成"昨天"是往她
@@ -201,13 +180,20 @@ class MomentSnapshot:
             head = f"你上一次写下的是 {when}："
         return f"{head}\n{self.day_page.text}"
 
-    def _render_open_ends(self) -> str:
+    def render_open_ends(self) -> str:
+        """心里挂着没了结的那几件，带着到没到点。"""
         if not self.open_ends:
             return "心里挂着没了结的：（没有）"
         lines = [f"- {_open_end_line(e, now=self.now)}" for e in self.open_ends]
         return "心里挂着没了结的：\n" + "\n".join(lines)
 
-    def _render_own_recent(self) -> str:
+    def render_own_recent(self) -> str:
+        """她自己最近做过、说过的那几条。
+
+        这一段带不带由组装那一层判（这一轮的历史接不接得住她最近说过的话，
+        :func:`app.agent.continuity.continues_unbroken`），这里只照着摆：接得住就不给 —— 她
+        4 小时内说过的话都原样在上下文里，再抄一份最近 12 句就是同一句话在一轮输入里出现好几遍。
+        """
         if not self.own_recent:
             return "你刚做过、说过：（还没有）"
         lines = [

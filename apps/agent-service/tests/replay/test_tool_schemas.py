@@ -64,6 +64,7 @@ async def _declared(app_host, monkeypatch) -> dict[str, list[ToolSpec]]:
     from inner_shared.dynamic_config import dynamic_config
 
     from app.agent.reading import build_reading_tools
+    from app.manifests.agent_service import RESIDENT
     from app.world.actions import ACTIONS
     from app.world.perception import someone_notices
     from app.world.sources import query_tools
@@ -72,7 +73,10 @@ async def _declared(app_host, monkeypatch) -> dict[str, list[ToolSpec]]:
     monkeypatch.setattr(dynamic_config, "get", lambda key, default="": default)
     living = await app_host("agent-service")
     await app_host("world")
-    hers = [r.detail["spec"] for r in living.registered() if r.kind == "tool"]
+    declared = {
+        r.name: r.detail["spec"] for r in living.registered() if r.kind == "tool"
+    }
+    hers = [declared[name] for name in RESIDENT.tools]
     query = await query_tools()
     return {
         "living_life_moment": hers,

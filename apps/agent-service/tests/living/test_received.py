@@ -290,19 +290,19 @@ async def her_round(inboxes, monkeypatch, models):
     return runner
 
 
-async def _her_round(at: dt.datetime):
-    return await regular_round(LANE, "ayana", at)
+async def _her_round(resident, at: dt.datetime):
+    return await regular_round(resident, "ayana", at)
 
 
 @pytest.mark.integration
-async def test_what_she_received_is_in_her_next_round_once(her_round):
+async def test_what_she_received_is_in_her_next_round_once(her_round, resident):
     rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
     dinner = _from("千凪", "姐姐，饭好了。", at=_at(21, 26))
     await receive(rain)
     await receive(dinner)
 
-    await _her_round(_at(21, 30))
-    await _her_round(_at(21, 40))
+    await _her_round(resident, _at(21, 30))
+    await _her_round(resident, _at(21, 40))
 
     first, second = her_round.prompts
     assert "- 21:25 CST 窗外下起了雨。\n- 21:26 CST 千凪：姐姐，饭好了。" in first
@@ -313,16 +313,16 @@ async def test_what_she_received_is_in_her_next_round_once(her_round):
 
 
 @pytest.mark.integration
-async def test_a_round_that_fails_shows_them_again(her_round):
+async def test_a_round_that_fails_shows_them_again(her_round, resident):
     """她跑失败的那一轮里看到的消息，下一轮再给她看一次：没跑完就不算看过。"""
     rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
     await receive(rain)
 
     her_round.fail = RuntimeError("这一轮的模型调用失败了")
     with pytest.raises(RuntimeError, match="模型调用失败"):
-        await _her_round(_at(21, 30))
+        await _her_round(resident, _at(21, 30))
     her_round.fail = None
-    await _her_round(_at(21, 31))
+    await _her_round(resident, _at(21, 31))
 
     assert len(her_round.prompts) == 2
     assert all("窗外下起了雨。" in seen for seen in her_round.prompts)
@@ -331,7 +331,7 @@ async def test_a_round_that_fails_shows_them_again(her_round):
 
 @pytest.mark.integration
 async def test_a_landing_that_fails_halfway_through_the_read_marks_keeps_none_of_them(
-    her_round, monkeypatch
+    her_round, monkeypatch, resident
 ):
     """这一轮收尾的那个事务里，看过的记了一条、记第二条时失败：已经写下的那一条和这一轮的
     ``LifeMoment`` 一起回滚，三条下一轮原样再摆一遍。只回滚一半的话，那一条就成了"看过"，
@@ -351,7 +351,7 @@ async def test_a_landing_that_fails_halfway_through_the_read_marks_keeps_none_of
 
     monkeypatch.setattr(received_mod, "insert_idempotent", fails_on_the_second_mark)
     with pytest.raises(_Crash):
-        await _her_round(_at(21, 30))
+        await _her_round(resident, _at(21, 30))
     monkeypatch.setattr(received_mod, "insert_idempotent", real)
     assert marked == [messages[0].message_id], "前提没造出来：第一条要在失败之前写进那个事务"
 
@@ -365,7 +365,7 @@ async def test_a_landing_that_fails_halfway_through_the_read_marks_keeps_none_of
     )
     assert (moments, reads) == (0, 0), "这一轮没落地，可它的记录或者看过的记录留下了"
 
-    await _her_round(_at(21, 31))
+    await _her_round(resident, _at(21, 31))
 
     again = her_round.prompts[-1]
     assert all(m.body in again for m in messages), f"没落地那一轮的消息没再摆出来：\n{again}"
@@ -373,7 +373,9 @@ async def test_a_landing_that_fails_halfway_through_the_read_marks_keeps_none_of
 
 
 @pytest.mark.integration
-async def test_what_arrives_while_she_is_in_a_round_stays_unread_for_the_next(her_round):
+async def test_what_arrives_while_she_is_in_a_round_stays_unread_for_the_next(
+    her_round, resident
+):
     """这一轮跑着的时候新到的消息，这一轮没给她看，就不能跟着记成看过。"""
     rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
     doorbell = _from("world", "楼下有人按门铃。", at=_at(21, 31))
@@ -383,13 +385,13 @@ async def test_what_arrives_while_she_is_in_a_round_stays_unread_for_the_next(he
         await receive(doorbell)
 
     her_round.meanwhile = it_arrives
-    await _her_round(_at(21, 30))
+    await _her_round(resident, _at(21, 30))
     her_round.meanwhile = None
 
     assert [m.message_id for m in await unread_received(lane=LANE, persona_id="ayana")] == [
         doorbell.message_id
     ]
-    await _her_round(_at(21, 40))
+    await _her_round(resident, _at(21, 40))
 
     first, second = her_round.prompts
     assert "窗外下起了雨。" in first and "楼下有人按门铃。" not in first

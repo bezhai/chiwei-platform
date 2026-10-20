@@ -18,6 +18,7 @@ import logging
 
 import pytest
 
+from app.agent import round as round_mod
 from app.agent.continuity import (
     CHECKPOINT_HEAD,
     GAP_HEAD,
@@ -27,16 +28,28 @@ from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.agent.session import load_session
 from app.data.persist import fetch_value, insert_idempotent
 from app.living.happening import record_happening
-from app.living.moment import LifeMoment, latest_moment, transcript_key
+from app.living.moment import LifeMoment, latest_moment
 from app.living.received import ReceivedMessage, ReceivedRead
 from app.living.records import KIND_SPEECH
 from app.living.whereabouts import note_whereabouts
+from app.manifests.agent_service import RESIDENT
 from tests.living.conftest import nudged_round, regular_round
 
 # 真 pg + 替身 life 这两样跟逐个 moment 的用例是同一份，不在这里再抄一遍。
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
 
 LANE = "coe-living"
+
+
+class _PodGone(BaseException):
+    """进程在两次提交之间没了：一轮里谁也接不住它。"""
+
+
+def _key(lane: str, persona_id: str) -> str:
+    """她那条上下文的键：清单 ``resident`` 的 ``history.key``，她的一轮按它读写
+    （:func:`app.agent.round.run_round`）。"""
+    return RESIDENT.history.key.format(lane=lane, participant=persona_id)
+
 
 _PHONE_CALL = ToolCall(
     id="c1",
@@ -131,7 +144,7 @@ async def _write_transcript(
 
 def test_one_row_per_persona_forever():
     """同一个人永远落在同一条上 —— 早上、深夜、下个月，都是它。"""
-    morning = transcript_key(lane=LANE, persona_id="akao")
+    morning = _key(LANE, "akao")
     assert morning == f"{LANE}:akao"
 
 
@@ -142,16 +155,16 @@ def test_the_context_does_not_reset_at_four_in_the_morning():
     话，全部只剩库里还有。接住它的是日记页那一层 —— 但那是一份她自己写的概述，不是
     她昨晚真正说过的每一句。现在两个时刻是同一条，她接着往下想。
     """
-    before = transcript_key(lane=LANE, persona_id="akao")
-    after = transcript_key(lane=LANE, persona_id="akao")
+    before = _key(LANE, "akao")
+    after = _key(LANE, "akao")
     assert before == after
 
 
 def test_a_lane_and_a_person_never_share_a_row():
     ids = {
-        transcript_key(lane=LANE, persona_id="akao"),
-        transcript_key(lane=LANE, persona_id="ayana"),
-        transcript_key(lane="prod", persona_id="akao"),
+        _key(LANE, "akao"),
+        _key(LANE, "ayana"),
+        _key("prod", "akao"),
     }
     assert len(ids) == 3
 
@@ -162,7 +175,7 @@ def test_the_key_says_who_it_is_without_looking_anything_up():
     顺带钉住"键里没有日期"这件事本身：留着日期段的话它会静默地每天开一条新的，
     而症状是她每天早上不记得昨天，跟"裁剪太狠"长得一模一样。
     """
-    tid = transcript_key(lane=LANE, persona_id="akao")
+    tid = _key(LANE, "akao")
     assert tid.split(":") == [LANE, "akao"]
 
 
@@ -266,12 +279,12 @@ def test_the_storage_layer_has_no_caps_of_its_own():
 
 @pytest.mark.integration
 async def test_the_next_moment_starts_from_the_stored_context(
-    moment_db, stub_moment
+    moment_db, stub_moment, resident
 ):
     """第二个 moment 的输入里，第一个 moment 那条刺激和她的回答都在。"""
     runner = stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(14))
-    await regular_round(LANE, "akao", _at(14, 10))
+    await regular_round(resident, "akao", _at(14))
+    await regular_round(resident, "akao", _at(14, 10))
 
     first_input = runner.runs[0][0]
     second_input = runner.runs[1][0]
@@ -288,13 +301,13 @@ async def test_the_next_moment_starts_from_the_stored_context(
 
 @pytest.mark.integration
 async def test_she_picks_up_a_context_this_process_never_wrote(
-    moment_db, stub_moment
+    moment_db, stub_moment, resident
 ):
     """接回不靠内存：库里先有一段，这个进程第一个 moment 就接着它往下说。
 
     等价于"杀掉 pod 之后她接着之前的上下文继续" —— 新进程手上什么都没有，全部来自 PG。
     """
-    tid = transcript_key(lane=LANE, persona_id="akao")
+    tid = _key(LANE, "akao")
     await _write_transcript(
         tid,
         [
@@ -304,7 +317,7 @@ async def test_she_picks_up_a_context_this_process_never_wrote(
     )
 
     runner = stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(14))
+    await regular_round(resident, "akao", _at(14))
 
     fed = [m.text() for m in runner.runs[0][0]]
     assert fed[0] == "上一个进程喂进去的那条"
@@ -312,15 +325,17 @@ async def test_she_picks_up_a_context_this_process_never_wrote(
 
 
 @pytest.mark.integration
-async def test_the_round_lands_in_the_context_exactly_once(moment_db, stub_moment):
+async def test_the_round_lands_in_the_context_exactly_once(
+    moment_db, stub_moment, resident
+):
     """一个 moment 跑完，这一轮的刺激 + 她的产出各进上下文一次。"""
     runner = stub_moment(
         ("keep_in_mind", {"still_on_my_mind": ["绫奈问我周末陪不陪她去祭典"]}),
         said="记下了",
     )
-    await regular_round(LANE, "akao", _at(14))
+    await regular_round(resident, "akao", _at(14))
 
-    tid = transcript_key(lane=LANE, persona_id="akao")
+    tid = _key(LANE, "akao")
     stored, ver = await load_session(tid)
     assert ver == 1
     # 一根界桩（一天的头一轮立的）+ 这一轮的刺激 + 工具那一组 + 最后那句
@@ -338,7 +353,9 @@ async def test_the_round_lands_in_the_context_exactly_once(moment_db, stub_momen
 
 
 @pytest.mark.integration
-async def test_she_carries_on_across_four_in_the_morning(moment_db, stub_moment):
+async def test_she_carries_on_across_four_in_the_morning(
+    moment_db, stub_moment, resident
+):
     """04:00 一过她接着往下说，不是从空上下文重新开始。
 
     这条原来钉的是相反的事（"04:00 一过是新的一条"）。清零同时干了两件事，而只有一件
@@ -349,8 +366,8 @@ async def test_she_carries_on_across_four_in_the_morning(moment_db, stub_moment)
     她照样会在 04:00 失忆，而那种失忆跟"裁剪太狠"长得一模一样、事后分不出来。
     """
     runner = stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(3, 50, day=26))
-    await regular_round(LANE, "akao", _at(4, 10, day=26))
+    await regular_round(resident, "akao", _at(3, 50, day=26))
+    await regular_round(resident, "akao", _at(4, 10, day=26))
 
     # 第一轮：一根界桩 + 这一轮的刺激。
     assert len(runner.runs[0][0]) == 2
@@ -371,7 +388,7 @@ async def test_she_carries_on_across_four_in_the_morning(moment_db, stub_moment)
 
 @pytest.mark.integration
 async def test_a_failed_context_write_leaves_the_round_standing(
-    moment_db, stub_moment, monkeypatch, caplog
+    moment_db, stub_moment, monkeypatch, caplog, resident
 ):
     """上下文写不进去时：这一轮照样算数，moment 记录和手机已读都落地，只留一行 ERROR。
 
@@ -387,16 +404,22 @@ async def test_a_failed_context_write_leaves_the_round_standing(
     await _stand("akao", "家/客厅", "待着", _at(13))
     await _reaches_her("当面对你说：「你在看什么」", _at(13, 59))
 
-    from app.living import moment as moment_mod
+    from app.agent.round import ROUND_STEP_FAILURES
+    from app.living.moment import CONTEXT_WRITE_FAILED
 
     async def boom(*_a, **_kw):
         raise RuntimeError("上下文写不进去")
 
-    monkeypatch.setattr(moment_mod, "commit_transcript", boom)
+    monkeypatch.setattr(round_mod, "commit_transcript", boom)
+    write_failed = CONTEXT_WRITE_FAILED.labels(lane=LANE, persona_id="akao")
+    step_failed = ROUND_STEP_FAILURES.labels(
+        app="agent-service", participant="akao", step="history"
+    )
+    before = (write_failed._value.get(), step_failed._value.get())
 
     stub_moment(("look_at_phone", {"channel_id": str(_DM)}), said="继续")
-    with caplog.at_level(logging.ERROR, logger="app.living.moment"):
-        moment = await regular_round(LANE, "akao", _at(14))
+    with caplog.at_level(logging.ERROR, logger="app.agent.round"):
+        moment = await regular_round(resident, "akao", _at(14))
 
     assert moment is not None, "上下文写失败把整轮拖垮了"
     landed = await latest_moment(lane=LANE, persona_id="akao")
@@ -407,14 +430,21 @@ async def test_a_failed_context_write_leaves_the_round_standing(
 
     assert await _rows(PhoneRead) == 1, "手机已读跟着上下文一起被回滚了"
 
-    tid = transcript_key(lane=LANE, persona_id="akao")
+    tid = _key(LANE, "akao")
     assert await load_session(tid) == ([], 0)
-    assert any("上下文" in r.message for r in caplog.records), caplog.text
+    # 存上下文那一步登记成 Continue：它先记一个计数再抛，循环记一行 ERROR、这一轮照样算数。
+    assert (write_failed._value.get(), step_failed._value.get()) == (
+        before[0] + 1,
+        before[1] + 1,
+    )
+    assert any(
+        "step history after the commit failed" in r.getMessage() for r in caplog.records
+    ), caplog.text
 
 
 @pytest.mark.integration
 async def test_a_failed_context_write_only_costs_her_this_round(
-    moment_db, stub_moment, monkeypatch
+    moment_db, stub_moment, monkeypatch, resident
 ):
     """丢掉的只有工具返回和中间过程 —— 她做过说过的事下一轮照样读得到。
 
@@ -424,19 +454,17 @@ async def test_a_failed_context_write_only_costs_her_this_round(
     await _stand("akao", "家/客厅", "待着", _at(13))
     await _stand("ayana", "家/客厅", "看书", _at(13))
 
-    from app.living import moment as moment_mod
-
     async def boom(*_a, **_kw):
         raise RuntimeError("上下文写不进去")
 
-    real_commit = moment_mod.commit_transcript
-    monkeypatch.setattr(moment_mod, "commit_transcript", boom)
+    real_commit = round_mod.commit_transcript
+    monkeypatch.setattr(round_mod, "commit_transcript", boom)
     stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="去煮了")
-    await regular_round(LANE, "akao", _at(14))
+    await regular_round(resident, "akao", _at(14))
 
-    monkeypatch.setattr(moment_mod, "commit_transcript", real_commit)
+    monkeypatch.setattr(round_mod, "commit_transcript", real_commit)
     runner = stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(14, 10))
+    await regular_round(resident, "akao", _at(14, 10))
 
     fed = runner.runs[0][0]
     assert all(m.role is Role.USER for m in fed), (
@@ -449,7 +477,7 @@ async def test_a_failed_context_write_only_costs_her_this_round(
 
 @pytest.mark.integration
 async def test_a_lost_round_puts_her_state_back_in_front_of_her(
-    moment_db, stub_moment, monkeypatch, caplog
+    moment_db, stub_moment, monkeypatch, caplog, resident
 ):
     """一轮写成了、下一轮写失败，第三轮必须发现这个缺口并重铺一次状态。
 
@@ -460,24 +488,22 @@ async def test_a_lost_round_puts_her_state_back_in_front_of_her(
     await _stand("akao", "家/客厅", "待着", _at(13))
     await _stand("ayana", "家/客厅", "看书", _at(13))
 
-    from app.living import moment as moment_mod
-
     stub_moment(said="第一轮")
-    await regular_round(LANE, "akao", _at(14))
+    await regular_round(resident, "akao", _at(14))
 
-    real_commit = moment_mod.commit_transcript
+    real_commit = round_mod.commit_transcript
 
     async def boom(*_a, **_kw):
         raise RuntimeError("上下文写不进去")
 
-    monkeypatch.setattr(moment_mod, "commit_transcript", boom)
+    monkeypatch.setattr(round_mod, "commit_transcript", boom)
     stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="第二轮")
-    await regular_round(LANE, "akao", _at(14, 10))
+    await regular_round(resident, "akao", _at(14, 10))
 
-    monkeypatch.setattr(moment_mod, "commit_transcript", real_commit)
+    monkeypatch.setattr(round_mod, "commit_transcript", real_commit)
     runner = stub_moment(said="第三轮")
     with caplog.at_level(logging.ERROR, logger="app.living.moment"):
-        await regular_round(LANE, "akao", _at(14, 20))
+        await regular_round(resident, "akao", _at(14, 20))
 
     fed = runner.runs[0][0]
     assert [m.role for m in fed] == [
@@ -502,7 +528,7 @@ async def test_a_lost_round_puts_her_state_back_in_front_of_her(
 
 @pytest.mark.integration
 async def test_a_crash_between_the_two_commits_is_found_by_the_next_round(
-    moment_db, stub_moment, monkeypatch
+    moment_db, stub_moment, monkeypatch, resident
 ):
     """进程崩在两次提交之间时连一行 ERROR 都留不下，缺口只能靠下一轮自己发现。
 
@@ -515,21 +541,23 @@ async def test_a_crash_between_the_two_commits_is_found_by_the_next_round(
     from app.living import moment as moment_mod
 
     stub_moment(said="第一轮")
-    await regular_round(LANE, "akao", _at(14))
+    await regular_round(resident, "akao", _at(14))
 
-    real_remember = moment_mod._remember_this_round
+    real_store = moment_mod.store_history
 
     async def die(*_a, **_kw):
-        raise RuntimeError("pod 没了")
+        raise _PodGone("pod 没了")
 
-    monkeypatch.setattr(moment_mod, "_remember_this_round", die)
+    # 存上下文那一步还没开始写进程就没了：不是一个能被接住的异常，写失败那条补偿路径
+    # （计数、循环的 ERROR）一步都没走。
+    monkeypatch.setattr(moment_mod, "store_history", die)
     stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="第二轮")
-    with pytest.raises(RuntimeError):
-        await regular_round(LANE, "akao", _at(14, 10))
+    with pytest.raises(_PodGone):
+        await regular_round(resident, "akao", _at(14, 10))
 
-    monkeypatch.setattr(moment_mod, "_remember_this_round", real_remember)
+    monkeypatch.setattr(moment_mod, "store_history", real_store)
     runner = stub_moment(said="第三轮")
-    await regular_round(LANE, "akao", _at(14, 20))
+    await regular_round(resident, "akao", _at(14, 20))
 
     fed = runner.runs[0][0]
     assert [m.role for m in fed] == [
@@ -543,28 +571,28 @@ async def test_a_crash_between_the_two_commits_is_found_by_the_next_round(
 
 
 @pytest.mark.integration
-async def test_the_gap_is_only_reported_once(moment_db, stub_moment, monkeypatch):
+async def test_the_gap_is_only_reported_once(
+    moment_db, stub_moment, monkeypatch, resident
+):
     """缺口补上之后不再重铺：下一轮读到的版本已经追平这个 moment 记的那一版。"""
     await _stand("akao", "家/客厅", "待着", _at(13))
 
-    from app.living import moment as moment_mod
-
     stub_moment(said="第一轮")
-    await regular_round(LANE, "akao", _at(14))
+    await regular_round(resident, "akao", _at(14))
 
     async def boom(*_a, **_kw):
         raise RuntimeError("上下文写不进去")
 
-    real_commit = moment_mod.commit_transcript
-    monkeypatch.setattr(moment_mod, "commit_transcript", boom)
+    real_commit = round_mod.commit_transcript
+    monkeypatch.setattr(round_mod, "commit_transcript", boom)
     stub_moment(said="第二轮")
-    await regular_round(LANE, "akao", _at(14, 10))
+    await regular_round(resident, "akao", _at(14, 10))
 
-    monkeypatch.setattr(moment_mod, "commit_transcript", real_commit)
+    monkeypatch.setattr(round_mod, "commit_transcript", real_commit)
     stub_moment(said="第三轮")
-    await regular_round(LANE, "akao", _at(14, 20))
+    await regular_round(resident, "akao", _at(14, 20))
     runner = stub_moment(said="第四轮")
-    await regular_round(LANE, "akao", _at(14, 30))
+    await regular_round(resident, "akao", _at(14, 30))
 
     fed = runner.runs[0][0]
     assert [m.role for m in fed] == [
@@ -580,7 +608,7 @@ async def test_the_gap_is_only_reported_once(moment_db, stub_moment, monkeypatch
 
 @pytest.mark.integration
 async def test_the_replay_after_a_failed_close_stores_the_round_once(
-    moment_db, stub_moment, monkeypatch
+    moment_db, stub_moment, monkeypatch, resident
 ):
     """收尾崩掉之后下一拍重跑：她重新看到那条，上下文里这一轮只留一份。
 
@@ -600,24 +628,24 @@ async def test_the_replay_after_a_failed_close_stores_the_round_once(
     runner = stub_moment(said="继续")
     monkeypatch.setattr(moment_mod, "insert_in_commit_order", crash)
     with pytest.raises(RuntimeError):
-        await regular_round(LANE, "akao", _at(14, 0))
+        await regular_round(resident, "akao", _at(14, 0))
 
     monkeypatch.setattr(moment_mod, "insert_in_commit_order", real_insert)
-    again = await regular_round(LANE, "akao", _at(14, 1))
+    again = await regular_round(resident, "akao", _at(14, 1))
 
     assert again is not None
     replayed = runner.runs[-1][0]
     assert len(replayed) == 2, "重放读到的历史不该带上没提交的那一轮"
     assert "你在看什么" in replayed[-1].content, "崩掉那一轮看到的那条被静默吞了"
 
-    tid = transcript_key(lane=LANE, persona_id="akao")
+    tid = _key(LANE, "akao")
     stored, ver = await load_session(tid)
     assert ver == 1
     assert len(_stimuli(stored)) == 1
 
 
 @pytest.mark.integration
-async def test_the_same_summons_only_wakes_her_once(moment_db, stub_moment):
+async def test_the_same_summons_only_wakes_her_once(moment_db, stub_moment, resident):
     """同一条消息把她叫来两次时，第二次一句模型都不调，上下文也不多一条。"""
     from app.living.nudge import NudgeBegun
     from tests.runtime.conftest import migrate
@@ -635,14 +663,14 @@ async def test_the_same_summons_only_wakes_her_once(moment_db, stub_moment):
             wakes_recipient=True,
         )
     )
-    first = await nudged_round(LANE, "akao", _at(14))
-    second = await nudged_round(LANE, "akao", _at(14, 2))
+    first = await nudged_round(resident, "akao", _at(14))
+    second = await nudged_round(resident, "akao", _at(14, 2))
 
     assert first is not None
     assert second is None
     assert len(runner.runs) == 1
 
-    tid = transcript_key(lane=LANE, persona_id="akao")
+    tid = _key(LANE, "akao")
     stored, ver = await load_session(tid)
     assert ver == 1
     assert len(_stimuli(stored)) == 1
@@ -650,18 +678,18 @@ async def test_the_same_summons_only_wakes_her_once(moment_db, stub_moment):
 
 @pytest.mark.integration
 async def test_the_moment_record_and_the_context_land_together(
-    moment_db, stub_moment
+    moment_db, stub_moment, resident
 ):
     """一个 moment 落地了，它的上下文一定也落地了 —— 同一次提交。"""
     stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(14))
+    await regular_round(resident, "akao", _at(14))
 
     from app.data.schema import table_name
 
     rows = await fetch_value(f"SELECT count(*) FROM {table_name(LifeMoment)}")
     assert rows == 1
 
-    tid = transcript_key(lane=LANE, persona_id="akao")
+    tid = _key(LANE, "akao")
     _stored, ver = await load_session(tid)
     assert ver == 1
 
@@ -701,22 +729,20 @@ async def _she_said_last_night() -> None:
 
 
 async def _lose_the_context_of_one_round(monkeypatch, run) -> None:
-    """跑一轮，但这一轮的上下文写不进去（:func:`app.living.moment._remember_this_round`）。"""
-    from app.living import moment as moment_mod
-
-    real_commit = moment_mod.commit_transcript
+    """跑一轮，但这一轮的上下文写不进去（:func:`app.agent.round.store_history`）。"""
+    real_commit = round_mod.commit_transcript
 
     async def boom(*_a, **_kw):
         raise RuntimeError("上下文写不进去")
 
-    monkeypatch.setattr(moment_mod, "commit_transcript", boom)
+    monkeypatch.setattr(round_mod, "commit_transcript", boom)
     await run()
-    monkeypatch.setattr(moment_mod, "commit_transcript", real_commit)
+    monkeypatch.setattr(round_mod, "commit_transcript", real_commit)
 
 
 @pytest.mark.integration
 async def test_an_empty_context_shows_her_what_she_said_before_it(
-    moment_db, stub_moment
+    moment_db, stub_moment, resident
 ):
     """上下文是空的（第一次跑、清过库），她之前说过的话只能从这一段来。
 
@@ -726,7 +752,7 @@ async def test_an_empty_context_shows_her_what_she_said_before_it(
     await _she_said_last_night()
 
     runner = stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(9, day=26))
+    await regular_round(resident, "akao", _at(9, day=26))
 
     first = runner.runs[0][0][0]
     assert _is_checkpoint(first)
@@ -735,19 +761,19 @@ async def test_an_empty_context_shows_her_what_she_said_before_it(
 
 @pytest.mark.integration
 async def test_crossing_four_in_the_morning_does_not_copy_her_words_again(
-    moment_db, stub_moment
+    moment_db, stub_moment, resident
 ):
     """跨过 04:00 那根标记消息跟别的整点一样，不带「你刚做过、说过」。
 
-    上下文不按天清零（:func:`app.living.moment.transcript_key` 不分天），她昨晚说过的话
+    上下文不按天清零（:data:`app.living.moment.HISTORY_KEY` 不分天），她昨晚说过的话
     还原样在上下文里，再抄一份就是重复。
     """
     await _stand("akao", "家/我房间", "准备睡了", _at(3, 30, day=26))
     stub_moment(("say", {"what": "晚安，明天见。", "to": ["ayana"]}), said="睡了")
-    await regular_round(LANE, "akao", _at(3, 50, day=26))
+    await regular_round(resident, "akao", _at(3, 50, day=26))
 
     runner = stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(4, 10, day=26))
+    await regular_round(resident, "akao", _at(4, 10, day=26))
 
     fed = runner.runs[0][0]
     marker = fed[-2]
@@ -760,15 +786,15 @@ async def test_crossing_four_in_the_morning_does_not_copy_her_words_again(
 
 @pytest.mark.integration
 async def test_an_hourly_cleanup_does_not_copy_her_words_again(
-    moment_db, stub_moment
+    moment_db, stub_moment, resident
 ):
     """每小时清理那一下不再带「你刚做过、说过」：她说过的话只以她自己那次调用出现一次。"""
     await _stand("akao", "家/客厅", "待着", _at(13))
     stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="去煮了")
-    await regular_round(LANE, "akao", _at(14, 30))
+    await regular_round(resident, "akao", _at(14, 30))
 
     runner = stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(15))
+    await regular_round(resident, "akao", _at(15))
 
     fed = runner.runs[0][0]
     cleanup = fed[-2]
@@ -783,7 +809,7 @@ async def test_an_hourly_cleanup_does_not_copy_her_words_again(
 
 @pytest.mark.integration
 async def test_a_lost_round_right_at_a_cleanup_still_shows_her_what_she_said(
-    moment_db, stub_moment, monkeypatch
+    moment_db, stub_moment, monkeypatch, resident
 ):
     """缺口跟清理点撞在一起时立的是清理那根，照样带「你刚做过、说过」。
 
@@ -794,16 +820,16 @@ async def test_a_lost_round_right_at_a_cleanup_still_shows_her_what_she_said(
     await _stand("ayana", "家/客厅", "看书", _at(13))
 
     stub_moment(said="第一轮")
-    await regular_round(LANE, "akao", _at(14, 40))
+    await regular_round(resident, "akao", _at(14, 40))
 
     stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="第二轮")
     await _lose_the_context_of_one_round(
         monkeypatch,
-        lambda: regular_round(LANE, "akao", _at(14, 50)),
+        lambda: regular_round(resident, "akao", _at(14, 50)),
     )
 
     runner = stub_moment(said="第三轮")
-    await regular_round(LANE, "akao", _at(15))
+    await regular_round(resident, "akao", _at(15))
 
     marker = runner.runs[0][0][-2]
     assert marker.text().startswith(CHECKPOINT_HEAD), "用例前提：清理那根赢了"
@@ -814,15 +840,16 @@ async def test_a_lost_round_right_at_a_cleanup_still_shows_her_what_she_said(
 
 @pytest.mark.integration
 async def test_after_the_hard_cap_took_every_marker_she_is_shown_what_she_said(
-    moment_db, stub_moment, monkeypatch
+    moment_db, stub_moment, monkeypatch, resident
 ):
     """硬顶把标记消息全裁掉之后，下一轮立的是清理那根，照样带「你刚做过、说过」。
 
     剩下那一截历史说不清是从哪儿接上的 —— 硬顶从最老的组开始整组丢，丢掉的可能正是
     她刚说过的话。
     """
+    from dataclasses import replace
+
     from app.agent.continuity import TrimPolicy
-    from app.living import moment as moment_mod
 
     tiny = TrimPolicy(
         material_minutes=60,
@@ -831,16 +858,18 @@ async def test_after_the_hard_cap_took_every_marker_she_is_shown_what_she_said(
         hard_cap_tokens=50,
         trim_target_tokens=20,
     )
-    monkeypatch.setattr(moment_mod, "MOMENT_TRIM_POLICY", tiny)
+    resident.profile = replace(
+        resident.profile, history=replace(resident.profile.history, policy=tiny)
+    )
     await _stand("akao", "家/客厅", "待着", _at(13))
 
     stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="去煮了")
-    await regular_round(LANE, "akao", _at(14))
-    stored, _ver = await load_session(transcript_key(lane=LANE, persona_id="akao"))
+    await regular_round(resident, "akao", _at(14))
+    stored, _ver = await load_session(_key(LANE, "akao"))
     assert not any(_is_checkpoint(m) for m in stored), "用例前提：硬顶把标记消息裁掉了"
 
     runner = stub_moment(said="继续")
-    await regular_round(LANE, "akao", _at(14, 10))
+    await regular_round(resident, "akao", _at(14, 10))
 
     marker = runner.runs[0][0][-2]
     assert _is_checkpoint(marker)
@@ -851,7 +880,7 @@ async def test_after_the_hard_cap_took_every_marker_she_is_shown_what_she_said(
 
 @pytest.mark.integration
 async def test_what_a_gap_marker_brought_back_goes_at_the_next_cleanup(
-    moment_db, stub_moment, monkeypatch
+    moment_db, stub_moment, monkeypatch, resident
 ):
     """**有意接受的提前遗忘**：缺口那根补回来的话，下一个清理点连同正文一起折叠掉。
 
@@ -865,22 +894,22 @@ async def test_what_a_gap_marker_brought_back_goes_at_the_next_cleanup(
     await _stand("ayana", "家/客厅", "看书", _at(13))
 
     stub_moment(said="第一轮")
-    await regular_round(LANE, "akao", _at(14))
+    await regular_round(resident, "akao", _at(14))
 
     stub_moment(("say", {"what": "我去煮点抹茶。", "to": ["ayana"]}), said="第二轮")
     await _lose_the_context_of_one_round(
         monkeypatch,
-        lambda: regular_round(LANE, "akao", _at(14, 10)),
+        lambda: regular_round(resident, "akao", _at(14, 10)),
     )
 
     gap_round = stub_moment(said="第三轮")
-    await regular_round(LANE, "akao", _at(14, 20))
+    await regular_round(resident, "akao", _at(14, 20))
     assert "我去煮点抹茶。" in _everything_she_read(gap_round.runs[0][0]), (
         "用例前提：缺口那根把丢掉那一轮说过的话补回来了"
     )
 
     runner = stub_moment(said="第四轮")
-    await regular_round(LANE, "akao", _at(15))
+    await regular_round(resident, "akao", _at(15))
 
     assert "我去煮点抹茶。" not in _everything_she_read(runner.runs[0][0]), (
         "缺口那根的正文过了清理点还在 —— 那就又是一份叠着的状态"

@@ -36,16 +36,25 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("living", "inboxes_at_start"): 1,
         ("living", "tool"): 22,
         ("living", "segment"): 2,
+        ("living", "round_start"): 1,
+        ("living", "round_log"): 1,
+        ("living", "section"): 9,
+        ("living", "commit"): 3,
+        ("living", "after_commit"): 2,
     }
 
 
-async def test_living_declares_each_of_her_tools_in_the_order_she_is_given_them(app_host):
-    from app.living.moment import MOMENT_TOOLS
+async def test_living_declares_each_tool_her_profile_lists(app_host):
+    """living declares every tool the ``resident`` profile lists and no other; the order she is
+    given them in is the profile's."""
+    from app.manifests.agent_service import RESIDENT
 
     host = await app_host("agent-service")
 
-    declared = [r.detail["spec"] for r in host.registered() if r.kind == "tool"]
-    assert declared == MOMENT_TOOLS
+    by_name = {r.name: r.detail["spec"] for r in host.registered() if r.kind == "tool"}
+    assert sorted(by_name) == sorted(RESIDENT.tools)
+    declared = [by_name[name] for name in RESIDENT.tools]
+    assert [s.tool.name for s in declared] == list(RESIDENT.tools)
     assert [s.tool.name for s in declared if s.trim == "material"] == [
         "look_around",
         "search_online",

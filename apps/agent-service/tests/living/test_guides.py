@@ -445,12 +445,14 @@ def test_both_hands_are_handed_over_as_one_set():
     assert [s.tool for s in GUIDE_TOOLS] == [read_a_guide, run_a_script]
 
 
-def test_both_hands_are_ones_she_actually_has():
-    """没挂进 ``MOMENT_TOOLS`` 是静默失败：本文件全绿，而她这一轮里根本没有这两只手。"""
-    from app.living.moment import MOMENT_TOOLS
-
-    assert read_a_guide in [s.tool for s in MOMENT_TOOLS], "她手里没有读说明这只手"
-    assert run_a_script in [s.tool for s in MOMENT_TOOLS], "她手里没有跑脚本这只手"
+async def test_both_hands_are_ones_she_actually_has(resident):
+    """没登记进她的一轮（清单 ``resident`` 的工具） 是静默失败：本文件全绿，而她这一轮里根本没有这两只手。"""
+    assert read_a_guide in [t.value.tool for t in resident.tools], (
+        "她手里没有读说明这只手"
+    )
+    assert run_a_script in [t.value.tool for t in resident.tools], (
+        "她手里没有跑脚本这只手"
+    )
 
 
 def test_the_list_variable_is_named_the_same_everywhere():

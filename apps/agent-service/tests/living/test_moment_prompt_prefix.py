@@ -72,7 +72,7 @@ def _clock_shaped(name: str) -> bool:
 
 
 @pytest.fixture
-async def two_moments(living_db, monkeypatch, models):
+async def two_moments(living_db, monkeypatch, models, resident):
     """真跑她相隔十分钟的两轮，交回这两轮各自喂给 prompt 的变量。
 
     这一轮该不该跑、变量怎么组装走的都是真代码；只有"调模型"那一步是替身，
@@ -94,8 +94,8 @@ async def two_moments(living_db, monkeypatch, models):
     monkeypatch.setattr(moment_mod, "life_moment_minutes", fixed_minutes)
     models[LIFE_MOMENT_PROMPT_ID] = runner.client
 
-    await regular_round(LANE, "akao", _at(14, 0))
-    await regular_round(LANE, "akao", _at(14, 10))
+    await regular_round(resident, "akao", _at(14, 0))
+    await regular_round(resident, "akao", _at(14, 10))
 
     assert len(runner.runs) == 2, f"两轮没都跑起来：{len(runner.runs)} 轮"
     return [run["values"] for _messages, run in runner.runs]
@@ -153,27 +153,44 @@ def _life_moment_prompt(template: str) -> TextPromptClient:
 
 
 async def _system_at(template: str, clock: dt.datetime) -> str:
-    """按 ``clock`` 这个时刻取齐、编译她这一轮的 prompt，交回 SYSTEM 正文。"""
+    """按 ``clock`` 这个时刻开始的一轮取齐、编译她这一轮的 prompt，交回 SYSTEM 正文。变量是这一轮
+    算出来的（:func:`app.living.moment.her_prompt_values`），「她是谁」和手边的说明按住不放。"""
+    from app.agent.round import Round
+
     prompt = _life_moment_prompt(template)
     langfuse = SimpleNamespace(get_prompt=lambda *_a, **_k: prompt)
+
+    async def who_she_is(*, lane, persona_id):
+        return {
+            "persona_name": "赤尾",
+            "persona_core": "她拍胶片、写角色分析、逛论坛。",
+        }
+
+    round = Round(
+        app="agent-service",
+        lane="coe-living",
+        participant="akao",
+        profile="resident",
+        round_id=clock.isoformat(timespec="minutes"),
+        now=clock,
+        reason="常规节奏",
+        due=None,
+    )
     with (
         patch("app.agent.prompts._get_client", return_value=langfuse),
         patch("app.agent.prompts.get_lane", return_value=None),
         patch.object(cst_time, "now_cst", lambda: clock),
+        patch.object(moment_mod, "persona_prompt_vars", who_she_is),
+        patch.object(
+            moment_mod, "guides_she_can_read", lambda: "drawing：人物画图指南"
+        ),
     ):
         prompts = await PromptSet.resolve(
             {LIFE_MOMENT_PROMPT_ID: LIFE_MOMENT_AGENT},
             {LIFE_MOMENT_PROMPT_ID: LIFE_MOMENT_SEGMENT},
-            None,
+            round,
         )
-        [system] = prompts.messages(
-            LIFE_MOMENT_PROMPT_ID,
-            {
-                "persona_name": "赤尾",
-                "persona_core": "她拍胶片、写角色分析、逛论坛。",
-                "guides_you_can_read": "drawing：人物画图指南",
-            },
-        )
+        [system] = prompts.messages(LIFE_MOMENT_PROMPT_ID)
     return system.content
 
 

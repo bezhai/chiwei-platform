@@ -373,7 +373,7 @@ def _record_tool_output(span: Any, result: ToolResult) -> None:
 # and an assistant turn whose calls are not all answered makes the provider
 # reject the whole next request. The wording says what happened, so a model
 # reading the stored context does not take it for a tool that failed.
-_NEVER_RAN = "（这一轮在这只手之前就结束了，它没有执行。）"
+NEVER_RAN = "（这一轮在这只手之前就结束了，它没有执行。）"
 
 def _tooldefs(tools: list[Tool]) -> list[ToolDef] | None:
     """Project neutral Tools to the ToolDefs the model sees, or None if empty."""
@@ -544,7 +544,7 @@ async def _run_loop(
 
       - **every call is answered.** A terminal tool ends the run where it sits
         in the turn, so the calls after it never run; each of those gets a
-        result saying so (``_NEVER_RAN``).
+        result saying so (``NEVER_RAN``).
       - **nothing content-free is stored** (``_carries_something``). The empty
         message a terminal tool returns stays out — it carries nothing, and a
         caller whose rounds usually end that way would pile up one per round —
@@ -596,7 +596,7 @@ async def _run_loop(
                 # unanswered call makes the provider reject the next request.
                 for skipped in last.tool_calls[at + 1 :]:
                     cancelled = ToolResult(
-                        tool_call_id=skipped.id, content=_NEVER_RAN
+                        tool_call_id=skipped.id, content=NEVER_RAN
                     ).to_message()
                     convo.append(cancelled)
                     if transcript_sink is not None:

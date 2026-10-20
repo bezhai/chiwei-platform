@@ -23,6 +23,7 @@ import pytest
 from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
 
 if TYPE_CHECKING:
+    from app.agent.round import AssembledProfile
     from app.host import Turns
     from app.living.moment import LifeMoment
 
@@ -96,6 +97,33 @@ def post(monkeypatch) -> Post:
     return stand_in
 
 
+# 她的一轮跑在哪条泳道上。一轮的泳道取自进程（宿主组装 ``resident`` 时读的 ``LANE``），线上它和
+# 判出这一轮的那条泳道是同一个值；用例里的 ``LANE`` 都是这一条。
+HER_LANE = "coe-living"
+
+
+@pytest.fixture
+async def resident(app_host, monkeypatch, tmp_path):
+    """她的一轮由什么组成：agent-service 的宿主起好（只跑 setup，不碰数据库、broker，不起钟），
+    清单里 ``resident`` 那份按 living 登记的东西组好，跟线上交给她两个唤醒来源的是同一份
+    （:mod:`app.plugins.living`）。
+
+    进程的泳道设成 :data:`HER_LANE`。手边的说明从一个空目录读：skills 插件起来时会重读一遍，
+    用例要哪几份说明自己装。
+    """
+    from app.host import Plugin
+    from app.plugins import living, skills
+
+    monkeypatch.setenv("LANE", HER_LANE)
+    monkeypatch.setenv("SKILLS_DIR", str(tmp_path / "skills"))
+    assembled = []
+    her_round = Plugin(
+        name="her-round", setup=lambda ctx: assembled.append(ctx.profile("resident"))
+    )
+    await app_host("agent-service", [skills.PLUGIN, living.PLUGIN, her_round])
+    return assembled[0]
+
+
 def clock_at(moment: datetime) -> Callable[[], datetime]:
     """一只停在 ``moment`` 的钟：轮到她的时候读它，读几次都是这一刻。"""
     return lambda: moment
@@ -116,20 +144,29 @@ def her_queue(
     return Turns(persona_id, line, hold_limit=hold_limit, clock=clock)
 
 
-async def regular_round(lane: str, persona_id: str, at: datetime) -> LifeMoment | None:
-    """钟点上该来的一拍：常规节奏的一个信号，送到一条新的队列上，钟停在 ``at``。"""
+async def regular_round(
+    resident: AssembledProfile, persona_id: str, at: datetime
+) -> LifeMoment | None:
+    """钟点上该来的一拍：常规节奏的一个信号，送到一条新的队列上，钟停在 ``at``；这一轮按
+    ``resident``（:func:`resident`）跑，泳道是它的。"""
     from app.host import Signal
     from app.plugins.living import regular
 
-    return await her_queue(persona_id, clock=clock_at(at)).take(regular(lane), Signal(at=at))
+    return await her_queue(persona_id, clock=clock_at(at)).take(
+        regular(resident), Signal(at=at)
+    )
 
 
-async def nudged_round(lane: str, persona_id: str, at: datetime) -> LifeMoment | None:
-    """提前叫醒的一拍：送到一条新的队列上，钟停在 ``at``。"""
+async def nudged_round(
+    resident: AssembledProfile, persona_id: str, at: datetime
+) -> LifeMoment | None:
+    """提前叫醒的一拍：送到一条新的队列上，钟停在 ``at``；这一轮按 ``resident`` 跑。"""
     from app.host import Signal
     from app.plugins.living import nudge
 
-    return await her_queue(persona_id, clock=clock_at(at)).take(nudge(lane), Signal(at=at))
+    return await her_queue(persona_id, clock=clock_at(at)).take(
+        nudge(resident), Signal(at=at)
+    )
 
 
 @asynccontextmanager
