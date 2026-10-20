@@ -79,7 +79,7 @@ async def write_persona_version(
 ) -> None:
     """append 一版身份正文（带来源）。
 
-    durable 语义同 write_day_page：append 新版本、无 dedup。整次 review 失败重跑
+    durable 语义同 write_due_page：append 新版本、无 dedup。整次 review 失败重跑
     可能再 append 一次语义相同的版本——无害，读侧只认最新版，版本链留痕。
     """
     await insert_append(

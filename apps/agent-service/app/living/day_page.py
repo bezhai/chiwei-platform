@@ -20,7 +20,7 @@
     绝不另设标记列。理由写在 :class:`LivingDayPage` 的 docstring 里。
   * **``run`` 返回不等于成功。** 这一轮**不给她任何工具**，她的回复正文**就是**那一
     页，于是"调了工具却没写成"这整类失败根本不存在。正文 strip 后为空 = 这一轮没
-    成：不落库、不占位，下一拍还会来（:func:`write_day_page`）。
+    成：不落库、不占位，下一拍还会来（:func:`write_due_page`）。
   * **摆给她的是她自己的经历**（:func:`day_material`）：她做过的事、说过的话，加上那
     一天传到她这里的消息。别人做了什么，只有传到她这里的那一部分才算她知道；别的姐妹的
     记录是她们自己的，这里一条都不读。
@@ -35,10 +35,10 @@ prompt 在 Langfuse（:data:`DAY_PAGE_PROMPT_ID`），变量只有 persona 那�
 
 from __future__ import annotations
 
-import asyncio
 import heapq
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Annotated
 
@@ -52,13 +52,11 @@ from app.capabilities.agent import AgentRunner
 from app.data.persist import fetch_all, fetch_one, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
 from app.domain.thinking_cost import record_round_cost
-from app.infra.cst_time import CST, dated_clock, now_cst
+from app.infra.cst_time import CST, dated_clock
 from app.living.happening import own_line, read_her_happenings_between
-from app.living.persona import LIVING_PERSONAS, persona_prompt_vars
+from app.living.persona import persona_prompt_vars
 from app.living.received import read_received_between, received_line
-from app.living.records import _require_aware, living_lane
-from app.living.serial import hold
-from app.runtime.node import node
+from app.living.records import _require_aware
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +69,6 @@ DAY_STARTS_AT = time(4, 0)
 # 写）。窗口过了就不再回望：中午再补一页"昨天"，她读到的时候那已经是前天了。
 DAY_PAGE_FROM = time(4, 0)
 DAY_PAGE_UNTIL = time(6, 0)
-
-# 钟拍得比窗口密得多，因为"该不该写"判在节点里（在不在窗口里、这天有没有页），绝大
-# 多数拍在打模型之前就返回了。五分钟一拍 = 窗口里有 24 次机会。
-DAY_PAGE_TICK_SECONDS = 300
 
 # Langfuse prompt id。
 DAY_PAGE_PROMPT_ID = "living_day_page"
@@ -149,11 +143,6 @@ class LivingDayPage(Data):
 
 
 _TABLE = table_name(LivingDayPage)
-
-
-def day_page_lock_key(lane: str, persona_id: str) -> str:
-    """这个人在这个 lane 上写日记的排他占用 key（每人一条轴，互不阻塞）。"""
-    return f"living:day-page:{lane}:{persona_id}"
 
 
 def living_day_of(moment: datetime) -> date:
@@ -241,7 +230,7 @@ async def read_day_page_before(
     下 07-26 那页之后，07-27 一整天读到的"昨天"仍然是 07-25 —— 差一天，而且没有任何
     报错，只有她把今天当昨天过。
 
-    这个函数同时是写页那一轮拿上一页的入口（:func:`write_day_page`）：链式，让她写
+    这个函数同时是写页那一轮拿上一页的入口（:func:`write_due_page`）：链式，让她写
     这一页时看得见上一页。不给的话每一页都是孤立的一天，跨天这条链断在第二页。
     """
     sql = (
@@ -309,153 +298,141 @@ def _day_page_prompt(*, day: date, lines: list[str], previous: LivingDayPage | N
     )
 
 
-async def write_day_page(
-    *, lane: str, persona_id: str, clock: Callable[[], datetime]
-) -> LivingDayPage | None:
-    """让她把刚过去那个生活日写成一页；这一拍不该写 / 没写成就返回 ``None``。
+@dataclass(frozen=True)
+class DuePage:
+    """判出来要写的那一页：哪一天、她这一轮的『现在』、摆给她的那一天。"""
 
-    **"这天写过没有"到落库为止在排他占用里**（每人一条轴）：两
-    条拍打到同一个人时，各自读到"这天还没写"就会双双烧一次模型，最后还有一条被
-    ``insert_idempotent`` 丢掉。窗口那一道判在占用**外面**：它只看这一拍的钟，
-    不读任何共享状态，等锁没有意义——一天里 288 拍中的绝大多数在这里就返回了。
+    # 为什么写这一页，记进日志。
+    reason: str
+    lane: str
+    persona_id: str
+    # 要写的是哪个生活日。
+    day: date
+    # 她这一轮的『现在』：轮到她时读的钟，这一页记成这一刻写下的。
+    now: datetime
+    # 那一天的材料，一件一行（:func:`day_material`）。
+    lines: tuple[str, ...]
 
-    **占用里的一切用拿到占用那一刻的钟**：写哪一天、这一页什么时候写下的。前一次写页挂住时
-    （最长占着 15 分钟），排在后面的那一拍要过一阵才轮到，这一页是那时写下的，不是那一拍
-    敲响时。窗口只管这一拍要不要去试：排在后面、轮到时已经过了窗口的那一拍照样写，不然那一天
-    就再也没有页了。
 
-    顺序是"能不调模型就不调"——四道判断全在模型前面：
+async def day_page_due(
+    *, lane: str, persona_id: str, at: datetime, clock: Callable[[], datetime]
+) -> DuePage | None:
+    """日记的钟在 ``at`` 响的那一拍，轮到她的日记队列时：要写哪一页；不该写返回 ``None``。
 
-      1. **不在窗口里**（:data:`DAY_PAGE_FROM` ～ :data:`DAY_PAGE_UNTIL`）就返回。
-         半夜两点她还在过昨天，中午了这件事早该做完，都不是回望的时候。
-      2. 要写的是**刚结束的那个生活日**（``living_day_of(now) - 1``），不是今天。
-      3. **这天已经有页**就返回。页存在就是复盘过了，重复的拍不该再烧一次模型。
-      4. **那天什么都没发生**（材料一行都没有）就返回：那是服务根本没跑的一天，不该
-         有那一页，更不该为一片空白叫一次模型。
+    **先读钟**：轮到她的这一刻就是她这一轮的『现在』，写哪一天、这一页什么时候写下的都按它。前一次
+    写页挂住时（最长占着她的日记队列 15 分钟），排在后面的那一拍要过一阵才轮到，这一页是那时写下
+    的，不是那一拍敲响时。
 
-    模型跑完之后还有一道：**正文 strip 为空 = 这一轮没成**。不落库、不占位——下一拍
-    还在窗口里的话她会再写一次。拿空页把这天记成"写过了"是最坏的一种，因为那一天从
-    此永远丢了，而且看起来一切正常。
+    **窗口按那一拍响的时刻判**（``at``，换到北京时间）：窗口只管这一拍要不要去试。排在后面、
+    轮到时已经过了窗口的那一拍照样写，不然那一天就再也没有页了；窗口之前响的那一拍轮到时进了
+    窗口，也不写。进程停过、06:00 之后才起来，那一天的窗口就过了，这一天不写。
 
-    ``max_retries=1``：core 的 ``run`` 把整轮包在 ``@retry`` 里，一次模型瞬时失败会
-    整轮重放、白花一次钱；这一轮本来就低频，五分钟后那一拍再来就行。
+    之后两道判断都在模型前面，能不调模型就不调：
+
+      1. 要写的是**刚结束的那个生活日**（``living_day_of(now) - 1``），不是今天。**这天已经有页**
+         就返回：页存在就是复盘过了，重复的拍不该再烧一次模型。
+      2. **那天什么都没发生**（材料一行都没有）就返回：那是服务根本没跑的一天，不该有那一页，
+         更不该为一片空白叫一次模型。
+
+    判和写在她日记队列上的同一次轮次里（:mod:`app.plugins.living`）：两拍打到同一个人时，各自读到
+    "这天还没写"就会双双烧一次模型，最后还有一条被 ``insert_idempotent`` 丢掉。队列上每一拍都
+    排队，轮到时再判一遍。
     """
-    if not (DAY_PAGE_FROM <= clock().astimezone(CST).time() < DAY_PAGE_UNTIL):
+    now = clock()
+    if not (DAY_PAGE_FROM <= at.astimezone(CST).time() < DAY_PAGE_UNTIL):
+        return None
+    day = living_day_of(now) - timedelta(days=1)
+    if await read_day_page(lane=lane, persona_id=persona_id, day=day) is not None:
+        return None
+    lines = await day_material(lane=lane, persona_id=persona_id, day=day)
+    if not lines:
+        logger.info(
+            "living day page lane=%s persona=%s %s 这一天一件事都没有，不写",
+            lane,
+            persona_id,
+            day.isoformat(),
+        )
+        return None
+    return DuePage(
+        reason=f"写 {day.isoformat()} 那一页",
+        lane=lane,
+        persona_id=persona_id,
+        day=day,
+        now=now,
+        lines=tuple(lines),
+    )
+
+
+async def write_due_page(due: DuePage) -> LivingDayPage | None:
+    """让她把判出来的那一天（:class:`DuePage`）写成一页；没写成返回 ``None``。
+
+    模型跑完之后还有一道：**正文 strip 为空 = 这一轮没成**。不落库、不占位——下一拍还在窗口里的
+    话她会再写一次。拿空页把这天记成"写过了"是最坏的一种，因为那一天从此永远丢了，而且看起来
+    一切正常。
+
+    ``max_retries=1``：core 的 ``run`` 把整轮包在 ``@retry`` 里，一次模型瞬时失败会整轮重放、白花
+    一次钱；这一轮本来就低频，五分钟后那一拍再来就行。模型失败往外抛，由她日记队列上的钟记一条
+    warning（一个人的失败不拖累另两个人）。
+    """
+    lane, persona_id, day = due.lane, due.persona_id, due.day
+    previous = await read_day_page_before(lane=lane, persona_id=persona_id, day=day)
+    prompt_vars = await persona_prompt_vars(lane=lane, persona_id=persona_id)
+    # 一个人的日记在 langfuse 里读成一条流，逐天翻起来才不用大海捞针。没有工具，
+    # 所以不需要任何 ambient feature。
+    context = AgentContext(
+        persona_id=persona_id,
+        session_id=f"living-day-page:{lane}:{persona_id}",
+    )
+    # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
+    # 会系统性丢 trace，"这一天花了多少"只能从 PG 数。
+    with collect_usage() as usage:
+        reply = await build_day_page_runner().run(
+            [
+                Message(
+                    role=Role.USER,
+                    content=_day_page_prompt(
+                        day=day, lines=list(due.lines), previous=previous
+                    ),
+                )
+            ],
+            prompt_vars=prompt_vars,
+            context=context,
+            max_retries=1,
+        )
+
+    await record_round_cost(
+        lane=lane,
+        actor=persona_id,
+        round_id=f"day-page:{day.isoformat()}",
+        usage=usage,
+        observed_at=due.now.isoformat(),
+    )
+
+    written = reply.text().strip()
+    if not written:
+        logger.warning(
+            "living day page lane=%s persona=%s %s 这一轮一个字都没写，不落库",
+            lane,
+            persona_id,
+            day.isoformat(),
+        )
         return None
 
-    async with hold(day_page_lock_key(lane, persona_id)):
-        now = clock()
-        day = living_day_of(now) - timedelta(days=1)
-        if await read_day_page(lane=lane, persona_id=persona_id, day=day) is not None:
-            return None
-
-        lines = await day_material(lane=lane, persona_id=persona_id, day=day)
-        if not lines:
-            logger.info(
-                "living day page lane=%s persona=%s %s 这一天一件事都没有，不写",
-                lane,
-                persona_id,
-                day.isoformat(),
-            )
-            return None
-
-        previous = await read_day_page_before(
-            lane=lane, persona_id=persona_id, day=day
-        )
-        prompt_vars = await persona_prompt_vars(lane=lane, persona_id=persona_id)
-        # 一个人的日记在 langfuse 里读成一条流，逐天翻起来才不用大海捞针。没有工具，
-        # 所以不需要任何 ambient feature。
-        context = AgentContext(
-            persona_id=persona_id,
-            session_id=f"living-day-page:{lane}:{persona_id}",
-        )
-        # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
-        # 会系统性丢 trace，"这一天花了多少"只能从 PG 数。
-        with collect_usage() as usage:
-            reply = await build_day_page_runner().run(
-                [
-                    Message(
-                        role=Role.USER,
-                        content=_day_page_prompt(
-                            day=day, lines=lines, previous=previous
-                        ),
-                    )
-                ],
-                prompt_vars=prompt_vars,
-                context=context,
-                max_retries=1,
-            )
-
-        await record_round_cost(
-            lane=lane,
-            actor=persona_id,
-            round_id=f"day-page:{day.isoformat()}",
-            usage=usage,
-            observed_at=now.isoformat(),
-        )
-
-        written = reply.text().strip()
-        if not written:
-            logger.warning(
-                "living day page lane=%s persona=%s %s 这一轮一个字都没写，不落库",
-                lane,
-                persona_id,
-                day.isoformat(),
-            )
-            return None
-
-        page = LivingDayPage(
-            lane=lane,
-            persona_id=persona_id,
-            day=day,
-            text=written,
-            written_at=now,
-            happenings=len(lines),
-        )
-        await insert_idempotent(page)
-        return page
-
-
-class DayPageTick(Data):
-    """写日记那一拍。单字段 ``ts``——框架源循环固定按 ``data_type(ts=<iso>)`` 造
-    payload，多一个必填字段就是每一拍 ValidationError **直接杀 Pod**。"""
-
-    ts: Annotated[str, Key]
-
-    class Meta:
-        transient = True
-
-
-@node
-async def day_page_tick(tick: DayPageTick) -> None:
-    """到点了让三个人各自把昨天写成一页；不在窗口里的拍什么都不做。
-
-    **并发跑，一个人炸不拖累另两个**：三条轴各有自己的占用，并发没有竞争。异常不往上抛——源循环那一拍失败会连累另外两
-    个人，而下一拍五分钟后就来了，窗口里还有的是机会。
-    """
-    lane = living_lane()
-    outcomes = await asyncio.gather(
-        *(
-            write_day_page(lane=lane, persona_id=persona_id, clock=now_cst)
-            for persona_id in LIVING_PERSONAS
-        ),
-        return_exceptions=True,
+    page = LivingDayPage(
+        lane=lane,
+        persona_id=persona_id,
+        day=day,
+        text=written,
+        written_at=due.now,
+        happenings=len(due.lines),
     )
-    for persona_id, outcome in zip(LIVING_PERSONAS, outcomes, strict=True):
-        if isinstance(outcome, BaseException):
-            logger.warning(
-                "living day page lane=%s persona=%s 这一页炸了：%r",
-                lane,
-                persona_id,
-                outcome,
-                exc_info=outcome,
-            )
-        elif outcome is not None:
-            logger.info(
-                "living day page lane=%s persona=%s 写下了 %s（材料 %d 行）：%s",
-                lane,
-                persona_id,
-                outcome.day.isoformat(),
-                outcome.happenings,
-                outcome.text,
-            )
+    await insert_idempotent(page)
+    logger.info(
+        "living day page lane=%s persona=%s 写下了 %s（材料 %d 行）：%s",
+        lane,
+        persona_id,
+        day.isoformat(),
+        page.happenings,
+        page.text,
+    )
+    return page

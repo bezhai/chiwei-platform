@@ -1,13 +1,15 @@
-"""Living: the three sisters' life engine — a queue of rounds for each sister with two wakes on it,
-three clocks, the reading inbox, the two outbound queues, the sisters' inboxes, and a one-off admin
-route that empties the old reading queue.
+"""Living: the three sisters' life engine — for each sister a queue of rounds with two wakes on it
+and a queue for her diary with one, two clocks, the reading inbox, the two outbound queues, the
+sisters' inboxes, and a one-off admin route that empties the old reading queue.
 
   each sister's queue of rounds ("round", ``ctx.turns``), signalled by two wakes (``ctx.wake``):
-  every  60 s  regular  -> regular_moment_due / run_due_moment   her regular rhythm
-  every  60 s  nudge    -> nudged_moment_due / run_due_moment    wake her early for a call or a message
+  every  60 s  regular   -> regular_moment_due / run_due_moment   her regular rhythm
+  every  60 s  nudge     -> nudged_moment_due / run_due_moment    wake her early for a call or a message
+
+  each sister's diary ("day-page"), signalled by one wake:
+  every 300 s  day-page  -> day_page_due / write_due_page         yesterday's page (04:00-06:00 window)
 
   every 300 s  LandingTick        -> landing_tick         match what she said with what landed
-  every 300 s  DayPageTick        -> day_page_tick        yesterday's page (04:00-06:00 window)
   every 300 s  PersonaReviewTick  -> persona_review_tick  Monday's "who I am" (06:00-08:00 window)
 
   ChatResponseSegment -> chat_response_{channel}          what she says
@@ -25,6 +27,12 @@ waiting behind a stuck round is enough, since it decides on what is true when it
 A turn holds her queue for at most :data:`app.living.serial.HELD_SECONDS`; a turn that never ends
 is cut off there and handled as a crash. Each tick reads the database and compares; most run
 nothing. Her diary and her weekly look back do not take turns on this queue.
+
+**Her diary has a queue of its own** ("day-page"), with the same hold limit, so writing yesterday's
+page never keeps her from living today. Every tick of its wake is queued (``QUEUE_EACH``): a tick
+waiting behind a stuck page gets its turn, and decides then whether the page is still to write.
+Whether a tick counts is judged by when it ticked (the window), what it writes by when it got its
+turn (:func:`app.living.day_page.day_page_due`).
 
 **Clocks tick denser than the work they drive.** A clock's seconds are fixed when it is
 registered, so the intervals that are business parameters (ten minutes between rounds, the
@@ -74,7 +82,7 @@ from app.domain.chat_dataflow import ChatResponseSegment
 from app.domain.safety import Recall
 from app.host import Batch, Coalesce, Context, Plugin, Tick, WakeSource
 from app.living import pictures, records  # noqa: F401
-from app.living.day_page import DAY_PAGE_TICK_SECONDS, DayPageTick, day_page_tick
+from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
 from app.living.landing import LANDING_TICK_SECONDS, LandingTick, landing_tick
 from app.living.moment import DueMoment, LifeMoment, regular_moment_due, run_due_moment
 from app.living.nudge import nudged_moment_due
@@ -91,14 +99,19 @@ from app.living.records import living_lane
 from app.living.serial import HELD_SECONDS
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
 
-# How often her two wakes tick (see "Clocks tick denser than the work they drive").
+# How often her wakes tick (see "Clocks tick denser than the work they drive").
 REGULAR_EVERY = timedelta(seconds=60)
 NUDGE_EVERY = timedelta(seconds=60)
+# Five minutes: 24 tries inside the two hours of the diary's window; a tick that fails (the model
+# timed out, she wrote nothing) is tried again by the next one.
+DAY_PAGE_EVERY = timedelta(minutes=5)
+
+# How long a turn may hold one of her queues (:mod:`app.host.turns`).
+HOLD_LIMIT = timedelta(seconds=HELD_SECONDS)
 
 # (tick Data, seconds, node). The clock is named after its tick Data.
 CLOCKS: tuple[tuple[type[Data], float, Callable[[Data], Awaitable[None]]], ...] = (
     (LandingTick, LANDING_TICK_SECONDS, landing_tick),
-    (DayPageTick, DAY_PAGE_TICK_SECONDS, day_page_tick),
     (PersonaReviewTick, PERSONA_REVIEW_TICK_SECONDS, persona_review_tick),
 )
 
@@ -132,13 +145,26 @@ def nudge(lane: str) -> WakeSource[DueMoment, LifeMoment]:
     return WakeSource("nudge", Coalesce.DROP_WHILE_ACTIVE, due, run_due_moment)
 
 
+def day_page(lane: str) -> WakeSource[DuePage, LivingDayPage | None]:
+    """Her diary on ``lane``: the page of the living day that just ended, when the tick came in the
+    window and the day has no page yet (:func:`app.living.day_page.day_page_due`)."""
+
+    async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DuePage | None:
+        (tick,) = batch.close()
+        return await day_page_due(lane=lane, persona_id=persona_id, at=tick.at, clock=clock)
+
+    return WakeSource("day-page", Coalesce.QUEUE_EACH, due, write_due_page)
+
+
 def setup(ctx: Context) -> None:
     lane = living_lane()
-    regular_rounds, early_wakes = regular(lane), nudge(lane)
+    regular_rounds, early_wakes, pages = regular(lane), nudge(lane), day_page(lane)
     for persona_id in LIVING_PERSONAS:
-        rounds = ctx.turns(persona_id, "round", hold_limit=timedelta(seconds=HELD_SECONDS))
+        rounds = ctx.turns(persona_id, "round", hold_limit=HOLD_LIMIT)
         ctx.wake(rounds, regular_rounds, every=REGULAR_EVERY)
         ctx.wake(rounds, early_wakes, every=NUDGE_EVERY)
+        diary = ctx.turns(persona_id, "day-page", hold_limit=HOLD_LIMIT)
+        ctx.wake(diary, pages, every=DAY_PAGE_EVERY)
     for data_type, seconds, node in CLOCKS:
         ctx.clock(data_type.__name__, seconds, _ticker(data_type, node))
     ctx.inbox(

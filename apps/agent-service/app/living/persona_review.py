@@ -211,7 +211,7 @@ async def review_persona(
     **占用里的一切用拿到占用那一刻的钟**：回看哪一周、本周写过没有、这一版什么时候写下的。
     前一次回看挂住时（最长占着 15 分钟），排在后面的那一拍要过一阵才轮到，这一版是那时写下
     的，不是那一拍敲响时。窗口只管这一拍要不要去试：排在后面、轮到时已经过了窗口的那一拍照样
-    写，理由同 :func:`app.living.day_page.write_day_page`。
+    写，理由同 :func:`app.living.day_page.day_page_due`。
 
     顺序是"能不调模型就不调"，四道判断全在模型前面：
 
@@ -349,7 +349,7 @@ class PersonaReviewTick(Data):
 async def persona_review_tick(tick: PersonaReviewTick) -> None:
     """到点了让三个人各自回看上一周；不在窗口里的拍什么都不做。
 
-    **并发跑，一个人炸不拖累另两个**（同 :func:`app.living.day_page.day_page_tick`）：
+    **并发跑，一个人炸不拖累另两个**：
     三条轴各有自己的占用，并发没有竞争。异常不往上抛——源循环那一拍失败会连累另外两
     个人，而下一拍五分钟后就来了，窗口里还有的是机会。
     """

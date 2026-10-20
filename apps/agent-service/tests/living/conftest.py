@@ -118,15 +118,17 @@ async def queued_behind(key: str) -> None:
 
 def her_queue(
     persona_id: str = "akao",
+    line: str = "round",
     *,
     clock: Callable[[], datetime],
     hold_limit: timedelta | None = None,
 ) -> Turns:
-    """她的轮次队列，跟宿主给她登记的那条一样（:mod:`app.plugins.living`）：一条新的就是一个刚
-    起来的进程。钟由用例给，轮到她的那一刻读它。"""
+    """她的一条队列，跟宿主给她登记的一样（:mod:`app.plugins.living`）：``round`` 是她的轮次，
+    ``day-page``、``persona-review`` 是日记和每周回看。一条新的就是一个刚起来的进程。钟由用例给，
+    轮到她的那一刻读它。"""
     from app.host import Turns
 
-    return Turns(persona_id, "round", hold_limit=hold_limit, clock=clock)
+    return Turns(persona_id, line, hold_limit=hold_limit, clock=clock)
 
 
 async def regular_round(lane: str, persona_id: str, at: datetime) -> LifeMoment | None:
@@ -147,7 +149,8 @@ async def nudged_round(lane: str, persona_id: str, at: datetime) -> LifeMoment |
 
 @asynccontextmanager
 async def her_round_runs(turns: Turns) -> AsyncIterator[None]:
-    """她的队列上正有一轮在跑（挂住了也一样）：``with`` 里面它一直占着她，出来它才跑完。"""
+    """她的这条队列上正有一个轮次在跑（挂住了也一样）：``with`` 里面它一直占着队列，出来它才
+    跑完。"""
     import asyncio
 
     from app.host import Coalesce, Signal, WakeSource

@@ -258,6 +258,28 @@ class Replay:
         ]
         return await wake.detail["turns"].take(wake.detail["source"], Signal(at=now_cst()))
 
+    async def tick(self, source: str) -> None:
+        """One tick of the clock of the wake ``source``, the way the host's clock gives it: a
+        signal at the frozen clock's time to every queue the running process registered for it
+        (``ctx.wake``), all at once; an error in one queue's turn does not stop the others and is
+        not raised (the host logs it). Returns nothing, like a clock's tick."""
+        import asyncio
+
+        from app.host import Signal
+
+        assert self.process is not None, "replay: no process is running"
+        signal = Signal(at=now_cst())
+        wakes = [
+            r
+            for r in self.process.registered()
+            if r.kind == "wake" and r.detail["source"].name == source
+        ]
+        assert wakes, f"replay: the process registered no wake {source!r}"
+        await asyncio.gather(
+            *(w.detail["turns"].take(w.detail["source"], signal) for w in wakes),
+            return_exceptions=True,
+        )
+
     def guide(self, name: str, text: str) -> None:
         """A guide on hand: ``SKILLS_DIR/<name>/SKILL.md``. The skills plugin loads the directory
         when the process starts, so call it before :meth:`start`."""

@@ -7,11 +7,11 @@ task, and the clocks phase with the lane gating.
 
 Neither the surface test (``tests/apps``) nor the replay starts clocks, so this file is where the
 clocks are seen to start through the lifespan: in a coe lane with
-``DATAFLOW_ENABLE_TIME_SOURCES=1`` each of living's three clocks ticks into its node and each of
-her two wakes signals her queue, and without it none does. The nodes and the wake sources are
+``DATAFLOW_ENABLE_TIME_SOURCES=1`` each of living's two clocks ticks into its node and each of
+her three wakes signals her queues, and without it none does. The nodes and the wake sources are
 replaced by recorders and the intervals shortened; which clocks and wakes living registers is
-pinned by ``tests/plugins/test_time_source_payload_contract.py`` and
-``tests/living/test_moment.py``.
+pinned by ``tests/plugins/test_time_source_payload_contract.py``,
+``tests/living/test_moment.py`` and ``tests/living/test_day_page.py``.
 """
 from __future__ import annotations
 
@@ -24,10 +24,9 @@ from fastapi import FastAPI
 
 LIVING_CLOCKS = (
     "LandingTick",
-    "DayPageTick",
     "PersonaReviewTick",
 )
-HER_WAKES = ("regular", "nudge")
+HER_WAKES = ("regular", "nudge", "day-page")
 
 
 @pytest.fixture
@@ -64,7 +63,7 @@ def pod(monkeypatch, tmp_path) -> list[str]:
 
 @pytest.fixture
 def ticks(monkeypatch) -> dict[str, list[object]]:
-    """living's clocks, each ticking every 20 ms into a recorder instead of its node, and her two
+    """living's clocks, each ticking every 20 ms into a recorder instead of its node, and her
     wakes, each signalling every 20 ms a source that records who it was asked about and runs
     nothing. Returns what each recorder received, by clock or source name."""
     from datetime import timedelta
@@ -99,8 +98,10 @@ def ticks(monkeypatch) -> dict[str, list[object]]:
     )
     monkeypatch.setattr(living, "regular", recording("regular"))
     monkeypatch.setattr(living, "nudge", recording("nudge"))
+    monkeypatch.setattr(living, "day_page", recording("day-page"))
     monkeypatch.setattr(living, "REGULAR_EVERY", timedelta(seconds=0.02))
     monkeypatch.setattr(living, "NUDGE_EVERY", timedelta(seconds=0.02))
+    monkeypatch.setattr(living, "DAY_PAGE_EVERY", timedelta(seconds=0.02))
     return seen
 
 
@@ -140,7 +141,7 @@ async def test_with_time_sources_enabled_each_clock_ticks_and_each_wake_signals_
         assert all(data.ts for data in ticks[name])
     for name in HER_WAKES:
         assert set(ticks[name]) <= {"akao", "ayana", "chinagi"}
-    # Three clocks and one clock for each of her two wakes, shared by the three sisters.
+    # Two clocks and one clock for each of her three wakes, shared by the three sisters.
     assert "runtime: app=agent-service started 5 clock(s)" in caplog.messages
 
     # Stopped with the app: no tick after shutdown.

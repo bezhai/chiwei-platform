@@ -1076,8 +1076,16 @@ async def test_each_sister_has_a_queue_of_rounds_with_both_wakes_on_it(app_host)
     from app.living.moment import run_due_moment
 
     host = await app_host("agent-service")
-    queues = {r.name: r.detail["turns"] for r in host.registered() if r.kind == "turns"}
-    wakes = [r for r in host.registered() if r.kind == "wake"]
+    queues = {
+        r.name: r.detail["turns"]
+        for r in host.registered()
+        if r.kind == "turns" and r.detail["turns"].line == "round"
+    }
+    wakes = [
+        r
+        for r in host.registered()
+        if r.kind == "wake" and r.detail["turns"].line == "round"
+    ]
 
     assert sorted(queues) == sorted(f"{p}/round" for p in LIVING_PERSONAS)
     assert {q.hold_limit for q in queues.values()} == {dt.timedelta(seconds=900)}

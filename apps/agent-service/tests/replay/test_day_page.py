@@ -1,6 +1,7 @@
-"""Replay: her day page, driven the way the day-page clock drives it (``day_page_tick``).
+"""Replay: her day page, driven the way the host's clock drives it (one tick of the ``day-page``
+wake, signalling the three sisters' day-page queues at once).
 
-The tick runs the three sisters concurrently. Only 赤尾 has anything on the day being written,
+The tick reaches the three sisters concurrently. Only 赤尾 has anything on the day being written,
 so the other two return before any write or model call and the order of effects is fixed.
 
 Her material is seeded with the product's own writes (``record_happening`` for what she did and
@@ -12,8 +13,8 @@ record: the round under test reads it.
   things before 04:00 that morning do not; a received message and something she did at the same
   minute: the received one first), with no page before it; a later tick finds the page written;
   the next morning's page is written with the first page in front of her.
-* ``model_call_fails`` — the model call fails; the tick swallows it and nothing is written, no
-  cost either. The next tick in the window writes the page.
+* ``model_call_fails`` — the model call fails; the tick does not raise it and nothing is written,
+  no cost either. The next tick in the window writes the page.
 * ``blank_reply`` — she writes nothing (whitespace only). The agent asks again inside the same
   turn, the blank turn kept in the conversation, up to three times; all three blank: the cost is
   recorded, no page. The next tick's first answer is blank again and its second one is the page;
@@ -30,8 +31,7 @@ from datetime import datetime
 import pytest
 
 from app.capabilities._errors import CapabilityTimeout
-from app.infra.cst_time import CST, now_cst
-from app.living.day_page import DayPageTick, day_page_tick
+from app.infra.cst_time import CST
 from app.living.happening import record_happening
 from app.living.records import (
     KIND_ACT,
@@ -52,8 +52,8 @@ def _at(day: int, hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 7, day, hour, minute, tzinfo=CST)
 
 
-def _tick():
-    return lambda: day_page_tick(DayPageTick(ts=now_cst().isoformat()))
+def _tick(replay):
+    return lambda: replay.tick("day-page")
 
 
 async def _her_household_is_up(replay) -> None:
@@ -161,15 +161,15 @@ async def test_two_mornings(replay):
     await _her_saturday(replay)
 
     await replay.step(
-        "a tick before the window does nothing", _tick(), at=_at(26, 3, 55)
+        "a tick before the window does nothing", _tick(replay), at=_at(26, 3, 55)
     )
 
     replay.model.script(DAY_PAGE, Reply(text=SATURDAY_PAGE))
     await replay.step(
-        "the first tick in the window: she writes 07-25", _tick(), at=_at(26, 4)
+        "the first tick in the window: she writes 07-25", _tick(replay), at=_at(26, 4)
     )
 
-    await replay.step("a later tick finds the page written", _tick(), at=_at(26, 4, 5))
+    await replay.step("a later tick finds the page written", _tick(replay), at=_at(26, 4, 5))
 
     await _her_sunday(replay)
     replay.model.script(
@@ -180,7 +180,7 @@ async def test_two_mornings(replay):
     )
     await replay.step(
         "the next morning: she writes 07-26 with the 07-25 page in front of her",
-        _tick(),
+        _tick(replay),
         at=_at(27, 4),
     )
 
@@ -196,11 +196,11 @@ async def test_model_call_fails(replay):
         Fail(lambda: CapabilityTimeout("offline-model gave no answer within 180s")),
     )
     await replay.step(
-        "the model call fails; the tick swallows it", _tick(), at=_at(26, 4)
+        "the model call fails; the tick swallows it", _tick(replay), at=_at(26, 4)
     )
 
     replay.model.script(DAY_PAGE, Reply(text=SATURDAY_PAGE))
-    await replay.step("the next tick writes the page", _tick(), at=_at(26, 4, 5))
+    await replay.step("the next tick writes the page", _tick(replay), at=_at(26, 4, 5))
 
     replay.check("day_page/model_call_fails")
 
@@ -211,11 +211,11 @@ async def test_blank_reply(replay):
 
     replay.model.script(DAY_PAGE, _blank(), _blank(), _blank())
     await replay.step(
-        "she writes nothing, three times in one turn", _tick(), at=_at(26, 4)
+        "she writes nothing, three times in one turn", _tick(replay), at=_at(26, 4)
     )
 
     replay.model.script(DAY_PAGE, _blank(), Reply(text=SATURDAY_PAGE))
-    await replay.step("the next tick: blank, then the page", _tick(), at=_at(26, 4, 5))
+    await replay.step("the next tick: blank, then the page", _tick(replay), at=_at(26, 4, 5))
 
     replay.check("day_page/blank_reply")
 
@@ -228,11 +228,11 @@ async def test_commit_fails(replay):
     replay.model.script(DAY_PAGE, Reply(text=SATURDAY_PAGE))
     await replay.step(
         "the page's transaction fails at commit; the tick swallows it",
-        _tick(),
+        _tick(replay),
         at=_at(26, 4),
     )
 
     replay.model.script(DAY_PAGE, Reply(text=SATURDAY_PAGE))
-    await replay.step("the next tick writes the page", _tick(), at=_at(26, 4, 5))
+    await replay.step("the next tick writes the page", _tick(replay), at=_at(26, 4, 5))
 
     replay.check("day_page/commit_fails")
