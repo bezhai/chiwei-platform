@@ -71,7 +71,7 @@ MANIFEST = App(
         "app.plugins.world",
         "app.world.records.reading",
         "app.world.records.keeping",
-        "app.world.sources.reality",
+        "app.world.reality",
         "app.world.sources.told",
     ),
     agents={

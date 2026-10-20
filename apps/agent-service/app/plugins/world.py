@@ -1,7 +1,7 @@
 """world App 的核心插件：主 agent 的一轮、``world`` 收件箱。world 的清单（:mod:`app.manifests.world`）
-只有它、记录的两个插件（:mod:`app.world.records`：查询工具一个，写记录、记录目录和人工读写接口一个）
-和另外两个知识来源的插件（:mod:`app.world.sources`，各自登记来源和查询工具），所以 world 的进程不
-加载 life 的任何代码。
+只有它、记录的两个插件（:mod:`app.world.records`：查询工具一个，写记录、记录目录和人工读写接口一个）、
+现实的插件（:mod:`app.world.reality`）和知识来源 told 的插件（:mod:`app.world.sources`），所以 world
+的进程不加载 life 的任何代码。
 
 **主 agent 的一轮**（:mod:`app.world.main_agent`），清单 ``world`` 排它们的位置：
 
@@ -60,10 +60,10 @@ from app.world.rounds import Rounds
 from app.world.volume import writer_lock
 from app.world.wake import WORLD, retry_latest_wake_without_limit, wake_on_start
 
-# 主 agent 的 prompt 里由这个插件登记的那几段；别的段（写记录）由各自的插件登记。
+# 主 agent 的 prompt 里由这个插件登记的那几段；别的段（写记录、现实）由各自的插件登记。
 _ROUND_SEGMENTS = tuple(
     f"{ROUND}/{name}"
-    for name in ("core", "reality", "report-change", "npc", "wake", "unfinished", "order")
+    for name in ("core", "report-change", "npc", "wake", "unfinished", "order")
 )
 
 

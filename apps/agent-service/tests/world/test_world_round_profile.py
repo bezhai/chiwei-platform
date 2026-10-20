@@ -67,6 +67,7 @@ async def test_the_world_profile_places_what_world_and_its_three_sources_registe
     assert [s.name for s in p.round_start] == ["unfinished.resend"]
     assert [(s.name, s.plugin) for s in p.state] == [("records.listing", "record_keeping")]
     assert p.segments["world_round/write-record"].plugin == "record_keeping"
+    assert p.segments["world_round/reality"].plugin == "reality"
     assert [s.name for s in p.input] == [
         "wake.woken_by",
         "wake.planned",
@@ -117,6 +118,32 @@ async def test_switching_records_off_leaves_writing_the_listing_and_its_segment_
     assert not {"list_records", "read_record"} & set(tools)
     assert "world_round/write-record" in segments
     assert "你的记录（1 份）" in world.runner.runs[-1][0].content
+
+
+async def test_switching_reality_off_leaves_its_segment_out_of_the_rounds_prompt(
+    world, monkeypatch
+):
+    """关掉 ``reality``，它的查询工具和它在主 agent 的 prompt 里的那一段都不进这一轮（决定 8）。"""
+    from inner_shared.dynamic_config import dynamic_config
+
+    monkeypatch.setattr(
+        dynamic_config,
+        "get",
+        lambda k, default="": "records,told" if k == "world_sources" else default,
+    )
+    segments: list[str] = []
+
+    async def plan():
+        segments.extend(p for p, _, _ in current_round().prompts.versions("world_round"))
+        return await sets_wake()()
+
+    world.runner.plan = plan
+    await run_round_taking(world, [self_message("m-1")], now=NOW)
+
+    assert segments == [
+        s for s in main_agent.ROUND_SEGMENTS if s != "world_round/reality"
+    ]
+    assert "check_current_weather" not in tools_built_for(world, main_agent.ROUND)
 
 
 async def test_the_three_input_sections_joined_by_a_newline_are_the_rounds_input(world):

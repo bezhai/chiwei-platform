@@ -1,4 +1,4 @@
-"""知识来源"现实"：真实世界此刻的样子——天气、网页上能搜到的事。
+"""插件 ``reality``：知识来源"现实"，真实世界此刻的样子——天气、网页上能搜到的事。
 
 * 天气（:mod:`app.capabilities.weather`，和风天气）分三个工具：
   :func:`check_current_weather` 查此刻的实况，:func:`check_hourly_forecast` 查逐小时预报，
@@ -9,7 +9,8 @@
   查哪样，也由它自己判断，这里不设次数限制。
 * :func:`app.agent.tools.search.search_web` —— 基础层现成的网页搜索，原样复用。
 
-都只读，没有收件处理。
+都只读（返回的都是读到的材料），没有收件处理。主 agent 的 prompt 里讲现实的那一段
+（``world_round/reality``）也归它：开关（``world_sources``）关掉它时，工具和这一段一起不进这一轮。
 """
 from __future__ import annotations
 
@@ -22,7 +23,8 @@ from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.agent.tools.search import search_web
 from app.capabilities import weather
-from app.world.sources import Source, source_plugin
+from app.host import Context, Plugin
+from app.world.agents import world_segments
 
 # 和风 v1 的风向是方位代码，月相是英文代码；按和风文档里的中文名说出来，不认识的代码原样给。
 _COMPASS = {
@@ -178,10 +180,17 @@ async def check_daily_forecast(
     return _report(places, lines, forecast.attributions)
 
 
-SOURCE = Source(
-    name="reality",
-    tools=(check_current_weather, check_hourly_forecast, check_daily_forecast, search_web),
-)
+# 主 agent 的 prompt 里讲现实的那一段（Langfuse id）。
+REALITY_SEGMENT = "world_round/reality"
+
+TOOLS = (check_current_weather, check_hourly_forecast, check_daily_forecast, search_web)
 
 
-PLUGIN = source_plugin(SOURCE)
+def setup(ctx: Context) -> None:
+    for segment in world_segments(REALITY_SEGMENT).values():
+        ctx.segment(segment)
+    for query in TOOLS:
+        ctx.tool(query, trim="material")
+
+
+PLUGIN = Plugin(name="reality", setup=setup)

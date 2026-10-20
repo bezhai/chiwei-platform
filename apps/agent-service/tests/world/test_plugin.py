@@ -42,7 +42,7 @@ def _rounds_now() -> Rounds:
 # ---------------------------------------------------------------------------
 
 
-def test_the_world_app_runs_the_world_plugin_the_two_record_plugins_and_two_sources_in_order():
+def test_the_world_app_runs_the_world_plugin_the_record_plugins_reality_and_told_in_order():
     """来源插件的顺序就是来源登记的顺序：收件处理按它看到来源。"""
     from app.manifests.world import MANIFEST
 
@@ -50,7 +50,7 @@ def test_the_world_app_runs_the_world_plugin_the_two_record_plugins_and_two_sour
         "app.plugins.world",
         "app.world.records.reading",
         "app.world.records.keeping",
-        "app.world.sources.reality",
+        "app.world.reality",
         "app.world.sources.told",
     )
 
@@ -178,7 +178,7 @@ async def test_stop_takes_back_the_sources_the_inbox_and_the_routes(app_host, mo
 
     monkeypatch.setattr(dynamic_config, "get", lambda k, default="": default)
     host = await app_host("world")
-    assert [s.name for s in await enabled_sources()] == ["reality", "told"]
+    assert [s.name for s in await enabled_sources()] == ["told"]
 
     await host.stop()
 
