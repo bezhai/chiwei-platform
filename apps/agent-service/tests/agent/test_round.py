@@ -96,9 +96,6 @@ class _Scripted(ModelClient):
             raise turn
         return turn
 
-    def stream(self, *_a: Any, **_k: Any):  # pragma: no cover - not used
-        raise NotImplementedError
-
     async def structured(self, *_a: Any, **_k: Any):  # pragma: no cover - not used
         raise NotImplementedError
 

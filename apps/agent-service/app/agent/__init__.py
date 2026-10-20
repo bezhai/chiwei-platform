@@ -1,7 +1,7 @@
 """agent — unified thinking entry point.
 
 Public surface:
-    Agent       — the unified Agent class (run / stream / extract), built from an
+    Agent       — the unified Agent class (run / extract), built from an
                   :class:`~app.agent.contracts.AgentSpec`
     PromptSet   — the prompts some agents render, resolved together and checked strictly
 """

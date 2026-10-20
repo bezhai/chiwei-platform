@@ -4,8 +4,8 @@ The adapter translates neutral types (``app.agent.neutral``) to OpenAI
 chat-completions wire and back, using the ``openai`` SDK. The dev box has no
 network egress to providers and production keys must not be extracted, so every
 test mocks the SDK: we hand the adapter a *canned* AsyncOpenAI whose
-``chat.completions.create`` returns hand-built response / chunk objects, then
-assert the adapter's neutral translation.
+``chat.completions.create`` returns hand-built response objects, then assert the
+adapter's neutral translation.
 
 Coverage (spec §T2 Verification, adapted to mocked transport):
   - plain text round-trip neutral→wire→neutral,
@@ -15,7 +15,6 @@ Coverage (spec §T2 Verification, adapted to mocked transport):
     re-injected on the wire +
     string normalisation),
   - structured output → dict,
-  - streaming chunks (text / reasoning / finish_reason / tool boundary),
   - use_proxy wires settings.forward_proxy_url into the SDK http client,
   - SDK auto-retry is disabled (max_retries=0),
   - a generation span is produced even with update_trace=False.
@@ -80,37 +79,6 @@ def _tool_call_obj(call_id: str, name: str, arguments: str) -> SimpleNamespace:
     )
 
 
-def _chunk(
-    *,
-    content: str | None = None,
-    reasoning_content: str | None = None,
-    tool_calls: list[Any] | None = None,
-    finish_reason: str | None = None,
-) -> SimpleNamespace:
-    delta = SimpleNamespace(
-        content=content,
-        reasoning_content=reasoning_content,
-        tool_calls=tool_calls,
-    )
-    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason, index=0)
-    return SimpleNamespace(choices=[choice], usage=None)
-
-
-def _tool_call_delta(
-    index: int,
-    *,
-    call_id: str | None = None,
-    name: str | None = None,
-    arguments: str | None = None,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        index=index,
-        id=call_id,
-        type="function",
-        function=SimpleNamespace(name=name, arguments=arguments),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Mock AsyncOpenAI: captures kwargs, returns the canned object the test sets
 # ---------------------------------------------------------------------------
@@ -123,18 +91,9 @@ class _MockAsyncOpenAI:
         self.init_kwargs = kwargs
         self.last_create_kwargs: dict[str, Any] | None = None
         self._next_result: Any = None
-        self._stream_chunks: list[Any] | None = None
 
         async def _create(**kw: Any) -> Any:
             self.last_create_kwargs = kw
-            if kw.get("stream"):
-                chunks = self._stream_chunks or []
-
-                async def _gen() -> Any:
-                    for c in chunks:
-                        yield c
-
-                return _gen()
             return self._next_result
 
         self.chat = SimpleNamespace(
@@ -143,9 +102,6 @@ class _MockAsyncOpenAI:
 
     def set_result(self, result: Any) -> None:
         self._next_result = result
-
-    def set_stream(self, chunks: list[Any]) -> None:
-        self._stream_chunks = chunks
 
 
 @pytest.fixture
@@ -588,260 +544,6 @@ async def test_structured_passes_through_reasoning_effort(mock_sdk):
 
 
 # ---------------------------------------------------------------------------
-# stream() — neutral chunk emission
-# ---------------------------------------------------------------------------
-
-
-async def test_stream_emits_text_reasoning_finish(mock_sdk):
-    adapter = OpenAIAdapter(
-        model_name="deepseek-reasoner",
-        api_key="sk",
-        base_url="https://ds",
-        client_type="deepseek",
-    )
-    mock_sdk.instance.set_stream(
-        [
-            _chunk(reasoning_content="think"),
-            _chunk(content="hel"),
-            _chunk(content="lo"),
-            _chunk(finish_reason="stop"),
-        ]
-    )
-
-    chunks = [c async for c in adapter.stream([Message(role=Role.USER, content="hi")])]
-
-    assert chunks[0].reasoning == "think"
-    assert "".join(c.text for c in chunks if c.text) == "hello"
-    assert chunks[-1].finish_reason == "stop"
-    # stream=True was set on the wire
-    assert mock_sdk.instance.last_create_kwargs["stream"] is True
-
-
-async def test_stream_emits_tool_call_boundary(mock_sdk):
-    adapter = OpenAIAdapter(
-        model_name="gpt-4o", api_key="sk", base_url="https://x", client_type="openai"
-    )
-    mock_sdk.instance.set_stream(
-        [
-            _chunk(content="let me search"),
-            _chunk(
-                tool_calls=[
-                    _tool_call_delta(0, call_id="call_1", name="search", arguments="")
-                ]
-            ),
-            _chunk(tool_calls=[_tool_call_delta(0, arguments='{"q":')]),
-            _chunk(tool_calls=[_tool_call_delta(0, arguments='"cats"}')]),
-            _chunk(finish_reason="tool_calls"),
-        ]
-    )
-
-    tools = [ToolDef(name="search", description="d", parameters={"type": "object"})]
-    chunks = [
-        c
-        async for c in adapter.stream(
-            [Message(role=Role.USER, content="find cats")], tools=tools
-        )
-    ]
-
-    # text emitted
-    assert "".join(c.text for c in chunks if c.text) == "let me search"
-    # a tool_call boundary chunk surfaced with the assembled call
-    tool_chunks = [c for c in chunks if c.tool_call is not None]
-    assert len(tool_chunks) == 1
-    assert tool_chunks[0].tool_call.id == "call_1"
-    assert tool_chunks[0].tool_call.name == "search"
-    assert tool_chunks[0].tool_call.arguments == {"q": "cats"}
-    # finish_reason surfaced
-    assert chunks[-1].finish_reason == "tool_calls"
-
-
-async def test_stream_emits_content_filter_finish(mock_sdk):
-    adapter = OpenAIAdapter(
-        model_name="gpt-4o", api_key="sk", base_url="https://x", client_type="openai"
-    )
-    mock_sdk.instance.set_stream(
-        [_chunk(content="partial"), _chunk(finish_reason="content_filter")]
-    )
-
-    chunks = [c async for c in adapter.stream([Message(role=Role.USER, content="x")])]
-    assert chunks[-1].finish_reason == "content_filter"
-
-
-async def test_stream_emits_parallel_tool_calls(mock_sdk):
-    """Two parallel tool calls (index 0 + 1) must BOTH surface, exactly once.
-
-    Index 0 finishes (fragments contiguous) when index 1 begins; index 1
-    finishes at finish_reason. Neither may be dropped or double-emitted.
-    """
-    adapter = OpenAIAdapter(
-        model_name="gpt-4o", api_key="sk", base_url="https://x", client_type="openai"
-    )
-    mock_sdk.instance.set_stream(
-        [
-            _chunk(
-                tool_calls=[
-                    _tool_call_delta(0, call_id="call_0", name="search", arguments="")
-                ]
-            ),
-            _chunk(tool_calls=[_tool_call_delta(0, arguments='{"q": "a"}')]),
-            _chunk(
-                tool_calls=[
-                    _tool_call_delta(1, call_id="call_1", name="lookup", arguments="")
-                ]
-            ),
-            _chunk(tool_calls=[_tool_call_delta(1, arguments='{"id": 7}')]),
-            _chunk(finish_reason="tool_calls"),
-        ]
-    )
-
-    tools = [
-        ToolDef(name="search", description="d", parameters={"type": "object"}),
-        ToolDef(name="lookup", description="d", parameters={"type": "object"}),
-    ]
-    chunks = [
-        c
-        async for c in adapter.stream(
-            [Message(role=Role.USER, content="do both")], tools=tools
-        )
-    ]
-
-    tool_calls = [c.tool_call for c in chunks if c.tool_call is not None]
-    assert len(tool_calls) == 2
-    by_id = {tc.id: tc for tc in tool_calls}
-    assert by_id["call_0"].name == "search"
-    assert by_id["call_0"].arguments == {"q": "a"}
-    assert by_id["call_1"].name == "lookup"
-    assert by_id["call_1"].arguments == {"id": 7}
-
-
-async def test_stream_emits_tool_calls_in_one_chunk(mock_sdk):
-    """Multiple tool-call deltas arriving in a SINGLE chunk both surface."""
-    adapter = OpenAIAdapter(
-        model_name="gpt-4o", api_key="sk", base_url="https://x", client_type="openai"
-    )
-    mock_sdk.instance.set_stream(
-        [
-            _chunk(
-                tool_calls=[
-                    _tool_call_delta(
-                        0, call_id="c0", name="a", arguments='{"x": 1}'
-                    ),
-                    _tool_call_delta(
-                        1, call_id="c1", name="b", arguments='{"y": 2}'
-                    ),
-                ]
-            ),
-            _chunk(finish_reason="tool_calls"),
-        ]
-    )
-    chunks = [c async for c in adapter.stream([Message(role=Role.USER, content="x")])]
-    tool_calls = [c.tool_call for c in chunks if c.tool_call is not None]
-    assert {tc.id for tc in tool_calls} == {"c0", "c1"}
-    assert {tc.id: tc.arguments for tc in tool_calls} == {
-        "c0": {"x": 1},
-        "c1": {"y": 2},
-    }
-
-
-async def test_stream_handles_empty_choices_chunk(mock_sdk):
-    """A keepalive / usage-only chunk with no choices must be skipped safely."""
-    adapter = OpenAIAdapter(
-        model_name="gpt-4o", api_key="sk", base_url="https://x", client_type="openai"
-    )
-    empty = SimpleNamespace(choices=[], usage=None)
-    mock_sdk.instance.set_stream(
-        [empty, _chunk(content="hi"), _chunk(finish_reason="stop")]
-    )
-    chunks = [c async for c in adapter.stream([Message(role=Role.USER, content="x")])]
-    assert "".join(c.text for c in chunks if c.text) == "hi"
-
-
-async def test_stream_requests_usage_and_records_it(mock_sdk):
-    """Streaming must opt into usage (stream_options) and record it on the span.
-
-    OpenAI only emits a usage-bearing final chunk when
-    ``stream_options={"include_usage": True}`` is set; otherwise token counts
-    never arrive and langfuse accounting is silently lost. The adapter must
-    request it AND surface the final chunk's usage as usage_details.
-    """
-    adapter = OpenAIAdapter(
-        model_name="gpt-4o", api_key="sk", base_url="https://x", client_type="openai"
-    )
-    usage_chunk = SimpleNamespace(choices=[], usage=_usage(prompt=11, completion=22))
-    mock_sdk.instance.set_stream(
-        [
-            _chunk(content="hi"),
-            _chunk(finish_reason="stop"),
-            usage_chunk,
-        ]
-    )
-
-    async for _ in adapter.stream([Message(role=Role.USER, content="x")]):
-        pass
-
-    # 1) the wire request opted into usage reporting
-    assert mock_sdk.instance.last_create_kwargs["stream_options"] == {
-        "include_usage": True
-    }
-    # 2) the span recorded the usage from the final chunk
-    span = _MOST_RECENT_SPAN[-1]
-    usage_updates = [u for u in span.updates if "usage_details" in u]
-    assert usage_updates, "stream span never recorded usage_details"
-    assert usage_updates[-1]["usage_details"] == {
-        "input": 11,
-        "output": 22,
-        "total": 33,
-    }
-
-
-async def test_stream_interleaved_tool_call_indices_reassemble(mock_sdk):
-    """Interleaved tool-call delta indices (0,1,0,1) must both reassemble fully.
-
-    The contiguous-by-index assumption is an *optimisation*; the assembler must
-    still produce two complete calls when fragments for index 0 and index 1
-    arrive interleaved (a delta for 0, then 1, then 0 again, then 1). Neither
-    call may lose argument fragments or be dropped.
-    """
-    adapter = OpenAIAdapter(
-        model_name="gpt-4o", api_key="sk", base_url="https://x", client_type="openai"
-    )
-    mock_sdk.instance.set_stream(
-        [
-            _chunk(
-                tool_calls=[
-                    _tool_call_delta(0, call_id="c0", name="search", arguments='{"q":')
-                ]
-            ),
-            _chunk(
-                tool_calls=[
-                    _tool_call_delta(1, call_id="c1", name="lookup", arguments='{"id":')
-                ]
-            ),
-            _chunk(tool_calls=[_tool_call_delta(0, arguments=' "cats"}')]),
-            _chunk(tool_calls=[_tool_call_delta(1, arguments=" 7}")]),
-            _chunk(finish_reason="tool_calls"),
-        ]
-    )
-
-    tools = [
-        ToolDef(name="search", description="d", parameters={"type": "object"}),
-        ToolDef(name="lookup", description="d", parameters={"type": "object"}),
-    ]
-    chunks = [
-        c
-        async for c in adapter.stream(
-            [Message(role=Role.USER, content="do both")], tools=tools
-        )
-    ]
-
-    tool_calls = [c.tool_call for c in chunks if c.tool_call is not None]
-    by_id = {tc.id: tc for tc in tool_calls}
-    assert set(by_id) == {"c0", "c1"}
-    assert by_id["c0"].arguments == {"q": "cats"}
-    assert by_id["c1"].arguments == {"id": 7}
-
-
-# ---------------------------------------------------------------------------
 # proxy / retry / azure construction
 # ---------------------------------------------------------------------------
 
@@ -1107,30 +809,6 @@ async def test_usage_without_cache_details_omits_cache_key(mock_sdk):
     span = _MOST_RECENT_SPAN[-1]
     details = [u for u in span.updates if "usage_details" in u][-1]["usage_details"]
     assert "cache_read_input_tokens" not in details
-
-
-async def test_azure_stream_sends_cache_params(mock_sdk):
-    """Streaming azure requests also carry retention + session_id."""
-    import json
-
-    adapter = OpenAIAdapter(
-        model_name="gpt-5.5",
-        api_key="sk",
-        base_url="https://gw",
-        client_type="azure-http",
-    )
-    mock_sdk.azure_instance.set_stream(
-        [_chunk(content="hi"), _chunk(finish_reason="stop")]
-    )
-
-    async for _ in adapter.stream(
-        [Message(role=Role.USER, content="x")], session_id="sess-1"
-    ):
-        pass
-
-    sent = mock_sdk.azure_instance.last_create_kwargs
-    assert sent["extra_body"]["prompt_cache_retention"] == "24h"
-    assert json.loads(sent["extra_headers"]["extra"]) == {"session_id": "sess-1"}
 
 
 async def test_azure_cache_params_merge_into_existing_extra(mock_sdk):

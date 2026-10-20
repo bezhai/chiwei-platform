@@ -2,12 +2,11 @@
 
 The thinking core never talks to a provider SDK directly. It talks to a
 ``ModelClient``: a thin adapter that translates neutral types (``app.agent.
-neutral``) to one provider's wire and back. ``Agent.run / stream / extract``
-each map onto one of three consumptions:
+neutral``) to one provider's wire and back. ``Agent.run / extract`` each map
+onto one of two consumptions:
 
-  - ``complete``   — non-streaming; returns the final assistant ``Message``
+  - ``complete``   — returns the final assistant ``Message``
                      (``run`` drinks this to its last state),
-  - ``stream``     — yields neutral ``StreamChunk``s (``stream`` forwards them),
   - ``structured`` — one structured output as a dict the caller validates
                      against its pydantic schema (``extract``).
 
@@ -25,23 +24,20 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from app.agent.models import resolve_model_info
-from app.agent.neutral import Message, StreamChunk, ToolDef
+from app.agent.neutral import Message, ToolDef
 from app.capabilities._errors import CapabilityTimeout
-
-T = TypeVar("T")
 
 # ---------------------------------------------------------------------------
 # How long one model call waits for the provider
 # ---------------------------------------------------------------------------
 
-# Every ModelClient call waits on its provider for at most this long: for the
-# whole answer of a non-streaming call, and for the opening and then each next
-# chunk of a streamed one. Past it the call fails with ``CapabilityTimeout``.
+# Every ModelClient call waits on its provider for at most this long for its
+# whole answer. Past it the call fails with ``CapabilityTimeout``.
 #
 # Why it exists: the google-genai SDK sends requests with no timeout at all
 # (``HttpOptions.timeout`` unset → httpx ``timeout=None`` for connect, read,
@@ -86,28 +82,6 @@ async def answer_deadline(model: str) -> AsyncIterator[None]:
         ) from exc
 
 
-async def stream_within_deadline(
-    model: str, opening: Awaitable[AsyncIterable[T]]
-) -> AsyncIterator[T]:
-    """Open a streamed answer and yield its chunks, each wait under :func:`answer_deadline`.
-
-    The deadline covers each wait on the provider — opening the stream, then
-    every next chunk — and never spans a ``yield``: a stream that keeps
-    producing is alive however long it runs, and the time the consumer spends
-    on a chunk is not the provider's.
-    """
-    async with answer_deadline(model):
-        chunks = await opening
-    pending = aiter(chunks)
-    while True:
-        async with answer_deadline(model):
-            try:
-                chunk = await anext(pending)
-            except StopAsyncIteration:
-                return
-        yield chunk
-
-
 # ---------------------------------------------------------------------------
 # Adapter constructor protocol
 # ---------------------------------------------------------------------------
@@ -130,15 +104,13 @@ class AdapterFactory(Protocol):
 class ModelClient(ABC):
     """Provider-agnostic chat client.
 
-    The three abstract methods are the only surface ``Agent.run / stream /
-    extract`` consume. Adapters keep the neutral contract on both sides:
-    neutral ``Message``/``ToolDef`` in, neutral ``Message``/``StreamChunk``/
-    ``dict`` out.
+    The two abstract methods are the only surface ``Agent.run / extract``
+    consume. Adapters keep the neutral contract on both sides: neutral
+    ``Message``/``ToolDef`` in, neutral ``Message``/``dict`` out.
 
-    Every wait on the provider runs under :func:`answer_deadline` (streams
-    through :func:`stream_within_deadline`), inside the call's generation span,
-    so a provider that never answers fails the call with ``CapabilityTimeout``
-    and the generation records why.
+    Every wait on the provider runs under :func:`answer_deadline`, inside the
+    call's generation span, so a provider that never answers fails the call
+    with ``CapabilityTimeout`` and the generation records why.
     """
 
     @abstractmethod
@@ -149,17 +121,7 @@ class ModelClient(ABC):
         tools: list[ToolDef] | None = None,
         **kwargs: Any,
     ) -> Message:
-        """Non-streaming completion → final assistant ``Message``."""
-
-    @abstractmethod
-    def stream(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolDef] | None = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[StreamChunk]:
-        """Streaming completion → neutral chunk stream."""
+        """Completion → final assistant ``Message``."""
 
     @abstractmethod
     async def structured(

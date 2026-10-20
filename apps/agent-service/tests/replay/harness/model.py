@@ -242,11 +242,6 @@ class ScriptedModel(ModelClient):
     async def complete(self, messages, *, tools=None, **kwargs) -> Message:
         return await self._script.complete(self._model, messages, tools, kwargs)
 
-    def stream(self, messages, *, tools=None, **kwargs):
-        raise NotImplementedError(
-            "replay: no round kind streams; script complete() instead"
-        )
-
     async def structured(self, messages, *, schema, **kwargs) -> dict[str, Any]:
         return await self._script.structured(self._model, messages, schema, kwargs)
 

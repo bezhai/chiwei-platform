@@ -13,7 +13,6 @@ what's under test. Tools are synthetic neutral ``@tool``s.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
@@ -24,7 +23,6 @@ from app.agent.neutral import (
     ContentBlock,
     Message,
     Role,
-    StreamChunk,
     ToolCall,
     ToolDef,
     TurnPart,
@@ -42,8 +40,7 @@ pytestmark = pytest.mark.unit
 class FakeModelClient(ModelClient):
     """A ModelClient that replays scripted responses, recording what it saw.
 
-    ``complete_script`` / ``structured_script`` are lists popped per call.
-    ``stream_script`` is a list of chunk-lists, one per ``stream`` call. Each
+    ``complete_script`` / ``structured_script`` are lists popped per call. Each
     call records the messages + tools it was handed so the loop's message
     threading (assistant turn + tool results fed back) can be asserted.
     """
@@ -52,31 +49,20 @@ class FakeModelClient(ModelClient):
         self,
         *,
         complete_script: list[Message] | None = None,
-        stream_script: list[list[StreamChunk]] | None = None,
         structured_script: list[dict] | None = None,
     ) -> None:
         self._complete = list(complete_script or [])
-        self._stream = list(stream_script or [])
         self._structured = list(structured_script or [])
         self.complete_calls: list[tuple[list[Message], list[ToolDef] | None]] = []
-        self.stream_calls: list[tuple[list[Message], list[ToolDef] | None]] = []
         self.structured_calls: list[tuple[list[Message], dict]] = []
         # per-call kwargs so passthrough (e.g. session_id for the prompt-cache
         # key) can be asserted.
         self.complete_kwargs: list[dict] = []
-        self.stream_kwargs: list[dict] = []
 
     async def complete(self, messages, *, tools=None, **kwargs):
         self.complete_calls.append((list(messages), tools))
         self.complete_kwargs.append(dict(kwargs))
         return self._complete.pop(0)
-
-    async def stream(self, messages, *, tools=None, **kwargs) -> AsyncIterator[StreamChunk]:
-        self.stream_calls.append((list(messages), tools))
-        self.stream_kwargs.append(dict(kwargs))
-        chunks = self._stream.pop(0)
-        for c in chunks:
-            yield c
 
     async def structured(self, messages, *, schema, **kwargs) -> dict:
         self.structured_calls.append((list(messages), schema))
@@ -547,9 +533,9 @@ class TestToolSpanOutput:
         assert output[1]["type"] == "image_url"
 
 # ---------------------------------------------------------------------------
-# session_id passthrough — the loop forwards session_id to model.complete /
-# model.stream so the adapter can use it as the prompt-cache key. Default (no
-# session_id) forwards None, which the adapter no-ops on.
+# session_id passthrough — the loop forwards session_id to model.complete so
+# the adapter can use it as the prompt-cache key. Default (no session_id)
+# forwards None, which the adapter no-ops on.
 # ---------------------------------------------------------------------------
 
 
@@ -739,10 +725,9 @@ class TestRunLoopEmptyTurnRetry:
 # ---------------------------------------------------------------------------
 # a model turn's sequence has to live through the loop's own rebuilds
 #
-# Two places hand-copy an assistant turn field by field (the closing call with
-# its tool calls stripped, and the streamed turn rebuilt from chunks) and one
-# decides whether a turn carries anything at all. All three used to be written
-# on the premise that nothing replays a model's thoughts — now they do replay,
+# One place hand-copies an assistant turn field by field (the closing call with
+# its tool calls stripped) and one decides whether a turn carries anything at
+# all. Both used to be written on the premise that nothing replays a model's thoughts — now they do replay,
 # and a turn that only thought is not empty on the wire any more.
 # ---------------------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 """Provider-agnostic types exchanged between the thinking core and adapters.
 
-These replace ``langchain_core.messages`` / langchain tool + chunk types. They
-are intentionally *neutral*: no provider's wire layout is baked in. Each
+These replace ``langchain_core.messages`` / langchain tool types. They are
+intentionally *neutral*: no provider's wire layout is baked in. Each
 adapter (OpenAI in T2, Gemini in T4) owns the translation ``neutral ↔ wire``.
 
 The field coverage here is a behaviour-equivalence hard constraint, not an
@@ -412,41 +412,3 @@ class Message:
                 TurnPart.from_replay_dict(p) for p in d.get("turn_parts", [])
             ],
         )
-
-
-# ---------------------------------------------------------------------------
-# Stream chunk
-# ---------------------------------------------------------------------------
-
-
-@dataclass(slots=True)
-class StreamChunk:
-    """One increment of a streaming response.
-
-    Carries everything ``app/chat/stream.py`` consumes: a text token, a
-    ``finish_reason`` signal (``content_filter`` / ``length`` / ``stop`` /
-    ``tool_calls``), a tool_call (the text→tool boundary marker), a
-    tool_result, and reasoning passthrough. Any field may be ``None``; a chunk
-    typically populates exactly one.
-
-    ``signature`` is the opaque blob the provider attached to the part this
-    chunk came from (a thought or a text part). The ReAct loop reassembles the
-    streamed turn into a :class:`Message`, and without a slot here the
-    signatures of a streamed turn would be gone before that happens — a tool
-    call carries its own on :attr:`ToolCall.signature`.
-
-    ``starts_part`` says this chunk opens a new :class:`TurnPart`. Only the
-    adapter can know that: it reads the provider's parts, and two parts that
-    arrived inside one wire chunk are two parts however their text and
-    signatures look. ``False`` means the boundary is unknown — the usual case,
-    one part cut across many chunks — and the loop then extends the part still
-    open.
-    """
-
-    text: str | None = None
-    reasoning: str | None = None
-    finish_reason: str | None = None
-    tool_call: ToolCall | None = None
-    tool_result: ToolResult | None = None
-    signature: bytes | None = None
-    starts_part: bool = False

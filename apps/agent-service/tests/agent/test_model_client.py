@@ -2,10 +2,9 @@
 
 Two things are pinned here:
 
-1. The ``ModelClient`` abstract interface must serve the three consumptions
-   ``Agent.run / stream / extract`` need (read from app/agent/core.py):
-     - ``complete`` — non-streaming, returns a final assistant Message,
-     - ``stream``   — yields neutral StreamChunks,
+1. The ``ModelClient`` abstract interface must serve the two consumptions
+   ``Agent.run / extract`` need (read from app/agent/core.py):
+     - ``complete`` — returns a final assistant Message,
      - ``structured`` — single structured output (a dict the caller validates
        against its pydantic model in extract()).
 
@@ -19,7 +18,6 @@ Two things are pinned here:
 from __future__ import annotations
 
 import inspect
-from collections.abc import AsyncIterator
 
 import pytest
 
@@ -28,15 +26,15 @@ from app.agent.client import (
     build_model_client,
     register_adapter,
 )
-from app.agent.neutral import Message, Role, StreamChunk, ToolDef, TurnPart
+from app.agent.neutral import Message, Role, ToolDef, TurnPart
 
 # ---------------------------------------------------------------------------
-# Interface shape: the three consumptions run/stream/extract require
+# Interface shape: the two consumptions run/extract require
 # ---------------------------------------------------------------------------
 
 
-def test_model_client_exposes_three_consumptions():
-    for name in ("complete", "stream", "structured"):
+def test_model_client_exposes_two_consumptions():
+    for name in ("complete", "structured"):
         assert hasattr(ModelClient, name), f"ModelClient missing {name}"
 
 
@@ -45,12 +43,6 @@ def test_complete_signature_takes_messages_and_tools():
     params = sig.parameters
     assert "messages" in params
     assert "tools" in params  # tools optional → run() with/without tools
-
-
-def test_stream_signature_takes_messages_and_tools():
-    sig = inspect.signature(ModelClient.stream)
-    assert "messages" in sig.parameters
-    assert "tools" in sig.parameters
 
 
 def test_structured_signature_takes_messages_and_schema():
@@ -97,18 +89,6 @@ class _FakeAdapter(ModelClient):
             ],
             [],
         )
-
-    async def stream(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolDef] | None = None,
-        **kwargs: object,
-    ) -> AsyncIterator[StreamChunk]:
-        yield StreamChunk(reasoning="thinking")
-        yield StreamChunk(text="hel")
-        yield StreamChunk(text="lo")
-        yield StreamChunk(finish_reason="stop")
 
     async def structured(
         self,
@@ -175,16 +155,6 @@ async def test_complete_returns_neutral_assistant_message(_fake_provider):
     assert out.role == Role.ASSISTANT
     assert out.content == "echo:ping"
     assert out.thought_text() == "faked-reasoning"
-
-
-async def test_stream_yields_neutral_chunks(_fake_provider):
-    client = await build_model_client("whatever")
-    chunks = [
-        c async for c in client.stream([Message(role=Role.USER, content="hi")])
-    ]
-    assert chunks[0].reasoning == "thinking"
-    assert "".join(c.text for c in chunks if c.text) == "hello"
-    assert chunks[-1].finish_reason == "stop"
 
 
 async def test_structured_returns_dict_for_extract(_fake_provider):

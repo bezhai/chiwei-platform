@@ -12,7 +12,7 @@ span 导出到内存（conftest 的 ``exported_spans``）。期限在测试里�
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -31,7 +31,7 @@ from app.agent.adapters.openai import OpenAIAdapter
 from app.agent.client import ModelClient
 from app.agent.contracts import AgentSpec, Segment
 from app.agent.core import Agent
-from app.agent.neutral import Message, Role, StreamChunk
+from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.capabilities._errors import CapabilityTimeout
@@ -77,10 +77,6 @@ async def _guarded(call: Awaitable[Any]) -> Any:
         raise
 
 
-async def _drain(chunks: AsyncIterator[StreamChunk]) -> list[StreamChunk]:
-    return [chunk async for chunk in chunks]
-
-
 async def _forever() -> None:
     await asyncio.Event().wait()
 
@@ -93,48 +89,13 @@ def _user(text: str) -> Message:
 # 模型 SDK 的替身
 # ---------------------------------------------------------------------------
 
-# 流式脚本里放它：这一块永远不来。
-NEVER = object()
-
-
-class _After:
-    """流式脚本里放它：隔 ``seconds`` 秒才来的一块。"""
-
-    def __init__(self, seconds: float, chunk: Any) -> None:
-        self.seconds = seconds
-        self.chunk = chunk
-
-
-def _scripted(chunks: list[Any]) -> AsyncIterator[Any]:
-    async def gen() -> AsyncIterator[Any]:
-        for item in chunks:
-            if item is NEVER:
-                await _forever()
-            if isinstance(item, _After):
-                await asyncio.sleep(item.seconds)
-                item = item.chunk
-            yield item
-
-    return gen()
-
-
-def _gemini_chunk(text: str) -> SimpleNamespace:
-    part = SimpleNamespace(
-        text=text, thought=False, function_call=None, thought_signature=None
-    )
-    candidate = SimpleNamespace(
-        content=SimpleNamespace(parts=[part], role="model"), finish_reason=None
-    )
-    return SimpleNamespace(candidates=[candidate], usage_metadata=None)
-
 
 def _gemini(
-    monkeypatch, *, answer: Callable[[], Awaitable[Any]] = _forever, chunks=None
+    monkeypatch, *, answer: Callable[[], Awaitable[Any]] = _forever
 ) -> list[dict[str, Any]]:
     """把 GeminiAdapter 用的 genai.Client 换成替身，返回它收到的每一次请求。
 
-    ``answer`` 是非流式请求怎么回（默认一直不回）；``chunks`` 是流式请求的脚本，``None`` 表示
-    连流都开不起来。
+    ``answer`` 是请求怎么回（默认一直不回）。
     """
     requests: list[dict[str, Any]] = []
 
@@ -142,16 +103,7 @@ def _gemini(
         requests.append(kw)
         return await answer()
 
-    async def generate_content_stream(**kw: Any) -> Any:
-        requests.append(kw)
-        if chunks is None:
-            await _forever()
-        return _scripted(chunks)
-
-    models = SimpleNamespace(
-        generate_content=generate_content,
-        generate_content_stream=generate_content_stream,
-    )
+    models = SimpleNamespace(generate_content=generate_content)
     client = SimpleNamespace(aio=SimpleNamespace(models=models))
     monkeypatch.setattr(
         "app.agent.adapters.gemini.genai.Client", lambda **_kwargs: client
@@ -207,7 +159,6 @@ def _named(exporter: InMemorySpanExporter, name: str) -> list[ReadableSpan]:
 _CALLS: dict[str, Callable[[ModelClient], Awaitable[Any]]] = {
     "complete": lambda m: m.complete([_user("醒了")]),
     "structured": lambda m: m.structured([_user("醒了")], schema=SCHEMA),
-    "stream": lambda m: _drain(m.stream([_user("醒了")])),
 }
 
 
@@ -237,67 +188,6 @@ async def test_an_openai_call_that_never_answers_fails_at_the_deadline(
     [generation] = _generations(exported_spans)
     assert generation.attributes[LEVEL] == "ERROR"
     assert "gpt-5.5 gave no answer within" in generation.attributes[STATUS]
-
-
-# ---------------------------------------------------------------------------
-# 流式：期限管的是每一次等，不是整条流
-# ---------------------------------------------------------------------------
-
-
-async def test_a_stream_that_stops_mid_answer_fails_at_the_deadline(
-    exported_spans, monkeypatch
-):
-    _gemini(monkeypatch, chunks=[_gemini_chunk("我"), NEVER])
-    got: list[str] = []
-
-    async def pull() -> None:
-        async for chunk in _gemini_adapter().stream([_user("醒了")]):
-            if chunk.text:
-                got.append(chunk.text)
-
-    with pytest.raises(CapabilityTimeout):
-        await _guarded(pull())
-
-    assert got == ["我"]
-    [generation] = _generations(exported_spans)
-    assert generation.attributes[LEVEL] == "ERROR"
-
-
-async def test_a_stream_that_keeps_answering_is_not_cut_however_long_it_runs(
-    exported_spans, monkeypatch
-):
-    """每一块都在期限内到，整条流加起来比期限长好几倍：这是一条活着的流，不能掐。"""
-    step = DEADLINE * 0.3
-    _gemini(
-        monkeypatch,
-        chunks=[_After(step, _gemini_chunk(t)) for t in ["一", "二", "三", "四", "五"]],
-    )
-
-    chunks = await _guarded(_drain(_gemini_adapter().stream([_user("醒了")])))
-
-    assert "".join(c.text or "" for c in chunks) == "一二三四五"
-    [generation] = _generations(exported_spans)
-    assert generation.attributes.get(LEVEL) != "ERROR"
-
-
-async def test_time_the_consumer_spends_on_a_chunk_is_not_counted_against_the_provider(
-    exported_spans, monkeypatch
-):
-    """拿到一块之后消费方去做别的事（比如派发它要的工具），那段时间不是对方没回话。"""
-    _gemini(monkeypatch, chunks=[_gemini_chunk("一"), _gemini_chunk("二")])
-    got: list[str] = []
-
-    async def pull_slowly() -> None:
-        async for chunk in _gemini_adapter().stream([_user("醒了")]):
-            if chunk.text:
-                got.append(chunk.text)
-                await asyncio.sleep(DEADLINE * 2)
-
-    await _guarded(pull_slowly())
-
-    assert got == ["一", "二"]
-    [generation] = _generations(exported_spans)
-    assert generation.attributes.get(LEVEL) != "ERROR"
 
 
 # ---------------------------------------------------------------------------

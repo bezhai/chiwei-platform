@@ -108,15 +108,12 @@ _current_prompt: ContextVar[PromptClient | None] = ContextVar(
 def rendered_from(prompt: PromptClient | None) -> Iterator[None]:
     """这个作用域里开的 generation 都关联 ``prompt``（它的名字和版本）。
 
-    一次 run / stream / extract 带的是它这次实际编译的那个 prompt 对象：泳道 label 命中就是那个
+    一次 run / extract 带的是它这次实际编译的那个 prompt 对象：泳道 label 命中就是那个
     版本，回落到 production 就是 production 的版本。``None`` 表示这次调用不是由 prompt 渲染的，
     它会清掉从外层继承来的值，而不是沿用外层的。SDK 自己的兜底 prompt（``is_fallback``）由
     SDK 跳过不关联。
 
-    离开时（包括出异常、被取消、流式调用被消费方关掉）恢复外层的值。恢复用的是"把外层的值设
-    回去"，不是 ``ContextVar.reset(token)``：流式调用在异步生成器里进这个作用域，消费方没关就
-    丢下的生成器由垃圾回收在另一个上下文里收尾，在那里 reset 会抛 ValueError；设回外层的值
-    只落在那个用完就丢的上下文里。
+    离开时（包括出异常、被取消）恢复外层的值。
     """
     outer = _current_prompt.get()
     _current_prompt.set(prompt)
@@ -161,7 +158,7 @@ def separate_trace() -> Iterator[None]:
 # 的 act 在 PG 全在、langfuse 名下 0 条），基于它的成本统计严重失真。这个累加器让
 # 调用方（world / life 收口）把"本轮 token"截下来落 durable PG —— **真相在 PG**。
 #
-# 唯一汇聚点：complete / stream / structured 三处 adapter 调用都经过 ``_SafeSpan``
+# 唯一汇聚点：complete / structured 两处 adapter 调用都经过 ``_SafeSpan``
 # / ``_NoOpSpan`` 的 ``update``。在那两个 update 里把 usage_details 累加进这个
 # contextvar，adapter / Agent.run 签名一行都不用动。
 #
@@ -305,10 +302,9 @@ def _get_client() -> Langfuse:
 class _UsageOnce:
     """Takes one call's usage down exactly once, whatever ``update`` is called.
 
-    A streamed call folds many chunks into one span and reports the running
-    total on the last ``update``; a caller updating twice with usage would then
-    bill the same call twice. The first update carrying a ``usage_details``
-    keyword is the measurement — later ones are ignored.
+    A caller updating one span twice with usage would otherwise bill the same
+    call twice. The first update carrying a ``usage_details`` keyword is the
+    measurement — later ones are ignored.
     """
 
     def __init__(self, model: str) -> None:
@@ -375,8 +371,7 @@ def mark_failed(span: Any, exc: BaseException) -> None:
     里是 DEFAULT、没有输出，跟一次没出事的调用看不出区别。所以这里直接写 Langfuse 的 level 和
     status message，不靠服务端从 OTel 状态推断。
 
-    ``GeneratorExit`` 不算失败：那是流式调用的消费方不再往下拉（拿到 content_filter 就收手），
-    这次调用该交的都交了。
+    ``GeneratorExit`` 不算失败：它只说明包着这个 span 的生成器被消费方关掉了，调用本身没有出错。
 
     记不上就算了：tracing 不能把调用本身搞坏。
     """

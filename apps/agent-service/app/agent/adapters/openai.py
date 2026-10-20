@@ -10,9 +10,9 @@ is a constructor parameter (``client_type``), not a separate code path:
 
 It translates neutral types (``app.agent.neutral``) ↔ OpenAI chat-completions
 wire, using the ``openai`` SDK's ``AsyncOpenAI`` / ``AsyncAzureOpenAI``. The
-three ``ModelClient`` methods map to one ``chat.completions.create`` shape each:
-``complete`` (non-stream), ``stream`` (stream=True), ``structured``
-(response_format=json_schema → dict).
+two ``ModelClient`` methods map to one ``chat.completions.create`` shape each:
+``complete`` (plain request), ``structured`` (response_format=json_schema →
+dict).
 
 **grok / openai-responses → Chat Completions.** xAI's ``/v1/chat/completions``
 is fully OpenAI-SDK-compatible and still functional (only marked "legacy"). The
@@ -47,22 +47,15 @@ from __future__ import annotations
 import functools
 import json
 import logging
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 
-from app.agent.client import (
-    ModelClient,
-    answer_deadline,
-    register_adapter,
-    stream_within_deadline,
-)
+from app.agent.client import ModelClient, answer_deadline, register_adapter
 from app.agent.neutral import (
     ContentBlock,
     Message,
-    StreamChunk,
     ToolCall,
     ToolDef,
     TurnPart,
@@ -151,7 +144,7 @@ class OpenAIAdapter(ModelClient):
             extra_headers["extra"] = json.dumps({"session_id": session_id})
 
     # ------------------------------------------------------------------
-    # ModelClient: complete (non-streaming)
+    # ModelClient: complete
     # ------------------------------------------------------------------
 
     async def complete(
@@ -186,103 +179,6 @@ class OpenAIAdapter(ModelClient):
                 usage_details=_usage_details(response),
             )
         return message
-
-    # ------------------------------------------------------------------
-    # ModelClient: stream
-    # ------------------------------------------------------------------
-
-    async def stream(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolDef] | None = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[StreamChunk]:
-        session_id = kwargs.pop("session_id", None)
-        wire_messages = self._to_wire_messages(messages)
-        request: dict[str, Any] = {
-            "model": self._model,
-            "messages": wire_messages,
-            "stream": True,
-            # opt into the usage-bearing final chunk; without this OpenAI never
-            # streams token counts and langfuse accounting is silently lost.
-            "stream_options": {"include_usage": True},
-            **kwargs,
-        }
-        if tools:
-            request["tools"] = [_tool_to_wire(t) for t in tools]
-        self._apply_cache_params(request, session_id)
-
-        with generation_span(
-            name=self._model,
-            model=self._model,
-            input=wire_messages,
-            model_parameters=_model_parameters(request),
-        ) as span:
-            assembler = _ToolCallAssembler()
-            text_parts: list[str] = []
-            usage: dict[str, int] | None = None
-
-            try:
-                async for chunk in stream_within_deadline(
-                    self._model, self._client.chat.completions.create(**request)
-                ):
-                    # the usage-only final chunk (no choices) carries token
-                    # counts. A chunk whose usage object reported no field at
-                    # all is skipped rather than allowed to overwrite a real
-                    # tally with nothing.
-                    chunk_usage = _usage_details(chunk)
-                    if chunk_usage:
-                        usage = chunk_usage
-                    async for out in self._chunk_to_neutral(
-                        chunk, assembler, text_parts
-                    ):
-                        yield out
-            finally:
-                # However this stream ends — drained, raising, or abandoned by a
-                # consumer that stops pulling (render_chat_turn does exactly that
-                # on a content_filter chunk) — the tokens already reported are
-                # what the call cost. Recording only after a clean drain loses
-                # the whole call: no tokens, and no "the provider reported
-                # nothing" either.
-                span.update(
-                    output={
-                        "text": "".join(text_parts),
-                        "tool_calls": [tc.to_dict() for tc in assembler.finished()],
-                    },
-                    usage_details=usage,
-                )
-
-    async def _chunk_to_neutral(
-        self,
-        chunk: Any,
-        assembler: _ToolCallAssembler,
-        text_parts: list[str],
-    ) -> AsyncIterator[StreamChunk]:
-        if not getattr(chunk, "choices", None):
-            return
-        choice = chunk.choices[0]
-        delta = getattr(choice, "delta", None)
-
-        if delta is not None:
-            reasoning = getattr(delta, "reasoning_content", None)
-            if reasoning:
-                yield StreamChunk(reasoning=reasoning)
-
-            text = getattr(delta, "content", None)
-            if text:
-                text_parts.append(text)
-                yield StreamChunk(text=text)
-
-            for completed in assembler.feed(getattr(delta, "tool_calls", None)):
-                yield StreamChunk(tool_call=completed)
-
-        finish_reason = getattr(choice, "finish_reason", None)
-        if finish_reason is not None:
-            # flush any tool call still being assembled at finish
-            for completed in assembler.flush():
-                yield StreamChunk(tool_call=completed)
-            yield StreamChunk(finish_reason=finish_reason)
 
     # ------------------------------------------------------------------
     # ModelClient: structured
@@ -395,90 +291,6 @@ class OpenAIAdapter(ModelClient):
 
 
 # ---------------------------------------------------------------------------
-# Streaming tool-call assembly
-# ---------------------------------------------------------------------------
-
-
-class _ToolCallAssembler:
-    """Reassemble streamed tool_call deltas (id/name/args arrive in pieces).
-
-    OpenAI streams a tool call across chunks: the first delta for an index
-    carries id + name, later deltas append argument string fragments. Fragments
-    are accumulated purely by ``index`` — we make NO assumption that an index's
-    fragments arrive contiguously, so interleaved deltas (index 0, then 1, then
-    0 again) can't finalise a call before its arguments finish. Every call is
-    emitted exactly once at ``flush`` (finish_reason), in index order.
-    """
-
-    def __init__(self) -> None:
-        # index -> {"id", "name", "args"} — argument fragments accumulate here
-        self._calls: dict[int, dict[str, str]] = {}
-        # indices already emitted (no double-emit)
-        self._emitted: set[int] = set()
-        self._completed: list[ToolCall] = []
-
-    def feed(self, tool_call_deltas: Any) -> list[ToolCall]:
-        """Consume a chunk's tool_call deltas; accumulate fragments by index.
-
-        Returns nothing during the stream: a call is only complete once the
-        stream finishes, because fragments for the same index may be interleaved
-        with other indices (finalising early on an index change would discard a
-        later continuation). ``flush`` emits the completed calls at finish.
-        """
-        if not tool_call_deltas:
-            return []
-
-        for d in tool_call_deltas:
-            index = getattr(d, "index", 0)
-            slot = self._calls.setdefault(index, {"id": "", "name": "", "args": ""})
-            if getattr(d, "id", None):
-                slot["id"] = d.id
-            func = getattr(d, "function", None)
-            if func is not None:
-                if getattr(func, "name", None):
-                    slot["name"] = func.name
-                if getattr(func, "arguments", None):
-                    slot["args"] += func.arguments
-
-        return []
-
-    def flush(self) -> list[ToolCall]:
-        """Finalise every still-unemitted tool call (called at finish_reason).
-
-        Every accumulated index not yet emitted is finalised here, in index
-        order, so the full set of parallel calls surfaces together once their
-        arguments are fully assembled.
-        """
-        out: list[ToolCall] = []
-        for index in sorted(self._calls):
-            if index in self._emitted:
-                continue
-            done = self._finalise(index)
-            if done is not None:
-                out.append(done)
-        return out
-
-    def finished(self) -> list[ToolCall]:
-        """All completed tool calls so far (for the trace summary)."""
-        return self._completed
-
-    def _finalise(self, index: int) -> ToolCall | None:
-        if index in self._emitted:
-            return None
-        slot = self._calls.get(index)
-        if slot is None or not slot["id"]:
-            return None
-        self._emitted.add(index)
-        call = ToolCall(
-            id=slot["id"],
-            name=slot["name"],
-            arguments=_parse_args(slot["args"]),
-        )
-        self._completed.append(call)
-        return call
-
-
-# ---------------------------------------------------------------------------
 # Translation helpers (module-level, pure)
 # ---------------------------------------------------------------------------
 
@@ -567,8 +379,6 @@ def _model_parameters(request: dict[str, Any]) -> dict[str, Any]:
         "model",
         "messages",
         "tools",
-        "stream",
-        "stream_options",
         "response_format",
         "extra_body",
         "extra_headers",

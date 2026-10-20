@@ -40,9 +40,6 @@ class _FakeGuard(ModelClient):
     async def complete(self, *_a: Any, **_k: Any):  # pragma: no cover - not used
         raise NotImplementedError
 
-    def stream(self, *_a: Any, **_k: Any):  # pragma: no cover - not used
-        raise NotImplementedError
-
     async def structured(self, messages, *, schema, **_kwargs):
         self.asked.append(_current_prompt.get().replay_variables["response"])
         self.calls.append(current_call())

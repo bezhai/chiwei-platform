@@ -53,9 +53,6 @@ class _AlwaysFails(ModelClient):
         self.calls += 1
         raise _server_error()
 
-    def stream(self, *_args: Any, **_kwargs: Any):  # pragma: no cover - not used
-        raise NotImplementedError
-
     async def structured(self, *_args: Any, **_kwargs: Any):  # pragma: no cover - not used
         raise NotImplementedError
 

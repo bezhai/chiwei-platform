@@ -541,9 +541,6 @@ def _scripted_call_class():
                 await script.after()
             return Message(role=Role.ASSISTANT, content=script.said)
 
-        def stream(self, *_args, **_kwargs):  # pragma: no cover - nothing streams
-            raise NotImplementedError
-
         async def structured(self, *_args, **_kwargs):  # pragma: no cover - not used here
             raise NotImplementedError
 

@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from app.agent.client import ModelClient
 from app.agent.contracts import AgentSpec, Segment, ToolSpec
 from app.agent.core import Agent
-from app.agent.neutral import Message, Role, StreamChunk, ToolCall, ToolDef
+from app.agent.neutral import Message, Role, ToolCall, ToolDef
 from app.agent.prompts import PromptSet
 from app.agent.round import Call, open_call
 from app.agent.tooling import tool
@@ -68,12 +68,10 @@ class _ScriptedModel(ModelClient):
         name: str = "scripted",
         *,
         turns: list[Message | BaseException | _Hang] | None = None,
-        streams: list[list[StreamChunk]] | None = None,
         structured: list[dict[str, Any]] | None = None,
     ) -> None:
         self._name = name
         self._turns = list(turns or [])
-        self._streams = list(streams or [])
         self._structured = list(structured or [])
 
     def _generation(self, messages: list[Message]):
@@ -94,14 +92,6 @@ class _ScriptedModel(ModelClient):
             assert isinstance(reply, Message)
             span.update(output=reply.to_dict())
         return reply
-
-    async def stream(
-        self, messages: list[Message], *, tools: list[ToolDef] | None = None, **_: Any
-    ) -> AsyncIterator[StreamChunk]:
-        with self._generation(messages):
-            for chunk in self._streams.pop(0):
-                await asyncio.sleep(0)
-                yield chunk
 
     async def structured(
         self, messages: list[Message], *, schema: dict[str, Any], **_: Any
