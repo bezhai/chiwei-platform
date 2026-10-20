@@ -15,14 +15,14 @@
 （:data:`HISTORY_KEY`），在这条记录和手机已读提交之后单独写，写失败只记一行 ERROR、
 这一轮照样算数（:func:`remember_this_round`））。
 
-**所以醒来只送新发生的事**：几点了、离上一次隔了多久、她在哪在做什么、有什么到点了
-（:class:`app.living.snapshot.MomentSnapshot` 的那几段）、传到她这里的消息里还没看过的
+**所以醒来只送新发生的事**：几点了、离上一次隔了多久、她在哪在做什么
+（:class:`app.living.snapshot.MomentSnapshot` 的那几段）、有什么到点了（loose_ends 插件那一段）、传到她这里的消息里还没看过的
 （:func:`app.living.received.render_received`；别人做了什么，只有传到她这里的这一段）、手机上刚来了什么
 （:func:`app.living.phone.render_arrived`）。她此刻的样子（在哪、在做什么、上一次写下的
 那天、心里挂着什么、手机上还有什么没看）读一百遍字字一样，上一轮读过的还在上下文里，
 所以它只在清理那一下作为新起点重铺一次（:func:`app.agent.continuity.trim_for_round`），
-而且上下文里永远只留最新那一份。"心里挂着没了结的事"那份清单由 :func:`keep_in_mind`
-重写（:mod:`app.living.loose_ends`）。
+而且上下文里永远只留最新那一份。"心里挂着没了结的事"那份清单由 ``keep_in_mind``
+重写（loose_ends 插件，:mod:`app.living.loose_ends`）。
 
 **她自己说过的话，在她眼前只出现一次。** 上下文连着的时候，那就是她自己那次
 ``say`` / ``send_message`` 调用：回执不抄原话（发出去的只给撤回编号），状态也不再附
@@ -61,12 +61,10 @@
 **"她这个 moment 的钟点"和"这个 moment 第几个落地"是两个问题，各有各的列**（见
 :class:`LifeMoment` 的 ``seq``）。
 
-工具：
+工具（``keep_in_mind`` 夹在这几只中间给她，但它是 loose_ends 插件的，见 :mod:`app.living.loose_ends`）：
 
   * :func:`switch_to`    我现在改去做 X、在哪、什么把我带走的
   * :func:`move_to`      人挪了地方，手上的事没变
-  * :func:`keep_in_mind` 我心里挂着没了结的事，全部（哪个 moment 都能调；每条可以带一个
-    "该在几点"，到点了她自己看得见，见 :mod:`app.living.loose_ends`）
   * :func:`say` / :func:`act`  当面说一句话 / 做一个别人看得见的动作。这一轮结束时，她在
     世界里做的事一条发给 world，只对姐妹说的话直接给那位姐妹（:mod:`app.living.outgoing`）
   * :func:`look_around`  问 world 她这里现在什么样、有谁在；没人回答就如实告诉她
@@ -134,11 +132,6 @@ from app.living.common import esc, legacy_null_is, require_aware
 # 她手边有哪些说明可读那一份清单（只能从 prompt 变量进，见本模块最后一段 docstring）。
 from app.living.guides import GUIDES_VAR, guides_she_can_read
 from app.living.happening import Recorded, note_recorded, record_happening
-from app.living.loose_ends import (
-    format_entry,
-    list_open_loose_ends,
-    rewrite_loose_ends,
-)
 from app.living.outgoing import SEND_SECONDS, send_what_she_did
 from app.living.participants import WORLD, residents
 from app.living.phone import (
@@ -156,6 +149,7 @@ from app.living.received import (
     unread_received,
 )
 from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, Whereabouts
+from app.living.services import LooseEnds
 from app.living.snapshot import MomentSnapshot, read_snapshot
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from app.messaging.sending import ask
@@ -510,63 +504,6 @@ async def move_to(
 
 
 @tool
-@tool_error("记下心里挂着的事失败")
-async def keep_in_mind(
-    still_on_my_mind: Annotated[
-        list[str],
-        Field(
-            description=(
-                "你现在还挂着没了结的事，**全部**列出来（一件都没有就传空数组）。"
-                "有该在的时刻就写成「[2026-07-25 15:00] 家属谈话会」，"
-                "没有时刻就直接写那件事"
-            )
-        ),
-    ],
-) -> str:
-    """记下我心里挂着、还没了结的事。
-
-    **随时都能调，跟你换不换手上的事没有关系。** 有人跟你说了句要紧的话、你临时
-    想起一件事、你答应了谁什么——手上的书不用放下，记一笔就行。
-
-    这是**整份清单，不是新增**：列进去的会一直跟着你，这次没列的就此了结、下一次你
-    就想不起来了。上一份清单每次都原样摆在你眼前，照着抄，再加上新的那件。
-
-    你没主动记下来的东西，过几次就真的没了——你眼前那份"刚发生过什么"只有最近一小
-    段，滚出去就找不回来了。
-
-    **有的事该在几点**（约好的谈话、说了要打的电话、几点出门）。那就把时刻写在这件
-    事前面：「[2026-07-25 15:00] 家属谈话会」。年月日 + 时分，今天几号看你眼前第一
-    行。没有时刻的事直接写，别写方括号。
-
-    到点之后你眼前那条会写着「到点了」，但它**不会自己消失**——去没去、算不算完是你
-    说了算，你不再列它才是了结。
-
-    想改时间就这次写一个不一样的时刻，不想要那个时刻了就这次别写方括号；都不用再调
-    别的东西。
-
-    Args:
-        still_on_my_mind: 你现在还挂着没了结的事，全部。
-
-    Returns:
-        一句确认文本。
-    """
-    this_round = current_round()
-    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
-    moment_id = this_round.round_id
-    open_now = await rewrite_loose_ends(
-        lane=lane,
-        persona_id=persona_id,
-        moment_id=moment_id,
-        now=now,
-        still_on_my_mind=still_on_my_mind,
-    )
-    # 连时刻一起回给她：确认里只有事情没有时刻的话，她当场无从知道自己写的那个时刻
-    # 收下了没有（下一个 moment 才在快照里看得见，那时已经隔了十分钟）。
-    carried = "、".join(format_entry(e.what, e.due_at) for e in open_now) or "没有"
-    return f"心里挂着：{carried}"
-
-
-@tool
 @tool_error("说话失败")
 async def say(
     what: Annotated[str, Field(description="你说出口的那句话，原话")],
@@ -828,7 +765,6 @@ async def look_around() -> str:
 LIFE_TOOLS = [
     ToolSpec(switch_to, trim="kept"),
     ToolSpec(move_to, trim="kept"),
-    ToolSpec(keep_in_mind, trim="kept"),
     ToolSpec(say, trim="kept"),
     ToolSpec(act, trim="kept"),
     ToolSpec(look_around, trim="material"),
@@ -1261,11 +1197,6 @@ async def day_page_section(round: Round) -> str:
     return (await _snapshot(round)).render_day_page()
 
 
-async def open_ends_section(round: Round) -> str:
-    """状态：心里挂着没了结的。"""
-    return (await _snapshot(round)).render_open_ends()
-
-
 async def own_recent_section(round: Round) -> str | None:
     """状态：她刚做过、说过的。只在这份历史接不住她最近说过的话时才带：一根标记消息都没有（冷启动、
     清过库、硬顶全裁掉了），或者上一轮没存下来（:attr:`app.agent.continuity.HistoryView.continues_unbroken`）。
@@ -1293,11 +1224,6 @@ async def whereabouts_section(round: Round) -> str:
     return (await _snapshot(round)).render_hands()
 
 
-async def just_due_section(round: Round) -> str | None:
-    """输入：这期间到点的那几件；没有就不摆。"""
-    return (await _snapshot(round)).render_just_due(round.previous_at)
-
-
 async def received_section(round: Round) -> str:
     """输入：这段时间传到她这里的。"""
     return render_received(await _received(round), now=round.now)
@@ -1319,13 +1245,13 @@ async def phone_arrived_section(round: Round) -> str:
 # 记成看过，也在这个事务里。
 
 
-async def land_the_moment(round: Round) -> None:
+async def land_the_moment(round: Round, *, loose_ends: LooseEnds) -> None:
     """落这一轮的 :class:`LifeMoment`。落地号也在这个事务里取
     （:func:`app.data.ordered.insert_in_commit_order`），所以号的先后就是提交的先后。这一格已经在
     别处落了地的话（两个进程跑同一格），不再写一行，留下库里那一行。
 
     ``context_ver`` 是这一轮**打算**把上下文写成第几版，下一轮拿它判这次写落没落地
-    （:func:`lost_last_round`）。
+    （:func:`lost_last_round`）。``open_ends`` 是这时她还挂着几件（``loose_ends`` 服务）。
     """
     switches = round.state(Switched).changes
     where = await current_whereabouts(lane=round.lane, persona_id=round.participant)
@@ -1338,8 +1264,8 @@ async def land_the_moment(round: Round) -> None:
         pulled_by=switches[-1]["because"] if switches else "",
         recorded=len(set(round.state(Recorded).happening_ids)),
         doing=where.doing if where is not None else "",
-        open_ends=len(
-            await list_open_loose_ends(lane=round.lane, persona_id=round.participant)
+        open_ends=await loose_ends.open_count(
+            lane=round.lane, persona_id=round.participant
         ),
         said=round.reply.text().strip(),
         context_ver=round.history.version + 1,

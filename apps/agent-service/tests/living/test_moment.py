@@ -22,15 +22,16 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent.neutral import Role
+from app.agent.tooling import Tool
 from app.data.schema import pg_type
-from app.living.loose_ends import LooseEnd, list_open_loose_ends
+from app.living.loose_ends.mind import OnHerMind
+from app.living.loose_ends.threads import LooseEnd, list_open_loose_ends
 from app.living.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
     LIFE_MOMENT_PROMPT_ID,
     LIFE_TOOLS,
     LifeMoment,
     act,
-    keep_in_mind,
     latest_moment,
     life_moment_minutes,
     look_around,
@@ -50,6 +51,9 @@ from tests.living.conftest import (
     regular_round,
     settled,
 )
+
+# ``keep_in_mind`` 是 loose_ends 插件的手（:mod:`app.living.loose_ends`），跟它登记的那只一样从插件对象来。
+keep_in_mind = Tool(OnHerMind().keep_in_mind)
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -207,7 +211,7 @@ async def test_keeping_something_in_mind_does_not_require_changing_what_she_is_d
     resident,
 ):
     """挂线头是独立的一件事，签名里不该出现任何"你改去做什么"。"""
-    assert keep_in_mind in [t.value.tool for t in resident.tools]
+    assert "keep_in_mind" in [t.value.tool.name for t in resident.tools]
     assert set(keep_in_mind.definition.parameters["properties"]) == {
         "still_on_my_mind"
     }
@@ -775,7 +779,7 @@ async def test_writing_only_a_time_does_not_empty_what_she_keeps_in_mind(
 
 def test_the_shape_she_is_taught_to_write_is_the_shape_that_parses():
     """工具文案里那个例子必须真的解析得出来 —— 教的和收的是同一个形状。"""
-    from app.living.loose_ends import DUE_EXAMPLE, parse_entry
+    from app.living.loose_ends.threads import DUE_EXAMPLE, parse_entry
 
     assert DUE_EXAMPLE in keep_in_mind.definition.description, (
         "工具描述里没有那个可照抄的例子 —— 她只能猜时刻该怎么写"
@@ -1002,7 +1006,6 @@ async def test_a_moment_that_landed_elsewhere_meanwhile_comes_back_as_stored(
     那一行要说的是真落了地的那个 moment。
     """
     from app.data.persist import insert_idempotent
-    from app.living import moment as moment_mod
     from tests.data.read_back import all_versions
 
     stub_moment(said="这一遍她说了别的")
@@ -1021,14 +1024,14 @@ async def test_a_moment_that_landed_elsewhere_meanwhile_comes_back_as_stored(
         said="继续",
         context_ver=1,
     )
-    counted = moment_mod.list_open_loose_ends
+    counted = OnHerMind.open_count
 
-    async def lands_elsewhere_first(**kwargs):
-        # 模型那一步之后、这一轮落地之前
+    async def lands_elsewhere_first(self, **kwargs):
+        # 模型那一步之后、这一轮落地之前（落地那一步问 loose_ends 服务她还挂着几件）
         assert await insert_idempotent(elsewhere) == 1
-        return await counted(**kwargs)
+        return await counted(self, **kwargs)
 
-    monkeypatch.setattr(moment_mod, "list_open_loose_ends", lands_elsewhere_first)
+    monkeypatch.setattr(OnHerMind, "open_count", lands_elsewhere_first)
 
     got = await regular_round(resident, "akao", at)
 

@@ -8,7 +8,6 @@
   ==================  ====================  ==========================
   手上正在做的事      最新一条 Whereabouts  1 行
   上一次写下的那天    LivingDayPage         1 页
-  挂着没了结的事      LooseEnd 还开着的     她自己列多少就是多少
   她刚做过 / 说过     她自己的 Happening    最近 N 条
   ==================  ====================  ==========================
 
@@ -27,8 +26,10 @@ import uuid
 
 import pytest
 
+from app.agent.round import Round
 from app.living.happening import record_happening
-from app.living.loose_ends import LooseEnd, rewrite_loose_ends
+from app.living.loose_ends.mind import OnHerMind
+from app.living.loose_ends.threads import LooseEnd, rewrite_loose_ends
 from app.living.records import (
     KIND_ACT,
     KIND_SPEECH,
@@ -77,19 +78,43 @@ async def _say(actor: str, content: str, at: dt.datetime, *, to=(), kind=KIND_SP
     )
 
 
-def _state_sections(snap) -> str:
-    """她此刻的样子那三段（日记页、挂念、刚做过说过）连在一起，查某句话在不在里面。"""
-    return "\n\n".join(
-        (snap.render_day_page(), snap.render_open_ends(), snap.render_own_recent())
+# 挂念和刚到点的那两段由 loose_ends 插件摆（:mod:`app.living.loose_ends.mind`），这里拿它交出去的
+# 那个对象，跟快照的几段拼在一起看她一轮里的样子。
+_MIND = OnHerMind()
+
+
+def _round(snap, previous_at: dt.datetime | None = None) -> Round:
+    """快照所在的那一轮（只有段要用的那几样）。"""
+    return Round(
+        app="agent-service",
+        lane=snap.lane,
+        participant=snap.persona_id,
+        profile="resident",
+        round_id=snap.now.isoformat(timespec="minutes"),
+        now=snap.now,
+        reason="常规节奏",
+        due=None,
+        previous_at=previous_at,
     )
 
 
-def _new_sections(snap, *, previous_at) -> str:
+async def _state_sections(snap) -> str:
+    """她此刻的样子那三段（日记页、挂念、刚做过说过）连在一起，查某句话在不在里面。"""
+    return "\n\n".join(
+        (
+            snap.render_day_page(),
+            await _MIND.open_section(_round(snap)),
+            snap.render_own_recent(),
+        )
+    )
+
+
+async def _new_sections(snap, *, previous_at) -> str:
     """这一轮的实况那三段（现在、手上、刚到点的）连在一起，查某句话在不在里面。"""
     parts = (
         snap.render_now(previous_at),
         snap.render_hands(),
-        snap.render_just_due(previous_at),
+        await _MIND.just_due_section(_round(snap, previous_at)),
     )
     return "\n\n".join(part for part in parts if part is not None)
 
@@ -116,7 +141,7 @@ async def test_the_state_she_stands_in_carries_nothing_that_just_happened(snap_d
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
-    state = _state_sections(snap)
+    state = await _state_sections(snap)
 
     assert "看昨天拍的胶片" not in state, (
         "她在哪、在干嘛归这一轮的实况 —— 位置每轮都可能被她自己改，重铺那份会过期"
@@ -143,7 +168,7 @@ async def test_what_is_new_is_the_clock_the_gap_and_where_she_is(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
-    new = _new_sections(snap, previous_at=_at(14))
+    new = await _new_sections(snap, previous_at=_at(14))
 
     assert "2026-07-25" in new and "周六" in new, "她不知道今天是几号、星期几"
     assert "10 分钟" in new, f"没告诉她离上一次隔了多久。拿到：\n{new}"
@@ -161,7 +186,7 @@ async def test_the_very_first_moment_says_nothing_about_a_gap(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
-    new = _new_sections(snap, previous_at=None)
+    new = await _new_sections(snap, previous_at=None)
 
     assert "2026-07-25" in new
     assert "上一次" not in new, f"凭空造了一个上一次。拿到：\n{new}"
@@ -173,7 +198,7 @@ async def test_a_long_gap_reads_in_hours(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
-    new = _new_sections(snap, previous_at=_at(9, 40))
+    new = await _new_sections(snap, previous_at=_at(9, 40))
 
     assert "4 小时 30 分钟" in new, f"拿到：\n{new}"
 
@@ -190,53 +215,10 @@ async def test_a_moment_that_lands_out_of_order_does_not_report_a_negative_gap(
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(21, 30)
     )
-    new = _new_sections(snap, previous_at=_at(21, 34))
+    new = await _new_sections(snap, previous_at=_at(21, 34))
 
     assert "离上一次过了" not in new, f"报了一个负数的间隔。拿到：\n{new}"
     assert "刚才" in new, f"拿到：\n{new}"
-
-
-@pytest.mark.integration
-async def test_a_thing_that_just_came_due_is_something_new(snap_db):
-    """挂着的那份清单每轮不重发，但"刚到点"是这一轮真的发生了的事，必须当场送到。
-
-    清单本身跟着状态走、清理时才重铺一次（默认一小时）。一件 15:30 该做的事要是也等
-    重铺，她会在 16:00 才看见"到点了" —— ``keep_in_mind`` 的文案对她的承诺就落空了。
-    """
-    await _keep("[2026-07-25 15:00] 家属谈话会", "洗的衣服还在阳台", at=_at(12))
-
-    before = await read_snapshot(
-        lane=LANE, persona_id="akao", now=_at(14, 50)
-    )
-    assert "家属谈话会" not in _new_sections(before, previous_at=_at(14, 40)), (
-        "还没到点就先报了"
-    )
-
-    now_due = await read_snapshot(
-        lane=LANE, persona_id="akao", now=_at(15, 0)
-    )
-    just_due = now_due.render_just_due(_at(14, 50))
-    assert "[2026-07-25 15:00] 家属谈话会" in just_due, f"拿到：\n{just_due}"
-    assert "洗的衣服还在阳台" not in just_due, "没到点的那条也跟着重发了"
-
-    later = await read_snapshot(
-        lane=LANE, persona_id="akao", now=_at(15, 30)
-    )
-    assert "家属谈话会" not in _new_sections(later, previous_at=_at(15, 20)), (
-        "到点那一下报过了还在每轮重报"
-    )
-
-
-@pytest.mark.integration
-async def test_nothing_comes_due_on_the_very_first_moment(snap_db):
-    """没有上一次就没有"这期间"，不拿一堆早就过期的事当成刚刚发生。"""
-    await _keep("[2026-07-25 09:00] 早就过去的那件事", at=_at(8))
-
-    snap = await read_snapshot(
-        lane=LANE, persona_id="akao", now=_at(14)
-    )
-
-    assert "早就过去的那件事" not in _new_sections(snap, previous_at=None)
 
 
 # --------------------------------------------------------------------------
@@ -254,7 +236,7 @@ async def test_the_snapshot_opens_with_what_is_in_her_hands(snap_db):
 
     assert snap.doing is not None
     assert (snap.doing.place, snap.doing.doing) == ("家/客厅", "看昨天拍的胶片")
-    assert "看昨天拍的胶片" in _new_sections(snap, previous_at=_at(14))
+    assert "看昨天拍的胶片" in await _new_sections(snap, previous_at=_at(14))
 
 
 @pytest.mark.integration
@@ -267,35 +249,16 @@ async def test_she_can_be_nowhere_yet_and_the_snapshot_says_so_plainly(snap_db):
         text.strip()
         for text in (
             snap.render_day_page(),
-            snap.render_open_ends(),
+            await _MIND.open_section(_round(snap)),
             snap.render_own_recent(),
         )
     )
 
 
 # --------------------------------------------------------------------------
-# 二 · 挂着没了结的事（跨轮续接的载体）
+# 二 · 挂着没了结的事：她自己列、loose_ends 插件摆（``tests/living/test_loose_ends.py``）；
+# 这里只用它看几段拼在一起时各在哪一半
 # --------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-async def test_things_on_her_mind_ride_into_the_snapshot(snap_db):
-    await rewrite_loose_ends(
-        lane=LANE,
-        persona_id="akao",
-        moment_id=_at(12).isoformat(timespec="minutes"),
-        now=_at(12),
-        still_on_my_mind=["周末陪绫奈去祭典"],
-    )
-
-    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(20))
-
-    assert [e.what for e in snap.open_ends] == ["周末陪绫奈去祭典"]
-    text = snap.render_open_ends()
-    assert "周末陪绫奈去祭典" in text
-    assert _at(12).isoformat(timespec="minutes") in text, (
-        "快照没告诉她这件事是从哪一轮带过来的 —— 光有钟点在跨天之后就分不清是哪一天"
-    )
 
 
 async def _keep(*items: str, at: dt.datetime, persona: str = "akao") -> None:
@@ -306,85 +269,6 @@ async def _keep(*items: str, at: dt.datetime, persona: str = "akao") -> None:
         now=at,
         still_on_my_mind=items,
     )
-
-
-@pytest.mark.integration
-async def test_a_thing_with_no_hour_reads_exactly_as_it_always_did(snap_db):
-    """没有时刻的那条一个字都不该变 —— 她眼前绝大多数线头都是这一种。"""
-    await _keep("周末陪绫奈去祭典", at=_at(12))
-
-    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(20))
-
-    assert (
-        "- 周末陪绫奈去祭典 · 从 2026-07-25T12:00+08:00 那一刻起挂着"
-        in snap.render_open_ends()
-    )
-
-
-@pytest.mark.integration
-async def test_a_thing_she_should_do_at_a_certain_hour_shows_that_hour(snap_db):
-    """那一行整个钉住：她既要读得出「该在几点、到了没有」，又要抄得回原样。"""
-    await _keep("[2026-07-25 15:00] 家属谈话会", at=_at(12))
-
-    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14))
-    text = snap.render_open_ends()
-
-    assert (
-        "- [2026-07-25 15:00] 家属谈话会 · 还没到 · "
-        "从 2026-07-25T12:00+08:00 那一刻起挂着" in text
-    ), f"她读不出这条该在几点、也抄不回那个形状。拿到：\n{text}"
-
-
-@pytest.mark.integration
-async def test_when_the_hour_has_come_the_snapshot_says_so(snap_db):
-    """「到点了」是渲染时当场跟 ``now`` 比出来的，库里没有任何人替她改过状态。"""
-    await _keep("[2026-07-25 15:00] 家属谈话会", at=_at(12))
-
-    early = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14))
-    due = await read_snapshot(lane=LANE, persona_id="akao", now=_at(15))
-
-    before = early.render_open_ends()
-    after = due.render_open_ends()
-    assert "还没到" in before and "到点了" not in before
-    assert "到点了" in after and "还没到" not in after
-
-
-@pytest.mark.integration
-async def test_a_thing_that_came_due_stays_until_she_stops_listing_it(snap_db):
-    """她自己的安排不是一张到期交付一次就被消费掉的时刻表：时间过了，那个会她还是
-    没去开。所以到点之后那条继续挂在她眼前，直到她自己不再列它——了结与否是她的判断，
-    不是钟的。
-    """
-    await _keep("[2026-07-25 15:00] 家属谈话会", at=_at(12))
-
-    for hour in (16, 20, 23):
-        later = await read_snapshot(
-            lane=LANE, persona_id="akao", now=_at(hour)
-        )
-        assert "到点了" in later.render_open_ends(), f"{hour} 点那一轮它自己消失了"
-
-    await _keep(at=_at(23, 10))
-
-    gone = await read_snapshot(
-        lane=LANE, persona_id="akao", now=_at(23, 20)
-    )
-    assert "家属谈话会" not in _state_sections(gone)
-
-
-@pytest.mark.integration
-async def test_another_sisters_mind_never_leaks_into_hers(snap_db):
-    await rewrite_loose_ends(
-        lane=LANE,
-        persona_id="ayana",
-        moment_id=_at(12).isoformat(timespec="minutes"),
-        now=_at(12),
-        still_on_my_mind=["绫奈自己的心事"],
-    )
-
-    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(13))
-
-    assert snap.open_ends == []
-    assert "绫奈自己的心事" not in _state_sections(snap)
 
 
 # --------------------------------------------------------------------------
@@ -423,7 +307,7 @@ async def test_when_her_words_are_already_in_view_the_state_does_not_copy_them(
     await _say("akao", "布丁我吃了。", _at(13, 50), to=["ayana"])
 
     snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 10))
-    page, open_ends = snap.render_day_page(), snap.render_open_ends()
+    page, open_ends = snap.render_day_page(), await _MIND.open_section(_round(snap))
 
     # 她的话只在「你刚做过、说过」那一段里：那一段不摆，别的两段一个字都不带它们。
     for text in (page, open_ends):
@@ -595,7 +479,7 @@ async def test_the_now_line_says_which_calendar_day_it_is(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(23, 45)
     )
-    text = _new_sections(snap, previous_at=_at(23, 40))
+    text = await _new_sections(snap, previous_at=_at(23, 40))
 
     assert "2026-07-25" in text, f"她不知道今天是几号。拿到：\n{text}"
     assert "周六" in text, f"她不知道今天星期几。拿到：\n{text}"
@@ -620,7 +504,7 @@ async def test_where_she_is_comes_with_every_round(snap_db):
     snap = await read_snapshot(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
-    new = _new_sections(snap, previous_at=_at(14))
+    new = await _new_sections(snap, previous_at=_at(14))
 
     assert "家/厨房" in new
     assert "煮抹茶" in new
@@ -635,7 +519,7 @@ async def test_where_she_is_is_not_also_in_the_checkpoint(snap_db):
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
 
-    assert "家/厨房" not in _state_sections(snap)
+    assert "家/厨房" not in await _state_sections(snap)
 
 
 @pytest.mark.integration
@@ -645,4 +529,4 @@ async def test_having_never_stood_anywhere_still_says_so(snap_db):
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
 
-    assert "还没定下" in _new_sections(snap, previous_at=None)
+    assert "还没定下" in await _new_sections(snap, previous_at=None)

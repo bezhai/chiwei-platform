@@ -269,7 +269,7 @@ async def her_round(inboxes, monkeypatch, models):
     ``prompts`` 记下每一轮新摆到她眼前的那条，``meanwhile`` 在模型那一步做点什么，``fail`` 让模型
     那一步失败。"""
     from app.living import moment as moment_mod
-    from app.living.loose_ends import LooseEnd
+    from app.living.loose_ends.threads import LooseEnd
     from app.living.moment import DEFAULT_LIFE_MOMENT_MINUTES, LifeMoment
     from app.living.persona import chain as persona_mod
     from tests.runtime.conftest import migrate

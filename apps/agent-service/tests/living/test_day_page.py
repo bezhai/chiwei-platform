@@ -38,7 +38,7 @@ from app.living.day_page import (
     read_day_pages_between,
 )
 from app.living.happening import record_happening
-from app.living.loose_ends import LooseEnd
+from app.living.loose_ends.threads import LooseEnd
 from app.living.received import ReceivedMessage
 from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, MEDIUM_PHONE
 from app.living.snapshot import read_snapshot

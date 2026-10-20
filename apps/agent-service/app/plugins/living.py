@@ -28,10 +28,11 @@ old reading queue.
     before the round            outgoing.before   send what she did and has not sent yet
     the round before            life.moments      when her last round landed, and whether its
                                                   history was stored
-    state sections              day_page.last_written, loose_ends.open, her_records.recent,
-                                phone.unread
-    input sections              life.now, her_records.whereabouts, loose_ends.just_due,
-                                household.received, phone.arrived
+    state sections              day_page.last_written, her_records.recent, phone.unread
+    input sections              life.now, her_records.whereabouts, household.received,
+                                phone.arrived
+                                (the loose_ends plugin registers keep_in_mind and the state and
+                                input sections about what is on her mind)
     commit (one transaction)    life.moment, phone.glances, household.read
     after the commit            history, outgoing.after   (both Continue: logged, the round counts)
 
@@ -117,12 +118,10 @@ from app.living.moment import (
     LifeMoment,
     commit_her_glances,
     day_page_section,
-    just_due_section,
     land_the_moment,
     lost_the_last_round,
     mark_received_read,
     now_section,
-    open_ends_section,
     own_recent_section,
     phone_arrived_section,
     phone_unread_section,
@@ -306,21 +305,19 @@ def _her_round(ctx: Context) -> None:
     )
     for name, section in (
         ("day_page.last_written", day_page_section),
-        ("loose_ends.open", open_ends_section),
         ("her_records.recent", own_recent_section),
         ("phone.unread", phone_unread_section),
         ("life.now", now_section),
         ("her_records.whereabouts", whereabouts_section),
-        ("loose_ends.just_due", just_due_section),
         ("household.received", received_section),
         ("phone.arrived", phone_arrived_section),
     ):
         ctx.section(name, section)
-    ctx.commit("life.moment", land_the_moment)
+    ctx.commit("life.moment", partial(land_the_moment, loose_ends=ctx.service("loose_ends")))
     ctx.commit("phone.glances", commit_her_glances)
     ctx.commit("household.read", mark_received_read)
     ctx.after_commit("history", remember_this_round, on_failure=Continue())
     ctx.after_commit("outgoing.after", send_her_doings, on_failure=Continue())
 
 
-PLUGIN = Plugin(name="living", setup=setup, requires=("skills", "persona"))
+PLUGIN = Plugin(name="living", setup=setup, requires=("skills", "persona", "loose_ends"))

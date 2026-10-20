@@ -12,41 +12,36 @@
   ==================  ==========================  ==============================
   手上正在做的事      最新一条 ``Whereabouts``    1 行（"当前"只有一个）
   上一次写下的那天    ``read_day_page_before``    1 页（严格早于当前生活日的最新一页）
-  挂着没了结的事      还开着的 ``LooseEnd``       她自己列多少就是多少
   她刚做过 / 说过     她自己的 ``Happening``      最近 N 条，只在她自己的话不在眼前时给
   ==================  ==========================  ==============================
 
-**四层全是她自己的。** 别人做了什么、说了什么，不从这里读：谁会察觉由 world 判断后告诉她，
+还有一层「挂着没了结的事」由 loose_ends 插件自己读、自己摆（:mod:`app.living.loose_ends.mind`）。
+
+**几层全是她自己的。** 别人做了什么、说了什么，不从这里读：谁会察觉由 world 判断后告诉她，
 姐妹对她说的话直接送到她那里，都进她的收件箱，那一段由 :mod:`app.living.received` 读、由
 :func:`app.living.moment.received_section` 摆进这一轮（它要跟这一轮在同一个事务里记成看过）。
 
-**为什么这么长不会失真**：四层没有一层是"机器对历史的概括"。头两层是当下状态，读一
+**为什么这么长不会失真**：没有一层是"机器对历史的概括"。头两层是当下状态，读一
 百遍字字一样；最后一层是原文照搬的最近若干条，只是**少**，不是**歪**。失真来自压缩，
-这里一处压缩都没有。会被遗忘的只有最后一层滚出窗口的那些——而第三层正是她把重要的东
-西从滚动窗口里救出来的那只手，救不救是她的决定（见 :mod:`app.living.loose_ends`）。
+这里一处压缩都没有。会被遗忘的只有最后一层滚出窗口的那些——而她心里挂着的那份清单正是她把
+重要的东西从滚动窗口里救出来的那只手，救不救是她的决定（见 :mod:`app.living.loose_ends`）。
 
 **这几层分两半送，因为她的上下文是连续的。** 每层一段，各是她一轮里的一个状态段或输入段
 （:mod:`app.living.moment` 摆进去，清单 ``resident`` 定顺序）：
 
-  * **她此刻的样子**：上一次写下的那天（:meth:`MomentSnapshot.render_day_page`）、心里挂着
-    什么（:meth:`MomentSnapshot.render_open_ends`）、刚做过说过什么
-    （:meth:`MomentSnapshot.render_own_recent`）。读一百遍字字一样，所以每轮重发就是把同一段话
+  * **她此刻的样子**：上一次写下的那天（:meth:`MomentSnapshot.render_day_page`）、刚做过说过
+    什么（:meth:`MomentSnapshot.render_own_recent`）。读一百遍字字一样，所以每轮重发就是把同一段话
     抄一遍。只在清理那一下作为新起点重铺（:func:`app.agent.continuity.trim_for_round`），默认
     一小时一次。「刚做过说过什么」那段只在这份历史接不住她最近说过的话时才带（上下文是空的、
     硬顶把标记消息全裁掉了、上一轮没存下来，判据见 :func:`app.agent.continuity.continues_unbroken`）：
     其余时候她 4 小时内说过的话都原样在上下文里，每小时再抄一份就是同一句话在一轮输入里
     出现好几遍。
   * **这一轮的实况**：几点了、离上一次隔了多久（:meth:`MomentSnapshot.render_now`）、她在哪在做
-    什么（:meth:`MomentSnapshot.render_hands`）、有什么到点了
-    （:meth:`MomentSnapshot.render_just_due`）。每轮都送，因为每轮都不一样。
-
-"刚到点的"是这条线上唯一一处从状态里**分出来**的东西：那份清单跟着状态走，但"这件事
-到点了"是这一轮真的发生的变化。等下一次重铺的话，一件 15:30 该做的事要到 16:00 她才
-看得见。
+    什么（:meth:`MomentSnapshot.render_hands`）。每轮都送，因为每轮都不一样。
 
 **日记那一层是她自己写的，不是折叠出来的。** 这是它跟被否掉的 ``SessionTranscript``
 唯一但决定性的区别：一条原始记录都没被动过，那一页是她另写的一份东西（见
-:mod:`app.living.day_page`）。少了它她跨不过一天——上面四层全是"当下"，滚出窗口的
+:mod:`app.living.day_page`）。少了它她跨不过一天——上面几层全是"当下"，滚出窗口的
 东西没有任何一层接得住。这里只负责读和摆，"读哪一页"那条严格早于当前生活日的判据在
 :func:`~app.living.day_page.read_day_page_before` 里。
 
@@ -54,11 +49,6 @@
 一次。上下文连着的时候她说过的话就在上下文里；上下文是空的、断过、上一轮没存下来的那一
 轮，上下文接不住，少了这一层，她上一轮答应姐姐的话下一轮就凭空消失，"接得上昨天"永远
 无从谈起。
-
-唯一一处在这里**算**出来的东西是线头那层的「到点了 / 还没到」：她给线头挂的时刻当场跟
-``now`` 比，库里没有这个状态（:func:`_open_end_line`）。这不是压缩，是把同一个事实
-换算成她读得懂的说法——比她自己拿第一行的钟点去减更不容易错，而"这件事算不算了结"
-仍然只有她能答。
 """
 
 from __future__ import annotations
@@ -71,7 +61,6 @@ from app.data.schema import table_name
 from app.infra.cst_time import dated_clock, to_cst_full
 from app.living.day_page import LivingDayPage, living_day_of, read_day_page_before
 from app.living.happening import own_line
-from app.living.loose_ends import LooseEnd, format_entry, list_open_loose_ends
 from app.living.records import Happening, Whereabouts
 from app.living.whereabouts import current_whereabouts
 
@@ -99,7 +88,6 @@ class MomentSnapshot:
     now: datetime
     doing: Whereabouts | None
     day_page: LivingDayPage | None
-    open_ends: list[LooseEnd]
     own_recent: list[Happening]
 
     # -- 这一轮的实况 ----------------------------------------------------
@@ -122,29 +110,6 @@ class MomentSnapshot:
         if gap < timedelta(minutes=1):
             return f"{now}，上一次就在刚才。"
         return f"{now}，离上一次过了 {_gap(gap)}。"
-
-    def render_just_due(self, previous_at: datetime | None) -> str | None:
-        """这期间到点的那几件；一件都没有返回 ``None``（不写一行空标题）。
-
-        **"刚到点的"是事件，不是清单。** 她挂着的那份清单跟着状态走、清理时才重铺一
-        次（默认一小时），但"这件事到点了"是这一轮真的发生的变化 —— 等重铺的话一件
-        15:30 该做的事要到 16:00 她才看得见，而 :func:`app.living.moment.keep_in_mind`
-        的文案对她的承诺是"到点之后你眼前那条会写着「到点了」"。
-
-        ``previous_at`` 是 ``None``（一个 moment 都没跑过）时也返回 ``None``：没有
-        "这期间"可言，把一堆早就过期的事当成刚刚发生是往她眼前塞假话。
-        """
-        if previous_at is None:
-            return None
-        came_due = [
-            e
-            for e in self.open_ends
-            if e.due_at is not None and previous_at < e.due_at <= self.now
-        ]
-        if not came_due:
-            return None
-        lines = [f"- {format_entry(e.what, e.due_at)}" for e in came_due]
-        return "刚到点的：\n" + "\n".join(lines)
 
     def render_hands(self) -> str:
         """她在哪、在做什么。
@@ -180,13 +145,6 @@ class MomentSnapshot:
             head = f"你上一次写下的是 {when}："
         return f"{head}\n{self.day_page.text}"
 
-    def render_open_ends(self) -> str:
-        """心里挂着没了结的那几件，带着到没到点。"""
-        if not self.open_ends:
-            return "心里挂着没了结的：（没有）"
-        lines = [f"- {_open_end_line(e, now=self.now)}" for e in self.open_ends]
-        return "心里挂着没了结的：\n" + "\n".join(lines)
-
     def render_own_recent(self) -> str:
         """她自己最近做过、说过的那几条。
 
@@ -210,27 +168,6 @@ def _gap(delta: timedelta) -> str:
         return f"{minutes} 分钟"
     hours, rest = divmod(minutes, 60)
     return f"{hours} 小时" if rest == 0 else f"{hours} 小时 {rest} 分钟"
-
-
-def _open_end_line(end: LooseEnd, *, now: datetime) -> str:
-    """她心上一条线头的样子：这件事（可能带该在几点）· 到了没有 · 从哪一轮带过来的。
-
-    **前半段走** :func:`~app.living.loose_ends.format_entry`，所以她读到的形状就是她
-    下一轮该照抄回 ``keep_in_mind`` 的形状（整份重写意味着她每一轮都要抄一遍）。抄回
-    来解析不出同一件事的话，那条会在她眼皮底下被关掉、再以另一个身份重开。
-
-    **"到点了"在这里当场算，库里没有这个状态。** 有个东西替她把"挂着"改成"到点了"
-    就是替她做决定；而且到点之后这条**继续显示**，直到她自己不再列它——时间过了，那个
-    会她还是没去开。理由见 :mod:`app.living.loose_ends`。
-
-    ``opened_moment_id`` 而不是只给钟点：跨天之后"12:00 那一轮"分不清是哪一天，而这条
-    正是"指得出它是从哪一轮带过来的"这个验收的落点。
-    """
-    parts = [format_entry(end.what, end.due_at)]
-    if end.due_at is not None:
-        parts.append("到点了" if end.due_at <= now else "还没到")
-    parts.append(f"从 {end.opened_moment_id} 那一刻起挂着")
-    return " · ".join(parts)
 
 
 async def recent_own_happenings(
@@ -270,6 +207,5 @@ async def read_snapshot(
         day_page=await read_day_page_before(
             lane=lane, persona_id=persona_id, day=living_day_of(now)
         ),
-        open_ends=await list_open_loose_ends(lane=lane, persona_id=persona_id),
         own_recent=await recent_own_happenings(lane=lane, persona_id=persona_id),
     )

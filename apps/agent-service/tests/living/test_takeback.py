@@ -63,7 +63,7 @@ async def takeback_db(living_db):
     顺带建上 ``LooseEnd``：下面那条「快照印出来的编号能撤掉那一条」要真的读一次
     快照，而快照第二层读的就是它。
     """
-    from app.living.loose_ends import LooseEnd
+    from app.living.loose_ends.threads import LooseEnd
     from tests.runtime.conftest import migrate
 
     await migrate(LooseEnd, living_db)

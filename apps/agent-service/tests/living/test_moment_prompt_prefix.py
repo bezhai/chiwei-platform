@@ -31,7 +31,7 @@ from app.agent.prompts import PromptConfigError, PromptSet
 from app.infra import cst_time
 from app.infra.propagation import Context
 from app.living import moment as moment_mod
-from app.living.loose_ends import LooseEnd
+from app.living.loose_ends.threads import LooseEnd
 from app.living.moment import (
     LIFE_MOMENT_AGENT,
     LIFE_MOMENT_PROMPT_ID,

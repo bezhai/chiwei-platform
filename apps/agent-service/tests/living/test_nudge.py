@@ -64,7 +64,7 @@ def _ms(moment: dt.datetime) -> int:
 
 @pytest.fixture
 async def nudge_db(living_db):
-    from app.living.loose_ends import LooseEnd
+    from app.living.loose_ends.threads import LooseEnd
     from app.living.nudge import NudgeBegun
     from tests.runtime.conftest import migrate
 

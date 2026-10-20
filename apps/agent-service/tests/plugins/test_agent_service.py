@@ -20,7 +20,14 @@ from app.host import Host, MissingService
 async def test_each_plugin_registers_its_own_part(app_host):
     host = await app_host("agent-service")
 
-    assert [p.name for p in host.plugins] == ["ops", "operator", "skills", "persona", "living"]
+    assert [p.name for p in host.plugins] == [
+        "ops",
+        "operator",
+        "skills",
+        "persona",
+        "loose_ends",
+        "living",
+    ]
     assert Counter((r.plugin, r.kind) for r in host.registered()) == {
         ("ops", "route"): 5,
         ("operator", "route"): 6,
@@ -29,6 +36,9 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("skills", "task"): 1,
         ("persona", "service"): 1,
         ("persona", "segment"): 1,  # who she is, the first segment of her round
+        ("loose_ends", "service"): 1,
+        ("loose_ends", "tool"): 1,
+        ("loose_ends", "section"): 2,
         ("living", "turns"): 9,
         ("living", "wake"): 12,
         ("living", "clock"): 1,
@@ -36,19 +46,19 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("living", "inbox"): 1,
         ("living", "outbound"): 2,
         ("living", "inboxes_at_start"): 1,
-        ("living", "tool"): 22,
+        ("living", "tool"): 21,
         ("living", "segment"): 5,  # four more segments of her round and the output check
         ("living", "round_start"): 1,
         ("living", "round_log"): 1,
-        ("living", "section"): 9,
+        ("living", "section"): 7,
         ("living", "commit"): 3,
         ("living", "after_commit"): 2,
     }
 
 
 async def test_living_declares_each_tool_her_profile_lists(app_host):
-    """living declares every tool the ``resident`` profile lists and no other; the order she is
-    given them in is the profile's."""
+    """Her plugins (living and the ones split out of it) declare every tool the ``resident``
+    profile lists and no other; the order she is given them in is the profile's."""
     from app.manifests.agent_service import RESIDENT
 
     host = await app_host("agent-service")
@@ -69,12 +79,12 @@ async def test_living_declares_each_tool_her_profile_lists(app_host):
 
 def test_living_without_skills_is_refused_naming_both():
     manifest = importlib.import_module(APPS["agent-service"]).MANIFEST
-    ops, operator, _skills, persona, living = (
+    ops, operator, _skills, *hers = (
         importlib.import_module(m).PLUGIN for m in manifest.plugins
     )
 
     with pytest.raises(MissingService) as refused:
-        Host("agent-service", [ops, operator, persona, living])
+        Host("agent-service", [ops, operator, *hers])
 
     message = str(refused.value)
     assert "'living'" in message

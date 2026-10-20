@@ -418,7 +418,7 @@ async def test_a_row_written_before_the_column_existed_still_reads_back(living_d
     from sqlalchemy import text as _text
 
     from app.data.tx import current_session, tx
-    from app.living.loose_ends import LooseEnd
+    from app.living.loose_ends.threads import LooseEnd
     from app.living.moment import (
         LifeMoment,
         latest_moment,
@@ -474,7 +474,7 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
 
     from app.data.persist import insert_idempotent
     from app.data.tx import current_session, tx
-    from app.living.loose_ends import LooseEnd
+    from app.living.loose_ends.threads import LooseEnd
     from app.living.moment import LifeMoment, latest_moment
     from tests.runtime.conftest import migrate
 

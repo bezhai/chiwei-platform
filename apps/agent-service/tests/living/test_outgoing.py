@@ -12,11 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.agent.tooling import Tool
 from app.data.persist import fetch_all, from_row
 from app.living import moment as moment_mod
 from app.living import outgoing as outgoing_mod
 from app.living.happening import record_happening
-from app.living.moment import act, keep_in_mind, move_to, say, switch_to
+from app.living.loose_ends.mind import OnHerMind
+from app.living.moment import act, move_to, say, switch_to
 from app.living.outgoing import OutgoingResult, OutgoingUpTo, send_what_she_did
 from app.living.records import (
     KIND_ACT,
@@ -84,6 +86,10 @@ async def _until(predicate, *, seconds: float = 5.0) -> None:
     async with asyncio.timeout(seconds):
         while not predicate():
             await asyncio.sleep(0.01)
+
+
+# loose_ends 插件的那只手（:mod:`app.living.loose_ends`），跟它登记的一样从插件对象来。
+keep_in_mind = Tool(OnHerMind().keep_in_mind)
 
 
 async def _do(hand, args: dict) -> str:

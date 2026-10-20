@@ -1,4 +1,5 @@
-"""她的一轮由 living 登记的东西组成，按清单 ``resident`` 排的位置跑（:func:`app.agent.round.run_round`）。
+"""她的一轮由 living 和已经拆出来的插件（loose_ends）登记的东西组成，按清单 ``resident`` 排的位置跑
+（:func:`app.agent.round.run_round`）。
 
 状态段和输入段分开登记、按清单的顺序拼：拼出来的文字和这些段拆开之前那两份（她此刻的样子、这一轮
 的刺激）逐字相同。期望的文字是拆开之前的代码对同一份输入渲染出来的，原样写在这里。
@@ -12,7 +13,7 @@ from app.agent.continuity import HistoryView
 from app.agent.contracts import Continue, CostSpec
 from app.agent.round import Round, in_round
 from app.living.day_page import LivingDayPage
-from app.living.loose_ends import LooseEnd
+from app.living.loose_ends.threads import LooseEnd
 from app.living.moment import DueMoment
 from app.living.phone import Envelope, Sender
 from app.living.received import ReceivedMessage
@@ -66,7 +67,10 @@ def test_living_places_every_part_of_her_round_the_manifest_lists(resident):
         *resident.commit,
         *resident.after_commit,
     )
-    assert {p.plugin for p in placed} == {"living"}
+    assert {p.name: p.plugin for p in placed if p.plugin != "living"} == {
+        "loose_ends.open": "loose_ends",
+        "loose_ends.just_due": "loose_ends",
+    }
     assert resident.profile.history.key == "{lane}:{participant}"
     assert resident.profile.cost == CostSpec(
         actor="{participant}", round_id="{round_id}"
@@ -94,27 +98,6 @@ def _snapshot() -> MomentSnapshot:
             written_at=_at(4, 30),
             happenings=3,
         ),
-        open_ends=[
-            LooseEnd(
-                lane=LANE,
-                persona_id="akao",
-                thread_id="t1",
-                ver=1,
-                what="周末陪绫奈去祭典",
-                opened_at=_at(12),
-                opened_moment_id="2026-07-25T12:00+08:00",
-            ),
-            LooseEnd(
-                lane=LANE,
-                persona_id="akao",
-                thread_id="t2",
-                ver=1,
-                what="去洗衣房收衣服",
-                due_at=_at(14, 5),
-                opened_at=_at(13),
-                opened_moment_id="2026-07-25T13:00+08:00",
-            ),
-        ],
         own_recent=[
             Happening(
                 lane=LANE,
@@ -129,6 +112,28 @@ def _snapshot() -> MomentSnapshot:
         ],
     )
 
+
+_OPEN_ENDS = [
+    LooseEnd(
+        lane=LANE,
+        persona_id="akao",
+        thread_id="t1",
+        ver=1,
+        what="周末陪绫奈去祭典",
+        opened_at=_at(12),
+        opened_moment_id="2026-07-25T12:00+08:00",
+    ),
+    LooseEnd(
+        lane=LANE,
+        persona_id="akao",
+        thread_id="t2",
+        ver=1,
+        what="去洗衣房收衣服",
+        due_at=_at(14, 5),
+        opened_at=_at(13),
+        opened_moment_id="2026-07-25T13:00+08:00",
+    ),
+]
 
 _ENVELOPES = [
     Envelope(
@@ -166,11 +171,17 @@ _RECEIVED = [
 ]
 
 
-def _reads(monkeypatch, *, snapshot, envelopes, received) -> dict[str, int]:
-    """这一轮读的三样（快照、手机信封、收件箱）换成写死的，并数每样读了几次。"""
+def _reads(monkeypatch, *, snapshot, open_ends, envelopes, received) -> dict[str, int]:
+    """这一轮读的四样（快照、心里挂着的、手机信封、收件箱）换成写死的，并数每样读了几次。"""
     from app.living import moment as moment_mod
+    from app.living.loose_ends import mind as mind_mod
 
-    reads = {"snapshot": 0, "envelopes": 0, "received": 0}
+    reads = {"snapshot": 0, "open_ends": 0, "envelopes": 0, "received": 0}
+
+    async def list_open_loose_ends(*, lane, persona_id):
+        assert (lane, persona_id) == (LANE, "akao")
+        reads["open_ends"] += 1
+        return open_ends
 
     async def read_snapshot(*, lane, persona_id, now):
         assert (lane, persona_id, now) == (LANE, "akao", NOW)
@@ -188,6 +199,7 @@ def _reads(monkeypatch, *, snapshot, envelopes, received) -> dict[str, int]:
         return received
 
     monkeypatch.setattr(moment_mod, "read_snapshot", read_snapshot)
+    monkeypatch.setattr(mind_mod, "list_open_loose_ends", list_open_loose_ends)
     monkeypatch.setattr(moment_mod, "envelopes_for", envelopes_for)
     monkeypatch.setattr(moment_mod, "unread_received", unread_received)
     return reads
@@ -236,7 +248,11 @@ async def test_a_round_whose_history_broke_shows_everything_section_by_section(
     resident, monkeypatch
 ):
     reads = _reads(
-        monkeypatch, snapshot=_snapshot(), envelopes=_ENVELOPES, received=_RECEIVED
+        monkeypatch,
+        snapshot=_snapshot(),
+        open_ends=_OPEN_ENDS,
+        envelopes=_ENVELOPES,
+        received=_RECEIVED,
     )
     round = _round(previous_at=_at(14), continues_unbroken=False)
 
@@ -279,8 +295,9 @@ async def test_a_round_whose_history_broke_shows_everything_section_by_section(
         '- 群「胶片社」channel_id=c1 · 2 条没看 · <who from="小林"/> · 14:03 CST–14:06 CST'
         " · 你还没在这儿说过话"
     )
-    # 快照、手机、收件箱各读一次：两个手机段用的是同一次查到的信封。
-    assert reads == {"snapshot": 1, "envelopes": 1, "received": 1}
+    # 快照、心里挂着的、手机、收件箱各读一次：两个手机段用的是同一次查到的信封，挂念和刚到点的
+    # 两段用的是同一次读到的清单。
+    assert reads == {"snapshot": 1, "open_ends": 1, "envelopes": 1, "received": 1}
 
 
 async def test_a_first_round_whose_history_continues_leaves_out_what_is_not_there(
@@ -292,10 +309,9 @@ async def test_a_first_round_whose_history_continues_leaves_out_what_is_not_ther
         now=NOW,
         doing=None,
         day_page=None,
-        open_ends=[],
         own_recent=[],
     )
-    _reads(monkeypatch, snapshot=empty, envelopes=[], received=[])
+    _reads(monkeypatch, snapshot=empty, open_ends=[], envelopes=[], received=[])
     round = _round(previous_at=None, continues_unbroken=True)
 
     state, stimulus = await _texts(resident, round)

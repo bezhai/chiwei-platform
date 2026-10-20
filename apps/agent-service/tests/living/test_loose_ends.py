@@ -14,7 +14,9 @@ import datetime as dt
 
 import pytest
 
-from app.living.loose_ends import (
+from app.agent.round import Round
+from app.living.loose_ends.mind import OnHerMind
+from app.living.loose_ends.threads import (
     DUE_EXAMPLE,
     LooseEnd,
     derive_thread_id,
@@ -377,3 +379,187 @@ async def test_something_that_is_not_a_time_is_refused_and_nothing_is_written(en
     assert [
         e.what for e in await list_open_loose_ends(lane=LANE, persona_id="akao")
     ] == ["洗的衣服还在阳台"]
+
+
+# --------------------------------------------------------------------------
+# 五 · 摆到她眼前的两段（loose_ends 插件对象）
+# --------------------------------------------------------------------------
+
+# loose_ends 插件交出去、登记段和工具的那个对象。它不带状态，这里每条测试共用一个。
+MIND = OnHerMind()
+
+
+def _round(now: dt.datetime, *, previous_at: dt.datetime | None = None) -> Round:
+    """她在 ``now`` 开始的一轮（只有段要用的那几样：泳道、她、此刻、上一轮的时刻）。"""
+    return Round(
+        app="agent-service",
+        lane=LANE,
+        participant="akao",
+        profile="resident",
+        round_id=now.isoformat(timespec="minutes"),
+        now=now,
+        reason="常规节奏",
+        due=None,
+        previous_at=previous_at,
+    )
+
+
+@pytest.mark.integration
+async def test_things_on_her_mind_ride_into_her_round(ends_db):
+    await _rewrite("周末陪绫奈去祭典", at=_at(12))
+
+    text = await MIND.open_section(_round(_at(20)))
+
+    assert "周末陪绫奈去祭典" in text
+    assert _moment(12) in text, (
+        "她眼前那段没告诉她这件事是从哪一轮带过来的 —— 光有钟点在跨天之后就分不清是哪一天"
+    )
+
+
+@pytest.mark.integration
+async def test_nothing_on_her_mind_reads_as_nothing_not_as_a_hole(ends_db):
+    assert await MIND.open_section(_round(_at(8))) == "心里挂着没了结的：（没有）"
+
+
+@pytest.mark.integration
+async def test_a_thing_with_no_hour_reads_exactly_as_it_always_did(ends_db):
+    """没有时刻的那条一个字都不该变 —— 她眼前绝大多数线头都是这一种。"""
+    await _rewrite("周末陪绫奈去祭典", at=_at(12))
+
+    assert "- 周末陪绫奈去祭典 · 从 2026-07-25T12:00+08:00 那一刻起挂着" in (
+        await MIND.open_section(_round(_at(20)))
+    )
+
+
+@pytest.mark.integration
+async def test_a_thing_she_should_do_at_a_certain_hour_shows_that_hour(ends_db):
+    """那一行整个钉住：她既要读得出「该在几点、到了没有」，又要抄得回原样。"""
+    await _rewrite("[2026-07-25 15:00] 家属谈话会", at=_at(12))
+
+    text = await MIND.open_section(_round(_at(14)))
+
+    assert (
+        "- [2026-07-25 15:00] 家属谈话会 · 还没到 · "
+        "从 2026-07-25T12:00+08:00 那一刻起挂着" in text
+    ), f"她读不出这条该在几点、也抄不回那个形状。拿到：\n{text}"
+
+
+@pytest.mark.integration
+async def test_when_the_hour_has_come_her_round_says_so(ends_db):
+    """「到点了」是渲染时当场跟 ``now`` 比出来的，库里没有任何人替她改过状态。"""
+    await _rewrite("[2026-07-25 15:00] 家属谈话会", at=_at(12))
+
+    before = await MIND.open_section(_round(_at(14)))
+    after = await MIND.open_section(_round(_at(15)))
+
+    assert "还没到" in before and "到点了" not in before
+    assert "到点了" in after and "还没到" not in after
+
+
+@pytest.mark.integration
+async def test_a_thing_that_came_due_stays_until_she_stops_listing_it(ends_db):
+    """她自己的安排不是一张到期交付一次就被消费掉的时刻表：时间过了，那个会她还是
+    没去开。所以到点之后那条继续挂在她眼前，直到她自己不再列它——了结与否是她的判断，
+    不是钟的。
+    """
+    await _rewrite("[2026-07-25 15:00] 家属谈话会", at=_at(12))
+
+    for hour in (16, 20, 23):
+        later = await MIND.open_section(_round(_at(hour)))
+        assert "到点了" in later, f"{hour} 点那一轮它自己消失了"
+
+    await _rewrite(at=_at(23, 10))
+
+    assert "家属谈话会" not in await MIND.open_section(_round(_at(23, 20)))
+
+
+@pytest.mark.integration
+async def test_another_sisters_mind_never_leaks_into_hers(ends_db):
+    await _rewrite("绫奈自己的心事", at=_at(12), persona="ayana")
+
+    assert "绫奈自己的心事" not in await MIND.open_section(_round(_at(13)))
+    assert await MIND.open_count(lane=LANE, persona_id="akao") == 0
+
+
+@pytest.mark.integration
+async def test_a_thing_that_just_came_due_is_something_new(ends_db):
+    """挂着的那份清单每轮不重发，但"刚到点"是这一轮真的发生了的事，必须当场送到。
+
+    清单本身跟着状态走、清理时才重铺一次（默认一小时）。一件 15:30 该做的事要是也等
+    重铺，她会在 16:00 才看见"到点了" —— ``keep_in_mind`` 的文案对她的承诺就落空了。
+    """
+    await _rewrite("[2026-07-25 15:00] 家属谈话会", "洗的衣服还在阳台", at=_at(12))
+
+    assert await MIND.just_due_section(_round(_at(14, 50), previous_at=_at(14, 40))) is None, (
+        "还没到点就先报了"
+    )
+
+    just_due = await MIND.just_due_section(_round(_at(15, 0), previous_at=_at(14, 50)))
+    assert just_due == "刚到点的：\n- [2026-07-25 15:00] 家属谈话会", f"拿到：\n{just_due}"
+
+    assert await MIND.just_due_section(_round(_at(15, 30), previous_at=_at(15, 20))) is None, (
+        "到点那一下报过了还在每轮重报"
+    )
+
+
+@pytest.mark.integration
+async def test_nothing_comes_due_on_the_very_first_moment(ends_db):
+    """没有上一次就没有"这期间"，不拿一堆早就过期的事当成刚刚发生。"""
+    await _rewrite("[2026-07-25 09:00] 早就过去的那件事", at=_at(8))
+
+    assert await MIND.just_due_section(_round(_at(14))) is None
+
+
+@pytest.mark.integration
+async def test_both_sections_of_one_round_read_her_list_once(ends_db, monkeypatch):
+    """两段读的是同一份清单，一轮只读一次：段在模型之前算，那时她还没动过它。"""
+    import app.living.loose_ends.mind as mind_mod
+
+    await _rewrite("[2026-07-25 15:00] 家属谈话会", at=_at(12))
+    reads = []
+    real = mind_mod.list_open_loose_ends
+
+    async def counted(**kwargs):
+        reads.append(kwargs)
+        return await real(**kwargs)
+
+    monkeypatch.setattr(mind_mod, "list_open_loose_ends", counted)
+    her_round = _round(_at(15), previous_at=_at(14, 50))
+
+    await MIND.open_section(her_round)
+    await MIND.just_due_section(her_round)
+
+    assert reads == [{"lane": LANE, "persona_id": "akao"}]
+
+
+@pytest.mark.integration
+async def test_open_count_is_how_many_she_still_carries(ends_db):
+    """落地那一行的 ``open_ends``：此刻还挂着几件（``loose_ends`` 服务）。"""
+    await _rewrite("洗的衣服还在阳台", "回绫奈的祭典", at=_at(12))
+    await _rewrite("回绫奈的祭典", at=_at(13))
+
+    assert await MIND.open_count(lane=LANE, persona_id="akao") == 1
+
+
+async def test_the_loose_ends_plugin_places_her_hand_and_both_sections(app_host):
+    """loose_ends 插件登记 ``keep_in_mind``（她自己的话，裁剪时留着）、两段，交出 ``loose_ends``
+    服务；清单 ``resident`` 把它们排在各自的位置。"""
+    host = await app_host("agent-service")
+    mine = {
+        (r.kind, r.name)
+        for r in host.registered()
+        if r.plugin == "loose_ends"
+    }
+
+    assert mine == {
+        ("service", "loose_ends"),
+        ("tool", "keep_in_mind"),
+        ("section", "loose_ends.open"),
+        ("section", "loose_ends.just_due"),
+    }
+    (spec,) = [
+        r.detail["spec"]
+        for r in host.registered()
+        if r.kind == "tool" and r.name == "keep_in_mind"
+    ]
+    assert (spec.trim, spec.ends_round) == ("kept", False)

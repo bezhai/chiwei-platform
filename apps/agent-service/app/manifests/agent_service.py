@@ -77,6 +77,7 @@ MANIFEST = App(
         "app.plugins.operator",
         "app.plugins.skills",
         "app.living.persona",
+        "app.living.loose_ends",
         "app.plugins.living",
     ),
     agents={
