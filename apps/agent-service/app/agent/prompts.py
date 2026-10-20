@@ -37,8 +37,8 @@ from langfuse.model import ChatPromptClient, PromptClient, TextPromptClient
 from app.agent.contracts import AgentSpec, Segment
 from app.agent.neutral import Message, Role
 from app.agent.tools._common import get_or_create_counter
-from app.api.middleware import get_lane
 from app.infra.config import settings
+from app.infra.propagation import current_context
 
 if TYPE_CHECKING:
     from app.agent.round import Round
@@ -79,7 +79,7 @@ def _fetch(prompt_id: str) -> tuple[PromptClient, str]:
     fetch of a lane with no label of its own (the miss is not cached), so it is called in a
     worker thread (:meth:`PromptSet.resolve`), which sees the lane bound on the loop.
     """
-    lane = get_lane() or settings.lane
+    lane = current_context().lane or settings.lane
     if lane and lane != "prod":
         try:
             prompt = _get_client().get_prompt(

@@ -35,6 +35,7 @@ from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.capabilities._errors import CapabilityTimeout
+from app.infra.propagation import Context
 
 LEVEL = LangfuseOtelSpanAttributes.OBSERVATION_LEVEL
 STATUS = LangfuseOtelSpanAttributes.OBSERVATION_STATUS_MESSAGE
@@ -260,7 +261,10 @@ def life_round(monkeypatch) -> list[dict[str, Any]]:
     requests = _gemini(monkeypatch)
     langfuse = SimpleNamespace(get_prompt=lambda *_a, **_k: _prompt())
     monkeypatch.setattr("app.agent.prompts._get_client", lambda: langfuse)
-    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: None)
+    monkeypatch.setattr(
+        "app.agent.prompts.current_context",
+        lambda: Context(trace_id=None, lane=None),
+    )
 
     async def _build(_model_id: str) -> ModelClient:
         return _gemini_adapter()

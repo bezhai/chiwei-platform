@@ -23,6 +23,7 @@ from app.agent.neutral import Message, ToolDef
 from app.agent.prompts import PromptSet
 from app.agent.round import Round, in_round
 from app.infra.cst_time import now_cst
+from app.infra.propagation import Context
 from app.messaging.message import Kind, new_message
 from app.world import perception
 from app.world.agents import world_segments
@@ -78,7 +79,10 @@ async def test_an_exhausted_perception_retry_leaves_one_error_trace_per_attempt(
     monkeypatch.setattr("app.agent.core.build_model_client", build_model_client)
     langfuse = SimpleNamespace(get_prompt=lambda name, **_: _prompt(name))
     monkeypatch.setattr("app.agent.prompts._get_client", lambda: langfuse)
-    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: None)
+    monkeypatch.setattr(
+        "app.agent.prompts.current_context",
+        lambda: Context(trace_id=None, lane=None),
+    )
     monkeypatch.setattr(dynamic_config, "get", lambda k, default="": default)
     monkeypatch.setattr(dynamic_config, "get_int", lambda k, default=0: default)
     monkeypatch.setattr(perception, "RETRY_BASE_SECONDS", 0.0)

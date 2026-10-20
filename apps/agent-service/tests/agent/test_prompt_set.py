@@ -77,7 +77,10 @@ class _Langfuse:
 def langfuse(monkeypatch) -> _Langfuse:
     client = _Langfuse()
     monkeypatch.setattr("app.agent.prompts._get_client", lambda: client)
-    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: None)
+    monkeypatch.setattr(
+        "app.agent.prompts.current_context",
+        lambda: Context(trace_id=None, lane=None),
+    )
     monkeypatch.setattr("app.agent.prompts.settings", SimpleNamespace(lane="prod"))
     return client
 
@@ -264,7 +267,10 @@ async def test_each_segment_is_fetched_once_per_resolve(langfuse):
 async def test_a_lane_takes_its_own_label_and_falls_back_to_production(
     langfuse, monkeypatch
 ):
-    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: "coe-world")
+    monkeypatch.setattr(
+        "app.agent.prompts.current_context",
+        lambda: Context(trace_id=None, lane="coe-world"),
+    )
     langfuse.prompts[("rules", "coe-world")] = _text(
         "rules", "泳道的规则。", version=12
     )
@@ -433,7 +439,10 @@ async def test_a_segment_id_with_a_slash_is_one_path_segment_on_the_wire(
         tracing_enabled=False,
     )
     monkeypatch.setattr("app.agent.prompts._get_client", lambda: client)
-    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: None)
+    monkeypatch.setattr(
+        "app.agent.prompts.current_context",
+        lambda: Context(trace_id=None, lane=None),
+    )
     monkeypatch.setattr("app.agent.prompts.settings", SimpleNamespace(lane="prod"))
     segments = {
         "identity": Segment(

@@ -29,6 +29,7 @@ from langfuse.model import TextPromptClient
 
 from app.agent.prompts import PromptConfigError, PromptSet
 from app.infra import cst_time
+from app.infra.propagation import Context
 from app.living import moment as moment_mod
 from app.living import persona as persona_mod
 from app.living.loose_ends import LooseEnd
@@ -182,7 +183,10 @@ async def _system_at(templates: dict[str, str], clock: dt.datetime) -> str:
     )
     with (
         patch("app.agent.prompts._get_client", return_value=langfuse),
-        patch("app.agent.prompts.get_lane", return_value=None),
+        patch(
+            "app.agent.prompts.current_context",
+            return_value=Context(trace_id=None, lane=None),
+        ),
         patch.object(cst_time, "now_cst", lambda: clock),
         patch.object(moment_mod, "persona_prompt_vars", who_she_is),
         patch.object(

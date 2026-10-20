@@ -35,6 +35,7 @@ from app.agent.round import (
 )
 from app.agent.tooling import tool
 from app.infra.cst_time import CST
+from app.infra.propagation import Context
 
 OUTER = AgentSpec(segments=("outer",), model="outer-model", trace_name="outer")
 INNER = AgentSpec(segments=("inner",), model="inner-model", trace_name="inner")
@@ -122,7 +123,10 @@ def models(monkeypatch) -> dict[str, ModelClient]:
     monkeypatch.setattr("app.agent.core.build_model_client", build)
     langfuse = SimpleNamespace(get_prompt=lambda name, **_: prompt(name))
     monkeypatch.setattr("app.agent.prompts._get_client", lambda: langfuse)
-    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: None)
+    monkeypatch.setattr(
+        "app.agent.prompts.current_context",
+        lambda: Context(trace_id=None, lane=None),
+    )
     monkeypatch.setattr("app.agent.core._get_trace_client", _no_tracing)
     monkeypatch.setattr("app.agent.trace._get_client", _no_tracing)
     return by_model

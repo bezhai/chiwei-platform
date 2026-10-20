@@ -32,6 +32,7 @@ from app.agent.prompts import PromptSet
 from app.agent.round import Call, open_call
 from app.agent.tooling import tool
 from app.agent.trace import generation_span, rendered_from, separate_trace
+from app.infra.propagation import Context
 
 AS_ROOT = LangfuseOtelSpanAttributes.AS_ROOT
 OUTPUT = LangfuseOtelSpanAttributes.OBSERVATION_OUTPUT
@@ -146,7 +147,10 @@ def prompts(monkeypatch) -> dict[str, TextPromptClient]:
             return by_id[name]
 
     monkeypatch.setattr("app.agent.prompts._get_client", lambda: _Langfuse())
-    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: None)
+    monkeypatch.setattr(
+        "app.agent.prompts.current_context",
+        lambda: Context(trace_id=None, lane=None),
+    )
     return by_id
 
 
@@ -168,7 +172,10 @@ def labelled(monkeypatch) -> dict[str, TextPromptClient]:
                 raise LookupError(f"{name} has no version labelled {label}") from None
 
     monkeypatch.setattr("app.agent.prompts._get_client", lambda: _Langfuse())
-    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: "coe-world")
+    monkeypatch.setattr(
+        "app.agent.prompts.current_context",
+        lambda: Context(trace_id=None, lane="coe-world"),
+    )
     return by_label
 
 
