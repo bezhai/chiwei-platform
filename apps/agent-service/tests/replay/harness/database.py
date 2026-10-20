@@ -67,8 +67,8 @@ async def create_schema(engine) -> None:
     from tests.living.conftest import _BOT_CONFIG_DDL, _BOT_PRESENCE_DDL
 
     # Importing a plugin module defines its Data classes; it registers nothing until its setup.
-    for modules in APPS.values():
-        for module in modules:
+    for manifest in APPS.values():
+        for module in importlib.import_module(manifest).MANIFEST.plugins:
             importlib.import_module(module)
     data_classes = sorted(
         (c for c in DATA_REGISTRY if c.__module__.startswith("app.")),

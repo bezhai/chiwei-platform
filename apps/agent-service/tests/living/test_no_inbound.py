@@ -89,8 +89,25 @@ print(json.dumps({
 # 也不能：每一拍交给她队列的只有钟响的时刻（宿主造的 ``app.host.Signal``），判不判、判出哪一轮
 # 由来源读库决定。宿主多出一种登记，这里先红，要重新判断它算哪一边。
 _INBOUND_KINDS = frozenset({"route", "inbox", "inboxes_at_start"})
+# 一轮由什么组成（工具、段落、段、各阶段的步骤、上一轮记录）只在她自己的轮次里被调用，不接外面的东西。
 _NOT_INBOUND_KINDS = frozenset(
-    {"clock", "task", "outbound", "service", "on_stop", "turns", "wake", "tool"}
+    {
+        "clock",
+        "task",
+        "outbound",
+        "service",
+        "on_stop",
+        "turns",
+        "wake",
+        "tool",
+        "segment",
+        "section",
+        "round_start",
+        "check",
+        "commit",
+        "after_commit",
+        "round_log",
+    }
 )
 
 _LIVING_ROOT = "app.living"

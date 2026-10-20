@@ -6,12 +6,32 @@ from __future__ import annotations
 
 import pytest
 
-from app.agent.contracts import ToolSpec
+from app.agent.contracts import AgentSpec, Segment, ToolSpec
 from app.agent.tooling import tool
-from app.host import Host, HostError
+from app.host import App, Host, HostError
 from tests.hosting import start_without_io
 
 from .conftest import plugin
+
+
+def _listing(*tools: str) -> App:
+    """A manifest whose one agent is given ``tools`` (a declared tool must be placed somewhere)."""
+    return App(
+        plugins=(),
+        agents={
+            "life": AgentSpec(segments=("life",), model="m", trace_name="life", tools=tools)
+        },
+        profiles={},
+        participants=(),
+    )
+
+
+def _with_segment(setup):
+    def both(ctx) -> None:
+        ctx.segment(Segment("life", "life"))
+        setup(ctx)
+
+    return both
 
 
 @tool
@@ -31,7 +51,11 @@ async def test_a_declared_tool_shows_its_trim_class_and_whether_it_ends_the_roun
         ctx.tool(look_around, trim="material")
         ctx.tool(stop_for_now, trim="kept", ends_round=True)
 
-    host = Host("agent-service", [plugin("life", setup)])
+    host = Host(
+        "agent-service",
+        [plugin("life", _with_segment(setup))],
+        manifest=_listing("look_around", "stop_for_now"),
+    )
     await start_without_io(host)
     try:
         tools = [r for r in host.registered() if r.kind == "tool"]
@@ -73,7 +97,15 @@ async def test_a_disposer_takes_the_declaration_back():
     disposers = []
     host = Host(
         "agent-service",
-        [plugin("life", lambda ctx: disposers.append(ctx.tool(look_around, trim="material")))],
+        [
+            plugin(
+                "life",
+                _with_segment(
+                    lambda ctx: disposers.append(ctx.tool(look_around, trim="material"))
+                ),
+            )
+        ],
+        manifest=_listing("look_around"),
     )
     await start_without_io(host)
     try:

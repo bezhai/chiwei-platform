@@ -43,9 +43,9 @@ def _rounds_now() -> Rounds:
 
 
 def test_the_world_app_runs_only_the_world_plugin():
-    from app.deployment import APPS
+    from app.manifests.world import MANIFEST
 
-    assert APPS["world"] == ("app.plugins.world",)
+    assert MANIFEST.plugins == ("app.plugins.world",)
 
 
 async def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_take_them(

@@ -35,6 +35,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("living", "outbound"): 2,
         ("living", "inboxes_at_start"): 1,
         ("living", "tool"): 22,
+        ("living", "segment"): 2,
     }
 
 
@@ -56,8 +57,9 @@ async def test_living_declares_each_of_her_tools_in_the_order_she_is_given_them(
 
 
 def test_living_without_skills_is_refused_naming_both():
+    manifest = importlib.import_module(APPS["agent-service"]).MANIFEST
     ops, operator, _skills, living = (
-        importlib.import_module(m).PLUGIN for m in APPS["agent-service"]
+        importlib.import_module(m).PLUGIN for m in manifest.plugins
     )
 
     with pytest.raises(MissingService) as refused:

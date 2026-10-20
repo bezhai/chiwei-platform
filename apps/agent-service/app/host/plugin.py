@@ -35,7 +35,9 @@ class Registration:
     """One thing a plugin registered, as :meth:`app.host.Host.registered` shows it.
 
     ``kind`` is ``turns`` / ``wake`` / ``clock`` / ``task`` / ``route`` / ``inbox`` /
-    ``inboxes_at_start`` / ``outbound`` / ``tool`` / ``service`` / ``on_stop``; ``detail`` is what
+    ``inboxes_at_start`` / ``outbound`` / ``service`` / ``on_stop``, or one of what a manifest
+    places (``tool`` / ``segment`` / ``section`` / ``round_start`` / ``check`` / ``commit`` /
+    ``after_commit`` / ``round_log``); ``detail`` is what
     the registration declared (a queue of turns, the queue and source a wake signals and how often,
     a clock's seconds, a route's flags and handler, an inbox's options, the inboxes an opener
     declared so far, a tool's ``ToolSpec``). Read-only: tests and governance checks look, nothing acts on it.

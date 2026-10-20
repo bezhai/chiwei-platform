@@ -3,7 +3,9 @@ and takes back everything they registered.
 
 **Setup only registers.** Each plugin's ``setup`` gets a :class:`Context` and registers through
 it: queues of turns and the clocks that signal them, clocks, tasks, admin routes, inboxes,
-outbound queues, tools, services, things to undo at stop.
+outbound queues, services, things to undo at stop, and what a round is made of (tools, segments,
+state and input sections, the steps before and after the model, the round log), which the
+manifest's profiles place (``ctx.profile`` gives a plugin the profile its rounds run from).
 Every registration returns a disposer that takes it back; :meth:`Host.stop` calls them all,
 plugins in reverse order, each plugin's in reverse order of registration. Registering outside
 setup is refused: the host has nothing that would start a late registration.
@@ -12,7 +14,8 @@ setup is refused: the host has nothing that would start a late registration.
 
 1. Dynamic Config reads the deployment lane.
 2. Every plugin's ``setup``, in order; right after each one, what it provided must match its
-   ``provides``.
+   ``provides``. Then the manifest is checked against what the plugins registered for the rounds
+   (tools, segments, sections, steps) and the profiles are filled in (:mod:`app.host.assembly`).
 3. The dataflow graph is reset and compiled, so a mis-wired outbound edge fails here.
    Nothing so far touched the database or the broker: a manifest the host cannot run fails
    before any IO.
@@ -59,11 +62,20 @@ from fastapi import FastAPI
 from inner_shared.dynamic_config import dynamic_config
 
 from app import deployment
-from app.agent.contracts import ToolSpec, Trim
+from app.agent.contracts import Continue, FailRound, Segment, ToolSpec, Trim
+from app.agent.round import (
+    AfterCommit,
+    AssembledProfile,
+    Round,
+    RoundLog,
+    Section,
+    Step,
+)
 from app.agent.tooling import Tool
 from app.data.bootstrap import ensure_business_schema
 from app.data.migrator import migrate_schema
 from app.data.schema import Data
+from app.host.assembly import KINDS, Contribution, assemble
 from app.host.clock import Clock, Clocks, Tick
 from app.host.errors import (
     DuplicateService,
@@ -74,6 +86,7 @@ from app.host.errors import (
     UnknownApp,
 )
 from app.host.http import METHODS, Handler, RouteSpec, bind_route, unbind_route
+from app.host.manifest import App
 from app.host.plugin import Disposer, Plugin, Registration
 from app.host.turns import Signal, Turns, WakeSource
 from app.infra.cst_time import now_cst
@@ -340,7 +353,70 @@ class Context:
         :class:`~app.agent.contracts.ToolSpec`; the schema the model sees is reflected from
         ``tool`` unchanged."""
         spec = ToolSpec(tool, trim=trim, ends_round=ends_round)
-        return self._register("tool", tool.name, lambda: {"spec": spec}, _nothing)
+        return self._contribute("tool", tool.name, spec, {"spec": spec})
+
+    def segment(self, segment: Segment) -> Disposer:
+        """Contribute ``segment`` (one Langfuse prompt of an agent's prompt) under its name; the
+        manifest's agents list it among their segments."""
+        return self._contribute("segment", segment.name, segment, {"segment": segment})
+
+    def section(self, name: str, section: Section) -> Disposer:
+        """A state or an input section of a round: ``section(round)`` gives its text, or ``None``
+        to leave it out. The manifest's profile places it among the state or the input."""
+        return self._contribute("section", name, section, {"section": section})
+
+    def round_start(self, name: str, step: Step) -> Disposer:
+        """A step before the round, before its history is read; it failing fails the round."""
+        return self._contribute("round_start", name, step, {"step": step})
+
+    def check(self, name: str, step: Step) -> Disposer:
+        """A check after the model, before the commit; it failing fails the round, and nothing
+        is committed."""
+        return self._contribute("check", name, step, {"step": step})
+
+    def commit(self, name: str, step: Step) -> Disposer:
+        """A step of the commit: every commit step of a round runs in one transaction."""
+        return self._contribute("commit", name, step, {"step": step})
+
+    def after_commit(
+        self, name: str, step: Step, *, on_failure: FailRound | Continue
+    ) -> Disposer:
+        """A step after the commit. ``on_failure`` says what it failing does: ``FailRound()``
+        fails the round, ``Continue()`` is logged and counted and the round goes on."""
+        after = AfterCommit(step, on_failure)
+        return self._contribute(
+            "after_commit", name, after, {"step": step, "on_failure": on_failure}
+        )
+
+    def round_log(
+        self,
+        name: str,
+        *,
+        previous_at: Callable[[Round], Awaitable[datetime | None]],
+        lost_last_round: Callable[[Round, int], Awaitable[bool]],
+    ) -> Disposer:
+        """How a profile's rounds read the round before (:class:`app.agent.round.RoundLog`); a
+        profile lists at most one."""
+        log = RoundLog(previous_at, lost_last_round)
+        return self._contribute(
+            "round_log",
+            name,
+            log,
+            {"previous_at": previous_at, "lost_last_round": lost_last_round},
+        )
+
+    def profile(self, name: str) -> AssembledProfile:
+        """The manifest's profile ``name``, as the host fills it in once every plugin has
+        registered (before any IO): what the plugin's wake source hands to
+        :func:`app.agent.round.run_round`."""
+        try:
+            return self._host._profiles[name]
+        except KeyError:
+            raise HostError(
+                f"app {self.app_name!r}: plugin {self._plugin.name!r} asked for profile "
+                f"{name!r}, which the manifest does not list "
+                f"(listed: {sorted(self._host._profiles)})"
+            ) from None
 
     def outbound(self, data_type: type[Data], queue: str) -> Disposer:
         """An emit of ``data_type`` is published to the outbound ``queue`` (``Sink.mq``)."""
@@ -391,6 +467,20 @@ class Context:
 
     # ------------------------------------------------------------------
 
+    def _contribute(
+        self, kind: str, name: str, value: object, detail: Mapping[str, Any]
+    ) -> Disposer:
+        """Register what a manifest places; its name is checked when the host assembles."""
+        contribution = Contribution(kind, name, self._plugin.name, value)
+        contributed = self._host._contributions
+        return self._register(
+            kind,
+            name,
+            lambda: detail,
+            _async(lambda: contributed.remove(contribution)),
+            add=lambda: contributed.append(contribution),
+        )
+
     def _register(
         self,
         kind: str,
@@ -423,9 +513,17 @@ class Context:
 class Host:
     """The plugins of one app, started and stopped together. See the module docstring."""
 
-    def __init__(self, app_name: str, plugins: Sequence[Plugin]) -> None:
+    def __init__(
+        self, app_name: str, plugins: Sequence[Plugin], *, manifest: App | None = None
+    ) -> None:
         self._app_name = app_name
         self._plugins = _resolve(app_name, list(plugins))
+        self._manifest = manifest or App(plugins=(), agents={}, profiles={}, participants=())
+        self._profiles = {
+            name: AssembledProfile(app=app_name, name=name, profile=profile)
+            for name, profile in self._manifest.profiles.items()
+        }
+        self._contributions: list[Contribution] = []
         self._entries: list[_Entry] = []
         self._services: dict[str, object] = {}
         self._clock_specs: dict[str, Clock] = {}
@@ -442,14 +540,20 @@ class Host:
 
     @classmethod
     def for_app(cls, app_name: str) -> Host:
-        """The host for ``app_name`` as ``app.deployment.APPS`` lists it: each module's ``PLUGIN``."""
-        modules = deployment.APPS.get(app_name)
-        if modules is None:
+        """The host for ``app_name``: its manifest (the ``MANIFEST`` of the module
+        ``app.deployment.APPS`` names), and the ``PLUGIN`` of each module the manifest lists."""
+        module = deployment.APPS.get(app_name)
+        if module is None:
             raise UnknownApp(
                 f"app {app_name!r} is not declared in app.deployment.APPS "
                 f"(declared: {sorted(deployment.APPS)})"
             )
-        return cls(app_name, [importlib.import_module(m).PLUGIN for m in modules])
+        manifest: App = importlib.import_module(module).MANIFEST
+        return cls(
+            app_name,
+            [importlib.import_module(m).PLUGIN for m in manifest.plugins],
+            manifest=manifest,
+        )
 
     @property
     def app_name(self) -> str:
@@ -523,6 +627,13 @@ class Host:
         dynamic_config.set_lane_provider(current_deployment_lane)
         for plugin in self._plugins:
             self._set_up(plugin)
+        assemble(
+            self._app_name,
+            self._manifest,
+            self._contributions,
+            self._profiles,
+            lane=current_deployment_lane() or "prod",
+        )
         reset_emit_runtime()
         compile_graph()
 
@@ -583,7 +694,8 @@ class Host:
             raise UndeclaredService(f"app {self._app_name!r}: " + "; ".join(problems))
 
     def _check_unique(self, plugin: str, kind: str, name: str) -> None:
-        if kind == "on_stop":
+        # What a manifest places is checked when the host assembles, every duplicate at once.
+        if kind == "on_stop" or kind in KINDS:
             return
         for e in self._entries:
             if e.kind == kind and e.name == name:

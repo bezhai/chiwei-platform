@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Start the plugins of the app this process serves; stop them at shutdown.
 
-    The app is ``APP_NAME`` (PaaS injects it per Deployment), and its plugins are its manifest in
-    :data:`app.deployment.APPS`: only those modules are imported, so one app's process loads none
+    The app is ``APP_NAME`` (PaaS injects it per Deployment), and its plugins are the ones its
+    manifest lists (:data:`app.deployment.APPS` names the manifest's module): only those modules
+    are imported, so one app's process loads none
     of the other's code. The plugin host (:mod:`app.host`) runs every startup phase, the schema,
     the broker (when one is configured), the routes on this app, the background tasks and the
     clocks, and stops them in the shutdown order. The middlewares, ``/metrics`` and ``/health``

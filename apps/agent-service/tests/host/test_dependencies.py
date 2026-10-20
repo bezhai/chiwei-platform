@@ -178,7 +178,11 @@ async def test_provides_must_match_what_setup_provided(recorded_phases, setup, d
 def test_an_app_the_manifest_does_not_declare_is_refused(monkeypatch):
     import app.deployment as deployment
 
-    monkeypatch.setattr(deployment, "APPS", {"agent-service": (), "world": ()})
+    monkeypatch.setattr(
+        deployment,
+        "APPS",
+        {"agent-service": "app.manifests.agent_service", "world": "app.manifests.world"},
+    )
 
     with pytest.raises(UnknownApp) as refused:
         Host.for_app("wrold")
@@ -188,18 +192,23 @@ def test_an_app_the_manifest_does_not_declare_is_refused(monkeypatch):
     assert "agent-service" in message and "world" in message
 
 
-def test_for_app_takes_the_plugin_of_each_manifest_module_in_order(monkeypatch):
+def test_for_app_takes_the_plugin_of_each_module_its_manifest_lists_in_order(monkeypatch):
     import app.deployment as deployment
+    from app.host import App
 
     for name in ("first", "second"):
         module = types.ModuleType(f"_host_test_plugins.{name}")
         module.PLUGIN = plugin(name)
         monkeypatch.setitem(sys.modules, module.__name__, module)
-    monkeypatch.setattr(
-        deployment,
-        "APPS",
-        {"agent-service": ("_host_test_plugins.second", "_host_test_plugins.first")},
+    manifest = types.ModuleType("_host_test_manifests.agent_service")
+    manifest.MANIFEST = App(
+        plugins=("_host_test_plugins.second", "_host_test_plugins.first"),
+        agents={},
+        profiles={},
+        participants=(),
     )
+    monkeypatch.setitem(sys.modules, manifest.__name__, manifest)
+    monkeypatch.setattr(deployment, "APPS", {"agent-service": manifest.__name__})
 
     host = Host.for_app("agent-service")
 

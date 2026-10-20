@@ -19,8 +19,10 @@ old reading queue.
   the inboxes named after the three personas -> received  stored only; she reads them on her clock
   the reading inbox                          -> read_a_round  one stretch of reading
 
-  her tools (``ctx.tool``)  each of app.living.moment.MOMENT_TOOLS, in the order she is given them,
-                            with how trimming treats what it returns and whether it ends her round
+  her tools (``ctx.tool``)  each of app.living.moment.MOMENT_TOOLS, with how trimming treats what
+                            it returns and whether it ends her round (the manifest's ``resident``
+                            profile lists them in the order she is given them)
+  segments (``ctx.segment``)  her round's prompt, and the output safety check's
 
   POST /admin/reading/carry-over  carry_over_reading  the old reading queue -> the reading inbox
 
@@ -83,6 +85,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
+from app.capabilities.output_safety import GUARD_OUTPUT_SEGMENT
 from app.domain.chat_dataflow import ChatResponseSegment
 from app.domain.safety import Recall
 from app.host import Batch, Coalesce, Context, Plugin, WakeSource
@@ -90,6 +93,7 @@ from app.living import pictures, records  # noqa: F401
 from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
 from app.living.landing import reconcile_what_she_said
 from app.living.moment import (
+    LIFE_MOMENT_SEGMENT,
     MOMENT_TOOLS,
     DueMoment,
     LifeMoment,
@@ -191,6 +195,8 @@ def setup(ctx: Context) -> None:
         ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
     for her_tool in MOMENT_TOOLS:
         ctx.tool(her_tool.tool, trim=her_tool.trim, ends_round=her_tool.ends_round)
+    ctx.segment(LIFE_MOMENT_SEGMENT)
+    ctx.segment(GUARD_OUTPUT_SEGMENT)
     ctx.clock(
         "landing",
         LANDING_EVERY.total_seconds(),

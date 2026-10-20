@@ -22,26 +22,58 @@ failed attempt leaves nothing behind for the one that replaces it.
 
 The bindings are context variables: every asyncio task sees its own, so three sisters' diaries
 or readings running at once never see each other's call or round.
+
+**The fixed loop** (:func:`run_round`) runs a participant's round from a profile the host assembled
+(:class:`AssembledProfile`: the manifest's names replaced by what the plugins registered under
+them). In order: the steps before the round; the round before it (:class:`RoundLog`) and the
+history; the state sections and the input sections, joined in the profile's order (a section
+that gives ``None`` is left out); the segments of the main agent and its sub-agents, fixed for
+the round; the main agent with the profile's tools; the cost; the checks; the commit steps in one
+transaction (none when there is none); the steps after the commit, each of which says whether its
+failure fails the round (:class:`~app.agent.contracts.FailRound`) or is logged and counted
+(:class:`~app.agent.contracts.Continue`). Storing the history is one of those steps
+(:func:`store_history`), which the plugin that keeps it registers with its own failure handling.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import logging
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, Generic, TypeVar
 
-from app.agent.contracts import AgentSpec, Due
+from app.agent.continuity import (
+    HistoryView,
+    commit_transcript,
+    continues_unbroken,
+    next_transcript,
+    trim_for_round,
+)
+from app.agent.contracts import (
+    AgentSpec,
+    Continue,
+    Due,
+    FailRound,
+    Profile,
+    Segment,
+    ToolSpec,
+)
+from app.agent.neutral import Message, Role
+from app.agent.prompts import PromptSet
+from app.agent.session import load_session
+from app.agent.tools._common import get_or_create_counter
+from app.agent.trace import collect_usage
+from app.data.tx import tx
+from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST
 
-if TYPE_CHECKING:
-    from app.agent.continuity import HistoryView
-    from app.agent.neutral import Message
-    from app.agent.prompts import PromptSet
+logger = logging.getLogger(__name__)
 
 S = TypeVar("S")
+T = TypeVar("T")
 
 
 @dataclass
@@ -166,3 +198,256 @@ def in_call(call: Call) -> Iterator[Call]:
         yield call
     finally:
         _current_call.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# A participant's round: the fixed loop
+# ---------------------------------------------------------------------------
+
+# A state or an input section: its text this round, or ``None`` to leave it out.
+Section = Callable[[Round], Awaitable["str | None"]]
+# A step before the round, a check, or a step of the commit phase.
+Step = Callable[[Round], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class Placed(Generic[T]):
+    """What one plugin registered under ``name``, at the place a profile lists it."""
+
+    name: str
+    plugin: str
+    value: T
+
+
+@dataclass(frozen=True)
+class AfterCommit:
+    """A step after the commit, and what its failure does to the round."""
+
+    run: Step
+    on_failure: FailRound | Continue
+
+
+@dataclass(frozen=True)
+class RoundLog:
+    """How a profile's rounds read the round before this one: when it was (``previous_at``, ``None``
+    when there was none), and whether it lost the write of its history (``lost_last_round``, given
+    the version the history was just read at)."""
+
+    previous_at: Callable[[Round], Awaitable[datetime | None]]
+    lost_last_round: Callable[[Round, int], Awaitable[bool]]
+
+
+@dataclass
+class AssembledProfile:
+    """A profile as the host assembled it: each name the manifest lists replaced by what a plugin
+    registered under it, in the profile's order (``profile`` keeps the names). ``agents`` are the
+    main agent and its sub-agents, ``segments`` every segment they list, ``lane`` the process's.
+
+    The host creates it when a plugin asks for the profile in its setup (``ctx.profile``) and fills
+    it in once every plugin has registered, before any IO; :func:`run_round` refuses one it has not
+    filled in (``assembled``)."""
+
+    app: str
+    name: str
+    profile: Profile
+    lane: str = ""
+    agents: Mapping[str, AgentSpec] = field(default_factory=dict)
+    segments: Mapping[str, Segment] = field(default_factory=dict)
+    tools: tuple[Placed[ToolSpec], ...] = ()
+    round_start: tuple[Placed[Step], ...] = ()
+    state: tuple[Placed[Section], ...] = ()
+    input: tuple[Placed[Section], ...] = ()
+    checks: tuple[Placed[Step], ...] = ()
+    commit: tuple[Placed[Step], ...] = ()
+    after_commit: tuple[Placed[AfterCommit], ...] = ()
+    round_log: RoundLog | None = None
+    assembled: bool = False
+
+
+@dataclass(frozen=True)
+class RoundResult:
+    """A round that ran to its end: the round (with what it read and decided) and the main agent's
+    last message."""
+
+    round: Round
+    reply: Message
+
+
+ROUND_STEP_FAILURES = get_or_create_counter(
+    "round_step_failures_total",
+    "Steps after a round's commit that failed and were let go (Continue): the round still counts",
+    ["app", "participant", "step"],
+)
+
+
+@dataclass
+class _NextHistory:
+    """The history this round stores, worked out before its commit (:func:`store_history`)."""
+
+    key: str = ""
+    version: int = 0
+    messages: list[Message] | None = None
+
+
+async def run_round(
+    profile: AssembledProfile,
+    *,
+    participant: str,
+    round_id: str,
+    now: datetime,
+    reason: str,
+    due: Due,
+) -> RoundResult:
+    """Run one round of ``participant`` as ``profile`` says (see the module docstring). The round's
+    identity, time and reason are the wake source's. A step before the round, a check, a commit step
+    or a step after the commit that fails the round raises out of here unchanged."""
+    if not profile.assembled:
+        raise RuntimeError(
+            f"profile {profile.name!r} of app {profile.app!r} is not assembled; "
+            f"the host fills it in when it starts"
+        )
+    spec = profile.agents[profile.profile.agent]
+    round = Round(
+        app=profile.app,
+        lane=profile.lane,
+        participant=participant,
+        profile=profile.name,
+        round_id=round_id,
+        now=now,
+        reason=reason,
+        due=due,
+    )
+    call = open_call(profile.profile.agent, spec, lane=round.lane, round=round)
+    history = profile.profile.history
+    with in_round(round):
+        for step in profile.round_start:
+            await step.value(round)
+        if profile.round_log is not None:
+            round.previous_at = await profile.round_log.previous_at(round)
+        if history is not None:
+            key = history.key.format(lane=round.lane, participant=participant)
+            await _read_history(profile, round, key)
+        state = await _joined(profile.profile.join, profile.state, round)
+        stimulus = Message(
+            role=Role.USER,
+            content=await _joined(profile.profile.join, profile.input, round),
+        )
+        if history is not None:
+            read = round.history
+            round.history = replace(
+                read,
+                messages=trim_for_round(
+                    read.messages,
+                    now=round.now,
+                    state=state,
+                    policy=history.policy,
+                    material_tools=frozenset(
+                        t.value.tool.name
+                        for t in profile.tools
+                        if t.value.trim == "material"
+                    ),
+                    lost_last_round=read.lost_last_round,
+                ),
+            )
+        earlier = round.history.messages if round.history is not None else []
+        round.prompts = await PromptSet.resolve(
+            {
+                name: profile.agents[name]
+                for name in (profile.profile.agent, *profile.profile.sub_agents)
+            },
+            profile.segments,
+            round,
+        )
+        # Imported here: app.agent.core imports this module (``Call``, ``in_call``).
+        from app.agent.core import Agent
+
+        produced: list[Message] = []
+        with collect_usage() as usage:
+            reply = await Agent(spec, tools=[t.value for t in profile.tools]).run(
+                [*earlier, stimulus],
+                call=call,
+                prompts=round.prompts,
+                transcript_sink=produced,
+            )
+        cost = profile.profile.cost
+        if cost is not None:
+            await record_round_cost(
+                lane=round.lane,
+                actor=cost.actor.format(participant=participant),
+                round_id=cost.round_id.format(round_id=round_id, trace=spec.trace_name),
+                usage=usage,
+                observed_at=round.now.isoformat(),
+            )
+        round.reply = reply
+        for check in profile.checks:
+            await check.value(round)
+        if history is not None:
+            # Worked out before the commit: it is pure, but anything that fails between the commit
+            # and the write would leave a round that landed and a history never even tried.
+            pending = round.state(_NextHistory)
+            pending.key, pending.version = key, round.history.version
+            pending.messages = next_transcript(
+                earlier, [stimulus, *produced], policy=history.policy
+            )
+        if profile.commit:
+            async with tx():
+                for step in profile.commit:
+                    await step.value(round)
+        for step in profile.after_commit:
+            await _after_commit(step, round)
+    return RoundResult(round=round, reply=reply)
+
+
+async def store_history(round: Round) -> None:
+    """Store the history ``round`` worked out before its commit as the next version (compare and
+    set on the version it read; :class:`~app.agent.continuity.TranscriptConflict` when someone wrote
+    it meanwhile). A step after the commit: the plugin that keeps the history registers it, with
+    what its failure does."""
+    pending = round.state(_NextHistory)
+    if pending.messages is None:
+        raise RuntimeError(
+            f"round {round.round_id} of {round.participant} has no history to store; "
+            f"its profile keeps none"
+        )
+    await commit_transcript(pending.key, pending.messages, expected_ver=pending.version)
+
+
+async def _read_history(profile: AssembledProfile, round: Round, key: str) -> None:
+    messages, version = await load_session(key)
+    lost = (
+        await profile.round_log.lost_last_round(round, version)
+        if profile.round_log is not None
+        else False
+    )
+    round.history = HistoryView(
+        messages=messages,
+        version=version,
+        lost_last_round=lost,
+        continues_unbroken=continues_unbroken(messages, lost_last_round=lost),
+    )
+
+
+async def _joined(
+    join: str, sections: tuple[Placed[Section], ...], round: Round
+) -> str:
+    texts = [await section.value(round) for section in sections]
+    return join.join(text for text in texts if text is not None)
+
+
+async def _after_commit(step: Placed[AfterCommit], round: Round) -> None:
+    try:
+        await step.value.run(round)
+    except Exception:
+        if isinstance(step.value.on_failure, FailRound):
+            raise
+        ROUND_STEP_FAILURES.labels(
+            app=round.app, participant=round.participant, step=step.name
+        ).inc()
+        logger.error(
+            "%s round %s of %s: step %s after the commit failed; the round still counts",
+            round.app,
+            round.round_id,
+            round.participant,
+            step.name,
+            exc_info=True,
+        )
