@@ -69,6 +69,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.agent.contracts import ToolSpec
 from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
@@ -284,4 +285,9 @@ async def browse_online(
     return f"刷「{toward}」刷到这些（带出处，自己往下翻）：\n\n{_render_feed(hits)}"
 
 
-WEB_TOOLS = [search_online, browse_online]
+# 上网的两只手读到的是素材（搜索结果和信息流，没有任何工具吃它们的 URL）：过了保留期换成一句
+# 短语，想知道就再查一次。
+WEB_TOOLS = [
+    ToolSpec(search_online, trim="material"),
+    ToolSpec(browse_online, trim="material"),
+]

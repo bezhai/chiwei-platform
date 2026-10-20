@@ -24,19 +24,19 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import text
 
-from app.agent.neutral import Message, Role
-from app.agent.round import in_call
 from app.data.persist import fetch_all, fetch_value, from_row
 from app.data.tx import current_session, tx
 from app.host import Signal
 from app.living.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
+    LIFE_MOMENT_PROMPT_ID,
     LifeMoment,
     latest_moment,
 )
 from app.living.whereabouts import note_whereabouts
 from app.plugins.living import nudge, regular
 from tests.living.conftest import (
+    Calls,
     clock_at,
     her_queue,
     her_round_runs,
@@ -158,40 +158,13 @@ async def _incoming(
     return str(mid)
 
 
-class FakeLife:
-    """替身 life：她这一轮调了哪些工具、最后说了什么，由用例写死。
-
-    ``prompts`` 收的是**这一轮新摆到她眼前那条**，也就是最后一条：喂给模型的列表是
-    "连续上下文 + 这一轮的刺激"（:func:`app.living.moment.run_due_moment`），取第一条会
-    取到几个 moment 之前的快照。
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict]] = []
-        self.said = "继续"
-        self.prompts: list[str] = []
-        # 模型那一步跑着的时候发生的事（比如又到了一条消息）。
-        self.meanwhile = None
-        # 她调完工具之后发生的事（比如这一轮在她已经做了些什么之后失败）。
-        self.after = None
-
-    async def run(self, messages, **kwargs):
-        self.prompts.append(messages[-1].content)
-        if self.meanwhile is not None:
-            await self.meanwhile()
-        with in_call(kwargs["call"]):
-            from app.living.moment import MOMENT_TOOLS
-
-            tools = {t.name: t for t in MOMENT_TOOLS}
-            for name, args in self.calls:
-                await tools[name].invoke(args)
-        if self.after is not None:
-            await self.after()
-        return Message(role=Role.ASSISTANT, content=self.said)
-
-
 @pytest.fixture
-def stub_life(monkeypatch):
+def stub_life(monkeypatch, models):
+    """她这一轮的模型替身（:class:`tests.living.conftest.Calls`）：她调了哪些手、最后说了什么由
+    用例写死。``prompts`` 收的是**这一轮新摆到她眼前那条**，也就是最后一条：喂给模型的列表是
+    "连续上下文 + 这一轮的刺激"（:func:`app.living.moment.run_due_moment`），取第一条会取到几个
+    moment 之前的快照。``meanwhile`` 是模型那一步跑着的时候发生的事（比如又到了一条消息），
+    ``after`` 是她调完工具之后发生的事（比如这一轮在她已经做了些什么之后失败）。"""
     from app.living import moment as moment_mod
     from app.living import persona as persona_mod
 
@@ -205,8 +178,8 @@ def stub_life(monkeypatch):
 
     monkeypatch.setattr(moment_mod, "life_moment_minutes", fixed_minutes)
 
-    fake = FakeLife()
-    monkeypatch.setattr(moment_mod, "build_moment_runner", lambda: fake)
+    fake = Calls()
+    models[LIFE_MOMENT_PROMPT_ID] = fake.client
     return fake
 
 

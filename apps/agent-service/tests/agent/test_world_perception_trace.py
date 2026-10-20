@@ -2,7 +2,7 @@
 都是一条单独的、标成 ERROR 的 trace，看得出这次判断没做成、为什么。
 
 走真的那条路（在 world 的一轮里）：:func:`app.world.perception.judge_who_notices` →
-:func:`app.world.agents.run_agent` → ``AgentRunner`` → ``Agent.run``，根 span 是真的，导出到内存（conftest 的 ``exported_spans``）。模型
+:func:`app.world.agents.run_agent` → ``Agent.run``，根 span 是真的，导出到内存（conftest 的 ``exported_spans``）。模型
 换成一直返回 500 的替身，Langfuse 换成一个本地 prompt 的替身，Dynamic Config 用默认值。
 """
 

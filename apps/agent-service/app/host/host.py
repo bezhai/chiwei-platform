@@ -3,7 +3,7 @@ and takes back everything they registered.
 
 **Setup only registers.** Each plugin's ``setup`` gets a :class:`Context` and registers through
 it: queues of turns and the clocks that signal them, clocks, tasks, admin routes, inboxes,
-outbound queues, services, things to undo at stop.
+outbound queues, tools, services, things to undo at stop.
 Every registration returns a disposer that takes it back; :meth:`Host.stop` calls them all,
 plugins in reverse order, each plugin's in reverse order of registration. Registering outside
 setup is refused: the host has nothing that would start a late registration.
@@ -59,6 +59,8 @@ from fastapi import FastAPI
 from inner_shared.dynamic_config import dynamic_config
 
 from app import deployment
+from app.agent.contracts import ToolSpec, Trim
+from app.agent.tooling import Tool
 from app.data.bootstrap import ensure_business_schema
 from app.data.migrator import migrate_schema
 from app.data.schema import Data
@@ -329,6 +331,16 @@ class Context:
             undo,
             add=lambda: receiving.inboxes_at_start(opener),
         )
+
+    def tool(self, tool: Tool, *, trim: Trim, ends_round: bool = False) -> Disposer:
+        """Declare ``tool``: ``trim`` says how trimming treats what it returns (``"material"`` is
+        replaced with a short line once it is older than the history policy's material minutes,
+        ``"kept"`` stays as long as the agent's own words), ``ends_round`` whether calling it ends
+        the round. One tool name per app. The declaration is a
+        :class:`~app.agent.contracts.ToolSpec`; the schema the model sees is reflected from
+        ``tool`` unchanged."""
+        spec = ToolSpec(tool, trim=trim, ends_round=ends_round)
+        return self._register("tool", tool.name, lambda: {"spec": spec}, _nothing)
 
     def outbound(self, data_type: type[Data], queue: str) -> Disposer:
         """An emit of ``data_type`` is published to the outbound ``queue`` (``Sink.mq``)."""

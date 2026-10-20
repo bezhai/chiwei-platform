@@ -241,12 +241,6 @@ async def test_openai_family_adapters_implemented(monkeypatch, client_type):
 # ---------------------------------------------------------------------------
 
 
-def test_model_client_default_does_not_support_native_web_search():
-    """The base ``ModelClient`` reports no native web search (OpenAI inherits)."""
-    client = _FakeAdapter(model_name="m", api_key="k", base_url=None)
-    assert client.supports_native_web_search is False
-
-
 async def test_gemini_adapter_implemented(monkeypatch):
     """T3 implements the ``google`` client_type; the seam dispatches it.
 

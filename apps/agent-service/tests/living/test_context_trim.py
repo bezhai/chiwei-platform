@@ -37,8 +37,6 @@ from app.agent.continuity import (
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.agent.session import load_session
 from app.living.moment import (
-    KEPT_TOOLS,
-    MATERIAL_TOOLS,
     MOMENT_TOOLS,
     MOMENT_TRIM_POLICY,
     transcript_key,
@@ -64,6 +62,11 @@ _PNG = (
 #
 # 本文件的默认策略就用它，等价性也以它为基准：搬完之后两侧各自那份跑出来的结果，
 # 必须跟拿这一份跑出来的逐条相同（见第七节）。
+# 她的手按声明分成两档（:data:`app.living.moment.MOMENT_TOOLS` 里每只的 ``trim``）。
+HER_MATERIAL = frozenset(t.tool.name for t in MOMENT_TOOLS if t.trim == "material")
+HER_KEPT = frozenset(t.tool.name for t in MOMENT_TOOLS if t.trim == "kept")
+
+
 BEFORE_THE_MOVE = TrimPolicy(
     material_minutes=60,
     own_minutes=240,
@@ -115,7 +118,7 @@ def _round(
     *produced: Message,
     state: str = "手上：你在家/客厅，正在发呆。",
     policy: TrimPolicy = BEFORE_THE_MOVE,
-    material_tools: frozenset[str] = MATERIAL_TOOLS,
+    material_tools: frozenset[str] = HER_MATERIAL,
 ) -> list[Message]:
     """跑一轮：先按这一刻裁一遍历史，再把这一轮的输入和产出接上去。
 
@@ -136,7 +139,7 @@ def _play(
     until: dt.datetime,
     events: dict[str, list[Message]] | None = None,
     policy: TrimPolicy = BEFORE_THE_MOVE,
-    material_tools: frozenset[str] = MATERIAL_TOOLS,
+    material_tools: frozenset[str] = HER_MATERIAL,
     step: int = 10,
 ) -> list[Message]:
     """照她真实的节奏一轮一轮跑过去：默认每 10 分钟一个「继续」。
@@ -174,18 +177,19 @@ def _images(messages: list[Message]) -> list[ContentBlock]:
 # ---------------------------------------------------------------------------
 
 
-def test_every_tool_she_has_is_classified():
-    """她手上 20 只手，每一只都要明确落进"素材"或"留着"其中一档。
+def test_what_she_reads_is_material():
+    """她手上每一只手都声明了自己落进"素材"还是"留着"（``ToolSpec.trim`` 是必填的，漏不掉）。
+    素材那一档恰好是读到的东西：环顾四周的回答、搜索和信息流、说明书、命令的输出。
 
-    漏分类的那只会落进默认档，而默认档是哪一档取决于实现细节 —— 一只带图片句柄的
-    新工具静默落进"素材"，就是她拿着一个失效的句柄去发图。
+    一只带图片句柄的新工具静默落进"素材"，就是她拿着一个失效的句柄去发图。
     """
-    every = {t.name for t in MOMENT_TOOLS}
-    assert MATERIAL_TOOLS | KEPT_TOOLS == every, (
-        f"没分类的：{every - (MATERIAL_TOOLS | KEPT_TOOLS)}；"
-        f"分类表里多出来的：{(MATERIAL_TOOLS | KEPT_TOOLS) - every}"
-    )
-    assert not (MATERIAL_TOOLS & KEPT_TOOLS)
+    assert HER_MATERIAL == {
+        "look_around",
+        "search_online",
+        "browse_online",
+        "read_a_guide",
+        "run_a_script",
+    }
 
 
 def test_the_tools_that_hand_her_a_handle_are_all_kept():
@@ -207,7 +211,7 @@ def test_the_tools_that_hand_her_a_handle_are_all_kept():
         # ``before=``（往前翻唯一的入口）。
         "look_at_phone",
     ):
-        assert name in KEPT_TOOLS, f"{name} 的返回里有她后面还要用的东西"
+        assert name in HER_KEPT, f"{name} 的返回里有她后面还要用的东西"
 
 
 # ---------------------------------------------------------------------------
@@ -583,7 +587,7 @@ async def test_folded_checkpoints_still_encode_as_a_valid_gemini_request():
             now=_at(13, 35),
             state="缺口那会儿",
             policy=BEFORE_THE_MOVE,
-            material_tools=MATERIAL_TOOLS,
+            material_tools=HER_MATERIAL,
             lost_last_round=True,
         ),
         [_stim("现在 13:35。"), _call("say", "c3"), _result("c3", "记下了。"), _said("嗯")],
@@ -722,7 +726,7 @@ def test_a_gap_marker_also_folds_the_checkpoints_before_it():
         now=_at(14, 35),
         state="手上：14:35 那会儿的样子。",
         policy=BEFORE_THE_MOVE,
-        material_tools=MATERIAL_TOOLS,
+        material_tools=HER_MATERIAL,
         lost_last_round=True,
     )
 
@@ -744,7 +748,7 @@ def test_a_later_cleanup_folds_the_gap_marker_too():
             now=_at(14, 35),
             state="手上：14:35 那会儿的样子。",
             policy=BEFORE_THE_MOVE,
-            material_tools=MATERIAL_TOOLS,
+            material_tools=HER_MATERIAL,
             lost_last_round=True,
         ),
         [_stim("现在 14:35。"), _said("继续")],
@@ -800,7 +804,7 @@ def test_a_transcript_stored_before_folding_existed_folds_at_the_next_cleanup():
         now=_at(14, 5),
         state="新状态",
         policy=BEFORE_THE_MOVE,
-        material_tools=MATERIAL_TOOLS,
+        material_tools=HER_MATERIAL,
     )
 
     assert [m.text() for m in _markers(fed)[:-1]] == [
@@ -874,7 +878,7 @@ def test_a_round_that_blew_past_the_cap_is_cut_back_before_the_next_model_call()
         now=_at(16),
         state="手上：你在家/客厅，正在发呆。",
         policy=policy,
-        material_tools=MATERIAL_TOOLS,
+        material_tools=HER_MATERIAL,
     )
 
     assert estimate_tokens(fed) <= policy.hard_cap_tokens, (
@@ -1032,7 +1036,7 @@ def _boundary_rounds(
         },
     }
     return _replay_both(
-        **plans[boundary], policy=policy, material_tools=MATERIAL_TOOLS
+        **plans[boundary], policy=policy, material_tools=HER_MATERIAL
     )
 
 

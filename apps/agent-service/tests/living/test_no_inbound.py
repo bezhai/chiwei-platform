@@ -90,7 +90,7 @@ print(json.dumps({
 # 由来源读库决定。宿主多出一种登记，这里先红，要重新判断它算哪一边。
 _INBOUND_KINDS = frozenset({"route", "inbox", "inboxes_at_start"})
 _NOT_INBOUND_KINDS = frozenset(
-    {"clock", "task", "outbound", "service", "on_stop", "turns", "wake"}
+    {"clock", "task", "outbound", "service", "on_stop", "turns", "wake", "tool"}
 )
 
 _LIVING_ROOT = "app.living"
@@ -324,7 +324,6 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
     """跑一遍她的收件处理：落一行，一次模型都不调，也不推进她的任何一轮。"""
     from types import SimpleNamespace
 
-    from app.capabilities.agent import AgentRunner
     from app.data.persist import fetch_all
     from app.living import moment as moment_mod
     from app.living import participants as participants_mod
@@ -344,8 +343,7 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
     def no_model(*args, **kwargs):
         raise AssertionError("收件处理调到模型了")
 
-    monkeypatch.setattr(AgentRunner, "run", no_model)
-    monkeypatch.setattr(moment_mod, "build_moment_runner", no_model)
+    monkeypatch.setattr("app.agent.core.build_model_client", no_model)
     monkeypatch.setattr(moment_mod, "run_due_moment", no_model)
 
     await open_inboxes(inbox)

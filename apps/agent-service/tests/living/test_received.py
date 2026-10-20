@@ -13,8 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.neutral import Message as Said
-from app.agent.neutral import Role
 from app.data.persist import fetch_all, fetch_value, from_row
 from app.data.tx import current_session, tx
 from app.living import participants as participants_mod
@@ -28,7 +26,7 @@ from app.living.received import (
 )
 from app.messaging.message import Kind, Message, new_message
 from app.messaging.receiving import INBOX_REGISTRY, inbox
-from tests.living.conftest import regular_round
+from tests.living.conftest import Calls, regular_round
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
 from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture 名
@@ -265,26 +263,11 @@ async def test_a_round_takes_the_oldest_few_and_leaves_the_rest_for_the_next(inb
     assert [m.body for m in unread] == ["第 1 件事。", "第 2 件事。"]
 
 
-class _Round:
-    """替身 life：记下每一轮新摆到她眼前的那条，可以在模型那一步做点什么、或者失败。"""
-
-    def __init__(self) -> None:
-        self.seen: list[str] = []
-        self.meanwhile = None
-        self.fails = False
-
-    async def run(self, messages, **kwargs):
-        self.seen.append(messages[-1].content)
-        if self.meanwhile is not None:
-            await self.meanwhile()
-        if self.fails:
-            raise RuntimeError("这一轮的模型调用失败了")
-        return Said(role=Role.ASSISTANT, content="继续")
-
-
 @pytest.fixture
-async def her_round(inboxes, monkeypatch):
-    """绫奈的一轮：真的常规节奏那一轮，只有模型那一步是替身。"""
+async def her_round(inboxes, monkeypatch, models):
+    """绫奈的一轮：真的常规节奏那一轮，只有模型那一步是替身（:class:`tests.living.conftest.Calls`）：
+    ``prompts`` 记下每一轮新摆到她眼前的那条，``meanwhile`` 在模型那一步做点什么，``fail`` 让模型
+    那一步失败。"""
     from app.living import moment as moment_mod
     from app.living import persona as persona_mod
     from app.living.loose_ends import LooseEnd
@@ -302,8 +285,8 @@ async def her_round(inboxes, monkeypatch):
 
     monkeypatch.setattr(persona_mod, "find_persona", find_persona)
     monkeypatch.setattr(moment_mod, "life_moment_minutes", fixed_minutes)
-    runner = _Round()
-    monkeypatch.setattr(moment_mod, "build_moment_runner", lambda: runner)
+    runner = Calls()
+    models[moment_mod.LIFE_MOMENT_PROMPT_ID] = runner.client
     return runner
 
 
@@ -321,7 +304,7 @@ async def test_what_she_received_is_in_her_next_round_once(her_round):
     await _her_round(_at(21, 30))
     await _her_round(_at(21, 40))
 
-    first, second = her_round.seen
+    first, second = her_round.prompts
     assert "- 21:25 CST 窗外下起了雨。\n- 21:26 CST 千凪：姐姐，饭好了。" in first
     assert "这段时间传到你这里的：（没有）" in second, (
         f"看过的又摆了一遍：\n{second}"
@@ -335,14 +318,14 @@ async def test_a_round_that_fails_shows_them_again(her_round):
     rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
     await receive(rain)
 
-    her_round.fails = True
+    her_round.fail = RuntimeError("这一轮的模型调用失败了")
     with pytest.raises(RuntimeError, match="模型调用失败"):
         await _her_round(_at(21, 30))
-    her_round.fails = False
+    her_round.fail = None
     await _her_round(_at(21, 31))
 
-    assert len(her_round.seen) == 2
-    assert all("窗外下起了雨。" in seen for seen in her_round.seen)
+    assert len(her_round.prompts) == 2
+    assert all("窗外下起了雨。" in seen for seen in her_round.prompts)
     assert await unread_received(lane=LANE, persona_id="ayana") == []
 
 
@@ -384,7 +367,7 @@ async def test_a_landing_that_fails_halfway_through_the_read_marks_keeps_none_of
 
     await _her_round(_at(21, 31))
 
-    again = her_round.seen[-1]
+    again = her_round.prompts[-1]
     assert all(m.body in again for m in messages), f"没落地那一轮的消息没再摆出来：\n{again}"
     assert await unread_received(lane=LANE, persona_id="ayana") == []
 
@@ -408,7 +391,7 @@ async def test_what_arrives_while_she_is_in_a_round_stays_unread_for_the_next(he
     ]
     await _her_round(_at(21, 40))
 
-    first, second = her_round.seen
+    first, second = her_round.prompts
     assert "窗外下起了雨。" in first and "楼下有人按门铃。" not in first
     assert "楼下有人按门铃。" in second and "窗外下起了雨。" not in second
 
@@ -502,8 +485,8 @@ async def test_a_quiet_message_stays_quiet_through_a_scheduled_hop_and_a_failed_
     from app.messaging import receiving
     from app.messaging.lifecycle import start_messaging
     from app.messaging.receiving import inboxes_at_start
-    from app.messaging.sending import send_at
     from app.messaging.retry import RetryPolicy
+    from app.messaging.sending import send_at
     from tests.messaging.helpers import eventually
 
     monkeypatch.setattr(messaging_broker, "DELAY_LIMIT_MS", 600)

@@ -16,20 +16,20 @@ prompt id；四类都经 :func:`run_agent` 调一次模型（工具循环跑到�
 * **成本**每一次调用记一行（:func:`app.domain.thinking_cost.record_round_cost`）：actor 是
   ``world``，round_id 是 ``<trace 名>:<调用 id>``，按前缀就分得出四类各花了多少。
 
-:func:`build_runner` 是测试换替身的地方：四类都经它拿 runner，测试从这里换掉，不碰真模型。
+工具按声明交给它（:class:`~app.agent.contracts.ToolSpec`）：知识来源的查询工具是读到的材料，
+主 agent 的动作和感知判断记判断的那只手留着。
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime
 
-from app.agent.contracts import AgentSpec, FromConfig, Segment
+from app.agent.contracts import AgentSpec, FromConfig, Segment, ToolSpec
+from app.agent.core import Agent
 from app.agent.neutral import Message as Turn
 from app.agent.prompts import PromptSet
 from app.agent.round import Call
-from app.agent.tooling import Tool
 from app.agent.trace import collect_usage
-from app.capabilities.agent import AgentRunner
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import now_cst, to_cst_full
 from app.infra.lane_policy import current_deployment_lane
@@ -86,18 +86,13 @@ def world_segments(*names: str) -> dict[str, Segment]:
     return {name: Segment(name, name) for name in names}
 
 
-def build_runner(spec: AgentSpec, tools: list[Tool]) -> AgentRunner:
-    """一次调用的 agent。模块级函数，测试替身从这里换掉，不碰真模型。"""
-    return AgentRunner(spec, tools=tools)
-
-
 async def run_agent(
     call: Call,
     spec: AgentSpec,
     messages: list[Turn],
     *,
     prompts: PromptSet,
-    tools: list[Tool],
+    tools: list[ToolSpec],
     call_id: str,
     transcript_sink: list[Turn] | None = None,
 ) -> Turn:
@@ -108,9 +103,8 @@ async def run_agent(
     用它存连续上下文）。模型调用失败原样往外抛。
     """
     started = now_cst()
-    runner = build_runner(spec, tools)
     with collect_usage() as usage:
-        reply = await runner.run(
+        reply = await Agent(spec, tools=tools).run(
             messages, call=call, prompts=prompts, transcript_sink=transcript_sink
         )
     await record_round_cost(

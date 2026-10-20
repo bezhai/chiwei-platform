@@ -34,7 +34,25 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("living", "inbox"): 1,
         ("living", "outbound"): 2,
         ("living", "inboxes_at_start"): 1,
+        ("living", "tool"): 22,
     }
+
+
+async def test_living_declares_each_of_her_tools_in_the_order_she_is_given_them(app_host):
+    from app.living.moment import MOMENT_TOOLS
+
+    host = await app_host("agent-service")
+
+    declared = [r.detail["spec"] for r in host.registered() if r.kind == "tool"]
+    assert declared == MOMENT_TOOLS
+    assert [s.tool.name for s in declared if s.trim == "material"] == [
+        "look_around",
+        "search_online",
+        "browse_online",
+        "read_a_guide",
+        "run_a_script",
+    ]
+    assert [s.tool.name for s in declared if s.ends_round] == ["stop_for_now"]
 
 
 def test_living_without_skills_is_refused_naming_both():

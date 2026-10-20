@@ -1,32 +1,30 @@
 """Unified Agent — single entry point for all LLM interactions.
 
-Every ``run()`` / ``stream()`` / ``extract()`` drives a hand-written ReAct loop
-over a neutral :class:`~app.agent.client.ModelClient` (resolved from a model_id
-by ``build_model_client``). There is no langchain / langgraph: the loop owns the
-control flow, the adapter owns the provider wire, and ``dispatch`` runs tools.
+``run()`` drives a hand-written ReAct loop over a neutral
+:class:`~app.agent.client.ModelClient` (resolved from a model_id by
+``build_model_client``); ``extract()`` makes one structured call. There is no
+langchain / langgraph: the loop owns the control flow, the adapter owns the
+provider wire, and ``dispatch`` runs tools.
 
   - ``run``     — loop ``model.complete`` until the assistant stops calling
-                  tools; return the final neutral ``Message``.
-  - ``stream``  — forward neutral ``StreamChunk``s; on a tool-call turn, dispatch
-                  the tools and feed the results back, looping for more turns.
+                  tools, or calls one its declaration says ends the round
+                  (``ToolSpec.ends_round``); return the final neutral ``Message``.
   - ``extract`` — one structured call: ``model.structured`` → dict →
                   ``response_model.model_validate``.
 
 Tracing埋 lives here (the langchain ``CallbackHandler`` is gone): each
-run/stream/extract opens one root span via langfuse and records what it hands
+run/extract opens one root span via langfuse and records what it hands
 back as that span's output; the adapter opens a generation span per LLM call
 (nested automatically), and every tool dispatch opens a tool span under the
 generation that requested it. ``update_trace`` controls only whether the root
 *trace*'s name / IO is overwritten (``update_current_trace``) — the spans are
-always produced (guard / deep_research want spans without clobbering the parent
+always produced (the output check wants spans without clobbering the parent
 trace).
 
 Retry is the Agent layer's sole responsibility (the adapters disable SDK retry).
-``run`` / ``extract`` wrap the whole call in ``@retry``; ``stream`` retries only
-*before* the first token is yielded (replaying a streamed prefix would duplicate
-it downstream). A model call whose provider never answers fails at
-``MODEL_ANSWER_SECONDS`` (``app.agent.client``) with ``CapabilityTimeout``, which
-is retried like the provider's own timeouts.
+``run`` / ``extract`` wrap the whole call in ``@retry``. A model call whose
+provider never answers fails at ``MODEL_ANSWER_SECONDS`` (``app.agent.client``)
+with ``CapabilityTimeout``, which is retried like the provider's own timeouts.
 
 Usage::
 
@@ -55,11 +53,10 @@ it once for itself and the sub-agents it may call; a call outside any round reso
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from typing import Any
 
@@ -74,24 +71,20 @@ from openai import (
 from pydantic import BaseModel
 
 from app.agent.client import ModelClient, build_model_client
-from app.agent.contracts import AgentSpec, FromConfig
+from app.agent.contracts import AgentSpec, FromConfig, ToolSpec
 from app.agent.neutral import (
     ContentBlock,
     Message,
     Role,
-    StreamChunk,
     ToolCall,
     ToolDef,
     ToolResult,
-    TurnPart,
     TurnPartKind,
 )
 from app.agent.prompts import PromptSet
 from app.agent.round import Call, in_call
 from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
-    TURN_TRACE_NAME,
-    current_turn_trace_id,
     mark_failed,
     rendered_from,
     separate_trace,
@@ -233,9 +226,7 @@ def _set_current_trace(
 
 
 @contextmanager
-def _safe_current_span(
-    span_name: str, input: Any, trace_context: dict[str, Any] | None = None
-):
+def _safe_current_span(span_name: str, input: Any):
     """Enter a langfuse ``start_as_current_span`` defensively, yield it (or no-op).
 
     Tracing must never break the wrapped call. Both *creating* the span and
@@ -245,15 +236,9 @@ def _safe_current_span(
     so the Agent's retry logic still sees them, after the span is marked as
     failed with the reason (``mark_failed``); only span ``__exit__`` failures on
     the way out are swallowed.
-
-    ``trace_context`` (e.g. ``{"trace_id": ...}``) attaches the span to an
-    existing trace; used by ``_root_span`` to fold one turn's guard + main spans
-    into one trace. ``None`` lets langfuse start a fresh trace (current behaviour).
     """
     try:
-        cm = _get_trace_client().start_as_current_span(
-            name=span_name, input=input, trace_context=trace_context
-        )
+        cm = _get_trace_client().start_as_current_span(name=span_name, input=input)
         span = cm.__enter__()
     except Exception as exc:
         logger.warning("langfuse span %s unavailable: %s", span_name, exc)
@@ -286,13 +271,13 @@ def _root_span(
     session_id: str | None = None,
     prompt: PromptClient | None = None,
 ):
-    """Open the run/stream/extract root span and (optionally) name the trace.
+    """Open the run/extract root span and (optionally) name the trace.
 
     The langchain ``CallbackHandler`` used to do this. We open one
     ``start_as_current_span`` so the adapter's generation spans and our tool
     spans nest under it (langfuse v3 propagates the current span via OTel
     context). When ``update_trace`` is set, the trace's name / input is
-    overwritten with this agent's — guard / deep_research pass ``False`` so the
+    overwritten with this agent's — the output check passes ``False`` so the
     parent trace keeps its identity while still getting our spans.
 
     调用方把这次调用交回去的结果记成这个 span 的 output（``_record_output``）。它是 trace 的根
@@ -309,34 +294,17 @@ def _root_span(
     before.
 
     Tracing must never break the call: every langfuse touch degrades to no-op.
-
-    When opened inside a ``turn_trace`` scope (per-turn @node), the span attaches
-    to that turn's langfuse trace_id so this turn's guard + main spans fold into
-    one trace; outside a turn it stays None and langfuse starts a fresh trace.
     """
     span_name = name or "agent"
-    tid = current_turn_trace_id()
-    trace_context = {"trace_id": tid} if tid else None
     with (
-        _safe_current_span(span_name, input, trace_context) as span,
+        _safe_current_span(span_name, input) as span,
         rendered_from(prompt),
     ):
-        trace_name: str | None = None
-        trace_input: Any = None
-        if tid is not None:
-            # Inside a turn the guards / main / post-safety are separate root
-            # spans on one trace; langfuse would name the whole trace after the
-            # last one ingested (post-safety). Every root span writes the SAME
-            # unified trace name so the name is stable — this is the trace-level
-            # name only, each span keeps its own observation name. Only the main
-            # path (``update_trace``) owns the trace input, so the trace top
-            # reads the chat turn, not a guard's safety prompt.
-            trace_name = TURN_TRACE_NAME
-            trace_input = input if update_trace else None
-        elif update_trace:
-            trace_name = span_name
-            trace_input = input
-        _set_current_trace(name=trace_name, input=trace_input, session_id=session_id)
+        _set_current_trace(
+            name=span_name if update_trace else None,
+            input=input if update_trace else None,
+            session_id=session_id,
+        )
         yield span
 
 
@@ -399,15 +367,8 @@ def _record_tool_output(span: Any, result: ToolResult) -> None:
 # Hand-written ReAct loops (module-level so they can be de-risked in isolation)
 # ---------------------------------------------------------------------------
 
-# Tools whose call means "this run is over" — the loop returns as soon as one is
-# dispatched, without asking the model for another turn. ``no_reply`` is chat's
-# (``app.agent.tools.no_reply``); ``stop_for_now`` is hers
-# (``app.living.moment``), the hand she ends a life moment with. A tool renamed
-# without updating this set fails silently — the loop just keeps going — so each
-# name is pinned by a test next to the tool it belongs to.
-_TERMINAL_TOOL_NAMES = {"no_reply", "stop_for_now"}
-
-# What a call that never ran is answered with. A terminal tool ends the run at
+# What a call that never ran is answered with. A tool that ends the round
+# (``ToolSpec.ends_round``; hers is ``stop_for_now``) ends the run at
 # the position it holds in the turn, so every call after it is left unexecuted —
 # and an assistant turn whose calls are not all answered makes the provider
 # reject the whole next request. The wording says what happened, so a model
@@ -433,8 +394,8 @@ def _normalise_tool_result(result: ToolResult) -> ToolResult:
       - ``list`` of block-dicts     → ``list[ContentBlock]`` (multimodal),
       - ``dict`` / anything else    → ``json.dumps`` string.
 
-    Returns a new ToolResult so the streamed ``tool_result`` chunk and the tool
-    message fed back both carry the normalised content.
+    Returns a new ToolResult so the tool message fed back carries the
+    normalised content.
     """
     content = result.content
     if isinstance(content, str):
@@ -448,39 +409,6 @@ def _normalise_tool_result(result: ToolResult) -> ToolResult:
     # dict (incl. tool_error outcome) or any other JSON-able value → string
     text = json.dumps(content, ensure_ascii=False, default=str)
     return ToolResult(tool_call_id=result.tool_call_id, content=text)
-
-
-def _is_terminal_tool_call(call: ToolCall) -> bool:
-    """Whether a tool call intentionally ends the current agent turn."""
-    return call.name in _TERMINAL_TOOL_NAMES
-
-
-def _extend_turn(
-    parts: list[TurnPart], kind: TurnPartKind, chunk: StreamChunk
-) -> None:
-    """Fold one streamed chunk into the sequence the turn is being rebuilt as.
-
-    A stream cuts one wire part into many chunks, so consecutive chunks of the
-    same kind extend the part that is still open. Two things close it: the
-    adapter saying this chunk opens a new one (``starts_part`` — it read the
-    provider's parts and saw the boundary), and a signature arriving, which
-    belongs to the segment it rode in on. A chunk carrying neither text nor a
-    signature adds nothing.
-    """
-    text = (chunk.text if kind is TurnPartKind.TEXT else chunk.reasoning) or ""
-    if not text and chunk.signature is None:
-        return
-    open_part = parts[-1] if parts else None
-    if (
-        not chunk.starts_part
-        and open_part is not None
-        and open_part.kind is kind
-        and open_part.signature is None
-    ):
-        open_part.text += text
-        open_part.signature = chunk.signature
-        return
-    parts.append(TurnPart(kind=kind, text=text, signature=chunk.signature))
 
 
 def _carries_something(message: Message) -> bool:
@@ -502,12 +430,10 @@ def _is_empty_turn(text: str, tool_calls: list[ToolCall]) -> bool:
     """Whether one model turn produced nothing usable: no tool_calls AND no
     non-whitespace text.
 
-    ``text`` should be the turn's plain-text view (``Message.text()`` for
-    ``_run_loop``, the joined streamed text parts for ``_stream_loop``) —
-    thinking is deliberately excluded from both: a turn that only thought
-    (thought parts on the turn, or streamed ``reasoning`` chunks) without
-    producing text or a tool_call is still empty *as an answer*, because
-    thinking is never surfaced to the user. This is a different question from
+    ``text`` should be the turn's plain-text view (``Message.text()``) —
+    thinking is deliberately excluded: a turn that only thought (thought parts
+    on the turn) without producing text or a tool_call is still empty *as an
+    answer*, because thinking is never surfaced to the user. This is a different question from
     ``_carries_something`` (whether the turn is worth replaying), which counts
     thoughts because the provider gets them back.
     """
@@ -585,6 +511,7 @@ async def _run_loop(
     messages: list[Message],
     tools: list[Tool],
     recursion_limit: int,
+    ends_round: frozenset[str] = frozenset(),
     session_id: str | None = None,
     model_kwargs: dict[str, Any] | None = None,
     transcript_sink: list[Message] | None = None,
@@ -662,7 +589,7 @@ async def _run_loop(
             convo.append(tool_msg)
             if transcript_sink is not None:
                 transcript_sink.append(tool_msg)
-            if _is_terminal_tool_call(call):
+            if call.name in ends_round:
                 # The calls after this one never ran, and the assistant turn
                 # carrying them is already stored. Answer each so the stored
                 # round keeps every call paired with a result — a turn with an
@@ -720,110 +647,6 @@ async def _run_loop(
     return closing
 
 
-async def _stream_loop(
-    model: ModelClient,
-    *,
-    messages: list[Message],
-    tools: list[Tool],
-    recursion_limit: int,
-    session_id: str | None = None,
-    model_kwargs: dict[str, Any] | None = None,
-) -> AsyncIterator[StreamChunk]:
-    """Stream neutral chunks; on a tool-call turn, dispatch and loop.
-
-    Each turn streams from the model, forwarding every chunk downstream while
-    accumulating the assistant's text + any tool calls. If the turn ended with
-    tool calls, dispatch them, emit a ``tool_result``
-    chunk per result (so the consumer can count them), feed the assistant turn +
-    tool messages back into the transcript, and stream another turn. A turn with
-    no tool calls ends the loop.
-
-    ``model_kwargs`` are forwarded to every model call. ``recursion_limit`` caps
-    the number of streamed turns.
-    """
-    convo = list(messages)
-    tool_defs = _tooldefs(tools)
-    call_kwargs = {**(model_kwargs or {}), "session_id": session_id}
-
-    for _ in range(max(1, recursion_limit)):
-        text_parts: list[str] = []
-        turn_parts: list[TurnPart] = []
-        turn_calls: list[ToolCall] = []
-        attempts = 0
-
-        # Transparent single-turn retry, mirroring _complete_turn: an empty
-        # attempt (no text, no tool_calls — see _is_empty_turn) re-issues
-        # model.stream for the SAME turn (no tools dispatched) instead of being
-        # accepted as the final turn. What that attempt thought does ride into
-        # the retry — see below.
-        # Chunks are still forwarded live as they arrive (yield below) so a
-        # normal turn keeps true token-by-token streaming — only once this
-        # attempt's stream is fully drained do we know whether it was empty.
-        # An empty attempt only ever carried reasoning / a bare finish_reason
-        # (never non-whitespace text or a tool_call, by definition), so
-        # nothing user-visible needs to be undone when we loop for another
-        # attempt. Exhausting the budget changes nothing about what happens
-        # below — same control flow, same shape — only a log marks it (see
-        # _complete_turn's docstring for why this must never raise instead).
-        while True:
-            attempts += 1
-            text_parts = []
-            turn_parts = []
-            turn_calls = []
-
-            async for chunk in model.stream(convo, tools=tool_defs, **call_kwargs):
-                if chunk.text:
-                    text_parts.append(chunk.text)
-                if chunk.text is not None:
-                    _extend_turn(turn_parts, TurnPartKind.TEXT, chunk)
-                if chunk.reasoning is not None:
-                    _extend_turn(turn_parts, TurnPartKind.THOUGHT, chunk)
-                if chunk.tool_call is not None:
-                    turn_calls.append(chunk.tool_call)
-                    turn_parts.append(TurnPart.from_tool_call(chunk.tool_call))
-                yield chunk
-
-            empty_turn = _is_empty_turn("".join(text_parts), turn_calls)
-            if not empty_turn or attempts >= _EMPTY_TURN_MAX_ATTEMPTS:
-                if empty_turn:
-                    logger.warning(
-                        "agent stream turn empty (no text, no tool_calls) after "
-                        "%d/%d attempts; model=%s",
-                        attempts,
-                        _EMPTY_TURN_MAX_ATTEMPTS,
-                        _model_label(model),
-                    )
-                break
-            # This attempt answered nothing, but what it thought is kept: the
-            # retry streams against a transcript that has it, so the signatures
-            # the model was reasoning from go back with it. An attempt that came
-            # back with nothing at all is dropped — on the wire it is an empty
-            # turn, which the provider rejects the whole request over.
-            unanswered = Message.from_model_turn(turn_parts, turn_calls)
-            if _carries_something(unanswered):
-                convo.append(unanswered)
-
-        if not turn_calls:
-            return
-
-        # rebuild the assistant turn from what we streamed, then dispatch. The
-        # sequence is carried back too (mirroring _run_loop, where the Message
-        # returned by model.complete already holds it) so the next request
-        # replays the thoughts and signatures this turn produced.
-        assistant_turn = Message.from_model_turn(turn_parts, turn_calls)
-        convo.append(assistant_turn)
-        for call in turn_calls:
-            with _tool_span(name=call.name, input=call.arguments) as span:
-                result = await dispatch(tools, call)
-                result = _normalise_tool_result(result)
-                _record_tool_output(span, result)
-            tool_msg = result.to_message()
-            convo.append(tool_msg)
-            yield StreamChunk(tool_result=result)
-            if _is_terminal_tool_call(call):
-                return
-
-
 # ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
@@ -837,9 +660,12 @@ async def _configured(value: str | int | FromConfig) -> Any:
 class Agent:
     """Unified thinking entry point for one agent (its :class:`AgentSpec`).
 
-    ``run`` / ``stream`` drive a hand-written ReAct loop. Having tools or not is
-    just a parameter difference, not a code path difference. ``extract`` is the
-    structured-output path (single ``model.structured`` call).
+    ``run`` drives a hand-written ReAct loop. Having tools or not is just a
+    parameter difference, not a code path difference. ``extract`` is the
+    structured-output path (single ``model.structured`` call). The tools are
+    given as their declarations (:class:`~app.agent.contracts.ToolSpec`): the
+    model sees their schemas in the order given, and a call to one declared
+    ``ends_round`` ends the run.
 
     Every entry takes the :class:`~app.agent.round.Call` its caller opened and binds it as the
     current call for as long as it runs; the call's own state is emptied at the start of each
@@ -851,9 +677,10 @@ class Agent:
     failure. ``spec.separate_trace`` puts every call in a Langfuse trace of its own.
     """
 
-    def __init__(self, spec: AgentSpec, *, tools: Sequence[Tool] = ()) -> None:
+    def __init__(self, spec: AgentSpec, *, tools: Sequence[ToolSpec] = ()) -> None:
         self._spec = spec
-        self._tools = list(tools)
+        self._tools = [t.tool for t in tools]
+        self._ends_round = frozenset(t.tool.name for t in tools if t.ends_round)
 
     # ------------------------------------------------------------------
     # internal
@@ -924,6 +751,7 @@ class Agent:
                         model,
                         messages=full_messages,
                         tools=self._tools,
+                        ends_round=self._ends_round,
                         recursion_limit=recursion_limit,
                         session_id=call.session,
                         model_kwargs=dict(spec.model_kwargs),
@@ -936,75 +764,6 @@ class Agent:
         if transcript_sink is not None:
             transcript_sink.extend(produced)
         return result
-
-    async def stream(
-        self,
-        messages: list[Message],
-        *,
-        call: Call,
-        prompts: PromptSet,
-        values: Mapping[str, str] | None = None,
-    ) -> AsyncGenerator[StreamChunk, None]:
-        """Stream neutral ``StreamChunk``s through the ReAct loop.
-
-        Retry only before the first chunk is yielded: once a token reaches the
-        consumer, replaying would duplicate the prefix. Backoff math matches
-        ``app.capabilities.retry`` (exponential ``base * 2^(N-1)`` clamped) so
-        streaming and non-streaming paths stay consistent.
-
-        It takes the call for its session only and does not bind it: a context variable set in an
-        async generator cannot be reset when a consumer drops the generator unclosed (the
-        garbage collector finishes it in another context). No round streams.
-        """
-        spec = self._spec
-        max_retries = spec.max_retries
-        model, recursion_limit = await self._model()
-        full_messages = [*prompts.messages(call.agent, values), *messages]
-
-        for attempt in range(1, max_retries + 1):
-            tokens_yielded = False
-            try:
-                with _root_span(
-                    name=spec.trace_name,
-                    input=[m.to_dict() for m in full_messages],
-                    update_trace=spec.update_trace,
-                    session_id=call.session,
-                    prompt=prompts.single_prompt(call.agent),
-                ) as span:
-                    _record_segments(span, prompts, call.agent)
-                    streamed: list[str] = []
-                    try:
-                        async for chunk in _stream_loop(
-                            model,
-                            messages=full_messages,
-                            tools=self._tools,
-                            recursion_limit=recursion_limit,
-                            session_id=call.session,
-                            model_kwargs=dict(spec.model_kwargs),
-                        ):
-                            tokens_yielded = True
-                            if chunk.text:
-                                streamed.append(chunk.text)
-                            yield chunk
-                    finally:
-                        # 跑完是完整的文本；出错或被消费方中途关掉时，是到那时已经交出去的部分。
-                        _record_output(span, "".join(streamed))
-                return
-            except RETRYABLE_EXCEPTIONS as e:
-                if tokens_yielded or attempt >= max_retries:
-                    raise
-                delay = min(_BACKOFF_BASE**attempt, _BACKOFF_MAX)
-                logger.warning(
-                    "Agent(%s).stream attempt %d/%d failed (%s: %s); "
-                    "retrying in %.2fs",
-                    spec.trace_name,
-                    attempt,
-                    max_retries,
-                    type(e).__name__,
-                    e,
-                    delay,
-                )
-                await asyncio.sleep(delay)
 
     async def extract(
         self,

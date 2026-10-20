@@ -150,70 +150,6 @@ def test_generation_span_swallows_end_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# turn-trace contextvar — unify one (message_id, persona_id) turn's Agent
-# root spans into ONE langfuse trace (guards + main), opt-in per turn node.
-# ---------------------------------------------------------------------------
-
-from app.agent.trace import current_turn_trace_id, turn_trace  # noqa: E402
-
-
-def test_current_turn_trace_id_none_outside_turn():
-    assert current_turn_trace_id() is None
-
-
-def test_current_turn_trace_id_deterministic_within_turn():
-    with turn_trace("msg-1:persona-7"):
-        a = current_turn_trace_id()
-        b = current_turn_trace_id()
-    assert a is not None
-    assert a == b
-
-
-def test_turn_trace_different_seed_different_id():
-    with turn_trace("msg-1:persona-7"):
-        a = current_turn_trace_id()
-    with turn_trace("msg-1:persona-8"):
-        c = current_turn_trace_id()
-    assert a != c
-
-
-def test_turn_trace_resets_on_exit():
-    with turn_trace("msg-1:persona-7"):
-        assert current_turn_trace_id() is not None
-    assert current_turn_trace_id() is None
-
-
-def test_same_seed_across_scopes_yields_same_id():
-    """The unification invariant: run_pre_safety and chat_node compute the same
-    seed independently from (message_id, persona_id) → same langfuse trace_id,
-    so guards and main land in one trace."""
-    with turn_trace("msg-9:persona-3"):
-        guard_tid = current_turn_trace_id()
-    with turn_trace("msg-9:persona-3"):
-        main_tid = current_turn_trace_id()
-    assert guard_tid == main_tid
-
-
-async def test_turn_trace_propagates_through_fan_out_wait():
-    """Guards run via fan_out_wait (ensure_future child tasks). The turn seed set
-    before the fan-out must reach those tasks so each guard's Agent root span
-    attaches to the turn trace, not a separate top-level trace."""
-    from app.capabilities.concurrency import fan_out_wait
-
-    seen: list[str | None] = []
-
-    async def _probe() -> None:
-        seen.append(current_turn_trace_id())
-
-    with turn_trace("msg-7:persona-2"):
-        expected = current_turn_trace_id()
-        await fan_out_wait([_probe(), _probe()], timeout_s=5.0)
-
-    assert expected is not None
-    assert seen == [expected, expected]
-
-
-# ---------------------------------------------------------------------------
 # under_last_generation —— 在它里面开的 span 挂在最近一次模型调用下面：工具在模型
 # 调用结束之后才派发，那个 generation 已经结束了，但仍能当父节点。
 # ---------------------------------------------------------------------------
@@ -435,19 +371,16 @@ def test_separate_trace_starts_spans_outside_the_current_trace(tracer):
     assert inner.get_span_context().trace_id != outer.get_span_context().trace_id
 
 
-async def test_separate_trace_leaves_the_outer_model_call_and_turn_as_they_were(
+async def test_separate_trace_leaves_the_outer_model_call_as_it_was(
     tracer, exported_spans
 ):
     """里面看不到外面那次模型调用；离开之后，外面那一轮接下来的工具 span 仍然挂在它自己的
     模型调用下面，而不是里面那次。"""
-    with tracer.start_as_current_span("outer"), turn_trace("msg-1:persona-1"):
+    with tracer.start_as_current_span("outer"):
         with generation_span(name="outer-llm", model="m", input=[]):
             pass
-        outer_turn = current_turn_trace_id()
-        assert outer_turn is not None
 
         with separate_trace():
-            assert current_turn_trace_id() is None
             with under_last_generation(), tracer.start_as_current_span(
                 "inner-tool"
             ) as inner_tool:
@@ -459,7 +392,6 @@ async def test_separate_trace_leaves_the_outer_model_call_and_turn_as_they_were(
             "outer-tool"
         ) as outer_tool:
             pass
-        assert current_turn_trace_id() == outer_turn
 
     generations = {s.name: s for s in exported_spans.get_finished_spans()}
     assert inner_tool.parent is None

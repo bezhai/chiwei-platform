@@ -66,7 +66,7 @@ async def test_the_answer_agent_has_its_own_prompt_trace_cost_and_only_the_sourc
 
     config = spec_called(world, "world_answer")
     assert config.trace_name == "world-answer"
-    assert tools_built_for(world, "world_answer") == [t.name for t in await query_tools()]
+    assert tools_built_for(world, "world_answer") == [t.tool.name for t in await query_tools()]
     assert len([c for c in world.costs if c["round_id"].startswith("world-answer:")]) == 1
     assert all(c["actor"] == "world" and c["lane"] == LANE for c in world.costs)
 

@@ -21,7 +21,7 @@ from langfuse.model import TextPromptClient
 from openai import InternalServerError
 
 from app.agent.client import ModelClient
-from app.agent.contracts import AgentSpec, Segment
+from app.agent.contracts import AgentSpec, Segment, ToolSpec
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role, ToolCall, ToolDef
 from app.agent.prompts import PromptSet
@@ -274,10 +274,10 @@ async def test_concurrent_calls_each_see_their_own_call_and_session(
     akao = open_call("diary", DIARY, lane="prod", participant="akao")
     ayana = open_call("diary", DIARY, lane="prod", participant="ayana")
     await asyncio.gather(
-        Agent(DIARY, tools=[who]).run(
+        Agent(DIARY, tools=[ToolSpec(who, trim="kept")]).run(
             _user("写日记"), call=akao, prompts=await _set(akao)
         ),
-        Agent(DIARY, tools=[who]).run(
+        Agent(DIARY, tools=[ToolSpec(who, trim="kept")]).run(
             _user("写日记"), call=ayana, prompts=await _set(ayana)
         ),
     )
@@ -302,7 +302,7 @@ async def test_after_a_sub_call_returns_its_caller_reads_its_state_and_is_curren
         """问一下。"""
         outer = current_call()
         inner = open_call("inner", INNER, lane="prod")
-        await Agent(INNER, tools=[note]).run(
+        await Agent(INNER, tools=[ToolSpec(note, trim="kept")]).run(
             _user("谁听见了"), call=inner, prompts=await _set(inner)
         )
         read_back.append(inner.state(Noted).items)
@@ -312,7 +312,7 @@ async def test_after_a_sub_call_returns_its_caller_reads_its_state_and_is_curren
         return "问过了。"
 
     outer = open_call("outer", OUTER, lane="prod")
-    await Agent(OUTER, tools=[ask]).run(
+    await Agent(OUTER, tools=[ToolSpec(ask, trim="kept")]).run(
         _user("醒了"), call=outer, prompts=await _set(outer)
     )
 
@@ -337,7 +337,7 @@ async def test_each_attempt_starts_with_the_calls_state_empty(models, monkeypatc
         participant="akao",
         at=datetime(2026, 7, 25, 14, tzinfo=CST),
     )
-    await Agent(READING, tools=[note]).run(
+    await Agent(READING, tools=[ToolSpec(note, trim="kept")]).run(
         _user("读"), call=call, prompts=await _set(call)
     )
 

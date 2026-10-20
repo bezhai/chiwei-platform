@@ -86,6 +86,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.agent.contracts import ToolSpec
 from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
@@ -347,4 +348,5 @@ async def take_back_message(
     )
 
 
-TAKEBACK_TOOLS = [take_back_message]
+# 撤回这只手的回执是她自己动作的结果，跟她自己的话一样留着。
+TAKEBACK_TOOLS = [ToolSpec(take_back_message, trim="kept")]

@@ -946,7 +946,7 @@ async def test_the_list_caps_the_unopened_pile_but_never_her_own_memory(
 def test_no_reading_tool_ever_asks_her_how_long_something_takes():
     """真人对"多久"没有内感受。问她要一个分钟数就是把生活切成日程表。"""
     banned = ("minute", "duration", "how_long", "seconds", "until", "hour")
-    for t in READING_TOOLS:
+    for t in [s.tool for s in READING_TOOLS]:
         params = t.definition.parameters.get("properties", {})
         for pname in params:
             assert not any(b in pname.lower() for b in banned), (
@@ -990,8 +990,8 @@ def test_both_hands_are_ones_she_actually_has():
     """
     from app.living.moment import MOMENT_TOOLS
 
-    assert look_for_something_to_read in MOMENT_TOOLS, "她手里没有找东西读这只手"
-    assert read_a_bit in MOMENT_TOOLS, "她手里没有往下读一程这只手"
+    assert look_for_something_to_read in [s.tool for s in MOMENT_TOOLS], "她手里没有找东西读这只手"
+    assert read_a_bit in [s.tool for s in MOMENT_TOOLS], "她手里没有往下读一程这只手"
 
 
 # --------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 """world 测试共用：临时的私有卷、起 world 的插件宿主（``app_host``）、替身模型和一轮之外的替身。
 
-四类 agent（主 agent、感知判断、NPC、应答）都经 :func:`app.world.agents.build_runner` 拿到
-runner，替身从那里换：按这次调用的名字（它的 prompt id）分给各自的替身，同时记下每一次调用的
-是哪一类、它的 spec、拿到了哪些工具。
+四类 agent（主 agent、感知判断、NPC、应答）都经 :func:`app.world.agents.run_agent` 造一个
+``Agent`` 来调，替身从那里换：按这次调用的名字（它的 prompt id）分给各自的替身，同时记下每一次
+调用的是哪一类、它的 spec、拿到了哪些工具。
 """
 from __future__ import annotations
 
@@ -207,16 +207,13 @@ async def world(volume, monkeypatch, app_host):
     class Dispatch:
         """按这次调用的名字交给主 agent 的替身或那一类的替身，记下调用的是谁、拿到哪些工具。"""
 
-        def __init__(self, spec, tools):
-            self.spec, self.tools = spec, [t.name for t in tools]
+        def __init__(self, spec, *, tools=()):
+            self.spec, self.tools = spec, [t.tool.name for t in tools]
 
         async def run(self, messages, *, call, **kw):
             h.built.append((call.agent, self.spec, self.tools))
             target = h.runner if call.agent == main_agent.ROUND else h.agents[call.agent]
             return await target.run(messages, call=call, **kw)
-
-    def build_runner(spec, tools):
-        return Dispatch(spec, tools)
 
     from inner_shared.dynamic_config import dynamic_config
 
@@ -227,7 +224,7 @@ async def world(volume, monkeypatch, app_host):
     monkeypatch.setattr(main_agent, "load_session", load_session)
     monkeypatch.setattr(main_agent, "commit_transcript", commit_transcript)
     monkeypatch.setattr(agents, "record_round_cost", record_round_cost)
-    monkeypatch.setattr(agents, "build_runner", build_runner)
+    monkeypatch.setattr(agents, "Agent", Dispatch)
     monkeypatch.setattr(receiving, "succeeded_message_ids", succeeded_message_ids)
     h.host = await app_host("world")
     h.handler = _world_inbox_handler(h.host)

@@ -51,7 +51,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from app.agent.contracts import AgentSpec, Segment
+from app.agent.contracts import AgentSpec, Segment, ToolSpec
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
@@ -127,7 +127,7 @@ def reading_instruction() -> str:
 
 def build_reading_tools(
     *, pages: list[str | None], total_pages: int, progress: dict
-) -> list[Tool]:
+) -> list[ToolSpec]:
     """造阅读 agent 的唯一工具 ``read(page_num)``，把现切页机制绑定 capture 进闭包。
 
     ``pages`` —— 读时现解码现分页得到的页列表（内存）。``read`` 从这里按页号现切。元素为
@@ -187,7 +187,8 @@ def build_reading_tools(
         progress["frontier"] += 1
         return content
 
-    return [Tool(read)]
+    # 读到的是书的正文（这一程不存上下文，裁剪用不上，按它是什么声明）。
+    return [ToolSpec(Tool(read), trim="material")]
 
 
 async def run_reading_round(

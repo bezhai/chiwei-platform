@@ -643,7 +643,7 @@ def test_all_four_hands_are_actually_in_her_tool_belt():
     """
     from app.living.moment import MOMENT_TOOLS
 
-    mounted = {t.name for t in MOMENT_TOOLS}
+    mounted = {s.tool.name for s in MOMENT_TOOLS}
     for hand in (
         "draw_a_picture",
         "find_a_picture_online",
@@ -651,7 +651,7 @@ def test_all_four_hands_are_actually_in_her_tool_belt():
         "look_at_a_picture",
     ):
         assert hand in mounted, f"{hand} 没挂进 MOMENT_TOOLS，她根本没有这只手"
-    assert {t.name for t in PICTURE_TOOLS} <= mounted
+    assert {s.tool.name for s in PICTURE_TOOLS} <= mounted
 
 
 def test_her_instruction_manual_is_written_for_her():
@@ -659,7 +659,7 @@ def test_her_instruction_manual_is_written_for_her():
 
     空 docstring = 她拿到一只不知道干什么用的手。
     """
-    for t in PICTURE_TOOLS:
+    for t in [s.tool for s in PICTURE_TOOLS]:
         assert t.definition.description.strip(), f"{t.name} 没有给她的说明"
 
 

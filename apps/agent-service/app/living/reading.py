@@ -68,6 +68,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field, field_validator
 
 # module-level 引入，测试从这里换替身（一程真跑起来要取字节 + 几轮模型调用）
+from app.agent.contracts import ToolSpec
 from app.agent.reading import run_reading_round
 from app.agent.round import current_round
 from app.agent.tooling import tool
@@ -525,7 +526,13 @@ async def send_round(this_round: FilePickedUp, *, sender: str) -> Delivery:
     )
 
 
-READING_TOOLS = [look_for_something_to_read, read_a_bit]
+# 读东西的两只手留着，不当素材裁：``look_for_something_to_read`` 的返回里是 ``file=<attachment_id>``，
+# 被 ``read_a_bit(which=...)`` 吃；``read_a_bit`` 指代不明时抛的那句话里也逐个印着候选的
+# ``file=``。
+READING_TOOLS = [
+    ToolSpec(look_for_something_to_read, trim="kept"),
+    ToolSpec(read_a_bit, trim="kept"),
+]
 
 
 # ---------------------------------------------------------------------------

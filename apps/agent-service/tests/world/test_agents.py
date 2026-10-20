@@ -1,6 +1,6 @@
 """world 的 agent 怎么调模型：模型和工具预算从哪来、每一次调用是单独的 trace、成本怎么记。
 
-模型换成替身（:func:`app.world.agents.build_runner` 换掉），成本记账换成替身。
+模型换成替身（:func:`app.world.agents.run_agent` 用的 ``Agent`` 换掉），成本记账换成替身。
 """
 from __future__ import annotations
 
@@ -95,14 +95,14 @@ def calling(config, monkeypatch):
     built: list[tuple] = []
     costs: list[dict] = []
 
-    def build_runner(spec, tools):
+    def build_agent(spec, *, tools=()):
         built.append((spec, list(tools)))
         return runner
 
     async def record_round_cost(**kw):
         costs.append(kw)
 
-    monkeypatch.setattr(agents, "build_runner", build_runner)
+    monkeypatch.setattr(agents, "Agent", build_agent)
     monkeypatch.setattr(agents, "record_round_cost", record_round_cost)
     return runner, built, costs
 

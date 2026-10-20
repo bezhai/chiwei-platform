@@ -7,15 +7,20 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
-from app.capabilities import banned_words, output_safety
+from app.agent.client import ModelClient
+from app.agent.round import current_call
+from app.agent.trace import _current_prompt
+from app.capabilities import banned_words
 from app.capabilities.output_safety import audit_output
 
 
-class _FakeGuard:
-    """判词那一步的替身：要么给一个结果，要么炸，要么永远不回来。"""
+class _FakeGuard(ModelClient):
+    """判词那一步的模型替身：要么给一个结果，要么炸，要么永远不回来。记下每次判的是哪段话（这一轮
+    取齐的 prompt 编译时拿到的 ``response``）和是哪次调用。"""
 
     def __init__(
         self,
@@ -32,22 +37,34 @@ class _FakeGuard:
         self.asked: list[str] = []
         self.calls: list = []
 
-    async def extract(self, schema, *, messages, call, prompts, values):
-        self.asked.append(values["response"])
-        self.calls.append(call)
+    async def complete(self, *_a: Any, **_k: Any):  # pragma: no cover - not used
+        raise NotImplementedError
+
+    def stream(self, *_a: Any, **_k: Any):  # pragma: no cover - not used
+        raise NotImplementedError
+
+    async def structured(self, messages, *, schema, **_kwargs):
+        self.asked.append(_current_prompt.get().replay_variables["response"])
+        self.calls.append(current_call())
         if self.hang:
             await asyncio.sleep(3600)
         if self.boom is not None:
             raise self.boom
-        return schema(is_unsafe=self.unsafe, confidence=self.confidence)
+        return {"is_unsafe": self.unsafe, "confidence": self.confidence}
 
 
 @pytest.fixture(autouse=True)
-def her_round():
-    """判的是她这一轮要发出去的话：判词那次调用开在她这一轮里。"""
+async def her_round(prompts_from_fixtures):
+    """判的是她这一轮要发出去的话：判词那次调用开在她这一轮里，prompt 用这一轮取齐的那份。"""
     from datetime import datetime
 
+    from app.agent.prompts import PromptSet
     from app.agent.round import Round, in_round
+    from app.capabilities.output_safety import (
+        GUARD_OUTPUT,
+        GUARD_OUTPUT_AGENT,
+        GUARD_OUTPUT_SEGMENT,
+    )
     from app.infra.cst_time import CST
 
     this_round = Round(
@@ -60,6 +77,9 @@ def her_round():
         reason="test",
         due=object(),
     )
+    this_round.prompts = await PromptSet.resolve(
+        {GUARD_OUTPUT: GUARD_OUTPUT_AGENT}, {GUARD_OUTPUT: GUARD_OUTPUT_SEGMENT}, this_round
+    )
     with in_round(this_round):
         yield this_round
 
@@ -67,7 +87,11 @@ def her_round():
 @pytest.fixture
 def guard(monkeypatch):
     fake = _FakeGuard()
-    monkeypatch.setattr(output_safety, "build_guard", lambda: fake)
+
+    async def build_model_client(_model_id: str) -> ModelClient:
+        return fake
+
+    monkeypatch.setattr("app.agent.core.build_model_client", build_model_client)
     return fake
 
 

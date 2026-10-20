@@ -193,6 +193,7 @@ from typing import Annotated, Any
 
 from pydantic import Field, field_validator
 
+from app.agent.contracts import ToolSpec
 from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
@@ -1575,7 +1576,24 @@ async def look_at_phone(
     return blocks
 
 
-PHONE_TOOLS = [look_at_phone, look_through_your_phone, look_up_contact]
+# 手机的三只手都留着，不当素材裁：
+#
+#   * ``look_up_contact`` / ``look_through_your_phone``  ``channel_id=<id>``，被 ``look_at_phone`` /
+#     ``send_message`` 吃（翻页那只手的最后一串还是往下翻的游标）。安静下来的会话不在手机通知上，
+#     这两只手是找回它的仅有的两条路。
+#   * ``look_at_phone``  **唯一一只返回是别人内容、却留着的手。** 它那一页上有两样凭据：每条她自己
+#     发的消息带的 ``take_back_id``，和头上那串 ``before=``。前者在快照的"你刚做过、说过"那段有
+#     副本，但那段只有最近 12 条，滚出去的旧消息就没有第二份了；后者是往前翻**唯一**的入口，从头
+#     到尾只出现在这一次返回里，换掉正文她就再也翻不回这条会话更早的地方。只保留句柄、把正文
+#     换掉更精确，但那要在裁剪这一层解析手机这边渲染出来的标签 —— 渲染改一个字，句柄就静默地留
+#     不住了，而症状是几小时后她拿着一个不存在的编号去撤消息。别人的正文因此多留 3 小时：一页十几
+#     条文本，跟这个风险不是一个量级（图片块**不**跟着多留，它走
+#     :data:`app.agent.continuity.PICTURE_TRIMMED` 那条独立的线）。
+PHONE_TOOLS = [
+    ToolSpec(look_at_phone, trim="kept"),
+    ToolSpec(look_through_your_phone, trim="kept"),
+    ToolSpec(look_up_contact, trim="kept"),
+]
 
 
 # medium 由会话本身决定：私聊是手机上一对一，群是群里说话。两者都隔着设备，所以坐在

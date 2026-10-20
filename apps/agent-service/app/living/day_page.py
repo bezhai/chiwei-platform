@@ -45,11 +45,11 @@ from typing import Annotated
 from pydantic import field_validator
 
 from app.agent.contracts import AgentSpec, Segment
+from app.agent.core import Agent
 from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.agent.trace import collect_usage
-from app.capabilities.agent import AgentRunner
 from app.data.persist import fetch_all, fetch_one, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
 from app.domain.thinking_cost import record_round_cost
@@ -276,14 +276,6 @@ async def read_day_pages_between(
     return [from_row(LivingDayPage, row) for row in rows]
 
 
-def build_day_page_runner() -> AgentRunner:
-    """写这一页的 agent。模块级函数，测试替身从这里换掉，不碰真模型。
-
-    **不带任何工具**（见 :data:`DAY_PAGE_AGENT`）：她的回复正文就是那一页。
-    """
-    return AgentRunner(DAY_PAGE_AGENT)
-
-
 def _day_page_prompt(*, day: date, lines: list[str], previous: LivingDayPage | None) -> str:
     """摆到她眼前的那一段：这是哪一天、这一天发生过什么、上一页写了什么。
 
@@ -391,7 +383,7 @@ async def write_due_page(due: DuePage) -> LivingDayPage | None:
     # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
     # 会系统性丢 trace，"这一天花了多少"只能从 PG 数。
     with collect_usage() as usage:
-        reply = await build_day_page_runner().run(
+        reply = await Agent(DAY_PAGE_AGENT).run(
             [
                 Message(
                     role=Role.USER,

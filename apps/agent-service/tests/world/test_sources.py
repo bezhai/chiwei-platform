@@ -53,7 +53,7 @@ async def test_without_dynamic_config_every_registered_source_is_enabled(registe
     names = [s.name for s in await sources.enabled_sources()]
 
     assert names[:2] == ["records", "reality"]
-    tools = [t.name for t in await sources.query_tools()]
+    tools = [t.tool.name for t in await sources.query_tools()]
     assert {"list_records", "read_record", "search_web", *WEATHER_TOOLS} <= set(tools)
 
 
@@ -66,13 +66,13 @@ async def test_the_enabled_list_keeps_only_the_named_sources_in_registration_ord
 async def test_a_source_left_out_of_the_enabled_list_loses_its_tools(registered):
     registered[sources.ENABLED_SOURCES_KEY] = "records"
 
-    assert [t.name for t in await sources.query_tools()] == ["list_records", "read_record"]
+    assert [t.tool.name for t in await sources.query_tools()] == ["list_records", "read_record"]
 
 
 async def test_a_new_source_is_one_registration_away(registered):
     sources.register(Source(name="tides", tools=(look_up_tides,)))
 
-    assert "look_up_tides" in [t.name for t in await sources.query_tools()]
+    assert "look_up_tides" in [t.tool.name for t in await sources.query_tools()]
     assert "look_up_tides" in sources.material_tools()
 
 

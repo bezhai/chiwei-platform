@@ -32,7 +32,7 @@ from datetime import datetime
 import httpx
 import pytest
 
-from app.agent.contracts import AgentSpec, Segment
+from app.agent.contracts import AgentSpec, Segment, ToolSpec
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
@@ -232,7 +232,7 @@ async def test_agents_interleave(replay):
     )
     replay.model.script("world_npc", Reply(text="老板：早。"))
 
-    reply = await Agent(outer, tools=[ask]).run(
+    reply = await Agent(outer, tools=[ToolSpec(ask, trim="kept")]).run(
         [Message(role=Role.USER, content="醒了")],
         call=open_call("world_round", outer, lane=LANE),
         prompts=prompts,

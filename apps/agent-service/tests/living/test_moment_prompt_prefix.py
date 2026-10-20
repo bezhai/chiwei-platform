@@ -27,7 +27,6 @@ import pytest
 from langfuse.api.resources.prompts import Prompt_Text
 from langfuse.model import TextPromptClient
 
-from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptConfigError, PromptSet
 from app.infra import cst_time
 from app.living import moment as moment_mod
@@ -39,7 +38,7 @@ from app.living.moment import (
     LIFE_MOMENT_SEGMENT,
     LifeMoment,
 )
-from tests.living.conftest import regular_round
+from tests.living.conftest import Calls, regular_round
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -72,19 +71,8 @@ def _clock_shaped(name: str) -> bool:
     return bool(tokens & _CLOCK_WORDS)
 
 
-class _CapturingLife:
-    """替身 life：只把每一轮拿到的 prompt 变量记下来，一句模型都不调。"""
-
-    def __init__(self) -> None:
-        self.runs: list[dict] = []
-
-    async def run(self, messages, **kwargs):
-        self.runs.append(kwargs)
-        return Message(role=Role.ASSISTANT, content="继续")
-
-
 @pytest.fixture
-async def two_moments(living_db, monkeypatch):
+async def two_moments(living_db, monkeypatch, models):
     """真跑她相隔十分钟的两轮，交回这两轮各自喂给 prompt 的变量。
 
     这一轮该不该跑、变量怎么组装走的都是真代码；只有"调模型"那一步是替身，
@@ -101,16 +89,16 @@ async def two_moments(living_db, monkeypatch):
     async def fixed_minutes() -> int:
         return 10
 
-    runner = _CapturingLife()
+    runner = Calls()
     monkeypatch.setattr(persona_mod, "find_persona", fake_find_persona)
     monkeypatch.setattr(moment_mod, "life_moment_minutes", fixed_minutes)
-    monkeypatch.setattr(moment_mod, "build_moment_runner", lambda: runner)
+    models[LIFE_MOMENT_PROMPT_ID] = runner.client
 
     await regular_round(LANE, "akao", _at(14, 0))
     await regular_round(LANE, "akao", _at(14, 10))
 
     assert len(runner.runs) == 2, f"两轮没都跑起来：{len(runner.runs)} 轮"
-    return [run["values"] for run in runner.runs]
+    return [run["values"] for _messages, run in runner.runs]
 
 
 def _at(hour: int, minute: int = 0) -> dt.datetime:

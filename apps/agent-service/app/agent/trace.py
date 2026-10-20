@@ -3,11 +3,11 @@
 LangChain's ``CallbackHandler`` auto-instrumented the old agent. The self-built
 core埋 spans by hand. This module is the *generation*-span ground floor: every
 adapter LLM call (T2) wraps itself in one ``generation_span``; T3/T4 build the
-``run``/``stream``/``extract`` root span and tool spans on top of the same
-langfuse v3 client.
+``run``/``extract`` root span and tool spans on top of the same langfuse v3
+client.
 
 Why a generation span is *unconditional* (spec §Key design decisions): the
-legacy ``update_trace=False`` on guard / ``deep_research`` paths means "do not
+legacy ``update_trace=False`` on the output check means "do not
 overwrite the parent trace's name / metadata / IO", **not** "do not trace". The
 generation span must always exist or we violate "every LLM call is traced".
 So this helper has no ``update_trace`` knob — it always opens a span. The
@@ -49,65 +49,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _client: Langfuse | None = None
-
-
-# ---------------------------------------------------------------------------
-# Turn-trace context: unify one chat turn's Agent spans into one langfuse trace
-# ---------------------------------------------------------------------------
-
-# A chat turn's per-LLM operations (pre-check guards via emit_and_wait, the main
-# stream) run in *separate* @node / async-task contexts, so each Agent root span
-# would otherwise open its own top-level langfuse trace. The OTel current-span
-# does not propagate across those dataflow boundaries. We instead derive a
-# deterministic langfuse trace_id from a per-turn seed (``message_id:persona_id``)
-# and attach every Agent root span to it, so guards + main land in ONE trace.
-#
-# This is OPT-IN: only per-turn @nodes (run_pre_safety, chat_node) enter
-# ``turn_trace`` from their request's (message_id, persona_id). Debounced
-# consumers (e.g. life wake) deliberately do NOT — they are aggregations,
-# not a turn, and must stay separate traces. A debounce-propagated runtime
-# trace_id would have leaked them into a turn trace, which is exactly why we
-# don't seed from the runtime trace_id.
-_turn_trace_seed: ContextVar[str | None] = ContextVar(
-    "agent_turn_trace_seed", default=None
-)
-
-# The trace-level name every root span in a turn writes. A turn's guards, main
-# stream, and post-safety are separate root spans on one trace; langfuse derives
-# the trace name from whichever root span is ingested last (post-safety, which
-# runs last), so the whole trace would otherwise read "post-safety-check". Each
-# root span writes THIS name instead, so the trace name is stable regardless of
-# ingestion order. This is the trace-level name only — each span keeps its own
-# observation name (pre-nsfw-check / main / post-safety-check / ...).
-TURN_TRACE_NAME = "chat-turn"
-
-
-@contextmanager
-def turn_trace(seed: str) -> Iterator[None]:
-    """Mark the current async scope as one chat turn keyed by ``seed``.
-
-    Every ``Agent`` root span opened inside this scope attaches to the same
-    langfuse trace (derived deterministically from ``seed``). Restores the
-    previous value on exit (success or exception).
-    """
-    token = _turn_trace_seed.set(seed)
-    try:
-        yield
-    finally:
-        _turn_trace_seed.reset(token)
-
-
-def current_turn_trace_id() -> str | None:
-    """The langfuse trace_id for the active turn, or None when outside any turn.
-
-    Deterministic in the seed: two scopes that compute the same
-    ``message_id:persona_id`` (e.g. run_pre_safety and chat_node) get the same
-    trace_id and therefore the same trace.
-    """
-    seed = _turn_trace_seed.get()
-    if not seed:
-        return None
-    return Langfuse.create_trace_id(seed=seed)
 
 
 # ---------------------------------------------------------------------------
@@ -197,17 +138,15 @@ def separate_trace() -> Iterator[None]:
     一个 agent 在自己的工具里调另一个 agent 时，里面那个的根 span 默认是外面那条 trace 里
     当前工具 span 的子 span，而且会把外面那条 trace 的名字、输入改成自己的。包上这一层：
     当前 OTel 上下文换成空的（里面开的第一个 span 就是一条新 trace 的根），"最近一次模型
-    调用"、渲染用的 prompt 和这一轮对话的 trace 都清空。离开时四样都恢复，外面那一轮接下来
-    的工具 span 照常挂在它自己的模型调用下面，模型调用照常关联它自己的 prompt。
+    调用"和渲染用的 prompt 都清空。离开时三样都恢复，外面那一轮接下来的工具 span 照常挂在
+    它自己的模型调用下面，模型调用照常关联它自己的 prompt。
     """
     otel_token = otel_context.attach(otel_context.Context())
     generation_token = _last_generation.set(None)
     prompt_token = _current_prompt.set(None)
-    turn_token = _turn_trace_seed.set(None)
     try:
         yield
     finally:
-        _turn_trace_seed.reset(turn_token)
         _current_prompt.reset(prompt_token)
         _last_generation.reset(generation_token)
         otel_context.detach(otel_token)

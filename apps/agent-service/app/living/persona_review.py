@@ -46,11 +46,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
 from app.agent.contracts import AgentSpec, Segment
+from app.agent.core import Agent
 from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.agent.trace import collect_usage
-from app.capabilities.agent import AgentRunner
 from app.data.queries import find_persona
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST
@@ -161,14 +161,6 @@ async def persona_review_vars(*, persona_id: str) -> dict[str, str]:
         "persona_name": getattr(persona, "display_name", "") or persona_id,
         "persona_core": core,
     }
-
-
-def build_persona_review_runner() -> AgentRunner:
-    """重写身份正文的 agent。模块级函数，测试替身从这里换掉，不碰真模型。
-
-    **不带任何工具**（见 :data:`PERSONA_REVIEW_AGENT`）：她的回复正文就是新那一版。
-    """
-    return AgentRunner(PERSONA_REVIEW_AGENT)
 
 
 def _persona_review_prompt(
@@ -298,7 +290,7 @@ async def write_due_review(due: DueReview) -> PersonaVersion | None:
     # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
     # 会系统性丢 trace，"这一周花了多少"只能从 PG 数。
     with collect_usage() as usage:
-        reply = await build_persona_review_runner().run(
+        reply = await Agent(PERSONA_REVIEW_AGENT).run(
             [
                 Message(
                     role=Role.USER,

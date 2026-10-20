@@ -34,6 +34,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.agent.contracts import ToolSpec
 from app.agent.round import current_call, current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
@@ -253,4 +254,9 @@ async def let_npc_appear(
 
 # 只给主 agent 的动作，排在知识来源的查询工具后面。它们的返回是它自己做过的事，跟着它自己
 # 的话一起留（:mod:`app.agent.continuity` 只把来源的查询结果当材料裁）。
-ACTIONS = [write_record, wake_me_at, report_change, let_npc_appear]
+ACTIONS = [
+    ToolSpec(write_record, trim="kept"),
+    ToolSpec(wake_me_at, trim="kept"),
+    ToolSpec(report_change, trim="kept"),
+    ToolSpec(let_npc_appear, trim="kept"),
+]

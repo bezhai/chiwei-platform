@@ -738,29 +738,24 @@ async def test_a_round_that_waited_behind_a_stuck_one_happens_when_it_gets_her(
 
 def _fails_after_its_hands(runner, failure: BaseException | None = None, *, hangs=False):
     """这一轮的手都用完了，模型那一步才失败（或者一直不返回）。"""
-    real = runner.run
 
-    async def run(messages, **kwargs):
-        reply = await real(messages, **kwargs)
+    async def after() -> None:
         if hangs:
             await asyncio.sleep(60)
         if failure is not None:
             raise failure
-        return reply
 
-    runner.run = run
+    runner.after = after
 
 
 def _notes_what_was_sent_before_the_model(runner, post):
     """下一轮模型那一步被调到的时候，已经发出去了哪些。"""
     seen: list[list] = []
-    real = runner.run
 
-    async def run(messages, **kwargs):
+    async def meanwhile() -> None:
         seen.append(list(post.sent))
-        return await real(messages, **kwargs)
 
-    runner.run = run
+    runner.meanwhile = meanwhile
     return seen
 
 

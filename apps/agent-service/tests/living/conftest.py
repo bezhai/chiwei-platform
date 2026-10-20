@@ -435,3 +435,138 @@ def model_facing_text(tool) -> dict[str, str]:
 def _prompts(prompts_from_fixtures):
     """一轮取齐的 prompt 来自回放的 prompt 快照（根 conftest 的 ``prompts_from_fixtures``）。"""
     return prompts_from_fixtures
+
+
+# ---------------------------------------------------------------------------
+# 模型那一步的替身
+#
+# 一轮里只有"调模型"那一步是假的：替身在模型客户端那一层（``app.agent.core.build_model_client``），
+# 循环、工具派发、prompt 取齐和渲染、上下文存取全是真的。替身按这次调用的名字分
+# （``current_call().agent``：她的一轮是 ``living_life_moment``，日记 ``living_day_page`` ……）。
+# ---------------------------------------------------------------------------
+
+
+def _as_returned(message) -> object:
+    """工具交回的东西，从循环喂回模型的那条工具消息里还原：失败（``@tool_error`` 的 dict）和 dict
+    在线上是 JSON 字符串，图片是一串块。"""
+    import json
+
+    content = message.content
+    if isinstance(content, list):
+        return [b.to_dict() for b in content]
+    if content.startswith("{"):
+        try:
+            return json.loads(content)
+        except ValueError:
+            return content
+    return content
+
+
+class Calls:
+    """一个 agent 的模型替身：每次调用先按顺序一只一只要写死的那几只手（循环真的派发它们），
+    最后说 ``said``。
+
+    记下每次调用拿到了什么（``runs``：SYSTEM 之后的那些消息，和一份
+    ``{"values": prompt 编译时的变量, "call": 这次调用, "tools": 给它的工具名}``）、每只手交回了
+    什么（``results``），以及每次调用最后那条输入（``prompts``）。``meanwhile`` 在模型那一步开头
+    跑（模型跑着的时候发生的事），``after`` 在手都调完、说话之前跑；``fail`` 给了就在模型那一步
+    抛它。
+    """
+
+    def __init__(self, *calls: tuple[str, dict], said: str = "继续") -> None:
+        self.calls = list(calls)
+        self.said = said
+        self.runs: list[tuple[list, dict]] = []
+        self.results: list[object] = []
+        self.prompts: list[str] = []
+        self.meanwhile = None
+        self.after = None
+        self.fail: BaseException | None = None
+
+    def client(self):
+        return _ScriptedCall(self)
+
+    @property
+    def material(self) -> str:
+        """最后一次调用真的摆到眼前的那段文字（SYSTEM 之后的消息）。"""
+        return "\n".join(m.content for m in self.runs[-1][0])
+
+    @property
+    def prompt_vars(self) -> dict[str, str]:
+        """最后一次调用的 prompt 编译时拿到的变量。"""
+        return self.runs[-1][1]["values"]
+
+
+def _scripted_call_class():
+    from app.agent.client import ModelClient
+    from app.agent.neutral import Message, Role, ToolCall
+    from app.agent.round import current_call
+    from app.agent.trace import _current_prompt
+
+    class ScriptedCall(ModelClient):
+        def __init__(self, script: Calls) -> None:
+            self._script = script
+            self._step = 0
+
+        async def complete(self, messages, *, tools=None, **_kwargs):
+            script = self._script
+            if self._step == 0:
+                prompt = _current_prompt.get()
+                script.runs.append(
+                    (
+                        list(messages[1:]),
+                        {
+                            "values": dict(getattr(prompt, "replay_variables", None) or {}),
+                            "call": current_call(),
+                            "tools": [t.name for t in tools or []],
+                        },
+                    )
+                )
+                script.prompts.append(messages[-1].content)
+                if script.meanwhile is not None:
+                    await script.meanwhile()
+                if script.fail is not None:
+                    raise script.fail
+            elif messages[-1].role is Role.TOOL:
+                script.results.append(_as_returned(messages[-1]))
+            step, self._step = self._step, self._step + 1
+            if step < len(script.calls):
+                name, arguments = script.calls[step]
+                return Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    tool_calls=[ToolCall(id=f"call-{step}", name=name, arguments=arguments)],
+                )
+            if step == len(script.calls) and script.after is not None:
+                await script.after()
+            return Message(role=Role.ASSISTANT, content=script.said)
+
+        def stream(self, *_args, **_kwargs):  # pragma: no cover - nothing streams
+            raise NotImplementedError
+
+        async def structured(self, *_args, **_kwargs):  # pragma: no cover - not used here
+            raise NotImplementedError
+
+    return ScriptedCall
+
+
+def _ScriptedCall(script: Calls):
+    return _scripted_call_class()(script)
+
+
+@pytest.fixture
+def models(monkeypatch) -> dict:
+    """每个 agent 的模型替身：名字 → 造替身的函数（一次调用造一个）。没给替身的 agent 一调模型
+    就报错，不会悄悄连到真模型。"""
+    from app.agent.round import current_call
+
+    by_agent: dict = {}
+
+    async def build_model_client(_model_id: str):
+        agent = current_call().agent
+        if agent not in by_agent:
+            raise AssertionError(f"{agent!r} 调了模型，但用例没给它替身")
+        return by_agent[agent]()
+
+    monkeypatch.setattr("app.agent.core.build_model_client", build_model_client)
+    return by_agent

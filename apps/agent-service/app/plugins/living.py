@@ -19,6 +19,9 @@ old reading queue.
   the inboxes named after the three personas -> received  stored only; she reads them on her clock
   the reading inbox                          -> read_a_round  one stretch of reading
 
+  her tools (``ctx.tool``)  each of app.living.moment.MOMENT_TOOLS, in the order she is given them,
+                            with how trimming treats what it returns and whether it ends her round
+
   POST /admin/reading/carry-over  carry_over_reading  the old reading queue -> the reading inbox
 
 **Her rounds take turns on one queue.** One person cannot think two things at once: her regular
@@ -86,7 +89,13 @@ from app.host import Batch, Coalesce, Context, Plugin, WakeSource
 from app.living import pictures, records  # noqa: F401
 from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
 from app.living.landing import reconcile_what_she_said
-from app.living.moment import DueMoment, LifeMoment, regular_moment_due, run_due_moment
+from app.living.moment import (
+    MOMENT_TOOLS,
+    DueMoment,
+    LifeMoment,
+    regular_moment_due,
+    run_due_moment,
+)
 from app.living.nudge import nudged_moment_due
 from app.living.participants import READING
 from app.living.persona import LIVING_PERSONAS, PersonaVersion
@@ -180,6 +189,8 @@ def setup(ctx: Context) -> None:
         ctx.wake(diary, pages, every=DAY_PAGE_EVERY)
         look_back = ctx.turns(persona_id, "persona-review", hold_limit=HOLD_LIMIT)
         ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
+    for her_tool in MOMENT_TOOLS:
+        ctx.tool(her_tool.tool, trim=her_tool.trim, ends_round=her_tool.ends_round)
     ctx.clock(
         "landing",
         LANDING_EVERY.total_seconds(),

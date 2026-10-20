@@ -26,7 +26,6 @@ import datetime as dt
 
 import pytest
 
-from app.agent.neutral import Message, Role
 from app.data.persist import insert_idempotent
 from app.data.tx import current_session, tx
 from app.host import Signal
@@ -43,7 +42,7 @@ from app.living.persona_review import (
     week_material,
 )
 from tests.data.read_back import all_versions
-from tests.living.conftest import clock_at, her_queue, her_round_runs, settled
+from tests.living.conftest import Calls, clock_at, her_queue, her_round_runs, settled
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -113,37 +112,17 @@ async def review_db(living_db):
     return living_db
 
 
-class FakeReview:
-    """替身：这一轮她写下的那一版是钉死的，只有模型那一步是假的。"""
-
-    def __init__(self, said: str) -> None:
-        self.said = said
-        self.runs: list[tuple[list[Message], dict]] = []
-
-    async def run(self, messages, **kwargs):
-        self.runs.append((messages, kwargs))
-        return Message(role=Role.ASSISTANT, content=self.said)
-
-    @property
-    def material(self) -> str:
-        """最后一轮真的摆到她眼前的那段文字。"""
-        return "\n".join(m.content for m in self.runs[-1][0])
-
-    @property
-    def prompt_vars(self) -> dict[str, str]:
-        """最后一轮真的传进去的那几个 prompt 变量。"""
-        return self.runs[-1][1]["values"]
-
-
 @pytest.fixture
-def stub_review(monkeypatch):
-    def install(said: str = "她这周开始每天写一页，好像有点上瘾。") -> FakeReview:
-        runner = FakeReview(said)
+def stub_review(monkeypatch, models):
+    """装一个模型替身：这一轮她写下的那一版是钉死的（:class:`tests.living.conftest.Calls`）；
+    ``material`` 是最后一轮真的摆到她眼前的那段文字，``prompt_vars`` 是那一轮 prompt 编译时拿到的
+    变量。"""
+
+    def install(said: str = "她这周开始每天写一页，好像有点上瘾。") -> Calls:
+        runner = Calls(said=said)
         from app.living import persona_review as review_mod
 
-        monkeypatch.setattr(
-            review_mod, "build_persona_review_runner", lambda: runner
-        )
+        models[review_mod.PERSONA_REVIEW_PROMPT_ID] = runner.client
         return runner
 
     return install

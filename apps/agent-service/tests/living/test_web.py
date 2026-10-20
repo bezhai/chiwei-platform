@@ -458,7 +458,7 @@ def test_neither_hand_ever_asks_her_how_long_something_takes():
     一遍，改坏了在本文件就该红。
     """
     banned = ("minute", "duration", "how_long", "seconds", "until", "hour")
-    for t in WEB_TOOLS:
+    for t in [s.tool for s in WEB_TOOLS]:
         for pname in t.definition.parameters.get("properties", {}):
             assert not any(b in pname.lower() for b in banned), (
                 f"{t.name} 的参数 {pname} 在问她一个时长 —— 她换的是一件事"
@@ -472,10 +472,10 @@ def test_neither_hand_can_be_mistaken_for_looking_at_her_phone():
     口语上也叫「刷手机」，两者一旦在她眼里糊成一件，她想看谁发来的消息时会去刷网页，
     或者反过来。名字里不带 phone，说明书里各自指回对方。
     """
-    names = {t.name for t in WEB_TOOLS}
+    names = {s.tool.name for s in WEB_TOOLS}
 
     assert all("phone" not in n for n in names), f"名字会跟看手机撞上：{names}"
-    for t in WEB_TOOLS:
+    for t in [s.tool for s in WEB_TOOLS]:
         assert "look_at_phone" in t.definition.description, (
             f"{t.name} 的说明书里没把「手机上谁给你发了什么」指回 look_at_phone"
         )
@@ -483,7 +483,7 @@ def test_neither_hand_can_be_mistaken_for_looking_at_her_phone():
 
 def test_both_hands_are_handed_over_as_one_set():
     """两只手一起交出去 —— 汇进 ``MOMENT_TOOLS`` 的是这一份，不是散着的两个。"""
-    assert WEB_TOOLS == [search_online, browse_online]
+    assert [s.tool for s in WEB_TOOLS] == [search_online, browse_online]
 
 
 def test_nothing_she_looks_up_survives_past_this_moment():
@@ -512,5 +512,5 @@ def test_both_hands_are_ones_she_actually_has():
     """
     from app.living.moment import MOMENT_TOOLS
 
-    assert search_online in MOMENT_TOOLS, "她手里没有上网查这只手"
-    assert browse_online in MOMENT_TOOLS, "她手里没有刷一批这只手"
+    assert search_online in [s.tool for s in MOMENT_TOOLS], "她手里没有上网查这只手"
+    assert browse_online in [s.tool for s in MOMENT_TOOLS], "她手里没有刷一批这只手"

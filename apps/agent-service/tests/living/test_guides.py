@@ -386,7 +386,7 @@ def test_both_hands_tell_her_the_output_can_be_cut():
     不说的话她会把截过的那一段当成完整结果，然后基于一个不完整的东西往下做事 ——
     跟 ``app.living.day_page`` 里那条"留白她会以为材料被截断了"是同一类。
     """
-    for t in GUIDE_TOOLS:
+    for t in [s.tool for s in GUIDE_TOOLS]:
         assert "太长会被截掉" in t.definition.description, (
             f"{t.name} 没告诉她输出可能不全"
         )
@@ -414,7 +414,7 @@ def test_neither_hand_ever_asks_her_how_long_something_takes():
     """真人对「多久」没有内感受。``tests/living/test_moment.py`` 对整份工具集有同一
     条；这两只手自己也守一遍，改坏了在本文件就该红。"""
     banned = ("minute", "duration", "how_long", "seconds", "until", "hour")
-    for t in GUIDE_TOOLS:
+    for t in [s.tool for s in GUIDE_TOOLS]:
         for pname in t.definition.parameters.get("properties", {}):
             assert not any(b in pname.lower() for b in banned), (
                 f"{t.name} 的参数 {pname} 在问她一个时长"
@@ -428,7 +428,7 @@ def test_neither_description_claims_a_limit_that_is_not_real():
     —— 说明里的 Python 脚本自己发 HTTP 照样通，那三份说明就靠这条才成立。写一条不
     存在的限制，她会因此不去跑本来跑得通的东西。
     """
-    for t in GUIDE_TOOLS:
+    for t in [s.tool for s in GUIDE_TOOLS]:
         assert "无网络" not in t.definition.description, (
             f"{t.name} 的说明书里写着一条不存在的限制"
         )
@@ -442,15 +442,15 @@ def test_the_hand_that_runs_things_points_back_at_the_guides():
 
 
 def test_both_hands_are_handed_over_as_one_set():
-    assert GUIDE_TOOLS == [read_a_guide, run_a_script]
+    assert [s.tool for s in GUIDE_TOOLS] == [read_a_guide, run_a_script]
 
 
 def test_both_hands_are_ones_she_actually_has():
     """没挂进 ``MOMENT_TOOLS`` 是静默失败：本文件全绿，而她这一轮里根本没有这两只手。"""
     from app.living.moment import MOMENT_TOOLS
 
-    assert read_a_guide in MOMENT_TOOLS, "她手里没有读说明这只手"
-    assert run_a_script in MOMENT_TOOLS, "她手里没有跑脚本这只手"
+    assert read_a_guide in [s.tool for s in MOMENT_TOOLS], "她手里没有读说明这只手"
+    assert run_a_script in [s.tool for s in MOMENT_TOOLS], "她手里没有跑脚本这只手"
 
 
 def test_the_list_variable_is_named_the_same_everywhere():

@@ -119,7 +119,8 @@ from app.agent.continuity import (
     next_transcript,
     trim_for_round,
 )
-from app.agent.contracts import AgentSpec, Segment
+from app.agent.contracts import AgentSpec, Segment, ToolSpec
+from app.agent.core import Agent
 from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
 from app.agent.round import Round, current_round, in_round, open_call
@@ -127,7 +128,6 @@ from app.agent.session import load_session
 from app.agent.tooling import tool
 from app.agent.tools._common import get_or_create_counter, tool_error
 from app.agent.trace import collect_usage
-from app.capabilities.agent import AgentRunner
 from app.capabilities.output_safety import (
     GUARD_OUTPUT,
     GUARD_OUTPUT_AGENT,
@@ -700,7 +700,7 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     )
     note_recorded(happening_id)
     # 不把原话再抄一遍：它就在这次调用的参数里，而这条回执跟她的话一样在上下文里留
-    # 4 小时（:data:`KEPT_TOOLS`），抄一遍就是同一句话在她每一轮的输入里多出现一次。
+    # 4 小时（:data:`MOMENT_TOOLS` 里它是留着的那一档），抄一遍就是同一句话在她每一轮的输入里多出现一次。
     # 当面说的话没有撤回编号，所以这里也没有编号可给。
     return "记下了。"
 
@@ -825,18 +825,27 @@ async def look_around() -> str:
 # :mod:`app.living.mouth` / :mod:`app.living.web` / :mod:`app.living.reading` /
 # :mod:`app.living.pictures` / :mod:`app.living.guides`），
 # 只在这里汇成一份——拆成几份工具集就会出现"某条路进来的那个 moment 她没有手机"这种谁也想
-# 不到的差别。
+# 不到的差别。这份的顺序就是模型看到的工具顺序（也是前缀缓存的一部分），改顺序会改请求。
 #
-# 每个模块导出自己那一份、由这里 splat，是为了让加一只手不必动别人的文件：模块自己
-# 管签名、描述和测试，这里只管"她手上有哪些"。
+# 每只手都声明它的返回怎么裁剪（:class:`app.agent.contracts.ToolSpec` 的 ``trim``，必填）：
+# 别的模块那几只在各自模块里声明，这里这几只的：
+#
+#   * ``look_around``  素材：world 回答的那一刻这里什么样，过了一阵早就变了，想知道就再看一眼。
+#   * 其余几只是**她自己动作的回执**（``switch_to`` / ``move_to`` / ``keep_in_mind`` / ``say`` /
+#     ``act`` / ``stop_for_now``），留着：这几条是"这件事到底做成了没有"的唯一记录，裁掉她就会
+#     照着一个不知道有没有成功的动作再来一遍。``stop_for_now`` 那句确认是她上一轮怎么收尾的唯一
+#     痕迹（它结束这一轮，后面没有她的话跟着），而且整条就几个字，换成短语省不下任何东西。
+#
+# 分不清就放"留着"那一档：留错了只是多占 token。``stop_for_now`` 是唯一一只结束这一轮的手
+# （``ends_round``）。
 MOMENT_TOOLS = [
-    switch_to,
-    move_to,
-    keep_in_mind,
-    say,
-    act,
-    look_around,
-    stop_for_now,
+    ToolSpec(switch_to, trim="kept"),
+    ToolSpec(move_to, trim="kept"),
+    ToolSpec(keep_in_mind, trim="kept"),
+    ToolSpec(say, trim="kept"),
+    ToolSpec(act, trim="kept"),
+    ToolSpec(look_around, trim="material"),
+    ToolSpec(stop_for_now, trim="kept", ends_round=True),
     *PHONE_TOOLS,
     *MOUTH_TOOLS,
     *TAKEBACK_TOOLS,
@@ -845,79 +854,6 @@ MOMENT_TOOLS = [
     *PICTURE_TOOLS,
     *GUIDE_TOOLS,
 ]
-
-# 她读到的素材：读完就该沉淀成她自己的东西，过了保留期换成一句短语。
-#
-#   * ``look_around``      world 回答的那一刻这里什么样，过了一阵早就变了，想知道就再看一眼
-#   * ``search_online`` / ``browse_online``  搜索结果和信息流，没有任何工具吃它们的 URL
-#   * ``read_a_guide``     说明书全文，想再看就再读一遍
-#   * ``run_a_script``     命令的输出。上限 4000 字（``app.capabilities.sandbox``），
-#     而且已经带着"还有多少字没给你"那句实话，这里不做第二次截断，只整块换掉
-MATERIAL_TOOLS = frozenset(
-    {
-        "look_around",
-        "search_online",
-        "browse_online",
-        "read_a_guide",
-        "run_a_script",
-    }
-)
-
-# 留着的那一档，两类东西：
-#
-# **一 · 长期标识** —— 不是她读到的内容，是她后面还要原样抄回去的凭据：
-#
-#   * ``draw_a_picture`` / ``find_a_picture_online`` / ``look_at_a_picture`` /
-#     ``look_through_your_pictures``  返回里的 ``pic=<32 位十六进制>``，被
-#     ``send_message(pictures=[...])`` / ``look_at_a_picture(which=...)`` /
-#     ``look_through_your_pictures(before=...)`` 吃。翻页那只手的最后一串还是往前翻
-#     的游标
-#   * ``look_for_something_to_read``  ``file=<attachment_id>``，被 ``read_a_bit(which=...)``
-#     吃。``read_a_bit`` 自己指代不明时抛的那句话里也逐个印着候选的 ``file=``，
-#     所以它也在这一档
-#   * ``look_up_contact`` / ``look_through_your_phone``  ``channel_id=<id>``，被
-#     ``look_at_phone`` / ``send_message`` 吃（翻页那只手的最后一串还是往下翻的游标）。
-#     安静下来的会话不在手机通知上，这两只手是找回它的仅有的两条路
-#   * ``look_at_phone``  **这一档里唯一一只返回是别人内容的手，破例在这里说清楚。**
-#     它那一页上有两样凭据：每条她自己发的消息带的 ``take_back_id``，和头上那串
-#     ``before=``。前者在快照的"你刚做过、说过"那段有副本，但那段只有最近 12 条，滚
-#     出去的旧消息就没有第二份了；后者是往前翻**唯一**的入口，从头到尾只出现在这一
-#     次返回里，换掉正文她就再也翻不回这条会话更早的地方。
-#     只保留句柄、把正文换掉更精确，但那要在裁剪这一层解析手机那边渲染出来的标签 ——
-#     渲染改一个字，句柄就静默地留不住了，而症状是几小时后她拿着一个不存在的编号去
-#     撤消息。别人的正文因此多留 3 小时：一页十几条文本，跟这个风险不是一个量级
-#     （图片块**不**跟着多留，它走 :data:`app.agent.continuity.PICTURE_TRIMMED` 那条独立的线）
-#
-# **二 · 她自己动作的回执** —— ``switch_to`` / ``move_to`` / ``keep_in_mind`` /
-# ``say`` / ``act`` / ``send_message`` / ``take_back_message`` / ``stop_for_now``。
-# 这几条是"这件事到底做成了没有"的唯一记录：``send_message`` 明确区分发出去了、已经说
-# 过了、交出去但没等到确认三种结局，裁掉她就会照着一个不知道有没有成功的动作再来一遍。
-# ``stop_for_now`` 那句确认是她上一轮怎么收尾的唯一痕迹（它结束这一轮，后面没有她的话
-# 跟着），而且整条就几个字，换成短语省不下任何东西。
-#
-# **新加一只手落进哪一档必须显式写下来**（用例 ``test_every_tool_she_has_is_classified``
-# 会因为漏掉而失败）。分不清就放这一档：留错了只是多占 token。
-KEPT_TOOLS = frozenset(
-    {
-        "switch_to",
-        "move_to",
-        "keep_in_mind",
-        "say",
-        "act",
-        "stop_for_now",
-        "send_message",
-        "take_back_message",
-        "look_at_phone",
-        "look_up_contact",
-        "look_through_your_phone",
-        "look_for_something_to_read",
-        "read_a_bit",
-        "draw_a_picture",
-        "find_a_picture_online",
-        "look_through_your_pictures",
-        "look_at_a_picture",
-    }
-)
 
 # 她的上下文裁多久。**写死在这儿，不走 Dynamic Config**：这五个数不随运行时变化，
 # 它们是"她是什么东西"的一部分，不是可调的旋钮。裁剪那一层只给形状，填什么归这里
@@ -1022,11 +958,6 @@ async def moment_ran(*, lane: str, persona_id: str, moment_id: str) -> bool:
     )
     row = await fetch_one(sql, lane=lane, persona_id=persona_id, moment_id=moment_id)
     return row is not None
-
-
-def build_moment_runner() -> AgentRunner:
-    """这个 moment 的 agent。模块级函数，测试替身从这里换掉，不碰真模型。"""
-    return AgentRunner(LIFE_MOMENT_AGENT, tools=MOMENT_TOOLS)
 
 
 # 上下文写失败的计数。没有对应的库表列：下一个 moment 冷启动本身就在 trace 和日志里看得
@@ -1336,7 +1267,9 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
     # 地址的历史不会在模型调用那一步先炸掉、永远轮不到被裁。
     history = trim_for_round(
         history,
-        material_tools=MATERIAL_TOOLS,
+        # 她读到的素材（声明成 material 的那几只手的返回）：读完就该沉淀成她自己的东西，过了保留期
+        # 换成一句短语。
+        material_tools=frozenset(t.tool.name for t in MOMENT_TOOLS if t.trim == "material"),
         now=now,
         state=state,
         policy=MOMENT_TRIM_POLICY,
@@ -1360,7 +1293,7 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
         LIFE_MOMENT_PROMPT_ID, LIFE_MOMENT_AGENT, lane=lane, participant=persona_id
     )
     with in_round(this_round), collect_usage() as usage:
-        reply = await build_moment_runner().run(
+        reply = await Agent(LIFE_MOMENT_AGENT, tools=MOMENT_TOOLS).run(
             [*history, stimulus],
             call=call,
             prompts=this_round.prompts,

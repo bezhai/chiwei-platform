@@ -132,7 +132,7 @@ def _install_agent(
             if delay:
                 await asyncio.sleep(delay)
             if read_calls is not None:
-                read_tool = {t.name: t for t in (captured["tools"] or [])}["read"]
+                read_tool = {t.tool.name: t.tool for t in (captured["tools"] or [])}["read"]
                 for pn in read_calls:
                     await read_tool.invoke({"page_num": pn})
             if usage is not None:
@@ -185,7 +185,7 @@ async def test_reading_agent_has_only_read_tool(monkeypatch):
     """唯一工具 read（只读、只产出印象）。"""
     captured = _install_agent(monkeypatch, read_calls=[0])
     await _run()
-    names = {t.name for t in captured["tools"]}
+    names = {t.tool.name for t in captured["tools"]}
     assert names == {"read"}
 
 
@@ -255,7 +255,7 @@ async def test_jump_read_is_rejected_with_guidance(monkeypatch, stub_pages):
     """修复 A：非连续 read 被挡（喂回引导），不静默接受。"""
     captured = _install_agent(monkeypatch, read_calls=[0])
     await _run(start_page=0)
-    read_tool = {t.name: t for t in captured["tools"]}["read"]
+    read_tool = {t.tool.name: t.tool for t in captured["tools"]}["read"]
     out = await read_tool.invoke({"page_num": 3})
     assert "第 3 页正文" not in out
     assert "1" in out, "引导里指出该读的下一页（第 1 页）"
@@ -358,7 +358,7 @@ async def test_read_call_cap_enforced(monkeypatch, stub_pages):
     monkeypatch.setattr(reading_mod, "MAX_READ_CALLS", 2)
     captured = _install_agent(monkeypatch, read_calls=[0, 1, 2, 3])
     await _run(start_page=0)
-    read_tool = {t.name: t for t in captured["tools"]}["read"]
+    read_tool = {t.tool.name: t.tool for t in captured["tools"]}["read"]
     over = await read_tool.invoke({"page_num": 9})
     assert "够" in over or "停" in over or "上限" in over
 

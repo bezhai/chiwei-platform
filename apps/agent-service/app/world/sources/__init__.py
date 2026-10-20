@@ -31,6 +31,7 @@ from pathlib import Path
 
 from inner_shared.dynamic_config import dynamic_config
 
+from app.agent.contracts import ToolSpec
 from app.agent.tooling import Tool
 from app.messaging.message import Message
 from app.world.volume import lane_dir
@@ -90,9 +91,10 @@ async def enabled_sources() -> list[Source]:
     return [s for name, s in _registered.items() if name in wanted]
 
 
-async def query_tools() -> list[Tool]:
-    """四个 agent 都拿的那份只读工具：全部已启用来源的查询工具。"""
-    return [t for s in await enabled_sources() for t in s.tools]
+async def query_tools() -> list[ToolSpec]:
+    """四个 agent 都拿的那份只读工具：全部已启用来源的查询工具。它们的返回都是读到的材料
+    （``trim="material"``，跟 :func:`material_tools` 同一个判断）。"""
+    return [ToolSpec(t, trim="material") for s in await enabled_sources() for t in s.tools]
 
 
 def material_tools() -> frozenset[str]:

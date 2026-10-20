@@ -25,7 +25,6 @@ import datetime as dt
 
 import pytest
 
-from app.agent.neutral import Message, Role
 from app.host import Signal
 from app.living.day_page import (
     DAY_PAGE_FROM,
@@ -44,7 +43,7 @@ from app.living.received import ReceivedMessage
 from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, MEDIUM_PHONE
 from app.living.snapshot import read_snapshot
 from app.living.whereabouts import note_whereabouts
-from tests.living.conftest import clock_at, her_queue, her_round_runs, settled
+from tests.living.conftest import Calls, clock_at, her_queue, her_round_runs, settled
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -80,26 +79,10 @@ async def page_db(living_db):
     return living_db
 
 
-class FakePage:
-    """替身：这一轮她写下的那一页是钉死的，只有模型那一步是假的。"""
-
-    def __init__(self, said: str = "今天拍完了那卷胶片。") -> None:
-        self.said = said
-        self.runs: list[tuple[list[Message], dict]] = []
-
-    async def run(self, messages, **kwargs):
-        self.runs.append((messages, kwargs))
-        return Message(role=Role.ASSISTANT, content=self.said)
-
-    @property
-    def material(self) -> str:
-        """最后一轮真的摆到她眼前的那段文字。"""
-        return "\n".join(m.content for m in self.runs[-1][0])
-
-
 @pytest.fixture
-def stub_page(monkeypatch):
-    """装一个替身 + 一份不碰真库的 persona。"""
+def stub_page(monkeypatch, models):
+    """装一个模型替身（这一轮她写下的那一页是钉死的，:class:`tests.living.conftest.Calls`）+ 一份
+    不碰真库的 persona。替身的 ``material`` 是最后一轮真的摆到她眼前的那段文字。"""
     from types import SimpleNamespace
 
     from app.living import day_page as page_mod
@@ -112,9 +95,9 @@ def stub_page(monkeypatch):
     # 一处组装（版本链优先，这里链是空的，落到 persona_core 这一层）。
     monkeypatch.setattr(persona_mod, "find_persona", fake_find_persona)
 
-    def install(said: str = "今天拍完了那卷胶片。") -> FakePage:
-        runner = FakePage(said)
-        monkeypatch.setattr(page_mod, "build_day_page_runner", lambda: runner)
+    def install(said: str = "今天拍完了那卷胶片。") -> Calls:
+        runner = Calls(said=said)
+        models[page_mod.DAY_PAGE_PROMPT_ID] = runner.client
         return runner
 
     return install

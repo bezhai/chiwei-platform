@@ -4,7 +4,6 @@ Covers the Agent layer over the neutral ``ModelClient`` (no langchain /
 create_agent / CallbackHandler):
   - Agent.run(): returns final neutral Message, retry on transient errors,
     prompt compilation + message threading, recursion_limit passthrough.
-  - Agent.stream(): forwards neutral StreamChunks, no retry after first yield.
   - Agent.extract(): structured output validated into a Pydantic model.
   - What an AgentSpec decides: model (fixed or from Dynamic Config), budget of
     model calls, retries, model kwargs; the session comes from the Call.
@@ -21,9 +20,9 @@ import pytest
 from openai import APITimeoutError
 from pydantic import BaseModel
 
-from app.agent.contracts import AgentSpec, FromConfig
+from app.agent.contracts import AgentSpec, FromConfig, ToolSpec
 from app.agent.core import Agent
-from app.agent.neutral import Message, Role, StreamChunk
+from app.agent.neutral import Message, Role
 from app.agent.round import Call, open_call
 
 pytestmark = pytest.mark.unit
@@ -38,6 +37,11 @@ _EXTRACT_CFG = AgentSpec(
     trace_name="relationship-filter",
     max_retries=2,
 )
+
+
+def _specs(*tools) -> list[ToolSpec]:
+    """The tools, declared the way a plugin declares them (none ends the round)."""
+    return [ToolSpec(t, trim="kept") for t in tools]
 
 
 def _call(spec: AgentSpec = _CFG) -> Call:
@@ -168,136 +172,12 @@ class TestRootSpanRobustness:
             assert entered
 
 
-class TestRootSpanTurnTrace:
-    """Root span attaches the active turn's langfuse trace, so the guard
-    extracts and the main stream of one (message_id, persona_id) turn land in
-    ONE trace instead of separate top-level traces."""
+class TestRootSpanTraceName:
+    """A root span starts a trace of its own unless it is opened inside another
+    span; ``update_trace`` decides whether it names the trace and sets its input
+    (the output check runs inside her round's tool and leaves her trace alone)."""
 
-    def test_root_span_attaches_turn_trace_context(self):
-        from app.agent import core
-        from app.agent.trace import current_turn_trace_id, turn_trace
-
-        client = MagicMock()
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with turn_trace("msg-1:persona-2"):
-                expected_tid = current_turn_trace_id()
-                with core._root_span(name="main", input=[], update_trace=False):
-                    pass
-        kwargs = client.start_as_current_span.call_args.kwargs
-        assert kwargs.get("trace_context") == {"trace_id": expected_tid}
-
-    def test_root_span_no_trace_context_outside_turn(self):
-        from app.agent import core
-
-        client = MagicMock()
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with core._root_span(name="main", input=[], update_trace=False):
-                pass
-        kwargs = client.start_as_current_span.call_args.kwargs
-        assert kwargs.get("trace_context") is None
-
-    def test_two_root_spans_same_turn_share_trace_id(self):
-        """Anti-false-positive (codex T1 必改 3 at the root layer): a guard
-        root span and a main root span opened under the SAME turn attach to the
-        SAME trace_id — real unification, not each opening its own trace."""
-        from app.agent import core
-        from app.agent.trace import turn_trace
-
-        client = MagicMock()
-        seen = []
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with turn_trace("msg-5:persona-1"):
-                with core._root_span(
-                    name="pre-nsfw-check", input=[], update_trace=False
-                ):
-                    pass
-                seen.append(
-                    client.start_as_current_span.call_args.kwargs.get("trace_context")
-                )
-                with core._root_span(name="main", input=[], update_trace=True):
-                    pass
-                seen.append(
-                    client.start_as_current_span.call_args.kwargs.get("trace_context")
-                )
-        assert seen[0] is not None
-        assert seen[0] == seen[1]
-        assert seen[0]["trace_id"]
-
-
-class TestTurnTraceUnifiedName:
-    """In a unified turn trace the guards / main / post-safety are separate root
-    spans on ONE trace; langfuse names the whole trace after whichever root span
-    is ingested LAST (post-safety, since it runs last). Every root span instead
-    writes the SAME trace-level name so the trace name is stable. Crucially the
-    per-span OBSERVATION names stay distinct — trace name and span name are
-    independent langfuse fields, so unifying the trace name must not pollute the
-    sub-span names."""
-
-    def test_guard_root_span_keeps_span_name_sets_unified_trace_name(self):
-        from app.agent import core
-        from app.agent.trace import TURN_TRACE_NAME, turn_trace
-
-        client = MagicMock()
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with turn_trace("msg-1:persona-2"):
-                with core._root_span(
-                    name="pre-nsfw-check", input=[{"x": 1}], update_trace=False
-                ):
-                    pass
-        # the OBSERVATION/span name is preserved — NOT polluted to the trace name
-        assert (
-            client.start_as_current_span.call_args.kwargs["name"] == "pre-nsfw-check"
-        )
-        # the TRACE-level name is the unified turn name
-        kw = client.update_current_trace.call_args.kwargs
-        assert kw["name"] == TURN_TRACE_NAME
-        # a guard does NOT own the trace input
-        assert kw.get("input") is None
-
-    def test_main_root_span_sets_unified_name_and_owns_input(self):
-        from app.agent import core
-        from app.agent.trace import TURN_TRACE_NAME, turn_trace
-
-        client = MagicMock()
-        chat_input = [{"role": "user", "content": "hi"}]
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with turn_trace("msg-1:persona-2"):
-                with core._root_span(
-                    name="main", input=chat_input, update_trace=True
-                ):
-                    pass
-        # span name preserved
-        assert client.start_as_current_span.call_args.kwargs["name"] == "main"
-        kw = client.update_current_trace.call_args.kwargs
-        assert kw["name"] == TURN_TRACE_NAME
-        # main owns the trace input (the chat), so the trace top reads the turn
-        assert kw["input"] == chat_input
-
-    def test_two_turn_root_spans_write_same_trace_name(self):
-        """The fix's invariant: main (runs first) and post-safety (ingested last)
-        both write TURN_TRACE_NAME, so order no longer decides the trace name."""
-        from app.agent import core
-        from app.agent.trace import TURN_TRACE_NAME, turn_trace
-
-        client = MagicMock()
-        names: list = []
-        client.update_current_trace.side_effect = lambda **kw: names.append(
-            kw.get("name")
-        )
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with turn_trace("msg-9:persona-3"):
-                with core._root_span(name="main", input=[], update_trace=True):
-                    pass
-                with core._root_span(
-                    name="post-safety-check", input=[], update_trace=False
-                ):
-                    pass
-        assert names == [TURN_TRACE_NAME, TURN_TRACE_NAME]
-
-    def test_outside_turn_keeps_span_name_as_trace_name(self):
-        """No turn → unchanged: update_trace=True still names the trace after the
-        span (world-engine / post-safety-without-turn become their own
-        traces named after themselves)."""
+    def test_update_trace_names_the_trace_after_the_span(self):
         from app.agent import core
 
         client = MagicMock()
@@ -308,7 +188,7 @@ class TestTurnTraceUnifiedName:
         assert kw["name"] == "world-engine"
         assert kw["input"] == [1]
 
-    def test_outside_turn_no_update_when_update_trace_false(self):
+    def test_no_update_when_update_trace_false(self):
         from app.agent import core
 
         client = MagicMock()
@@ -542,31 +422,8 @@ class TestRunSessionPlumbing:
             )
         assert captured["session_id"] is None
 
-    async def test_stream_threads_the_calls_session_to_root_span(self, mock_deps):
-        captured: dict = {}
-        from contextlib import contextmanager
-
-        @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None, prompt=None):
-            captured["session_id"] = session_id
-            yield MagicMock()
-
-        async def fake_stream(messages, *, tools=None, **kwargs):
-            yield StreamChunk(text="hi")
-            yield StreamChunk(finish_reason="stop")
-
-        mock_deps["model"].stream = fake_stream
-        with patch("app.agent.core._root_span", _spy_span):
-            async for _ in Agent(_CFG).stream(
-                messages=[Message(role=Role.USER, content="hi")],
-                call=_call_in("prod:world:2026-06-04"), prompts=_PROMPTS,
-            ):
-                pass
-        assert captured["session_id"] == "prod:world:2026-06-04"
-
-
 class TestModelCacheSessionId:
-    """The call's session is forwarded to model.complete / model.stream as the
+    """The call's session is forwarded to model.complete as the
     prompt-cache key, so the azure adapter can wire it into the gateway's
     session cache header. None when there is no session (adapter no-ops)."""
 
@@ -582,23 +439,6 @@ class TestModelCacheSessionId:
         await Agent(_CFG).run([Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS)
         kw = mock_deps["model"].complete.call_args.kwargs
         assert kw.get("session_id") is None
-
-    async def test_stream_forwards_the_calls_session_to_model(self, mock_deps):
-        captured: dict = {}
-
-        async def fake_stream(messages, *, tools=None, **kwargs):
-            captured.update(kwargs)
-            yield StreamChunk(text="hi")
-            yield StreamChunk(finish_reason="stop")
-
-        mock_deps["model"].stream = fake_stream
-        async for _ in Agent(_CFG).stream(
-            [Message(role=Role.USER, content="hi")],
-            call=_call_in("prod:world:2026-06-04"), prompts=_PROMPTS,
-        ):
-            pass
-        assert captured.get("session_id") == "prod:world:2026-06-04"
-
 
 # ---------------------------------------------------------------------------
 # run()
@@ -630,7 +470,7 @@ class TestRun:
             """
             return ""
 
-        await Agent(_CFG, tools=[my_tool]).run(
+        await Agent(_CFG, tools=_specs(my_tool)).run(
             messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS
         )
         # the model saw the tool's neutral ToolDef
@@ -690,7 +530,7 @@ class TestRun:
                 tool_calls=[ToolCall(id="c", name="loop_tool", arguments={})],
             )
         )
-        await Agent(spec, tools=[loop_tool]).run(
+        await Agent(spec, tools=_specs(loop_tool)).run(
             messages=[Message(role=Role.USER, content="go")], call=_call(spec), prompts=_PROMPTS
         )
         mock_deps["build_model_client"].assert_awaited_once_with("main-model")
@@ -768,76 +608,54 @@ class TestRun:
             ]
         )
         call = _call()
-        await Agent(_CFG, tools=[ctx_tool]).run(
+        await Agent(_CFG, tools=_specs(ctx_tool)).run(
             messages=[Message(role=Role.USER, content="go")], call=call, prompts=_PROMPTS
         )
         assert seen["call"] is call
 
+    @pytest.mark.parametrize("ends_round", [True, False])
+    async def test_whether_a_tool_ends_the_run_is_what_its_declaration_says(
+        self, mock_deps, ends_round
+    ):
+        from app.agent.core import _NEVER_RAN
+        from app.agent.neutral import ToolCall
+        from app.agent.tooling import tool
 
-# ---------------------------------------------------------------------------
-# stream()
-# ---------------------------------------------------------------------------
+        @tool
+        async def finish() -> str:
+            """Finish."""
+            return "done"
 
+        mock_deps["model"].complete = AsyncMock(
+            side_effect=[
+                Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="c1", name="finish", arguments={}),
+                        ToolCall(id="c2", name="finish", arguments={}),
+                    ],
+                ),
+                Message(role=Role.ASSISTANT, content="还在。"),
+            ]
+        )
+        sink: list[Message] = []
+        await Agent(
+            _CFG, tools=[ToolSpec(finish, trim="kept", ends_round=ends_round)]
+        ).run(
+            messages=[Message(role=Role.USER, content="go")],
+            call=_call(),
+            prompts=_PROMPTS,
+            transcript_sink=sink,
+        )
 
-class TestStream:
-    async def test_yields_chunks(self, mock_deps):
-        async def fake_stream(messages, *, tools=None, **kwargs):
-            for c in [StreamChunk(text="he"), StreamChunk(text="llo"),
-                      StreamChunk(finish_reason="stop")]:
-                yield c
-
-        mock_deps["model"].stream = fake_stream
-
-        collected = []
-        async for chunk in Agent(_CFG).stream(
-            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS,
-        ):
-            collected.append(chunk)
-
-        texts = [c.text for c in collected if c.text]
-        assert "".join(texts) == "hello"
-
-    async def test_no_retry_after_tokens_yielded(self, mock_deps):
-        call_count = 0
-
-        async def failing_stream(messages, *, tools=None, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            yield StreamChunk(text="partial")
-            raise APITimeoutError(request=MagicMock())
-
-        mock_deps["model"].stream = failing_stream
-
-        with pytest.raises(APITimeoutError):
-            async for _ in Agent(_CFG).stream(
-                messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS,
-            ):
-                pass
-
-        assert call_count == 1  # no retry after yield
-
-    async def test_retries_before_first_token(self, mock_deps):
-        call_count = 0
-
-        async def failing_then_ok(messages, *, tools=None, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise APITimeoutError(request=MagicMock())
-                yield  # pragma: no cover
-            yield StreamChunk(text="ok")
-            yield StreamChunk(finish_reason="stop")
-
-        mock_deps["model"].stream = failing_then_ok
-
-        collected = []
-        async for chunk in Agent(_CFG).stream(
-            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS,
-        ):
-            collected.append(chunk)
-
-        assert call_count == 2  # first attempt failed, second succeeded
-        assert "".join(c.text or "" for c in collected) == "ok"
+        answered = [m.text() for m in sink if m.role is Role.TOOL]
+        if ends_round:
+            assert mock_deps["model"].complete.await_count == 1
+            assert answered == ["done", _NEVER_RAN]
+        else:
+            assert mock_deps["model"].complete.await_count == 2
+            assert answered == ["done", "done"]
 
 
 # ---------------------------------------------------------------------------
@@ -868,7 +686,7 @@ class TestRecursionLimit:
                 tool_calls=[ToolCall(id="c", name="loop_tool", arguments={"x": "v"})],
             )
         )
-        await Agent(_CFG, tools=[loop_tool]).run(
+        await Agent(_CFG, tools=_specs(loop_tool)).run(
             messages=[Message(role=Role.USER, content="go")], call=_call(), prompts=_PROMPTS
         )
         # 6 turns with tools, then one toolless call so the run ends on what the
@@ -897,7 +715,7 @@ class TestRecursionLimit:
                 tool_calls=[ToolCall(id="c", name="loop_tool", arguments={"x": "v"})],
             )
         )
-        await Agent(cfg, tools=[loop_tool]).run(
+        await Agent(cfg, tools=_specs(loop_tool)).run(
             messages=[Message(role=Role.USER, content="go")], call=_call(cfg), prompts=_PROMPTS
         )
         assert mock_deps["model"].complete.call_count == 5
@@ -999,7 +817,7 @@ class TestExtract:
 
     async def test_extract_threads_the_calls_session_to_root_span(self, mock_deps):
         """An extract whose call has a session tags the langfuse trace's session,
-        exactly like ``run`` / ``stream``; a call without one leaves it untouched."""
+        exactly like ``run``; a call without one leaves it untouched."""
         from contextlib import contextmanager
 
         class Out(BaseModel):
@@ -1065,7 +883,7 @@ class TestTranscriptSink:
             ]
         )
         produced: list[Message] = []
-        result = await Agent(_CFG, tools=[world_tool]).run(
+        result = await Agent(_CFG, tools=_specs(world_tool)).run(
             messages=[Message(role=Role.USER, content="醒了")],
             transcript_sink=produced, call=_call(), prompts=_PROMPTS,
         )

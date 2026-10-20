@@ -79,18 +79,13 @@ class OutputVerdict:
     checked: bool = True
 
 
-def build_guard() -> Agent:
-    """判词那一步的 agent。模块级函数，测试替身从这里换，不碰真模型。"""
-    return Agent(GUARD_OUTPUT_AGENT)
-
-
 async def _ask_guard(text: str) -> _OutputSafetyResult:
     # 判的是她这一轮要发出去的话：这次调用在她这一轮里，prompt 用这一轮开头定下的那个版本。
     her_round = current_round()
     call = open_call(
         GUARD_OUTPUT, GUARD_OUTPUT_AGENT, lane=her_round.lane, round=her_round
     )
-    return await build_guard().extract(
+    return await Agent(GUARD_OUTPUT_AGENT).extract(
         _OutputSafetyResult,
         messages=[],
         call=call,

@@ -18,7 +18,14 @@ from app.messaging.message import Kind, new_message
 from app.world import main_agent, wake
 from app.world.agents import when
 
-from .conftest import LANE, self_message, sets_nothing, sets_wake, spec_called, tools_built_for
+from .conftest import (
+    LANE,
+    self_message,
+    sets_nothing,
+    sets_wake,
+    spec_called,
+    tools_built_for,
+)
 
 
 def _round_input(world_handle, run: int = -1) -> str:
@@ -223,7 +230,7 @@ async def test_the_main_agent_gets_every_enabled_sources_query_tools_and_its_own
         new_message(sender="operator", recipient="world", body="x", kind=Kind.MESSAGE)
     )
 
-    expected = [t.name for t in await query_tools()] + [t.name for t in ACTIONS]
+    expected = [t.tool.name for t in await query_tools()] + [t.tool.name for t in ACTIONS]
     assert tools_built_for(world, main_agent.ROUND) == expected
     assert {
         "list_records", "read_record", "search_web",

@@ -21,9 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.core import _normalise_tool_result
-from app.agent.neutral import Message, Role, ToolCall, ToolResult
-from app.agent.round import in_call
+from app.agent.neutral import Role
 from app.data.schema import pg_type
 from app.living.loose_ends import LooseEnd, list_open_loose_ends
 from app.living.moment import (
@@ -45,6 +43,7 @@ from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from tests.hosting import in_a_fresh_process
 from tests.living.conftest import (
+    Calls,
     clock_at,
     her_queue,
     her_round_runs,
@@ -56,7 +55,7 @@ LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
 _STEP = dt.timedelta(minutes=DEFAULT_LIFE_MOMENT_MINUTES)
 
-_TOOLS = {t.name: t for t in MOMENT_TOOLS}
+_TOOLS = {t.tool.name: t.tool for t in MOMENT_TOOLS}
 
 
 async def _wipe_transcripts() -> None:
@@ -85,54 +84,8 @@ async def moment_db(living_db):
     return living_db
 
 
-class FakeMoment:
-    """替身 life：这个 moment 她调了哪些工具是写死的，只有模型那一步是假的。
-
-    走真工具 + 真 context 绑定，所以写库、派生 id、lane 隔离都是被真的验到的。
-
-    ``transcript_sink`` 按真 ReAct 循环的口径填：每个工具一条带 tool_call 的
-    ASSISTANT + 一条 TOOL 返回，最后是她那句话。连续上下文存的就是这个列表，填得
-    不像真的，验上下文的用例就是在验一个不存在的形状。
-    """
-
-    def __init__(self, *calls: tuple[str, dict], said: str = "继续") -> None:
-        self.calls = list(calls)
-        self.said = said
-        self.runs: list[tuple[list[Message], dict]] = []
-        self.results: list[object] = []
-
-    async def run(self, messages, **kwargs):
-        self.runs.append((messages, kwargs))
-        sink = kwargs.get("transcript_sink")
-        with in_call(kwargs["call"]):
-            for i, (name, args) in enumerate(self.calls):
-                result = await _TOOLS[name].invoke(args)
-                self.results.append(result)
-                if sink is None:
-                    continue
-                call_id = f"call-{i}"
-                sink.append(
-                    Message(
-                        role=Role.ASSISTANT,
-                        content="",
-                        tool_calls=[
-                            ToolCall(id=call_id, name=name, arguments=args)
-                        ],
-                    )
-                )
-                sink.append(
-                    _normalise_tool_result(
-                        ToolResult(tool_call_id=call_id, content=result)
-                    ).to_message()
-                )
-        reply = Message(role=Role.ASSISTANT, content=self.said)
-        if sink is not None:
-            sink.append(reply)
-        return reply
-
-
 @pytest.fixture
-def stub_moment(monkeypatch):
+def stub_moment(monkeypatch, models):
     """装一个替身 life + 固定 moment 间隔 + 一份不碰真库的 persona。
 
     打桩打在 ``app.living.persona`` 上：moment 自己不查 ``bot_persona`` 了，那两个
@@ -158,9 +111,11 @@ def stub_moment(monkeypatch):
 
     monkeypatch.setattr(moment_mod, "life_moment_minutes", fixed_minutes)
 
-    def install(*calls: tuple[str, dict], said: str = "继续") -> FakeMoment:
-        runner = FakeMoment(*calls, said=said)
-        monkeypatch.setattr(moment_mod, "build_moment_runner", lambda: runner)
+    def install(*calls: tuple[str, dict], said: str = "继续") -> Calls:
+        """她这一轮的模型替身：这一轮她调了哪些手是写死的，只有模型那一步是假的；走真循环、
+        真工具、真的这一轮绑定，所以写库、派生 id、lane 隔离、存下的上下文都是被真的验到的。"""
+        runner = Calls(*calls, said=said)
+        models[LIFE_MOMENT_PROMPT_ID] = runner.client
         return runner
 
     install.persona = persona  # type: ignore[attr-defined]
@@ -250,7 +205,7 @@ async def test_every_moment_is_countable_afterwards(moment_db, stub_moment):
 
 def test_keeping_something_in_mind_does_not_require_changing_what_she_is_doing():
     """挂线头是独立的一件事，签名里不该出现任何"你改去做什么"。"""
-    assert keep_in_mind in MOMENT_TOOLS
+    assert keep_in_mind in _TOOLS.values()
     assert set(keep_in_mind.definition.parameters["properties"]) == {
         "still_on_my_mind"
     }
@@ -263,28 +218,29 @@ def test_she_has_a_hand_that_ends_this_round():
     """她自己说「就到这儿」的那只手 —— 不然这一轮什么时候结束只能由代码判。"""
     from app.living.moment import stop_for_now
 
-    assert stop_for_now in MOMENT_TOOLS
+    assert stop_for_now in _TOOLS.values()
     assert stop_for_now.definition.parameters.get("properties", {}) == {}, (
         "这只手有参数 —— 她只决定停，别的什么都不该问她"
     )
 
 
 def test_ending_the_round_really_ends_it():
-    """名字要在终止工具那份名单上，不然调了它循环照样往下跑。
+    """这只手要声明成结束这一轮的那只，不然调了它循环照样往下跑。
 
-    名单在 :mod:`app.agent.core`，改名不同步就是**静默**失效：她调了这只手，模型接着
-    被问下一轮，谁也不会报错。
+    循环不认名字，只认声明（``ToolSpec.ends_round``）：声明掉了就是**静默**失效 —— 她调了
+    这只手，模型接着被问下一轮，谁也不会报错。
     """
-    from app.agent.core import _TERMINAL_TOOL_NAMES
     from app.living.moment import stop_for_now
 
-    assert stop_for_now.name in _TERMINAL_TOOL_NAMES
+    [declared] = [t for t in MOMENT_TOOLS if t.tool is stop_for_now]
+    assert declared.ends_round is True
+    assert [t.tool.name for t in MOMENT_TOOLS if t.ends_round] == ["stop_for_now"]
 
 
 def test_no_tool_ever_asks_her_how_long_something_takes():
     """真人对"多久"没有内感受。问她要一个分钟数就是把生活切成日程表。"""
     banned = ("minute", "duration", "how_long", "seconds", "until", "hour")
-    for t in MOMENT_TOOLS:
+    for t in _TOOLS.values():
         params = t.definition.parameters.get("properties", {})
         for pname in params:
             assert not any(b in pname.lower() for b in banned), (
@@ -391,7 +347,7 @@ async def test_saying_and_acting_hand_back_no_copy_of_her_words(
     """说一句、做一件：回执不把她的原话再抄一遍。
 
     原话就在紧挨着的那次调用参数里，而这两只手的回执跟她的话一样在上下文里留 4 小时
-    （:data:`app.living.moment.KEPT_TOOLS`）—— 每抄一遍，同一句话就在她每一轮的
+    （:data:`app.living.moment.MOMENT_TOOLS` 里它们是留着的那一档）—— 每抄一遍，同一句话就在她每一轮的
     输入里多出现一次。
     """
     await _stand("akao", "家/客厅", "待着", _at(13))
@@ -1774,7 +1730,7 @@ def test_moving_is_one_of_the_hands_she_actually_has():
     """没注册 = 她永远调不到，症状跟原 bug 一模一样但更难查。"""
     from app.living.moment import move_to
 
-    assert move_to in MOMENT_TOOLS
+    assert move_to in _TOOLS.values()
     assert set(move_to.definition.parameters["properties"]) == {"place"}
 
 

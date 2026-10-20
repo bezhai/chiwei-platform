@@ -79,6 +79,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.agent.contracts import ToolSpec
 from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
@@ -309,4 +310,11 @@ async def run_a_script(
     return esc(result.stdout)
 
 
-GUIDE_TOOLS = [read_a_guide, run_a_script]
+# 她读说明的两只手，怎么裁剪（:class:`app.agent.contracts.ToolSpec`）：说明书全文和命令的输出都
+# 是读到的素材，过了保留期换成一句短语，想再看就再读一遍、再跑一遍。命令的输出上限 4000 字
+# （``app.capabilities.sandbox``），而且已经带着"还有多少字没给你"那句实话，裁剪不做第二次截断，
+# 只整块换掉。
+GUIDE_TOOLS = [
+    ToolSpec(read_a_guide, trim="material"),
+    ToolSpec(run_a_script, trim="material"),
+]

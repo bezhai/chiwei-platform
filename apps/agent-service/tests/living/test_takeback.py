@@ -763,7 +763,7 @@ async def test_she_is_told_the_outcome_comes_later_not_that_it_is_already_gone(
 def test_the_take_back_hand_is_in_her_hands():
     from app.living.moment import MOMENT_TOOLS
 
-    assert take_back_message in MOMENT_TOOLS, "她手里没有撤回这只手"
+    assert take_back_message in [s.tool for s in MOMENT_TOOLS], "她手里没有撤回这只手"
 
 
 def test_taking_something_back_takes_the_message_id_she_was_shown():

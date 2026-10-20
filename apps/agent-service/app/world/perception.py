@@ -51,6 +51,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.agent.contracts import ToolSpec
 from app.agent.core import RETRYABLE_EXCEPTIONS
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
@@ -198,7 +199,7 @@ async def judge_who_notices(
     原样往外抛。
     """
     perception_input = _perception_input(change, round_messages)
-    tools = [*await query_tools(), someone_notices]
+    tools = [*await query_tools(), ToolSpec(someone_notices, trim="kept")]
     # 判断是在主 agent 这一轮里做的。
     world_round = current_round()
 

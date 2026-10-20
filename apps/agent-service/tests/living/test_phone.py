@@ -2175,7 +2175,7 @@ async def test_finding_someone_is_one_of_the_hands_she_actually_has(living_db):
     """
     from app.living.moment import MOMENT_TOOLS
 
-    assert look_up_contact in MOMENT_TOOLS, "她手里没有这只手"
+    assert look_up_contact in [s.tool for s in MOMENT_TOOLS], "她手里没有这只手"
 
 
 # --------------------------------------------------------------------------
@@ -2323,7 +2323,7 @@ def test_looking_through_her_phone_is_one_of_the_hands_she_has():
     """这只手要真在她的工具集里 —— 没注册是静默失败（同「找人」那条）。"""
     from app.living.moment import MOMENT_TOOLS
 
-    assert look_through_your_phone in MOMENT_TOOLS, "她手里没有这只手"
+    assert look_through_your_phone in [s.tool for s in MOMENT_TOOLS], "她手里没有这只手"
 
 
 # --------------------------------------------------------------------------

@@ -17,7 +17,7 @@ class Plugin:
     """One feature of an app.
 
     ``setup`` is synchronous and only registers (queues of turns, wakes, clocks, tasks, routes,
-    inboxes, wires, services) through the :class:`~app.host.host.Context` it is given; it does no
+    inboxes, wires, tools, services) through the :class:`~app.host.host.Context` it is given; it does no
     IO, so a manifest the host cannot run fails before anything touches the database or the
     broker. ``requires`` names the services ``setup`` may take with ``ctx.service``, ``provides``
     the ones it must hand over with ``ctx.provide``; the host sets a plugin up after the plugins
@@ -35,10 +35,10 @@ class Registration:
     """One thing a plugin registered, as :meth:`app.host.Host.registered` shows it.
 
     ``kind`` is ``turns`` / ``wake`` / ``clock`` / ``task`` / ``route`` / ``inbox`` /
-    ``inboxes_at_start`` / ``outbound`` / ``service`` / ``on_stop``; ``detail`` is what the
-    registration declared (a queue of turns, the queue and source a wake signals and how often, a
-    clock's seconds, a route's flags and handler, an inbox's options, the inboxes an opener
-    declared so far). Read-only: tests and governance checks look, nothing acts on it.
+    ``inboxes_at_start`` / ``outbound`` / ``tool`` / ``service`` / ``on_stop``; ``detail`` is what
+    the registration declared (a queue of turns, the queue and source a wake signals and how often,
+    a clock's seconds, a route's flags and handler, an inbox's options, the inboxes an opener
+    declared so far, a tool's ``ToolSpec``). Read-only: tests and governance checks look, nothing acts on it.
     """
 
     plugin: str
