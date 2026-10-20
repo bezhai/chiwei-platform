@@ -57,18 +57,15 @@ def _handled_records(volume) -> dict:
 
 
 class SlowAsking:
-    """问通信机制"哪些处理完的消息已经记下了成功"那一步：卡住，直到放行（或者一直不回）。"""
+    """问通信机制"哪些处理完的消息已经记下了成功"那一步：卡住，直到放行。"""
 
-    def __init__(self, *, answers: bool = True) -> None:
+    def __init__(self) -> None:
         self.asking = asyncio.Event()
         self.answer = asyncio.Event()
-        self.answers = answers
 
     async def __call__(self, inbox_name, message_ids):
         self.asking.set()
         await self.answer.wait()
-        if not self.answers:
-            await asyncio.Event().wait()
         return set()
 
 
@@ -156,17 +153,31 @@ async def test_when_messaging_does_not_answer_a_delivery_arriving_meanwhile_join
     monkeypatch.setattr("app.world.rounds.SETTLED_QUERY_TIMEOUT", timedelta(milliseconds=300))
     first = _from("赤尾", "我出门了。")
     await world.deliver(first)
-    slow = SlowAsking(answers=False)
-    slow.answer.set()
-    monkeypatch.setattr(receiving, "succeeded_message_ids", slow)
+    asking, joined = asyncio.Event(), asyncio.Event()
+    asked: list[list[str]] = []
+
+    async def never_answers(inbox_name, message_ids):
+        """一直没有回音，只有时限能结束这一步。时限取消它之后，等测试看到那次投递并进来了才真的
+        停下：测试机上收下那次投递慢、时限先到了，这一步也还没结束，那次投递仍然是问的时候到的。"""
+        asked.append(message_ids)
+        asking.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await joined.wait()
+
+    monkeypatch.setattr(receiving, "succeeded_message_ids", never_answers)
     leader, joining = _from("千凪", "我在做饭。"), _from("绫奈", "我在看书。")
 
     leading = asyncio.create_task(world.deliver(leader))
-    await _soon(slow.asking.wait())
+    await _soon(asking.wait())
     following = asyncio.create_task(world.deliver(joining))
+    # 记进还没经过一轮的消息到并进这一批之间没有 await：看到它到了，它就已经并进来了。
     await _arrived(joining)
+    joined.set()
 
     assert await _soon(asyncio.gather(leading, following)) == [None, None]
+    assert len(asked) == 1, "并进来的那次投递自己排了一次轮次，没有并进这一轮"
     assert len(world.runner.runs) == 2
     assert "我在做饭。" in _round_input(world) and "我在看书。" in _round_input(world)
     assert first.message_id in _handled_records(volume)
