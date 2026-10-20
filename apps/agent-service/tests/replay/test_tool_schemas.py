@@ -63,7 +63,7 @@ async def _declared(app_host, monkeypatch) -> dict[str, list[ToolSpec]]:
     """Each agent that is offered tools, and the declarations it is given them from."""
     from inner_shared.dynamic_config import dynamic_config
 
-    from app.living.reading_agent import build_reading_tools
+    from app.living.reading.agent import build_reading_tools
     from app.manifests.agent_service import RESIDENT
     from app.manifests.world import WORLD
     from app.world.perception import someone_notices

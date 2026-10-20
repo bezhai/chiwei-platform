@@ -1,6 +1,5 @@
 """Living: the three sisters' life engine — for each sister a queue of rounds with two wakes on it
-and a queue each for her diary and her weekly look back with one, the reading inbox, and a one-off
-admin route that empties the old reading queue.
+and a queue each for her diary and her weekly look back with one.
 
   each sister's queue of rounds ("round", ``ctx.turns``), signalled by two wakes (``ctx.wake``):
   every  60 s  regular   -> regular_moment_due / run_due_moment   her regular rhythm
@@ -10,9 +9,9 @@ admin route that empties the old reading queue.
   every 300 s  day-page        -> day_page_due / write_due_page          yesterday's page (04:00-06:00)
   every 300 s  persona-review  -> persona_review_due / write_due_review  last week's "who I am" (06:00-08:00)
 
-  the reading inbox  -> read_a_round  one stretch of reading
   (the household plugin opens the inboxes named after the three personas: stored only, she reads
-  them on her clock; the speaking plugin has the landing clock and the two outbound queues)
+  them on her clock; the speaking plugin has the landing clock and the two outbound queues; the
+  reading plugin the reading inbox and the route that carries the old reading queue over)
 
   her round, which the manifest's ``resident`` profile places (app.living.moment):
     her tools (``ctx.tool``)    the methods of :class:`NotSplitYet`, each declared with how
@@ -32,8 +31,6 @@ admin route that empties the old reading queue.
                                 household plugin what reached her and the sends before and after)
     commit (one transaction)    life.moment   (and phone.glances, household.read of those plugins)
     after the commit            history   (Continue: logged, the round counts)
-
-  POST /admin/reading/carry-over  carry_over_reading  the old reading queue -> the reading inbox
 
 **What has not been split out is one plugin object** (:class:`NotSplitYet`), so that a tool which
 needs another plugin's service can be handed it. Each plugin split out of it takes its tools along,
@@ -68,21 +65,6 @@ minute.
 rounds; what world and her sisters tell her arrives in her inbox, which only stores it
 (``tests/living/test_no_inbound.py``).
 
-**The reading inbox** (:data:`app.living.services.READING`) gets a message when she picks a
-file up in one of her rounds (:func:`app.living.reading.read_a_bit`); its handler reads that
-stretch. A message is handled at most once (``max_attempts=1``): a stretch costs model calls, so
-an error past the stretch dead-letters the message and a person decides whether to replay it.
-Processing is limited to five minutes, above the reading agent's own timeout; it bounds how long a
-stretch whose process died stays claimed before another process reads it again. What reaches this
-inbox from outside can run the reading agent, not her round (``tests/living/test_no_inbound.py``).
-
-**The old reading queue.** Reading used to run from a durable edge whose queue
-(``durable_file_picked_up_read_a_round``) nothing consumes any more. The admin route reports what is
-left there, carries the rounds that were never read over to the reading inbox, and deletes the
-lane's empty queue (:mod:`app.nodes.reading_carry_over`). Its handler is not in ``app.living``; it
-has the inner credential and lane checks of the operator routes. It is removed once prod has
-switched over and the old queue is deleted.
-
 **Her Data classes come in with the modules below.** A Data class registers when its module is
 imported, and the schema step builds tables only for registered classes; the split-out plugins
 import their own.
@@ -97,7 +79,7 @@ from app.agent.contracts import Continue
 from app.agent.round import AssembledProfile
 from app.agent.tooling import Tool
 from app.host import Batch, Coalesce, Context, Plugin, WakeSource
-from app.living import moment, reading
+from app.living import moment
 from app.living.common import living_lane
 from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
 from app.living.moment import (
@@ -115,9 +97,7 @@ from app.living.moment import (
 )
 from app.living.nudge import nudged_moment_due
 from app.living.persona_review import DueReview, persona_review_due, write_due_review
-from app.living.reading import read_a_round
 from app.living.services import (
-    READING,
     HerRecords,
     Persona,
     PersonaText,
@@ -125,7 +105,6 @@ from app.living.services import (
     Received,
     WhoLivesHere,
 )
-from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
 
 # How often her wakes tick (see "Clocks tick denser than the work they drive").
 REGULAR_EVERY = timedelta(seconds=60)
@@ -163,19 +142,10 @@ class NotSplitYet:
     act = moment.act
     look_around = moment.look_around
     stop_for_now = moment.stop_for_now
-    look_for_something_to_read = reading.look_for_something_to_read
-    read_a_bit = reading.read_a_bit
 
-    def __init__(
-        self,
-        *,
-        residents: WhoLivesHere,
-        her_records: HerRecords,
-        phone: Phone,
-    ) -> None:
+    def __init__(self, *, residents: WhoLivesHere, her_records: HerRecords) -> None:
         self.residents = residents
         self.her_records = her_records
-        self.phone = phone
 
 
 def regular(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
@@ -277,27 +247,8 @@ def setup(ctx: Context) -> None:
         ctx.wake(diary, pages, every=DAY_PAGE_EVERY)
         look_back = ctx.turns(persona_id, "persona-review", hold_limit=HOLD_LIMIT)
         ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
-    living = NotSplitYet(
-        residents=residents,
-        her_records=her_records,
-        phone=phone,
-    )
+    living = NotSplitYet(residents=residents, her_records=her_records)
     _her_round(ctx, living)
-    ctx.inbox(
-        READING,
-        on_message=partial(read_a_round, persona=persona),
-        processing_timeout=timedelta(minutes=5),
-        max_attempts=1,
-    )
-    ctx.route(
-        "POST",
-        "/admin/reading/carry-over",
-        ReadingCarryOverRequest,
-        partial(carry_over_reading, residents=residents),
-        inner_secret=True,
-        lane_match=True,
-        answers_with_lane=True,
-    )
 
 
 def _her_round(ctx: Context, living: NotSplitYet) -> None:
@@ -347,11 +298,6 @@ def _her_tools(ctx: Context, living: NotSplitYet) -> None:
     ctx.tool(Tool(living.act), trim="kept")
     ctx.tool(Tool(living.look_around), trim="material")
     ctx.tool(Tool(living.stop_for_now), trim="kept", ends_round=True)
-    # 读东西的两只手留着，不当素材裁：``look_for_something_to_read`` 的返回里是 ``file=<attachment_id>``，
-    # 被 ``read_a_bit(which=...)`` 吃；``read_a_bit`` 指代不明时抛的那句话里也逐个印着候选的
-    # ``file=``（:mod:`app.living.reading`）。
-    ctx.tool(Tool(living.look_for_something_to_read), trim="kept")
-    ctx.tool(Tool(living.read_a_bit), trim="kept")
 
 
 PLUGIN = Plugin(

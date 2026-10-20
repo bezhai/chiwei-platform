@@ -37,7 +37,7 @@ langfuse prompt、硬超时、独立成本入账、空产出拦截），但它**
   * **重来一次安全**：``read`` 是只读工具（无 durable mutation），一程被重跑（投递被取消后
     重投、占位过期后被接手）只重读、不写脏。真正的 durable mutation（写印象 + 推进页号）在
     读书收件箱的处理函数里、本函数返回之后做，走版本 CAS（见
-    :func:`app.living.reading.read_a_round`）。
+    :func:`app.living.reading.files.read_a_round`）。
 
   * **成本独立入账**：``collect_usage`` 包住 run、``record_round_cost(actor=
     f"{persona}:reading")``——阅读的 token 绝不混进 life 本体账。
@@ -208,7 +208,7 @@ async def run_reading_round(
 ) -> ReadingResult | None:
     """跑一程阅读：读时取字节 + 现解码现分页 + 硬超时 + 独立成本 + 空产出拦截。
 
-    失败返回 ``None``（fail-soft）。外壳（读书收件箱的处理函数 :func:`app.living.reading.read_a_round`）调它，传
+    失败返回 ``None``（fail-soft）。外壳（读书收件箱的处理函数 :func:`app.living.reading.files.read_a_round`）调它，传
     [当前印象 + 从第几页接着读]。返回 :class:`ReadingResult` 供外壳走 CAS 提交；返回
     ``None`` = 本程失败（取不到字节 / 解码失败 / 超时 / 抛错 / 空产出），外壳据此**不动
     印象 / 页号**（她可重读）。

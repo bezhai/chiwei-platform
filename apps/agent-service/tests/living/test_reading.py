@@ -20,9 +20,10 @@ import uuid
 import pytest
 from sqlalchemy import text
 
+from app.agent.tooling import Tool
 from app.data.tx import current_session, tx
 from app.living.persona.chain import PersonaChain
-from app.living.reading import (
+from app.living.reading.files import (
     FILE_LIST_LIMIT,
     FilePickedUp,
     FileRead,
@@ -32,10 +33,10 @@ from app.living.reading import (
 from app.living.services import READING
 from app.messaging.message import Kind, Message, new_message
 from tests.hosting import in_a_fresh_process
-from tests.living.conftest import RESIDENT_NAMES, Post, her_phone, her_tool
+from tests.living.conftest import RESIDENT_NAMES, Post, her_phone, her_reader
 
-look_for_something_to_read = her_tool("look_for_something_to_read")
-read_a_bit = her_tool("read_a_bit")
+look_for_something_to_read = Tool(her_reader().look_for_something_to_read)
+read_a_bit = Tool(her_reader().read_a_bit)
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -208,7 +209,7 @@ async def reading_db(living_db, pinned):
 @pytest.fixture
 def picked_up(monkeypatch) -> Post:
     """她拿起文件时发给读书收件箱的消息，记在替身里，不碰 broker。"""
-    from app.living import reading as reading_mod
+    from app.living.reading import files as reading_mod
 
     stand_in = Post()
     monkeypatch.setattr(reading_mod, "send", stand_in.send)
@@ -223,7 +224,7 @@ def _rounds(post: Post) -> list[FilePickedUp]:
 @pytest.fixture
 def one_round(monkeypatch):
     """把"读一程"那步换成替身：读到第几页、揉出什么印象，由用例说了算。"""
-    from app.living import reading as reading_mod
+    from app.living.reading import files as reading_mod
 
     class FakeRound:
         def __init__(self) -> None:
@@ -232,7 +233,7 @@ def one_round(monkeypatch):
             self.before_return = None
 
         def gives(self, *, impression: str, pages_read: int, finished: bool = False):
-            from app.living.reading_agent import ReadingResult
+            from app.living.reading.agent import ReadingResult
 
             self.result = ReadingResult(
                 impression=impression, pages_read=pages_read, finished=finished
@@ -303,7 +304,7 @@ async def test_a_file_in_the_shape_lark_actually_writes_is_found(reading_db):
     只断言"查得到 + 名字对"，不碰任何工具文案 —— 这条测的是查询和真实数据的
     对齐，不是渲染。
     """
-    from app.living.reading import files_sent_to
+    from app.living.reading.files import files_sent_to
 
     message_id = uuid.uuid5(uuid.NAMESPACE_OID, "msg-real-shape")
     async with tx():
@@ -739,7 +740,7 @@ async def test_bytes_that_never_arrive_do_not_write_half_an_impression(
     reading_db, monkeypatch
 ):
     """取件失败走的是真的那条阅读一程 —— 取不到字节就整程作废，什么都不落。"""
-    from app.living import reading_agent as agent_reading
+    from app.living.reading import agent as agent_reading
 
     asked: list[str] = []
 
@@ -848,7 +849,7 @@ async def test_a_notice_that_is_not_a_message_is_set_aside(reading_db, one_round
     warning，不读，正常返回（消息确认，不进死信）。"""
     one_round.gives(impression="不该写下的。", pages_read=7)
 
-    with caplog.at_level("WARNING", logger="app.living.reading"):
+    with caplog.at_level("WARNING", logger="app.living.reading.files"):
         await read_a_round(
             _trigger(attachment_id="msg-1:key-a", kind=Kind.NOT_DELIVERED),
             persona=PersonaChain(),
@@ -977,7 +978,7 @@ def test_the_reading_inbox_is_opened_on_every_lane_and_no_route_takes_a_round():
         " for r in rs if r.kind == 'inbox')));"
         "print(sorted(r.detail['request'].__name__ for r in rs if r.kind == 'route'))"
     )
-    reading = [READING, "app.living.reading.read_a_round", "0:05:00", 1]
+    reading = [READING, "app.living.reading.files.read_a_round", "0:05:00", 1]
     for lane in (LANE, None):
         inboxes, requests = in_a_fresh_process("agent-service", probe, lane=lane).strip().splitlines()
         assert reading in json.loads(inboxes), (

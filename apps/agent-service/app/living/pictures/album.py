@@ -81,7 +81,7 @@ from app.living.common import esc, require_aware
 
 logger = logging.getLogger(__name__)
 
-# 一次给她列几张。跟 :data:`app.living.reading.FILE_LIST_LIMIT` 同一条理由：这是"一屏
+# 一次给她列几张。跟 :data:`app.living.reading.files.FILE_LIST_LIMIT` 同一条理由：这是"一屏
 # 摆得下多少"的显示口径，不是"她该记得几张" —— 被挤下去的那些没有消失，句柄那条路照样
 # 取得到。
 PICTURE_LIST_LIMIT = 20

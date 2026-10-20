@@ -26,13 +26,10 @@ import asyncio
 
 import pytest
 
-import app.living.reading_agent as reading_mod
+import app.living.reading.agent as reading_mod
 from app.agent.neutral import Message, Role
 from app.agent.trace import _accumulate_usage
-from app.living.reading_agent import (
-    ReadingResult,
-    run_reading_round,
-)
+from app.living.reading.agent import ReadingResult, run_reading_round
 
 _LANE = "coe-t2"
 _PERSONA = "akao"

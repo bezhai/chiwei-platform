@@ -291,15 +291,22 @@ async def settled() -> None:
 def her_tool(name: str, *, residents=None) -> Tool:
     """她还没拆成插件的一只手：living 插件对象（:class:`app.plugins.living.NotSplitYet`）上的方法，
     包成跟插件登记给模型的同一种 :class:`~app.agent.tooling.Tool`。``residents`` 是交给它的
-    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）；``her_records``、``phone`` 服务是
-    那两个插件对象本身（不带状态，读写的是用例的库）。"""
+    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）；``her_records`` 服务是那个插件
+    对象本身（不带状态，读写的是用例的库）。"""
     from app.agent.tooling import Tool
     from app.plugins.living import NotSplitYet
 
     names = residents or NamesRead()
-    records = own_records(names)
-    living = NotSplitYet(residents=names, her_records=records, phone=her_phone(records))
+    living = NotSplitYet(residents=names, her_records=own_records(names))
     return Tool(getattr(living, name))
+
+
+def her_reader():
+    """她读东西的那两只手所在的插件对象（reading 插件，:class:`app.living.reading.files.Reader`）；``phone``
+    服务是那个插件对象本身，``residents`` 服务是名字已经读好的替身（:class:`NamesRead`）。"""
+    from app.living.reading.files import Reader
+
+    return Reader(phone=her_phone(), residents=NamesRead())
 
 
 def her_mouth() -> Tool:

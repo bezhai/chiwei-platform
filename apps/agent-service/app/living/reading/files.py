@@ -21,7 +21,7 @@
 模型，它要的是这几个字段。没送到、没确认，工具如实告诉她没拿起来，她可以再拿一次（同一轮里
 还是同一程、同一个消息 id）。
 
-**读书收件箱里的每条消息最多处理一次，处理时限 5 分钟**（living 插件开设时声明）。读一程里的
+**读书收件箱里的每条消息最多处理一次，处理时限 5 分钟**（reading 插件开设时声明）。读一程里的
 失败（取不到字节、解码失败、超时、模型调用失败、空产出）都在读一程里吞掉，处理函数正常返回，
 消息确认；越过读一程的错误（写印象时提交失败）让处理函数抛出，消息直接进本泳道的死信，不再
 调一次模型——重放是人看过之后的决定。投递被取消（停机、通道关掉）不算处理过，消息回到队列，
@@ -34,7 +34,7 @@
 （``Happening`` / ``LooseEnd`` / ``PhoneRead`` / ``SpokenOutbound``），这条不破例。
 
 **一程读不成，印象一个字都不动。** 取不到字节（没缓存进对象存储 / 预签失败 / GET
-挂了）、解码失败、超时、空产出，:func:`app.living.reading_agent.run_reading_round` 一律返回
+挂了）、解码失败、超时、空产出，:func:`app.living.reading.agent.run_reading_round` 一律返回
 ``None``，这里据此**不提交**：印象和读到第几页原样停在上一程的位置，她下次自己想读
 了再拿起来一次。绝不写半截脏印象 —— 空印象覆盖整篇就是真失忆。
 
@@ -54,7 +54,7 @@
 开过**的那些则相反，撤掉了就一条都不列 —— 她从没打开过它，撤掉了就等于没来过。
 
 取字节、解码、分页在 :mod:`app.domain.reading_source` 里，跟哪个引擎在跑没有关系，直接用；
-读一程的 agent 在 :mod:`app.living.reading_agent`。
+读一程的 agent 在 :mod:`app.living.reading.agent`。
 """
 
 from __future__ import annotations
@@ -77,8 +77,8 @@ from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
 from app.infra.cst_time import CST, to_cst_dated
 from app.living.common import esc, require_aware
-from app.living.reading_agent import run_reading_round
-from app.living.services import READING, Persona, Phone, Sender
+from app.living.reading.agent import run_reading_round
+from app.living.services import READING, Persona, Phone, Sender, WhoLivesHere
 from app.messaging.message import Delivery, Kind, Message, SendFailed
 
 # module-level 引入，测试从这里换替身（不碰 broker）
@@ -340,173 +340,181 @@ def _one_file(f: SentFile, mark: FileRead | None, *, now: datetime, phone: Phone
     return f"{head}\n  {read}。这个东西在你心里：{mark.impression}"
 
 
-@tool_error("看看有什么能读的失败")
-async def look_for_something_to_read(self) -> str:
-    """看看有人给你发过什么能读的东西，还有你读过的那些现在在你心里是什么样。
+class Reader:
+    """reading 插件对象：她读东西的两只手（看看有什么能读的、拿起一个往下读一程）。她能读的会话问
+    ``phone`` 服务（同一道闸，她读得到的严格等于她看得见的），拿起一个时发给读书收件箱的那条消息署她在
+    世界里的名字（``residents`` 服务）。对象本身不带状态，读到哪了落在 :class:`FileRead` 上。"""
 
-    别人发到你手机上的文件都在这儿，每个带一串 file=…，拿它调 read_a_bit 就能
-    读一程。你读过的那些会连着你读到哪了、它在你心里留下了什么一起给你。
+    def __init__(self, *, phone: Phone, residents: WhoLivesHere) -> None:
+        self.phone = phone
+        self.residents = residents
 
-    你读过的东西里有些已经被撤回了 —— 那几个照样在这儿，因为你确实读过、它确实在
-    你心里，只是现在拿不到它了、也就没有 file=… 可用，读不下去了。
+    @tool_error("看看有什么能读的失败")
+    async def look_for_something_to_read(self) -> str:
+        """看看有人给你发过什么能读的东西，还有你读过的那些现在在你心里是什么样。
 
-    没翻开过的一次只列最近那些；你读过的一个都不会少。
+        别人发到你手机上的文件都在这儿，每个带一串 file=…，拿它调 read_a_bit 就能
+        读一程。你读过的那些会连着你读到哪了、它在你心里留下了什么一起给你。
 
-    Returns:
-        有人发给你的那些文件，能拿到的各带一串 file=…；一个都没有时如实说明。
-    """
-    her_round = current_round()
-    lane, now, persona_id = her_round.lane, her_round.now, her_round.participant
-    files = await files_sent_to(persona_id=persona_id, now=now, phone=self.phone)
-    if not files:
-        return "没有谁给你发过什么可以读的东西。"
+        你读过的东西里有些已经被撤回了 —— 那几个照样在这儿，因为你确实读过、它确实在
+        你心里，只是现在拿不到它了、也就没有 file=… 可用，读不下去了。
 
-    marks = await everything_read_so_far(lane=lane, persona_id=persona_id)
-    # 读过的一条都不省，上限只管还没翻开过的那摞（见模块 docstring）。被挤下去的
-    # 那些没有消失：报名字那条路没有上限。
-    #
-    # **撤回掉的分两种命运，分界是她有没有翻开过它**：读过的照常摆在这儿（决策 6，
-    # 只是不配句柄，见 :func:`_one_file`）—— 抹掉就是替她遗忘一件真发生过的事；
-    # 没翻开过的一条都不列 —— 她从没打开过它，撤掉了就等于没来过，摆出来只是给她
-    # 一个既读不了、也想不起来的东西。
-    opened = [f for f in files if f.attachment_id in marks]
-    unopened = [
-        f for f in files if f.attachment_id not in marks and f.still_gettable
-    ]
-    skipped = max(0, len(unopened) - FILE_LIST_LIMIT)
-    shown = opened + unopened[:FILE_LIST_LIMIT]
+        没翻开过的一次只列最近那些；你读过的一个都不会少。
 
-    lines = ["有人发给你的（想读就拿起来读一程）："]
-    lines += [
-        _one_file(f, marks.get(f.attachment_id), now=now, phone=self.phone) for f in shown
-    ]
-    if skipped:
-        lines.append(
-            f"还有 {skipped} 个没在这儿列出来 —— 想得起名字就直接报名字。"
-        )
-    return "\n".join(lines)
+        Returns:
+            有人发给你的那些文件，能拿到的各带一串 file=…；一个都没有时如实说明。
+        """
+        her_round = current_round()
+        lane, now, persona_id = her_round.lane, her_round.now, her_round.participant
+        files = await files_sent_to(persona_id=persona_id, now=now, phone=self.phone)
+        if not files:
+            return "没有谁给你发过什么可以读的东西。"
 
+        marks = await everything_read_so_far(lane=lane, persona_id=persona_id)
+        # 读过的一条都不省，上限只管还没翻开过的那摞（见模块 docstring）。被挤下去的
+        # 那些没有消失：报名字那条路没有上限。
+        #
+        # **撤回掉的分两种命运，分界是她有没有翻开过它**：读过的照常摆在这儿（决策 6，
+        # 只是不配句柄，见 :func:`_one_file`）—— 抹掉就是替她遗忘一件真发生过的事；
+        # 没翻开过的一条都不列 —— 她从没打开过它，撤掉了就等于没来过，摆出来只是给她
+        # 一个既读不了、也想不起来的东西。
+        opened = [f for f in files if f.attachment_id in marks]
+        unopened = [
+            f for f in files if f.attachment_id not in marks and f.still_gettable
+        ]
+        skipped = max(0, len(unopened) - FILE_LIST_LIMIT)
+        shown = opened + unopened[:FILE_LIST_LIMIT]
 
-@tool_error("拿起这个文件失败")
-async def read_a_bit(
-    self,
-    which: Annotated[
-        str,
-        Field(
-            description="你要读的那个文件叫什么，记得多少写多少；"
-            "也可以把清单里那串 file=… 原样抄进来"
-        ),
-    ],
-) -> str:
-    """拿起有人发给你的一个文件，往下读一程。
-
-    报名字就行，记得多少写多少。名字对上好几份（同一本书两个人各发过一次）时，
-    它会把这几份连着谁发的、什么时候发的一起摆给你，**它不会替你挑**——你自己认
-    哪一份，把那一行末尾那串 file=… 原样抄回来。
-
-    读读停停都随你：这一程读到哪儿是你自己停下的地方，下次拿起同一个文件就从那儿
-    接着往下。
-
-    已经被撤回的那些拿不起来，报名字或者抄那串 file=… 都拿不起来 —— 它在渠道上已经
-    没有了，谁都取不到。你读过的那部分还在你心里，读不下去而已。
-
-    你读完一程要过一会儿才在你心里 —— 想知道你读到哪了、它给你留下了什么，
-    调 look_for_something_to_read。
-
-    Args:
-        which: 你要读的那个文件的名字，或者原样抄回来的那串 file=…。
-
-    Returns:
-        你拿起了哪个文件的一句确认；没有对得上的 / 对上好几份 / 已经拿不到时一句
-        如实说明。
-    """
-    her_round = current_round()
-    lane, now, persona_id = her_round.lane, her_round.now, her_round.participant
-    moment_id = her_round.round_id
-    wanted = which.strip()
-    if not wanted:
-        raise ValueError("你没说要读哪个：写一个名字，或者原样抄一串 file=… 进来。")
-
-    files = await files_sent_to(persona_id=persona_id, now=now, phone=self.phone)
-    # 一条判据两条腿：报的是那串身份（照抄回来的），或者是名字的一部分。**不排序、
-    # 不取第一个** —— 命中几个就是几个，认不准由她自己认。
-    #
-    # 身份那条腿要连 ``file=`` 前缀一起认：回问正文里印的就是 ``file=<id>``，她照抄
-    # 回来的也是整串。只认剥了前缀的裸 id 的话，这条回问是死路 —— 摊开候选、她照着
-    # 指了、却被告知"没有名字对得上"（2026-09-02 在 coe-living 上实测到）。
-    handle = wanted.removeprefix(_HANDLE_PREFIX)
-    needle = wanted.casefold()
-
-    def she_means_it(f: SentFile) -> bool:
-        return f.attachment_id == handle or (
-            bool(f.title) and needle in f.title.casefold()
-        )
-
-    # **撤回掉的不是候选**：取不到字节，读一程只会整程作废。但她指的那份**确实存在
-    # 过**（她读过的那些就摆在清单上），所以单独留一手回话 —— 回一句"没有对得上的"
-    # 是句假话，而她会拿着一份自己明明记得读过的东西反复重报。
-    hit = [f for f in files if f.still_gettable and she_means_it(f)]
-    gone = [f for f in files if not f.still_gettable and she_means_it(f)]
-
-    if not hit:
-        if gone:
-            raise ValueError(
-                "、".join(_name_of(f) for f in gone)
-                + f"{_NO_LONGER_GETTABLE}。你读过的那部分还在你心里，"
-                f"用 look_for_something_to_read 看得到。"
+        lines = ["有人发给你的（想读就拿起来读一程）："]
+        lines += [
+            _one_file(f, marks.get(f.attachment_id), now=now, phone=self.phone) for f in shown
+        ]
+        if skipped:
+            lines.append(
+                f"还有 {skipped} 个没在这儿列出来 —— 想得起名字就直接报名字。"
             )
-        raise ValueError(
-            f"没有谁给你发过名字对得上「{wanted}」的东西。换个说法，"
-            f"或者用 look_for_something_to_read 看看你手上都有什么。"
-        )
-    if len(hit) > 1:
-        # 同名多份：这几份是**不同的东西**（各自一条印象链），所以只能她自己认。
-        # 摊开来路让她指得动，绝不替她挑一个。
-        # 跟 :func:`_one_file` 同一批外面来的字串，同样过 :func:`esc`：这段回问也是
-        # 她眼前那段文本的一部分，摊开候选跟摆清单没有区别。
-        spread = "\n".join(
-            f"- {_name_of(f)} {_file_sender(f, phone=self.phone)} "
-            f"{to_cst_dated(f.at.isoformat(), now=now, seconds=False)} "
-            f"发在{f.where} {_HANDLE_PREFIX}{f.attachment_id}"
-            for f in hit
-        )
-        raise ValueError(
-            f"「{wanted}」对上了好几份，它们是不同的东西：\n{spread}\n"
-            f"你要读哪一份？把那一行末尾那串 {_HANDLE_PREFIX}… 原样抄回来。我不替你挑。"
-        )
+        return "\n".join(lines)
 
-    picked = hit[0]
-    # 一程的身份从这次 moment + 这个附件实例派生：这次 moment 里重复拿起（工具重试、整轮重放）
-    # 撞同一程，下一次才是新的一程。
-    round_id = uuid.uuid5(
-        _ID_NS,
-        f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{picked.attachment_id}",
-    ).hex
-    this_round = FilePickedUp(
-        lane=lane,
-        round_id=round_id,
-        persona_id=persona_id,
-        attachment_id=picked.attachment_id,
-        title=picked.title,
-        tos_file=picked.tos_file,
-    )
-    try:
-        delivery = await send_round(
-            this_round, sender=self.residents.residents().by_persona[persona_id]
+    @tool_error("拿起这个文件失败")
+    async def read_a_bit(
+        self,
+        which: Annotated[
+            str,
+            Field(
+                description="你要读的那个文件叫什么，记得多少写多少；"
+                "也可以把清单里那串 file=… 原样抄进来"
+            ),
+        ],
+    ) -> str:
+        """拿起有人发给你的一个文件，往下读一程。
+
+        报名字就行，记得多少写多少。名字对上好几份（同一本书两个人各发过一次）时，
+        它会把这几份连着谁发的、什么时候发的一起摆给你，**它不会替你挑**——你自己认
+        哪一份，把那一行末尾那串 file=… 原样抄回来。
+
+        读读停停都随你：这一程读到哪儿是你自己停下的地方，下次拿起同一个文件就从那儿
+        接着往下。
+
+        已经被撤回的那些拿不起来，报名字或者抄那串 file=… 都拿不起来 —— 它在渠道上已经
+        没有了，谁都取不到。你读过的那部分还在你心里，读不下去而已。
+
+        你读完一程要过一会儿才在你心里 —— 想知道你读到哪了、它给你留下了什么，
+        调 look_for_something_to_read。
+
+        Args:
+            which: 你要读的那个文件的名字，或者原样抄回来的那串 file=…。
+
+        Returns:
+            你拿起了哪个文件的一句确认；没有对得上的 / 对上好几份 / 已经拿不到时一句
+            如实说明。
+        """
+        her_round = current_round()
+        lane, now, persona_id = her_round.lane, her_round.now, her_round.participant
+        moment_id = her_round.round_id
+        wanted = which.strip()
+        if not wanted:
+            raise ValueError("你没说要读哪个：写一个名字，或者原样抄一串 file=… 进来。")
+
+        files = await files_sent_to(persona_id=persona_id, now=now, phone=self.phone)
+        # 一条判据两条腿：报的是那串身份（照抄回来的），或者是名字的一部分。**不排序、
+        # 不取第一个** —— 命中几个就是几个，认不准由她自己认。
+        #
+        # 身份那条腿要连 ``file=`` 前缀一起认：回问正文里印的就是 ``file=<id>``，她照抄
+        # 回来的也是整串。只认剥了前缀的裸 id 的话，这条回问是死路 —— 摊开候选、她照着
+        # 指了、却被告知"没有名字对得上"（2026-09-02 在 coe-living 上实测到）。
+        handle = wanted.removeprefix(_HANDLE_PREFIX)
+        needle = wanted.casefold()
+
+        def she_means_it(f: SentFile) -> bool:
+            return f.attachment_id == handle or (
+                bool(f.title) and needle in f.title.casefold()
+            )
+
+        # **撤回掉的不是候选**：取不到字节，读一程只会整程作废。但她指的那份**确实存在
+        # 过**（她读过的那些就摆在清单上），所以单独留一手回话 —— 回一句"没有对得上的"
+        # 是句假话，而她会拿着一份自己明明记得读过的东西反复重报。
+        hit = [f for f in files if f.still_gettable and she_means_it(f)]
+        gone = [f for f in files if not f.still_gettable and she_means_it(f)]
+
+        if not hit:
+            if gone:
+                raise ValueError(
+                    "、".join(_name_of(f) for f in gone)
+                    + f"{_NO_LONGER_GETTABLE}。你读过的那部分还在你心里，"
+                    f"用 look_for_something_to_read 看得到。"
+                )
+            raise ValueError(
+                f"没有谁给你发过名字对得上「{wanted}」的东西。换个说法，"
+                f"或者用 look_for_something_to_read 看看你手上都有什么。"
+            )
+        if len(hit) > 1:
+            # 同名多份：这几份是**不同的东西**（各自一条印象链），所以只能她自己认。
+            # 摊开来路让她指得动，绝不替她挑一个。
+            # 跟 :func:`_one_file` 同一批外面来的字串，同样过 :func:`esc`：这段回问也是
+            # 她眼前那段文本的一部分，摊开候选跟摆清单没有区别。
+            spread = "\n".join(
+                f"- {_name_of(f)} {_file_sender(f, phone=self.phone)} "
+                f"{to_cst_dated(f.at.isoformat(), now=now, seconds=False)} "
+                f"发在{f.where} {_HANDLE_PREFIX}{f.attachment_id}"
+                for f in hit
+            )
+            raise ValueError(
+                f"「{wanted}」对上了好几份，它们是不同的东西：\n{spread}\n"
+                f"你要读哪一份？把那一行末尾那串 {_HANDLE_PREFIX}… 原样抄回来。我不替你挑。"
+            )
+
+        picked = hit[0]
+        # 一程的身份从这次 moment + 这个附件实例派生：这次 moment 里重复拿起（工具重试、整轮重放）
+        # 撞同一程，下一次才是新的一程。
+        round_id = uuid.uuid5(
+            _ID_NS,
+            f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{picked.attachment_id}",
+        ).hex
+        this_round = FilePickedUp(
+            lane=lane,
+            round_id=round_id,
+            persona_id=persona_id,
+            attachment_id=picked.attachment_id,
+            title=picked.title,
+            tos_file=picked.tos_file,
         )
-    except SendFailed as exc:
-        raise RuntimeError(_NOT_STARTED) from exc
-    if not delivery.delivered:
-        logger.warning(
-            "living reading lane=%s persona=%s file=%s round=%s 没送到读书收件箱（%s）",
-            lane, persona_id, picked.attachment_id, round_id, delivery.reason,
+        try:
+            delivery = await send_round(
+                this_round, sender=self.residents.residents().by_persona[persona_id]
+            )
+        except SendFailed as exc:
+            raise RuntimeError(_NOT_STARTED) from exc
+        if not delivery.delivered:
+            logger.warning(
+                "living reading lane=%s persona=%s file=%s round=%s 没送到读书收件箱（%s）",
+                lane, persona_id, picked.attachment_id, round_id, delivery.reason,
+            )
+            raise RuntimeError(_NOT_STARTED)
+        # 只陈述客观的那一件：你拿起来读了。读出什么感受是她读出来的，不在这儿替她编。
+        return (
+            f"你拿起{_name_of(picked)}读了起来。读进去要一会儿 —— "
+            f"读到什么、它给你留下什么，得等你自己读完这一程。"
         )
-        raise RuntimeError(_NOT_STARTED)
-    # 只陈述客观的那一件：你拿起来读了。读出什么感受是她读出来的，不在这儿替她编。
-    return (
-        f"你拿起{_name_of(picked)}读了起来。读进去要一会儿 —— "
-        f"读到什么、它给你留下什么，得等你自己读完这一程。"
-    )
 
 
 async def send_round(this_round: FilePickedUp, *, sender: str) -> Delivery:
@@ -514,7 +522,7 @@ async def send_round(this_round: FilePickedUp, *, sender: str) -> Delivery:
     （她在世界里的名字）。
 
     两处发这种消息：她拿起文件时（:func:`read_a_bit`），和旧读书队列的一次性搬运
-    （:mod:`app.nodes.reading_carry_over`）。格式只在这里定一次，:func:`read_a_round` 按它解开。
+    （:mod:`app.living.reading.carry_over`）。格式只在这里定一次，:func:`read_a_round` 按它解开。
     """
     return await send(
         sender=sender,

@@ -1,7 +1,7 @@
 """一次性的搬运：旧的读书队列里的消息搬进读书收件箱（``POST /admin/reading/carry-over``）。
 
 读书原来走持久边，队列是 ``durable_file_picked_up_read_a_round``（泳道里带 ``_<泳道>`` 后缀）；现在
-走 living 插件开设的读书收件箱（:data:`app.living.services.READING`），新版本不再消费旧队列。
+走 reading 插件开设的读书收件箱（:data:`app.living.services.READING`），新版本不再消费旧队列。
 旧队列里剩下的消息由这条路由处理：先只看（``dry_run``，默认），再搬，最后删掉本泳道的空队列。
 prod 切换完成、旧队列删掉之后，这条路由连同 monitor-dashboard 的转发一起删除。
 
@@ -18,7 +18,7 @@ passive declare 打开，不存在就报不存在，不会建出来。
 * 其余：``unprocessed``，从没被处理过的一程。
 
 **搬**（``dry_run=false``）：``unprocessed`` 的按读书收件箱的格式发过去
-（:func:`app.living.reading.send_round`：消息 id 是 ``round_id``，发送方是那个人在世界里的名字），
+（:func:`app.living.reading.files.send_round`：消息 id 是 ``round_id``，发送方是那个人在世界里的名字），
 发送成功（记录写好、broker 确认）之后才确认旧消息；那个人不在三姐妹里、或者没送到，就放回，计入
 ``failed``。``discard_dead=true`` 时 ``dead`` 的逐条把消息体写进日志再确认掉，否则放回。
 ``discard_foreign=true`` 时 ``foreign`` 的也这样丢掉，否则放回：prod 不带后缀的那条旧队列里可能有 ppe
@@ -53,7 +53,7 @@ from app.data.schema import Data, Key
 from app.infra.lane_policy import current_deployment_lane
 from app.infra.rabbitmq import lane_queue, mq
 from app.living.common import living_lane
-from app.living.reading import FilePickedUp, send_round
+from app.living.reading.files import FilePickedUp, send_round
 from app.living.services import Residents, WhoLivesHere
 from app.messaging.message import SendFailed
 

@@ -19,13 +19,13 @@ import aio_pika
 import pytest
 
 from app.infra.rabbitmq import DLQ_NAME, Route, lane_queue, mq
-from app.living import reading as reading_mod
-from app.living.reading import FileRead
+from app.living.reading import files as reading_mod
+from app.living.reading.carry_over import ReadingCarryOverRequest, carry_over_reading
+from app.living.reading.files import FileRead
 from app.living.residents import names as names_mod
 from app.living.services import READING
 from app.messaging.lifecycle import start_messaging
 from app.messaging.record import read_record
-from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
 from tests.living.conftest import RESIDENT_NAMES, NamesRead, her_plugins
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
@@ -416,7 +416,7 @@ async def test_a_queue_deeper_than_the_scan_limit_is_reported_and_left_alone(
 ):
     """一次调用要把整条队列取出来、处理完才放回；队列深到超过上限，就一条都不取，只报深度和"太多"，
     看的时候也一样。"""
-    from app.nodes import reading_carry_over
+    from app.living.reading import carry_over as reading_carry_over
 
     monkeypatch.setattr(reading_carry_over, "SCAN_LIMIT", 3, raising=False)
     monkeypatch.delenv("LANE")
@@ -473,7 +473,7 @@ async def test_other_lanes_rounds_are_put_back_unless_they_are_to_be_discarded(
     )
 
     # 给 discard_foreign：别的泳道的逐条记下消息体、确认掉；解不开的还在。
-    with caplog.at_level(logging.WARNING, logger="app.nodes.reading_carry_over"):
+    with caplog.at_level(logging.WARNING, logger="app.living.reading.carry_over"):
         (dropped,) = (await _carry(dry_run=False, discard_foreign=True))["queues"]
     assert (dropped["foreign"], dropped["discarded_foreign"], dropped["unreadable"]) == (3, 3, 1)
     assert [_round_or_raw(b) for b in await _bodies(OLD.queue)] == ["not json at all"]

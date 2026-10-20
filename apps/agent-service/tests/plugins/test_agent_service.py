@@ -32,6 +32,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         "phone",
         "household",
         "speaking",
+        "reading",
         "web",
         "guides",
         "living",
@@ -66,14 +67,15 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("speaking", "segment"): 1,  # the output check's
         ("speaking", "clock"): 1,
         ("speaking", "outbound"): 2,
+        ("reading", "tool"): 2,
+        ("reading", "inbox"): 1,
+        ("reading", "route"): 1,
         ("web", "tool"): 2,
         ("guides", "tool"): 2,
         ("guides", "segment"): 1,  # what guides she can read, the last segment of her round
         ("living", "turns"): 9,
         ("living", "wake"): 12,
-        ("living", "route"): 1,
-        ("living", "inbox"): 1,
-        ("living", "tool"): 8,
+        ("living", "tool"): 6,
         ("living", "segment"): 3,  # three more segments of her round
         ("living", "round_log"): 1,
         ("living", "section"): 2,

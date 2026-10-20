@@ -28,7 +28,7 @@ from app.living.moment import LifeMoment
 from app.living.nudge import NudgeBegun
 from app.living.persona.chain import PersonaVersion
 from app.living.pictures.album import Picture
-from app.living.reading import FileRead
+from app.living.reading.files import FileRead
 from app.living.services import KIND_SPEECH, MEDIUM_IN_PERSON
 from tests.hosting import in_a_fresh_process
 

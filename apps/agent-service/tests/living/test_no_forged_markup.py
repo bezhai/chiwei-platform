@@ -31,7 +31,7 @@ from sqlalchemy import text
 
 from app.agent.tooling import Tool
 from app.data.tx import current_session, tx
-from tests.living.conftest import glance_text, her_phone, her_tool
+from tests.living.conftest import glance_text, her_phone, her_reader
 from tests.living.test_phone import (
     _DM,
     _GROUP,
@@ -92,7 +92,7 @@ LANE = "coe-living"
 @pytest.fixture
 async def reading_db(living_db):
     """手机那几张表 + "读到哪了" 那一张 —— 可读清单每一行都要问一句"读到哪了"。"""
-    from app.living.reading import FileRead
+    from app.living.reading.files import FileRead
     from tests.runtime.conftest import migrate
 
     await migrate(FileRead, living_db)
@@ -290,7 +290,7 @@ async def test_a_file_name_cannot_carry_markup_into_her_reading_list(
     reading_db, in_a_moment
 ):
     """**这是最短的一条路**：不用改昵称、不用进群，给文件起个名字发过来就行。"""
-    look_for_something_to_read = her_tool("look_for_something_to_read")
+    look_for_something_to_read = Tool(her_reader().look_for_something_to_read)
 
     await _seed_world()
     await _incoming(
@@ -308,7 +308,7 @@ async def test_a_sender_name_and_a_group_name_stay_out_of_her_reading_list(
     reading_db, in_a_moment, pinned
 ):
     """清单上还有两样外面来的：谁发的（昵称）、发在哪（会话名）。"""
-    look_for_something_to_read = her_tool("look_for_something_to_read")
+    look_for_something_to_read = Tool(her_reader().look_for_something_to_read)
 
     await _seed_world()
     async with tx():
@@ -341,7 +341,7 @@ async def test_the_reask_that_spreads_same_named_files_escapes_them_too(
     reading_db, in_a_moment
 ):
     """同名多份时摊开候选那一段同样是她眼前的文本。"""
-    read_a_bit = her_tool("read_a_bit")
+    read_a_bit = Tool(her_reader().read_a_bit)
 
     await _seed_world()
     for i in range(2):

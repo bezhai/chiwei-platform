@@ -11,14 +11,15 @@
 文件时发一条消息到这里，读那一程。所以这里验的是（看的是 agent-service 的插件宿主上登记的
 东西）：
 
-  * 实验泳道上没有任何一条路由能到达 ``app.living`` 里的处理函数，路由之外能把东西送进进程的
+  * 实验泳道上到得了 ``app.living`` 里的处理函数的路由只有一条：把旧读书队列搬进读书收件箱的那条
+    运维路由，它能做到的跟往读书收件箱里投一条一样，碰不到她的一轮。路由之外能把东西送进进程的
     登记（收件箱、将来别的种类）都逐种过一遍；
   * life 开设的收件箱只有三姐妹那一组和读书收件箱。三姐妹的处理函数是
     :func:`app.living.household.received.receive`，它只存一行、不碰模型：跑一遍看得到一行、看不到任何一次
     模型调用；它所在的模块连同它 import 的一切，一行能跑模型的代码都没有；
   * 读书收件箱和别的收件箱一样，运维入口（``/admin/messaging/send``）能以任何身份往里投。投进来
-    能做到的只有读一程：处理函数 :func:`app.living.reading.read_a_round` 所在的模块连同它 import
-    的一切，碰不到她的一轮（:mod:`app.living.moment`）；
+    能做到的只有读一程：处理函数 :func:`app.living.reading.files.read_a_round` 所在的模块连同它
+    import 的一切，碰不到她的一轮（:mod:`app.living.moment`）；搬运那条路由的处理函数也一样；
   * ``app.living`` 的源码里一次都没有出现旧 chat 入站那几个名字；
   * living 自己登记的钟只有对账那一条；她的轮次、日记和回看由宿主的钟给她的队列发信号。钟给出去
     的只有钟响的时刻：对账那条钟每一拍对一次这个进程泳道的账，她的队列收到的信号里也只有时刻
@@ -131,6 +132,22 @@ def _operator(request: str, method: str, path: str, handler: str) -> Route:
     return Route(method, path, request, handler, True, True, True)
 
 
+# 一次性的搬运：旧的读书队列（持久边那一条）里剩下的消息，按读书收件箱的格式发进读书收件箱。它是
+# reading 插件登记的（``app.living.reading.carry_over``），所以**处理函数在 app.living 里**，是唯一
+# 一条到得了 living 的路由；能做到的跟运维入口往读书收件箱里投一条一样：让读书 agent 读一程，碰不到她的
+# 一轮（下面 ``test_the_carry_over_handler_cannot_run_her_round`` 守着）。三项检查跟运维入口一样都开着。
+# prod 切换完成、旧队列删掉之后，这一条连同路由一起删除。
+_CARRY_OVER = Route(
+    "POST",
+    "/admin/reading/carry-over",
+    "app.living.reading.carry_over.ReadingCarryOverRequest",
+    "app.living.reading.carry_over.carry_over_reading",
+    True,
+    True,
+    True,
+)
+_CARRY_OVER_HANDLER = "app.living.reading.carry_over"
+
 # 进程里**唯一**允许存在的路由：运维口（``/admin/*``，搜索 + DLQ 巡检 + 通信机制的人工入口）。
 #
 # 每条按 **方法 + 路径 + 完整类标识 + 处理函数 + 三项检查** 列全，不是按类名、也不是按路径前缀。
@@ -172,14 +189,7 @@ _OPS_ONLY_ROUTES = frozenset({
     _operator("app.messaging.operator.OperatorReplayRequest", "POST",
               "/admin/messaging/dead-letters/replay",
               "app.messaging.operator.operator_replay_node"),
-    # 一次性的搬运：旧的读书队列（持久边那一条）里剩下的消息，按读书收件箱的格式发进读书收件箱
-    # （``app.nodes.reading_carry_over``）。**它的处理函数不在 app.living 里**，能做到的跟运维入口往
-    # 读书收件箱里投一条一样：让读书 agent 读一程，碰不到她的一轮（下面
-    # ``test_the_reading_inbox_handler_cannot_run_her_round`` 守着）。三项检查跟运维入口一样都开着。
-    # prod 切换完成、旧队列删掉之后，这一条连同路由一起删除。
-    Route("POST", "/admin/reading/carry-over",
-          "app.nodes.reading_carry_over.ReadingCarryOverRequest",
-          "app.nodes.reading_carry_over.carry_over_reading", True, True, True),
+    _CARRY_OVER,
 })
 
 @functools.cache
@@ -207,7 +217,8 @@ def _reaches_living(route: Route) -> list[str]:
 
 
 def test_nothing_from_outside_reaches_the_living_engine():
-    """实验泳道上没有任何路由能到达 ``app.living`` 里的处理函数，别的入口逐种过一遍。
+    """实验泳道上除了搬运那一条（:data:`_CARRY_OVER`，它的处理函数碰不到她的一轮，下面单独守着），没有
+    任何路由能到达 ``app.living`` 里的处理函数，别的入口逐种过一遍。
 
     路由判的是**通向谁**：把处理函数摸出来（``__module__.__qualname__``），凡是落在
     ``app.living`` 里的就红。这样两个方向都堵上——给 living 的 Data 挂一条路由会红，把一条已经在
@@ -226,7 +237,7 @@ def test_nothing_from_outside_reaches_the_living_engine():
     )
 
     routes = [Route(*r) for r in registered["routes"]]
-    ears = [line for r in routes for line in _reaches_living(r)]
+    ears = [line for r in routes if r != _CARRY_OVER for line in _reaches_living(r)]
     assert ears == [], (
         "外面的东西能到达 living 的处理函数了 —— 新引擎长出了耳朵：\n  "
         + "\n  ".join(ears)
@@ -254,8 +265,8 @@ _OPEN_HER_INBOXES = "app.living.household.mailbox.Mailbox.open_inboxes"
 _HER_INBOX_HANDLER = "app.living.household.received"
 
 # 读书收件箱：名字、处理函数。
-_READING_INBOX = ["reading", "app.living.reading.read_a_round"]
-_READING_HANDLER = "app.living.reading"
+_READING_INBOX = ["reading", "app.living.reading.files.read_a_round"]
+_READING_HANDLER = "app.living.reading.files"
 
 # 她的一轮。读书收件箱的处理函数所在的模块连同它 import 的一切，不许碰到它。
 _HER_ROUND = "app.living.moment"
@@ -266,7 +277,7 @@ _MODEL_RUNNING = ("app.agent", "app.capabilities", _HER_ROUND)
 
 def test_the_only_inboxes_living_opens_are_the_residents_and_reading():
     """life 开设的收件箱只有两类：三姐妹那一组，由 :meth:`app.living.household.mailbox.Mailbox.open_inboxes` 在开始
-    接收时开；读书收件箱，setup 时直接开，处理函数是 :func:`app.living.reading.read_a_round`。
+    接收时开；读书收件箱，setup 时直接开，处理函数是 :func:`app.living.reading.files.read_a_round`。
 
     三姐妹的名字在人设表里，setup 时只声明"开始接收时再开"；所以宿主起完 setup 之后，直接开设的
     收件箱落在 ``app.living`` 里的只许是读书那一个，"启动时再开"的声明只许是那一个。多出任何一个，
@@ -347,6 +358,19 @@ def test_the_reading_inbox_handler_cannot_run_her_round():
     assert reached == [], (
         f"读书收件箱的处理函数（{_READING_HANDLER}）碰得到她的一轮了：{reached}。"
         "往读书收件箱里投一条，只该让读书 agent 读一程。"
+    )
+
+
+def test_the_carry_over_handler_cannot_run_her_round():
+    """搬运那条路由的处理函数所在的模块，连同它 import 的一切，碰不到她的一轮。
+
+    它是唯一一条到得了 ``app.living`` 的路由（:data:`_CARRY_OVER`）：要内网凭据、核对泳道，搬进来的
+    消息进读书收件箱，能让读书 agent 读一程，不能让她跑一轮。
+    """
+    loaded = _app_modules_loaded_by_importing(_CARRY_OVER_HANDLER)
+    reached = [m for m in loaded if m == _HER_ROUND or m.startswith(_HER_ROUND + ".")]
+    assert reached == [], (
+        f"搬运那条路由的处理函数（{_CARRY_OVER_HANDLER}）碰得到她的一轮了：{reached}。"
     )
 
 

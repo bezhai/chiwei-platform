@@ -4,7 +4,7 @@
 收件箱由 living 插件开设：宿主按 agent-service 的清单只起 skills 和 living 两个插件（只跑
 setup），之后通信机制照线上那样开始接收。所以这里用的是插件实际登记的选项：最多处理 1 次、
 处理时限 5 分钟。她手机上的文件和读一程本身（取字节、解码、模型调用）换成替身；读一程的替身
-在"模型调用失败"时返回 ``None``，跟 :func:`app.living.reading_agent.run_reading_round` 把失败吞掉
+在"模型调用失败"时返回 ``None``，跟 :func:`app.living.reading.agent.run_reading_round` 把失败吞掉
 的样子一样。
 """
 from __future__ import annotations
@@ -16,16 +16,17 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import text
 
+from app.agent.tooling import Tool
 from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, lane_queue
-from app.living import reading as reading_mod
-from app.living.reading import FileRead, SentFile, read_so_far
+from app.living.reading import files as reading_mod
+from app.living.reading.files import FileRead, SentFile, read_so_far
 from app.living.residents import names as names_mod
 from app.living.services import READING
 from app.messaging import receiving
 from app.messaging.broker import inbox_route
 from app.messaging.lifecycle import start_messaging
 from app.messaging.record import read_record
-from tests.living.conftest import RESIDENT_NAMES, her_plugins, her_tool
+from tests.living.conftest import RESIDENT_NAMES, her_plugins, her_reader
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
 from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture 名
@@ -37,7 +38,7 @@ from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture
 from tests.messaging.helpers import eventually
 from tests.runtime.conftest import migrate
 
-read_a_bit = her_tool("read_a_bit")
+read_a_bit = Tool(her_reader().read_a_bit)
 
 pytestmark = pytest.mark.integration
 
@@ -65,7 +66,7 @@ class _Round:
         self.result = None
 
     def gives(self, *, impression: str, pages_read: int) -> _Round:
-        from app.living.reading_agent import ReadingResult
+        from app.living.reading.agent import ReadingResult
 
         self.result = ReadingResult(impression=impression, pages_read=pages_read, finished=False)
         return self
