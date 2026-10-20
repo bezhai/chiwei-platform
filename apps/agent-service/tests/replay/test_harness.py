@@ -14,6 +14,13 @@ breaking, because a broken one still passes.
 * ``unserved_host`` — a request to a host the replay does not serve never goes out: async and
   sync clients are both refused, and a refusal the code swallowed
   (``gather(return_exceptions=True)``) still fails the replay.
+* ``scripted_by_the_call`` — a model call takes its reply from the script of the agent whose call
+  is running (``current_call().agent``), not from the script named after the prompt it was
+  rendered from: once an agent's prompt is several segments, no one prompt is named after it.
+  The call record keeps both, the agent and the prompt.
+* ``agents_interleave`` — an agent whose tool runs another agent: each model call of the chain
+  takes the next reply of its own agent's script, the outer agent's again after the inner one
+  returned.
 """
 
 from __future__ import annotations
@@ -25,13 +32,22 @@ from datetime import datetime
 import httpx
 import pytest
 
+from app.agent.contracts import AgentSpec
+from app.agent.core import Agent
+from app.agent.neutral import Message, Role
+from app.agent.round import Call, in_call, open_call
+from app.agent.tooling import tool
+from app.agent.trace import rendered_from
 from app.capabilities import banned_words
 from app.infra.cst_time import CST
 from tests.replay import seeds
 from tests.replay.conftest import DEFAULT_START, LANE
 from tests.replay.harness import Replay, Reply, ToolUse
 from tests.replay.harness import baseline as baseline_mod
+from tests.replay.harness.model import ModelScript
 from tests.replay.harness.network import UnservedRequest
+from tests.replay.harness.prompts import load_fixture
+from tests.replay.harness.timeline import Timeline
 
 pytestmark = pytest.mark.integration
 
@@ -171,3 +187,51 @@ async def test_redis_is_per_replay(real_pg_required, test_db, tmp_path):
 
     async with _scenario(test_db, tmp_path / "second"):
         assert await banned_words.contains("在 Dark Room 里") is None
+
+
+async def test_scripted_by_the_call():
+    script = ModelScript(Timeline())
+    script.script("world_perception", Reply(text="判断完了。"))
+    rendered = load_fixture("world_round")
+
+    with in_call(Call(agent="world_perception", session=None, round=None)):
+        with rendered_from(rendered):
+            reply = await script.complete(
+                "perception-model", [Message(role=Role.USER, content="x")], None, {}
+            )
+
+    assert reply.text() == "判断完了。"
+    [call] = script.calls
+    assert call["agent"] == "world_perception"
+    assert call["prompt"]["name"] == "world_round"
+    assert script.unused() == {}
+
+
+async def test_agents_interleave(replay):
+    outer = AgentSpec(segments=("world_round",), model="m", trace_name="world-round")
+    inner = AgentSpec(segments=("world_npc",), model="m", trace_name="world-npc")
+
+    @tool
+    async def ask() -> str:
+        """问一下 NPC。"""
+        call = open_call("world_npc", inner, lane=LANE)
+        reply = await Agent(inner).run([Message(role=Role.USER, content="说吧")], call=call)
+        return reply.text()
+
+    replay.model.script(
+        "world_round", Reply(tools=(ToolUse("ask", {}),)), Reply(text="这一轮完了。")
+    )
+    replay.model.script("world_npc", Reply(text="老板：早。"))
+
+    reply = await Agent(outer, tools=[ask]).run(
+        [Message(role=Role.USER, content="醒了")],
+        call=open_call("world_round", outer, lane=LANE),
+    )
+
+    assert reply.text() == "这一轮完了。"
+    assert [(c["agent"], c["number"]) for c in replay.model.calls] == [
+        ("world_round", 1),
+        ("world_npc", 1),
+        ("world_round", 2),
+    ]
+    assert replay.model.unused() == {}

@@ -22,7 +22,7 @@ skipping, because a baseline that silently skips guards nothing.
 | `prompts/<prompt id>.txt` / `.json` | Fixture text for each Langfuse prompt a round renders (text prompt, or a chat prompt as a list of `{role, content}`). |
 | `seeds.py` | Rows the rounds read that no round writes (personas, her bot, a private chat), and picture bytes. |
 | `test_<kind>.py` | Scenarios of one round kind. |
-| `test_harness.py` | Self-tests of the core, for guarantees whose breaking no scenario would notice (a swallowed `ScriptExhausted`, Redis shared between scenarios, a missing answer from an outside service, a request to a host nothing serves). |
+| `test_harness.py` | Self-tests of the core, for guarantees whose breaking no scenario would notice (a swallowed `ScriptExhausted`, Redis shared between scenarios, a missing answer from an outside service, a request to a host nothing serves, a model call scripted by its call's agent rather than by the prompt it was rendered from). |
 | `baselines/<kind>/<scenario>.json` | The recorded baselines. |
 | `.actual/` | Written when a comparison fails; git-ignored. |
 
@@ -59,7 +59,7 @@ plugins' setup and the dataflow graph.
 
 | Boundary | Where | What the replay does |
 |---|---|---|
-| Model calls | `app.agent.client.build_model_client`: `resolve_model_info` resolves every model id to client type `replay`, registered as `ScriptedModel` (`harness/model.py`) | Answers from a script, one queue per agent (the Langfuse prompt the call was rendered from). Records the complete request. Reports usage through `generation_span`, as the real adapters do, so cost rows come from the code under test. The provider adapters never run, so neither does the Gemini adapter's own download of every image url in a request (`_fetch_remote_image`, history included); instead each image block pointing into the object store is recorded with what fetching it at the time of the call returns (`"fetched"`, below). |
+| Model calls | `app.agent.client.build_model_client`: `resolve_model_info` resolves every model id to client type `replay`, registered as `ScriptedModel` (`harness/model.py`) | Answers from a script, one queue per agent (the agent whose call is running, `current_call().agent`; its name is its original prompt id, so it stays the same when its prompt is split into segments). Records the complete request. Reports usage through `generation_span`, as the real adapters do, so cost rows come from the code under test. The provider adapters never run, so neither does the Gemini adapter's own download of every image url in a request (`_fetch_remote_image`, history included); instead each image block pointing into the object store is recorded with what fetching it at the time of the call returns (`"fetched"`, below). |
 | Prompts | `app.agent.prompts._get_client` (the Langfuse SDK client; the lane-label fallback logic stays) | Serves `prompts/<id>`; each prompt object remembers the variables it was compiled with. |
 | Tracing | `app.agent.trace._get_client`, `app.agent.core._get_trace_client` | Off (the spans take their no-op path). Not part of the baseline. |
 | Clock | `time-machine` (not freezegun: freezegun swaps `datetime.date` for a subclass, which changes the migrator's and persist's type checks and which asyncpg will not encode) | Frozen; moves only when a step says `at=`. The event loop's monotonic clock is untouched. `TZ` is set to the container's `Asia/Shanghai`. |

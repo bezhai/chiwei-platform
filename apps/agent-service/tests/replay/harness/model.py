@@ -5,10 +5,12 @@ Interception point: ``app.agent.client.build_model_client``. Model resolution
 and that client type is registered as :class:`ScriptedModel`. Everything above it runs for real:
 the agent loop, tool dispatch, retries, transcript collection, prompt compilation.
 
-A script is a queue of replies per *agent*, where the agent is the Langfuse prompt the call was
-rendered from (``living_life_moment``, ``world_round``, ``guard_output_safety``…). Calls from
-different agents can interleave (a perception judgement runs inside a world tool) without the
-scenario having to predict the interleaving. A reply is a :class:`Reply`, a :class:`Fail`, or a
+A script is a queue of replies per *agent*, where the agent is the one whose call is running
+(``app.agent.round.current_call().agent``: ``living_life_moment``, ``world_round``,
+``guard_output_safety``…; an agent's name is its original prompt id). Calls from different agents
+can interleave (a perception judgement runs inside a world tool) without the scenario having to
+predict the interleaving. It is not the prompt the call was rendered from: an agent whose prompt
+is several segments is rendered from no one prompt named after it. A reply is a :class:`Reply`, a :class:`Fail`, or a
 callable taking the :class:`Request` and returning one of those (for replies that copy something
 out of the conversation, the way a model would).
 
@@ -30,6 +32,7 @@ from typing import Any
 
 from app.agent.client import ModelClient
 from app.agent.neutral import Message, ToolCall, ToolDef, TurnPart
+from app.agent.round import current_call
 from app.agent.trace import _current_prompt, generation_span
 from tests.replay.harness.errors import describe_error
 
@@ -147,7 +150,7 @@ class ModelScript:
     ) -> tuple[dict, Request]:
         self._effects.alive()
         prompt = _current_prompt.get()
-        agent = getattr(prompt, "name", None)
+        agent = current_call().agent
         self._numbers[agent] += 1
         number = self._numbers[agent]
         record: dict[str, Any] = {
