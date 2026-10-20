@@ -79,8 +79,8 @@ def test_the_loop_reads_no_request_or_app_registry():
 
 
 def _agents_with_tools():
-    from app.agent.reading import READING_AGENT
     from app.living.moment import LIFE_MOMENT_AGENT
+    from app.living.reading_agent import READING_AGENT
     from app.world.answer import ANSWER_AGENT
     from app.world.main_agent import ROUND_AGENT
     from app.world.npc import NPC_AGENT

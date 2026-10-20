@@ -34,7 +34,7 @@
 （``Happening`` / ``LooseEnd`` / ``PhoneRead`` / ``SpokenOutbound``），这条不破例。
 
 **一程读不成，印象一个字都不动。** 取不到字节（没缓存进对象存储 / 预签失败 / GET
-挂了）、解码失败、超时、空产出，:func:`app.agent.reading.run_reading_round` 一律返回
+挂了）、解码失败、超时、空产出，:func:`app.living.reading_agent.run_reading_round` 一律返回
 ``None``，这里据此**不提交**：印象和读到第几页原样停在上一程的位置，她下次自己想读
 了再拿起来一次。绝不写半截脏印象 —— 空印象覆盖整篇就是真失忆。
 
@@ -53,8 +53,8 @@
 执行的句柄，并写明这份东西拿不到了。抹掉它就是替她遗忘一件真发生过的事。她**从没翻
 开过**的那些则相反，撤掉了就一条都不列 —— 她从没打开过它，撤掉了就等于没来过。
 
-取字节、解码、分页、跑一程阅读这几样在 :mod:`app.domain.reading_source` 和
-:mod:`app.agent.reading` 里，跟哪个引擎在跑没有关系，直接用。
+取字节、解码、分页在 :mod:`app.domain.reading_source` 里，跟哪个引擎在跑没有关系，直接用；
+读一程的 agent 在 :mod:`app.living.reading_agent`。
 """
 
 from __future__ import annotations
@@ -69,7 +69,6 @@ from pydantic import BaseModel, Field, field_validator
 
 # module-level 引入，测试从这里换替身（一程真跑起来要取字节 + 几轮模型调用）
 from app.agent.contracts import ToolSpec
-from app.agent.reading import run_reading_round
 from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
@@ -81,6 +80,7 @@ from app.infra import cst_time
 from app.infra.cst_time import CST, to_cst_dated
 from app.living.participants import READING, residents
 from app.living.phone import Sender, _who_tag, reachable_conversations
+from app.living.reading_agent import run_reading_round
 from app.living.records import _require_aware, esc
 from app.messaging.message import Delivery, Kind, Message, SendFailed
 

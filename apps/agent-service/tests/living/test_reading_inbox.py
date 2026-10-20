@@ -4,7 +4,7 @@
 收件箱由 living 插件开设：宿主按 agent-service 的清单只起 skills 和 living 两个插件（只跑
 setup），之后通信机制照线上那样开始接收。所以这里用的是插件实际登记的选项：最多处理 1 次、
 处理时限 5 分钟。她手机上的文件和读一程本身（取字节、解码、模型调用）换成替身；读一程的替身
-在"模型调用失败"时返回 ``None``，跟 :func:`app.agent.reading.run_reading_round` 把失败吞掉
+在"模型调用失败"时返回 ``None``，跟 :func:`app.living.reading_agent.run_reading_round` 把失败吞掉
 的样子一样。
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ class _Round:
         self.result = None
 
     def gives(self, *, impression: str, pages_read: int) -> _Round:
-        from app.agent.reading import ReadingResult
+        from app.living.reading_agent import ReadingResult
 
         self.result = ReadingResult(impression=impression, pages_read=pages_read, finished=False)
         return self

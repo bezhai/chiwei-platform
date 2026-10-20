@@ -56,7 +56,7 @@ from app.capabilities._errors import CapabilityTimeout
 #
 # A source constant, not Dynamic Config: it changes nothing about what any agent
 # does, it only turns a hang into a failure — the same judgment as the other
-# hang guards in this service (``app.living.outgoing``, ``app.agent.reading``).
+# hang guards in this service (``app.living.outgoing``, ``app.living.reading_agent``).
 MODEL_ANSWER_SECONDS = 180.0
 
 

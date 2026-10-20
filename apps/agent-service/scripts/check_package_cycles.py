@@ -25,10 +25,10 @@ from pathlib import Path
 
 from scripts.check_world_life_imports import imported_names, module_name
 
-# 现在还在的环。agent ↔ living ↔ memory 由插件化（T5–T7）拆开；
+# 现在还在的环。living ↔ memory 由插件化（T5–T7）拆开；
 # 拆开一部分就把这里改成剩下的样子。
 KNOWN_CYCLES: list[frozenset[str]] = [
-    frozenset({"agent", "living", "memory"}),
+    frozenset({"living", "memory"}),
 ]
 
 # 不管成不成环都不许出现的边（从哪个包，到哪个包）。消息机制是宿主下面的一层：宿主启停它，

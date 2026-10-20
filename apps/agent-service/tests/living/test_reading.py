@@ -231,7 +231,7 @@ def one_round(monkeypatch):
             self.before_return = None
 
         def gives(self, *, impression: str, pages_read: int, finished: bool = False):
-            from app.agent.reading import ReadingResult
+            from app.living.reading_agent import ReadingResult
 
             self.result = ReadingResult(
                 impression=impression, pages_read=pages_read, finished=finished
@@ -737,7 +737,7 @@ async def test_bytes_that_never_arrive_do_not_write_half_an_impression(
     reading_db, monkeypatch
 ):
     """取件失败走的是真的那条阅读一程 —— 取不到字节就整程作废，什么都不落。"""
-    from app.agent import reading as agent_reading
+    from app.living import reading_agent as agent_reading
 
     asked: list[str] = []
 

@@ -26,6 +26,7 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * :mod:`app.living.phone`       手机：信封可感、内容要她去看，持久游标
   * :mod:`app.living.whitelist`   会话白名单：哪些会话进她的视野（手机那道主闸的判据）
   * :mod:`app.living.reading`     读别人发给她的文件（没有"书"这个注册物）
+  * :mod:`app.living.reading_agent` 读一程的 agent：只有一只往后翻页的手，读完揉出新印象
   * :mod:`app.living.pictures`    她自己做过的图：画 / 上网找 / 翻一翻 / 拿出一张看；
     存永久句柄，跨轮找得回
   * :mod:`app.living.web`         上网：手里有问题就查，没有就随便翻
