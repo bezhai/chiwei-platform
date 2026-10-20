@@ -20,8 +20,8 @@
     能做到的只有读一程：处理函数 :func:`app.living.reading.read_a_round` 所在的模块连同它 import
     的一切，碰不到她的一轮（:mod:`app.living.moment`）；
   * ``app.living`` 的源码里一次都没有出现旧 chat 入站那几个名字；
-  * living 自己登记的钟只有那两条，钟上那条 Data 除了 ``ts`` 什么都装不下；她的轮次和日记由
-    宿主的钟给她的队列发信号，信号里只有钟响的时刻——装不下内容的钟，天然没法当入站口用。
+  * living 自己登记的钟只有那一条，钟上那条 Data 除了 ``ts`` 什么都装不下；她的轮次、日记和
+    回看由宿主的钟给她的队列发信号，信号里只有钟响的时刻——装不下内容的钟，天然没法当入站口用。
 
 最后一条是最要紧的一条：只要哪天有人给 tick 加一个 ``content`` 字段，"钟"就变成了
 "信箱"，而这一步在 code review 里看起来毫无杀伤力。
@@ -46,7 +46,6 @@ import pytest
 
 import app.living as living_pkg
 from app.living.landing import LandingTick
-from app.living.persona_review import PersonaReviewTick
 from tests.hosting import in_a_fresh_process
 
 LANE = "coe-living"
@@ -386,7 +385,6 @@ def test_no_living_module_ever_mentions_the_old_inbound_chain():
     "cls",
     [
         LandingTick,
-        PersonaReviewTick,
     ],
 )
 def test_a_clock_cannot_be_turned_into_a_mailbox(cls):
@@ -401,14 +399,11 @@ def test_a_clock_cannot_be_turned_into_a_mailbox(cls):
     )
 
 
-def test_the_only_clocks_are_livings_two_and_her_wakes():
-    """宿主上的钟只有 living 那两条，名字就是上面那两个只装得下 ``ts`` 的 tick；她的轮次只由
-    常规节奏和提前叫醒这两个来源的钟叫醒，日记只由日记的钟叫醒，每人各一条队列。"""
+def test_the_only_clocks_are_livings_one_and_her_wakes():
+    """宿主上的钟只有 living 那一条，名字就是上面那个只装得下 ``ts`` 的 tick；她的轮次只由
+    常规节奏和提前叫醒这两个来源的钟叫醒，日记、回看各由自己的钟叫醒，每人各一条队列。"""
     registered = _registered(LANE)
-    assert registered["clocks"] == [
-        ["living", "LandingTick"],
-        ["living", "PersonaReviewTick"],
-    ]
+    assert registered["clocks"] == [["living", "LandingTick"]]
     assert registered["wakes"] == sorted(
         [
             *(
@@ -416,6 +411,10 @@ def test_the_only_clocks_are_livings_two_and_her_wakes():
                 for source in ("nudge", "regular")
                 for persona in ("akao", "ayana", "chinagi")
             ),
-            *(["living", f"day-page -> {persona}/day-page"] for persona in ("akao", "ayana", "chinagi")),
+            *(
+                ["living", f"{line} -> {persona}/{line}"]
+                for line in ("day-page", "persona-review")
+                for persona in ("akao", "ayana", "chinagi")
+            ),
         ]
     )

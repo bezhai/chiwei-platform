@@ -179,8 +179,8 @@ replay.check("living_moment/continuation")
 
 1. Find how production triggers it and call that from a step: a wake the process registered,
    for one participant (`replay.wake("akao", "regular")`, `replay.wake("akao", "nudge")`) or as
-   one tick of its clock to every participant (`replay.tick("day-page")`), a clock-driven function
-   (`persona_review_tick`) or a delivery to a
+   one tick of its clock to every participant (`replay.tick("day-page")`,
+   `replay.tick("persona-review")`), or a delivery to a
    consumer (an inbox such as `inbox_reading_<lane>`, a question queue, the scheduled queue).
    Prefer the outermost entry that production calls, so a refactor of what is underneath stays
    covered.

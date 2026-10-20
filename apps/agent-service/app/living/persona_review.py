@@ -40,11 +40,10 @@ prompt 在 Langfuse（:data:`PERSONA_REVIEW_PROMPT_ID`），变量只有 persona
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Annotated
 
 from app.agent.context import AgentContext
 from app.agent.core import AgentConfig
@@ -52,12 +51,10 @@ from app.agent.neutral import Message, Role
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
 from app.data.queries import find_persona
-from app.data.schema import Data, Key
 from app.domain.thinking_cost import record_round_cost
-from app.infra.cst_time import CST, now_cst
+from app.infra.cst_time import CST
 from app.living.day_page import LivingDayPage, read_day_pages_between
 from app.living.persona import (
-    LIVING_PERSONAS,
     PersonaVersion,
     has_review_version_this_week,
     read_latest_persona_version,
@@ -65,9 +62,6 @@ from app.living.persona import (
     week_start_cst,
     write_persona_version,
 )
-from app.living.records import living_lane
-from app.living.serial import hold
-from app.runtime.node import node
 
 logger = logging.getLogger(__name__)
 
@@ -82,11 +76,6 @@ logger = logging.getLogger(__name__)
 # 版"那道判据说了算，不由日子说了算。
 PERSONA_REVIEW_FROM = time(6, 0)
 PERSONA_REVIEW_UNTIL = time(8, 0)
-
-# 钟拍得比窗口密得多，因为"该不该跑"判在节点里（在不在窗口、本周写过没有、上一周有
-# 没有日记），一周 2016 拍里绝大多数在打模型之前就返回了。五分钟一拍 = 窗口里有 24
-# 次机会。
-PERSONA_REVIEW_TICK_SECONDS = 300
 
 # Langfuse prompt id。
 PERSONA_REVIEW_PROMPT_ID = "living_persona_review"
@@ -103,11 +92,6 @@ _CFG = AgentConfig(
     "living-persona-review",
     recursion_limit=1,
 )
-
-
-def persona_review_lock_key(lane: str, persona_id: str) -> str:
-    """这个人在这个 lane 上回看那一周的排他占用 key（每人一条轴，互不阻塞）。"""
-    return f"living:persona-review:{lane}:{persona_id}"
 
 
 def last_full_week(now: datetime) -> tuple[date, date]:
@@ -153,8 +137,8 @@ async def persona_review_vars(*, persona_id: str) -> dict[str, str]:
     **锚拿不到就 fail fast**（``bot_persona`` 没这行、或者那一列是空白）：这一轮的全
     部意义就是"在锚的约束下改自己"，没有锚还照跑的话，她会在一段空白的参照下重写自
     己，而这件事在库里、在日志里、在她的表现上都看不出来——只有几个月后那份「我是谁」
-    已经不是她了。抛出去由 :func:`persona_review_tick` 记一条 warning，这个人这一周
-    的班不跑，另外两个照跑。
+    已经不是她了。抛出去由她回看队列上的钟记一条 warning，这个人这一周的班不跑，另外两个
+    照跑。
     """
     persona = await find_persona(persona_id)
     core = getattr(persona, "persona_core", None) or ""
@@ -196,185 +180,163 @@ def _persona_review_prompt(
     )
 
 
-async def review_persona(
-    *, lane: str, persona_id: str, clock: Callable[[], datetime]
-) -> PersonaVersion | None:
-    """让她读上一周自己写的那几页，重写一版「我是谁」；这一拍不该跑 / 没写成返回
-    ``None``。
+@dataclass(frozen=True)
+class DueReview:
+    """判出来要做的那一次回看：哪一周、她这一轮的『现在』、那一周她写下的那几页。"""
 
-    **"本周写过没有"到落库为止在排他占用里**（每人一条轴），理由同
-    day_page：两条拍打到同一个人时，各自读到"本周还没写"就会双双烧一次模型，最后链
-    上多出一版语义重复的正文（版本链是 append-only，没有任何东西会拦第二次）。窗口
-    那一道判在占用**外面**：它只看这一拍的钟，不读任何共享状态，等锁没有意义
-    ——一周 2016 拍里的绝大多数在这里就返回了。
+    # 为什么做这一次回看，记进日志。
+    reason: str
+    lane: str
+    persona_id: str
+    # 上一个完整自然周的 ``[起, 止)``（:func:`last_full_week`）。
+    since: date
+    until: date
+    # 她这一轮的『现在』：轮到她时读的钟。
+    now: datetime
+    # 那一周她写下的那几页，按日子升序（:func:`week_material`）。
+    pages: tuple[LivingDayPage, ...]
 
-    **占用里的一切用拿到占用那一刻的钟**：回看哪一周、本周写过没有、这一版什么时候写下的。
-    前一次回看挂住时（最长占着 15 分钟），排在后面的那一拍要过一阵才轮到，这一版是那时写下
-    的，不是那一拍敲响时。窗口只管这一拍要不要去试：排在后面、轮到时已经过了窗口的那一拍照样
-    写，理由同 :func:`app.living.day_page.day_page_due`。
 
-    顺序是"能不调模型就不调"，四道判断全在模型前面：
+async def persona_review_due(
+    *, lane: str, persona_id: str, at: datetime, clock: Callable[[], datetime]
+) -> DueReview | None:
+    """回看的钟在 ``at`` 响的那一拍，轮到她的回看队列时：要回看哪一周；不该跑返回 ``None``。
 
-      1. **不在窗口里**（:data:`PERSONA_REVIEW_FROM` ～ :data:`PERSONA_REVIEW_UNTIL`）
-         就返回。日记还没写完、或者这件事早该做完了，都不是回看的时候。
-      2. **本周已经有 review 版**就返回。这是周级幂等的**全部**依据（
-         :func:`~app.living.persona.has_review_version_this_week`），不另设标记——
-         标记和版本是两个事实，中间崩一次就永久对不上。owner 本周盖过版不算，那是
-         bezhai 的干预，不该顶掉她自己的班。
-      3. **上一周一页日记都没有**就返回：那是服务根本没跑的一周，不该有那一版，更不
-         该为一片空白叫一次模型（她会凭空编出一周的变化）。
-      4. **链是空的先 seed 一版**（``source='seed'``，内容是她链空时实际读到的那份）。
-         这不是省钱那类判断，是让链上的历史连得上：没有起点那一版的话，v1 就是"某天
-         突然出现的一段正文"，往前没有任何东西。
+    **先读钟**：轮到她的这一刻就是她这一轮的『现在』，回看哪一周、本周写过没有、这一版什么时候
+    写下的都按它。前一次回看挂住时（最长占着她的回看队列 15 分钟），排在后面的那一拍要过一阵才
+    轮到，这一版是那时写下的，不是那一拍敲响时。
 
-    模型跑完之后还有一道：**正文 strip 为空 = 这一轮没成**。不落版本——下一拍还在窗
-    口里的话她会再写一次。落一版空白的后果是这一周被记成"写过了"，而她那一版是空的。
+    **窗口按那一拍响的时刻判**（``at``，换到北京时间），理由同
+    :func:`app.living.day_page.day_page_due`：排在后面、轮到时已经过了窗口的那一拍照样写。
 
-    ``written_at`` 用拿到占用时读的那一个 ``now``（归一到 CST），不在写的时候再读一次钟：
-    判据 2 读的 ``written_at`` 和这里写的 ``written_at`` 必须是同一个时刻，两次读钟之间
-    那点差可以正好跨过周界，于是同一周写两版、或者下一周的班被当成已经跑过。
+    之后两道判断都在模型前面，能不调模型就不调：
 
-    ``max_retries=1``：core 的 ``run`` 把整轮包在 ``@retry`` 里，一次模型瞬时失败会
-    整轮重放、白花一次钱；这一轮本来就一周一次，五分钟后那一拍再来就行。
+      1. **本周已经有 review 版**就返回。这是周级幂等的**全部**依据（
+         :func:`~app.living.persona.has_review_version_this_week`），不另设标记——标记和版本是
+         两个事实，中间崩一次就永久对不上。owner 本周盖过版不算，那是 bezhai 的干预，不该顶掉
+         她自己的班。窗口每天都开：周一没跑成，同一周后面几天的窗口会补上；过了周日，``now``
+         落进下一周，回看的就是刚过去的那一周，没写成的那一周就放弃了。
+      2. **上一周一页日记都没有**就返回：那是服务根本没跑的一周，不该有那一版，更不该为一片空白
+         叫一次模型（她会凭空编出一周的变化）。
+
+    判和写在她回看队列上的同一次轮次里（:mod:`app.plugins.living`）：两拍打到同一个人时，各自读到
+    "本周还没写"就会双双烧一次模型，最后链上多出一版语义重复的正文（版本链是 append-only，没有
+    任何东西会拦第二次）。队列上每一拍都排队，轮到时再判一遍。
     """
-    if not (
-        PERSONA_REVIEW_FROM
-        <= clock().astimezone(CST).time()
-        < PERSONA_REVIEW_UNTIL
-    ):
+    now = clock()
+    if not (PERSONA_REVIEW_FROM <= at.astimezone(CST).time() < PERSONA_REVIEW_UNTIL):
+        return None
+    since, until = last_full_week(now)
+    if await has_review_version_this_week(lane=lane, persona_id=persona_id, now=now):
+        return None
+    pages = await week_material(lane=lane, persona_id=persona_id, since=since, until=until)
+    if not pages:
+        logger.info(
+            "living persona review lane=%s persona=%s %s 那一周一页日记都没有，不写",
+            lane,
+            persona_id,
+            since.isoformat(),
+        )
+        return None
+    return DueReview(
+        reason=f"回看 {since.isoformat()} 那一周",
+        lane=lane,
+        persona_id=persona_id,
+        since=since,
+        until=until,
+        now=now,
+        pages=tuple(pages),
+    )
+
+
+async def write_due_review(due: DueReview) -> PersonaVersion | None:
+    """让她读判出来的那一周（:class:`DueReview`）自己写的那几页，重写一版「我是谁」；没写成
+    返回 ``None``。
+
+    **链是空的先 seed 一版**（``source='seed'``，内容是她链空时实际读到的那份）。这不是省钱那类
+    判断，是让链上的历史连得上：没有起点那一版的话，v1 就是"某天突然出现的一段正文"，往前没有
+    任何东西。
+
+    模型跑完之后还有一道：**正文 strip 为空 = 这一轮没成**。不落版本——下一拍还在窗口里的话她会
+    再写一次。落一版空白的后果是这一周被记成"写过了"，而她那一版是空的。
+
+    ``written_at`` 用轮到她时读的那一个 ``now``（归一到 CST），不在写的时候再读一次钟：判据 1 读的
+    ``written_at`` 和这里写的 ``written_at`` 必须是同一个时刻，两次读钟之间那点差可以正好跨过周界，
+    于是同一周写两版、或者下一周的班被当成已经跑过。
+
+    ``max_retries=1``：core 的 ``run`` 把整轮包在 ``@retry`` 里，一次模型瞬时失败会整轮重放、白花
+    一次钱；这一轮本来就一周一次，五分钟后那一拍再来就行。模型失败往外抛，由她回看队列上的钟记
+    一条 warning（一个人的失败不拖累另两个人）。
+    """
+    lane, persona_id, since, until = due.lane, due.persona_id, due.since, due.until
+    current = await read_latest_persona_version(lane=lane, persona_id=persona_id)
+    if current is None:
+        await seed_persona_chain(lane=lane, persona_id=persona_id)
+        current = await read_latest_persona_version(lane=lane, persona_id=persona_id)
+        if current is None:
+            raise RuntimeError(f"seed 之后链仍然是空的 lane={lane} persona={persona_id}")
+
+    prompt_vars = await persona_review_vars(persona_id=persona_id)
+    # 一个人的每周回看在 langfuse 里读成一条流，逐周翻起来才不用大海捞针。没有
+    # 工具，所以不需要任何 ambient feature。
+    context = AgentContext(
+        persona_id=persona_id,
+        session_id=f"living-persona-review:{lane}:{persona_id}",
+    )
+    # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
+    # 会系统性丢 trace，"这一周花了多少"只能从 PG 数。
+    with collect_usage() as usage:
+        reply = await build_persona_review_runner().run(
+            [
+                Message(
+                    role=Role.USER,
+                    content=_persona_review_prompt(
+                        since=since,
+                        until=until,
+                        current=current.narrative,
+                        pages=list(due.pages),
+                    ),
+                )
+            ],
+            prompt_vars=prompt_vars,
+            context=context,
+            max_retries=1,
+        )
+
+    await record_round_cost(
+        lane=lane,
+        actor=persona_id,
+        round_id=f"persona-review:{since.isoformat()}",
+        usage=usage,
+        observed_at=due.now.isoformat(),
+    )
+
+    written = reply.text().strip()
+    if not written:
+        logger.warning(
+            "living persona review lane=%s persona=%s %s 这一轮一个字都没写，不落版本",
+            lane,
+            persona_id,
+            since.isoformat(),
+        )
         return None
 
-    async with hold(persona_review_lock_key(lane, persona_id)):
-        now = clock()
-        local = now.astimezone(CST)
-        since, until = last_full_week(now)
-        if await has_review_version_this_week(
-            lane=lane, persona_id=persona_id, now=now
-        ):
-            return None
-
-        pages = await week_material(
-            lane=lane, persona_id=persona_id, since=since, until=until
-        )
-        if not pages:
-            logger.info(
-                "living persona review lane=%s persona=%s %s 那一周一页日记都没有，不写",
-                lane,
-                persona_id,
-                since.isoformat(),
-            )
-            return None
-
-        current = await read_latest_persona_version(
-            lane=lane, persona_id=persona_id
-        )
-        if current is None:
-            await seed_persona_chain(lane=lane, persona_id=persona_id)
-            current = await read_latest_persona_version(
-                lane=lane, persona_id=persona_id
-            )
-            if current is None:
-                raise RuntimeError(
-                    f"seed 之后链仍然是空的 lane={lane} persona={persona_id}"
-                )
-
-        prompt_vars = await persona_review_vars(persona_id=persona_id)
-        # 一个人的每周回看在 langfuse 里读成一条流，逐周翻起来才不用大海捞针。没有
-        # 工具，所以不需要任何 ambient feature。
-        context = AgentContext(
-            persona_id=persona_id,
-            session_id=f"living-persona-review:{lane}:{persona_id}",
-        )
-        # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
-        # 会系统性丢 trace，"这一周花了多少"只能从 PG 数。
-        with collect_usage() as usage:
-            reply = await build_persona_review_runner().run(
-                [
-                    Message(
-                        role=Role.USER,
-                        content=_persona_review_prompt(
-                            since=since,
-                            until=until,
-                            current=current.narrative,
-                            pages=pages,
-                        ),
-                    )
-                ],
-                prompt_vars=prompt_vars,
-                context=context,
-                max_retries=1,
-            )
-
-        await record_round_cost(
-            lane=lane,
-            actor=persona_id,
-            round_id=f"persona-review:{since.isoformat()}",
-            usage=usage,
-            observed_at=now.isoformat(),
-        )
-
-        written = reply.text().strip()
-        if not written:
-            logger.warning(
-                "living persona review lane=%s persona=%s %s 这一轮一个字都没写，不落版本",
-                lane,
-                persona_id,
-                since.isoformat(),
-            )
-            return None
-
-        await write_persona_version(
-            lane=lane,
-            persona_id=persona_id,
-            narrative=written,
-            source="review",
-            written_at=local.isoformat(),
-        )
-        # 读回来而不是就地拼一个：返回的那一版要带真实的 ``version``，而版本号是
-        # ``insert_append`` 在库里定的。这次读仍在占用里，读到的一定是刚写的那版。
-        return await read_latest_persona_version(lane=lane, persona_id=persona_id)
-
-
-class PersonaReviewTick(Data):
-    """每周回看那一拍。单字段 ``ts``——框架源循环固定按 ``data_type(ts=<iso>)`` 造
-    payload，多一个必填字段就是每一拍 ValidationError **直接杀 Pod**。"""
-
-    ts: Annotated[str, Key]
-
-    class Meta:
-        transient = True
-
-
-@node
-async def persona_review_tick(tick: PersonaReviewTick) -> None:
-    """到点了让三个人各自回看上一周；不在窗口里的拍什么都不做。
-
-    **并发跑，一个人炸不拖累另两个**：
-    三条轴各有自己的占用，并发没有竞争。异常不往上抛——源循环那一拍失败会连累另外两
-    个人，而下一拍五分钟后就来了，窗口里还有的是机会。
-    """
-    lane = living_lane()
-    outcomes = await asyncio.gather(
-        *(
-            review_persona(lane=lane, persona_id=persona_id, clock=now_cst)
-            for persona_id in LIVING_PERSONAS
-        ),
-        return_exceptions=True,
+    await write_persona_version(
+        lane=lane,
+        persona_id=persona_id,
+        narrative=written,
+        source="review",
+        written_at=due.now.astimezone(CST).isoformat(),
     )
-    for persona_id, outcome in zip(LIVING_PERSONAS, outcomes, strict=True):
-        if isinstance(outcome, BaseException):
-            logger.warning(
-                "living persona review lane=%s persona=%s 这一版炸了：%r",
-                lane,
-                persona_id,
-                outcome,
-                exc_info=outcome,
-            )
-        elif outcome is not None:
-            logger.info(
-                "living persona review lane=%s persona=%s 重写了一版（v%d）：%s",
-                lane,
-                persona_id,
-                outcome.version,
-                outcome.narrative,
-            )
+    # 读回来而不是就地拼一个：返回的那一版要带真实的 ``version``，而版本号是
+    # ``insert_append`` 在库里定的。这次读仍在她的回看队列上，读到的一定是刚写的那版。
+    version = await read_latest_persona_version(lane=lane, persona_id=persona_id)
+    if version is not None:
+        logger.info(
+            "living persona review lane=%s persona=%s 重写了一版（v%d）：%s",
+            lane,
+            persona_id,
+            version.version,
+            version.narrative,
+        )
+    return version

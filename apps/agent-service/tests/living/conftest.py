@@ -101,21 +101,6 @@ def clock_at(moment: datetime) -> Callable[[], datetime]:
     return lambda: moment
 
 
-async def queued_behind(key: str) -> None:
-    """等到有人排在这把占用后面（``asyncio.Lock`` 的等待队列不空）：日记、回看的占用
-    （:mod:`app.living.serial`）。"""
-    import asyncio
-
-    from app.living.serial import _lock_for
-
-    lock = _lock_for(key)
-    for _ in range(500):
-        if lock._waiters:
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"没有人排在 {key} 后面")
-
-
 def her_queue(
     persona_id: str = "akao",
     line: str = "round",

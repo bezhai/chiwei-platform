@@ -7,11 +7,12 @@ task, and the clocks phase with the lane gating.
 
 Neither the surface test (``tests/apps``) nor the replay starts clocks, so this file is where the
 clocks are seen to start through the lifespan: in a coe lane with
-``DATAFLOW_ENABLE_TIME_SOURCES=1`` each of living's two clocks ticks into its node and each of
-her three wakes signals her queues, and without it none does. The nodes and the wake sources are
+``DATAFLOW_ENABLE_TIME_SOURCES=1`` living's clock ticks into its node and each of her four wakes
+signals her queues, and without it none does. The nodes and the wake sources are
 replaced by recorders and the intervals shortened; which clocks and wakes living registers is
 pinned by ``tests/plugins/test_time_source_payload_contract.py``,
-``tests/living/test_moment.py`` and ``tests/living/test_day_page.py``.
+``tests/living/test_moment.py``, ``tests/living/test_day_page.py`` and
+``tests/living/test_persona_review.py``.
 """
 from __future__ import annotations
 
@@ -22,11 +23,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 
-LIVING_CLOCKS = (
-    "LandingTick",
-    "PersonaReviewTick",
-)
-HER_WAKES = ("regular", "nudge", "day-page")
+LIVING_CLOCKS = ("LandingTick",)
+HER_WAKES = ("regular", "nudge", "day-page", "persona-review")
 
 
 @pytest.fixture
@@ -99,9 +97,11 @@ def ticks(monkeypatch) -> dict[str, list[object]]:
     monkeypatch.setattr(living, "regular", recording("regular"))
     monkeypatch.setattr(living, "nudge", recording("nudge"))
     monkeypatch.setattr(living, "day_page", recording("day-page"))
+    monkeypatch.setattr(living, "persona_review", recording("persona-review"))
     monkeypatch.setattr(living, "REGULAR_EVERY", timedelta(seconds=0.02))
     monkeypatch.setattr(living, "NUDGE_EVERY", timedelta(seconds=0.02))
     monkeypatch.setattr(living, "DAY_PAGE_EVERY", timedelta(seconds=0.02))
+    monkeypatch.setattr(living, "PERSONA_REVIEW_EVERY", timedelta(seconds=0.02))
     return seen
 
 
@@ -141,7 +141,7 @@ async def test_with_time_sources_enabled_each_clock_ticks_and_each_wake_signals_
         assert all(data.ts for data in ticks[name])
     for name in HER_WAKES:
         assert set(ticks[name]) <= {"akao", "ayana", "chinagi"}
-    # Two clocks and one clock for each of her three wakes, shared by the three sisters.
+    # One clock and one clock for each of her four wakes, shared by the three sisters.
     assert "runtime: app=agent-service started 5 clock(s)" in caplog.messages
 
     # Stopped with the app: no tick after shutdown.

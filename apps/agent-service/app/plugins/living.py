@@ -1,16 +1,17 @@
 """Living: the three sisters' life engine — for each sister a queue of rounds with two wakes on it
-and a queue for her diary with one, two clocks, the reading inbox, the two outbound queues, the
-sisters' inboxes, and a one-off admin route that empties the old reading queue.
+and a queue each for her diary and her weekly look back with one, a clock, the reading inbox, the
+two outbound queues, the sisters' inboxes, and a one-off admin route that empties the old reading
+queue.
 
   each sister's queue of rounds ("round", ``ctx.turns``), signalled by two wakes (``ctx.wake``):
   every  60 s  regular   -> regular_moment_due / run_due_moment   her regular rhythm
   every  60 s  nudge     -> nudged_moment_due / run_due_moment    wake her early for a call or a message
 
-  each sister's diary ("day-page"), signalled by one wake:
-  every 300 s  day-page  -> day_page_due / write_due_page         yesterday's page (04:00-06:00 window)
+  each sister's diary ("day-page") and weekly look back ("persona-review"), one wake each:
+  every 300 s  day-page        -> day_page_due / write_due_page          yesterday's page (04:00-06:00)
+  every 300 s  persona-review  -> persona_review_due / write_due_review  last week's "who I am" (06:00-08:00)
 
-  every 300 s  LandingTick        -> landing_tick         match what she said with what landed
-  every 300 s  PersonaReviewTick  -> persona_review_tick  Monday's "who I am" (06:00-08:00 window)
+  every 300 s  LandingTick  -> landing_tick  match what she said with what landed
 
   ChatResponseSegment -> chat_response_{channel}          what she says
   Recall              -> recall_{channel}                 what she takes back
@@ -28,11 +29,12 @@ A turn holds her queue for at most :data:`app.living.serial.HELD_SECONDS`; a tur
 is cut off there and handled as a crash. Each tick reads the database and compares; most run
 nothing. Her diary and her weekly look back do not take turns on this queue.
 
-**Her diary has a queue of its own** ("day-page"), with the same hold limit, so writing yesterday's
-page never keeps her from living today. Every tick of its wake is queued (``QUEUE_EACH``): a tick
-waiting behind a stuck page gets its turn, and decides then whether the page is still to write.
-Whether a tick counts is judged by when it ticked (the window), what it writes by when it got its
-turn (:func:`app.living.day_page.day_page_due`).
+**Her diary and her weekly look back have a queue each** ("day-page", "persona-review"), with the
+same hold limit, so writing yesterday's page or rewriting who she is never keeps her from living
+today, nor each other. Every tick of their wakes is queued (``QUEUE_EACH``): a tick waiting behind a
+stuck one gets its turn, and decides then whether there is still something to write. Whether a tick
+counts is judged by when it ticked (the window), what it writes by when it got its turn
+(:func:`app.living.day_page.day_page_due`, :func:`app.living.persona_review.persona_review_due`).
 
 **Clocks tick denser than the work they drive.** A clock's seconds are fixed when it is
 registered, so the intervals that are business parameters (ten minutes between rounds, the
@@ -87,12 +89,8 @@ from app.living.landing import LANDING_TICK_SECONDS, LandingTick, landing_tick
 from app.living.moment import DueMoment, LifeMoment, regular_moment_due, run_due_moment
 from app.living.nudge import nudged_moment_due
 from app.living.participants import READING
-from app.living.persona import LIVING_PERSONAS
-from app.living.persona_review import (
-    PERSONA_REVIEW_TICK_SECONDS,
-    PersonaReviewTick,
-    persona_review_tick,
-)
+from app.living.persona import LIVING_PERSONAS, PersonaVersion
+from app.living.persona_review import DueReview, persona_review_due, write_due_review
 from app.living.reading import read_a_round
 from app.living.received import open_inboxes
 from app.living.records import living_lane
@@ -102,9 +100,10 @@ from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_rea
 # How often her wakes tick (see "Clocks tick denser than the work they drive").
 REGULAR_EVERY = timedelta(seconds=60)
 NUDGE_EVERY = timedelta(seconds=60)
-# Five minutes: 24 tries inside the two hours of the diary's window; a tick that fails (the model
-# timed out, she wrote nothing) is tried again by the next one.
+# Five minutes: 24 tries inside the two hours of the diary's and the look back's windows; a tick
+# that fails (the model timed out, she wrote nothing) is tried again by the next one.
 DAY_PAGE_EVERY = timedelta(minutes=5)
+PERSONA_REVIEW_EVERY = timedelta(minutes=5)
 
 # How long a turn may hold one of her queues (:mod:`app.host.turns`).
 HOLD_LIMIT = timedelta(seconds=HELD_SECONDS)
@@ -112,7 +111,6 @@ HOLD_LIMIT = timedelta(seconds=HELD_SECONDS)
 # (tick Data, seconds, node). The clock is named after its tick Data.
 CLOCKS: tuple[tuple[type[Data], float, Callable[[Data], Awaitable[None]]], ...] = (
     (LandingTick, LANDING_TICK_SECONDS, landing_tick),
-    (PersonaReviewTick, PERSONA_REVIEW_TICK_SECONDS, persona_review_tick),
 )
 
 
@@ -156,15 +154,30 @@ def day_page(lane: str) -> WakeSource[DuePage, LivingDayPage | None]:
     return WakeSource("day-page", Coalesce.QUEUE_EACH, due, write_due_page)
 
 
+def persona_review(lane: str) -> WakeSource[DueReview, PersonaVersion | None]:
+    """Her weekly look back on ``lane``: a new "who I am" from last week's pages, when the tick
+    came in the window and this week has no review yet
+    (:func:`app.living.persona_review.persona_review_due`)."""
+
+    async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DueReview | None:
+        (tick,) = batch.close()
+        return await persona_review_due(lane=lane, persona_id=persona_id, at=tick.at, clock=clock)
+
+    return WakeSource("persona-review", Coalesce.QUEUE_EACH, due, write_due_review)
+
+
 def setup(ctx: Context) -> None:
     lane = living_lane()
-    regular_rounds, early_wakes, pages = regular(lane), nudge(lane), day_page(lane)
+    regular_rounds, early_wakes = regular(lane), nudge(lane)
+    pages, reviews = day_page(lane), persona_review(lane)
     for persona_id in LIVING_PERSONAS:
         rounds = ctx.turns(persona_id, "round", hold_limit=HOLD_LIMIT)
         ctx.wake(rounds, regular_rounds, every=REGULAR_EVERY)
         ctx.wake(rounds, early_wakes, every=NUDGE_EVERY)
         diary = ctx.turns(persona_id, "day-page", hold_limit=HOLD_LIMIT)
         ctx.wake(diary, pages, every=DAY_PAGE_EVERY)
+        look_back = ctx.turns(persona_id, "persona-review", hold_limit=HOLD_LIMIT)
+        ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
     for data_type, seconds, node in CLOCKS:
         ctx.clock(data_type.__name__, seconds, _ticker(data_type, node))
     ctx.inbox(

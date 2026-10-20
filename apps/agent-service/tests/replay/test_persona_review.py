@@ -1,6 +1,7 @@
-"""Replay: her weekly review, driven the way the review clock drives it (``persona_review_tick``).
+"""Replay: her weekly review, driven the way the host's clock drives it (one tick of the
+``persona-review`` wake, signalling the three sisters' review queues at once).
 
-The tick runs the three sisters concurrently. Only 赤尾 has day pages in the week being read,
+The tick reaches the three sisters concurrently. Only 赤尾 has day pages in the week being read,
 so the other two return before any write or model call and the order of effects is fixed.
 
 Her day pages are seeded with the product's own write (``insert_idempotent``), between steps, so
@@ -11,7 +12,8 @@ they are not part of the record: the round under test reads them.
   she rewrites it from last week's pages (only Monday to Sunday of that week, oldest first) with
   the flat persona text as the anchor; a later tick finds this week's review written. The next
   Monday's review reads the version she wrote the week before.
-* ``model_call_fails`` — the model call fails after the chain was seeded; the tick swallows it.
+* ``model_call_fails`` — the model call fails after the chain was seeded; the tick does not raise
+  it.
   The next tick does not seed again and writes the review.
 """
 
@@ -23,9 +25,8 @@ import pytest
 
 from app.capabilities._errors import CapabilityTimeout
 from app.data.persist import insert_idempotent
-from app.infra.cst_time import CST, now_cst
+from app.infra.cst_time import CST
 from app.living.day_page import LivingDayPage
-from app.living.persona_review import PersonaReviewTick, persona_review_tick
 from tests.replay import seeds
 from tests.replay.harness import Fail, Reply
 
@@ -38,8 +39,8 @@ def _at(month: int, day: int, hour: int, minute: int = 0) -> datetime:
     return datetime(2026, month, day, hour, minute, tzinfo=CST)
 
 
-def _tick():
-    return lambda: persona_review_tick(PersonaReviewTick(ts=now_cst().isoformat()))
+def _tick(replay):
+    return lambda: replay.tick("persona-review")
 
 
 async def _her_household_is_up(replay) -> None:
@@ -89,18 +90,18 @@ async def test_two_weeks(replay):
     await _her_pages(replay, LAST_WEEK)
 
     await replay.step(
-        "a tick before the window does nothing", _tick(), at=_at(7, 27, 5, 55)
+        "a tick before the window does nothing", _tick(replay), at=_at(7, 27, 5, 55)
     )
 
     replay.model.script(REVIEW, Reply(text=FIRST_REVIEW))
     await replay.step(
         "the first tick in the window: the chain is seeded, then she rewrites it",
-        _tick(),
+        _tick(replay),
         at=_at(7, 27, 6),
     )
 
     await replay.step(
-        "a later tick finds this week's review written", _tick(), at=_at(7, 27, 6, 5)
+        "a later tick finds this week's review written", _tick(replay), at=_at(7, 27, 6, 5)
     )
 
     await _her_pages(replay, WEEK_AFTER)
@@ -110,7 +111,7 @@ async def test_two_weeks(replay):
     )
     await replay.step(
         "the next Monday: she rewrites the version she wrote last week",
-        _tick(),
+        _tick(replay),
         at=_at(8, 3, 6),
     )
 
@@ -127,14 +128,14 @@ async def test_model_call_fails(replay):
     )
     await replay.step(
         "the chain is seeded, then the model call fails; the tick swallows it",
-        _tick(),
+        _tick(replay),
         at=_at(7, 27, 6),
     )
 
     replay.model.script(REVIEW, Reply(text=FIRST_REVIEW))
     await replay.step(
         "the next tick writes the review without seeding again",
-        _tick(),
+        _tick(replay),
         at=_at(7, 27, 6, 5),
     )
 
