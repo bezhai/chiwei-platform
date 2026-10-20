@@ -15,10 +15,12 @@ from app.host.errors import (
     UnknownApp,
 )
 from app.host.host import Context, Host
+from app.host.manifest import App, Participant
 from app.host.plugin import Disposer, Plugin, Registration
 from app.host.turns import Batch, Coalesce, JoinedTurnFailed, Signal, Turns, WakeSource
 
 __all__ = [
+    "App",
     "Batch",
     "Coalesce",
     "Context",
@@ -28,6 +30,7 @@ __all__ = [
     "HostError",
     "JoinedTurnFailed",
     "MissingService",
+    "Participant",
     "Plugin",
     "Registration",
     "ServiceCycle",
