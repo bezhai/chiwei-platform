@@ -1,6 +1,6 @@
 """判一段她要发出去的话安不安全。
 
-现在只有她自己开口这一条链用它（:mod:`app.living.mouth`，交出去之前判，不合格就不发）。
+现在只有她自己开口这一条链用它（:mod:`app.living.speaking.mouth`，交出去之前判，不合格就不发）。
 判词那次模型调用挂在她这一轮里，用这一轮开头定下的 prompt 版本，所以它跟着她的开口放在
 living，不在能力层。
 
@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from app.agent.contracts import AgentSpec, Segment
 from app.agent.core import Agent
 from app.agent.round import current_round, open_call
-from app.capabilities import banned_words
+from app.living.speaking import banned_words
 
 logger = logging.getLogger(__name__)
 

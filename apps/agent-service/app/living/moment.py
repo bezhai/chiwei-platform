@@ -74,7 +74,7 @@
   * ``look_through_your_phone`` 翻一翻手机上都有哪些会话（同上，三层里的第二层：
     通知只给刚来的那几条动静，这只手给整张名单）
   * ``look_up_contact``  按名字找回一条会话（同上）
-  * ``send_message``     给手机上某条会话发一条（:mod:`app.living.mouth`）
+  * ``send_message``     给手机上某条会话发一条（:mod:`app.living.speaking.mouth`）
   * ``search_online`` / ``browse_online``  带着问题上网查 / 没事逛一圈刷一批
     （:mod:`app.living.web`，跟 ``look_at_phone`` 是两件事：那只手看别人发给她的
     消息，这两只手看网上的东西）

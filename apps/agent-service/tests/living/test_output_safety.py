@@ -14,8 +14,8 @@ import pytest
 from app.agent.client import ModelClient
 from app.agent.round import current_call
 from app.agent.trace import _current_prompts
-from app.capabilities import banned_words
-from app.living.output_safety import audit_output
+from app.living.speaking import banned_words
+from app.living.speaking.output_safety import audit_output
 
 
 class _FakeGuard(ModelClient):
@@ -59,7 +59,7 @@ async def her_round(prompts_from_fixtures):
     from app.agent.prompts import PromptSet
     from app.agent.round import Round, in_round
     from app.infra.cst_time import CST
-    from app.living.output_safety import (
+    from app.living.speaking.output_safety import (
         GUARD_OUTPUT,
         GUARD_OUTPUT_AGENT,
         GUARD_OUTPUT_SEGMENT,

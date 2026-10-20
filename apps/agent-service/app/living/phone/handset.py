@@ -375,7 +375,7 @@ async def conversations_her_bot_is_in(*, persona_id: str) -> list[Reachable]:
     口径（presence + 她自己的 bot + 会话没归档）在
     :func:`app.data.queries.persona.find_conversations_with_persona_bot`。
 
-    **只有撤回走这一份**（:mod:`app.living.takeback`）：她撤的是自己已经发出去的话，
+    **只有撤回走这一份**（:mod:`app.living.speaking.takeback`）：她撤的是自己已经发出去的话，
     用的是自己那张认领表上的编号，跟"她现在还看不看得见那条会话"是两件事 —— 让一条
     发出去时在名单里、之后掉出名单的消息撤不回来是纯粹的倒退。**别处一律用**
     :func:`reachable_conversations`；多一个调用方就多一条绕过白名单的路，门禁是

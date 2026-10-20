@@ -2,9 +2,9 @@
 
 这两条是 living 引擎**唯一**的出站出口（``ctx.outbound``，:mod:`app.infra.outbound`）：
 
-  * ``ChatResponseSegment -> chat_response`` —— 嘴（``app.living.mouth`` publish 它）。没有它
+  * ``ChatResponseSegment -> chat_response`` —— 嘴（``app.living.speaking.mouth`` publish 它）。没有它
     她能想不能说。
-  * ``Recall -> recall`` —— 撤回（``app.living.takeback`` publish 它）。
+  * ``Recall -> recall`` —— 撤回（``app.living.speaking.takeback`` publish 它）。
 
 之所以要**按插件**验而不是只验"注册表里有这条边"：这两条边原先分别搭在旧 chat
 主 pipeline 和旧 pre/post 安全链的接线模块上，而那两个模块整体属于旧实现。
@@ -33,14 +33,14 @@ def _outbound(host) -> dict[tuple[type, str], str]:
     }
 
 
-async def test_both_outbound_edges_are_registered_by_the_living_plugin(app_host):
-    """她开口和撤回走的就是这两条边，都由 living 插件登记，起来之后 publish 看得到。"""
+async def test_both_outbound_edges_are_registered_by_the_speaking_plugin(app_host):
+    """她开口和撤回走的就是这两条边，都由 speaking 插件登记，起来之后 publish 看得到。"""
     host = await app_host("agent-service")
 
     assert _outbound(host) == {
-        (ChatResponseSegment, "chat_response"): "living",
-        (Recall, "recall"): "living",
-    }, "living 插件没登记她的嘴或撤回 —— 她能想不能说，或者收不回已经说出去的话。"
+        (ChatResponseSegment, "chat_response"): "speaking",
+        (Recall, "recall"): "speaking",
+    }, "speaking 插件没登记她的嘴或撤回 —— 她能想不能说，或者收不回已经说出去的话。"
     assert _publishes_to(ChatResponseSegment, "chat_response")
     assert _publishes_to(Recall, "recall")
 

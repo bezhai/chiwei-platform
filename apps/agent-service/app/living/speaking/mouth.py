@@ -60,7 +60,7 @@
 
 **交出去之前先过一道检查，不合格就不发。** 真人问她、她答的那条链是"先发后撤"（流式
 回复没有同步检查的窗口）；她主动开口没有这个压力，所以检查放得进发送之前 —— 拦下的话
-真人一个字都没看见，不用撤。判据在 :mod:`app.living.output_safety`。
+真人一个字都没看见，不用撤。判据在 :mod:`app.living.speaking.output_safety`。
 
   * 位置在**认领之前**：拦下时不占那个 id，否则同一轮里她再说同一件事会撞上"你已经
     说过了"——而那是假话，她一个字都没说出去。判的那一串就是 ``what``，也就是真人会
@@ -111,8 +111,14 @@ from app.domain.chat_dataflow import (
 )
 from app.infra.outbound import publish
 from app.living.common import printed_handle, require_aware
-from app.living.output_safety import audit_output
-from app.living.services import KIND_SPEECH, OUTBOUND_HAPPENING_PREFIX
+from app.living.services import (
+    KIND_SPEECH,
+    OUTBOUND_HAPPENING_PREFIX,
+    HerRecords,
+    Phone,
+    Pictures,
+)
+from app.living.speaking.output_safety import audit_output
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +173,7 @@ class SpokenOutbound(Data):
     可能不记得自己说过"这件事再没人看得见。所以是两个独立字段。
 
     **这条链上有两个写者。** 一个是 :func:`send_message`（认领 → 收口），另一个是
-    :mod:`app.living.landing` 那条对账钟（补落地那两列）。两边各写自己那根轴，但
+    :mod:`app.living.speaking.landing` 那条对账钟（补落地那两列）。两边各写自己那根轴，但
     追的是同一条版本链，所以谁都可能先到 —— 每一次 append 都必须看 CAS 的返回值，
     并且**输了的那一方要把自己那根轴合到最新一版上**，不是照着手里那份过期的重写
     （见 :func:`_settle`）。
@@ -184,7 +190,7 @@ class SpokenOutbound(Data):
     claimed_at: datetime
     settled_at: datetime | None = None
     # 这次开口落地成了公共层的哪一行（``common_message.common_message_id``），由
-    # :mod:`app.living.landing` 事后按 ``outbound_id`` 对账补上。
+    # :mod:`app.living.speaking.landing` 事后按 ``outbound_id`` 对账补上。
     #
     # **必须可空、且不能有 DB 默认值**：migrator 加列生成的是可空无默认的
     # ``ADD COLUMN``，已有行读回来就是 NULL；声明成不可空的话，加列之后这张表上每
@@ -292,7 +298,7 @@ def _already_claimed(tried: SpokenOutbound) -> str:
 async def _settle(claim: SpokenOutbound, *, at: datetime) -> None:
     """收口：把 ``state`` 这一轴合到版本链**最新那一版**上。
 
-    :mod:`app.living.landing` 那条对账钟是这条链上的第二个写者，而且下面这个时序
+    :mod:`app.living.speaking.landing` 那条对账钟是这条链上的第二个写者，而且下面这个时序
     是可达的：认领写下 v1 → ``publish`` → 渠道落账 → **对账钟先跑**，基于 v1 追了 v2
     （补上落地那两列，``state`` 仍是 ``claimed``）→ 收口这才走到，手里那个版本号
     已经过期。
@@ -390,289 +396,299 @@ def _handles_she_gave(pictures: list[str] | str | None) -> list[str]:
     return [wanted]
 
 
-@tool_error("这条消息没发出去")
-async def send_message(
-    self,
-    what: Annotated[
-        str,
-        Field(description="你要发出去的那句话，原话"),
-    ],
-    channel_id: Annotated[
-        str, Field(description="发到哪条会话，用通知 / 会话列表 / 看手机时那串 channel_id")
-    ],
-    pictures: Annotated[
-        list[str] | None,
-        Field(
-            description="要跟这条一起发出去的图，填它们的句柄（看图那边给你的那串），"
-            "照抄；只说话就别填"
-        ),
-    ] = None,
-) -> str:
-    """给手机上的某条会话发一条消息。
+class Mouth:
+    """speaking 插件对象之一：她在手机上开口的那只手。发到哪条会话问 ``phone`` 服务（这一轮的视野 ∩ 实时
+    presence，同一道闸），她说的话经 ``her_records`` 服务记进她的经历，她给的图的句柄问 ``pictures``
+    服务认回她手上那一张。对象本身不带状态，去重靠的是认领表（:class:`SpokenOutbound`）。"""
 
-    只能发你手机上有的会话，channel_id 照抄，别自己编。刚来的动静在通知上，整张
-    名单翻 look_through_your_phone，知道名字就 look_up_contact。
+    def __init__(self, *, phone: Phone, her_records: HerRecords, pictures: Pictures) -> None:
+        self.phone = phone
+        self.her_records = her_records
+        self.pictures = pictures
 
-    要带图就填 pictures，**别把图写进话里**——你写在话里的图片引用到不了对方那儿。
-    只能带你自己做过的图。
+    @tool_error("这条消息没发出去")
+    async def send_message(
+        self,
+        what: Annotated[
+            str,
+            Field(description="你要发出去的那句话，原话"),
+        ],
+        channel_id: Annotated[
+            str, Field(description="发到哪条会话，用通知 / 会话列表 / 看手机时那串 channel_id")
+        ],
+        pictures: Annotated[
+            list[str] | None,
+            Field(
+                description="要跟这条一起发出去的图，填它们的句柄（看图那边给你的那串），"
+                "照抄；只说话就别填"
+            ),
+        ] = None,
+    ) -> str:
+        """给手机上的某条会话发一条消息。
 
-    这一轮里可以发好几条。但发完就是发完了——对方回了什么，要等你下一次拿起手机才知道。
+        只能发你手机上有的会话，channel_id 照抄，别自己编。刚来的动静在通知上，整张
+        名单翻 look_through_your_phone，知道名字就 look_up_contact。
 
-    Args:
-        what: 你要发出去的那句话，原话。
-        channel_id: 发到哪条会话。
-        pictures: 要一起发出去的图的句柄。
+        要带图就填 pictures，**别把图写进话里**——你写在话里的图片引用到不了对方那儿。
+        只能带你自己做过的图。
 
-    Returns:
-        这条的下场。发出去了的话，后面方括号里那串是这条消息的编号：`发出去了［a1b2……］`，
-        想撤回就把它照抄给 take_back_message。你那句话就在你这次写下的 what 里，这里不再
-        抄一遍。有时候只能告诉你"交出去了但不知道到没到" —— 那就是真的不知道，别当成
-        发出去了，也别当成没发。也可能这句话过不了、压根没发出去，那就换个说法或者换件
-        事说。
-    """
-    this_round = current_round()
-    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
-    moment_id = this_round.round_id
-    said = what.strip()
-    if not said:
-        raise ValueError("说点什么：这句话不能是空的。")
+        这一轮里可以发好几条。但发完就是发完了——对方回了什么，要等你下一次拿起手机才知道。
 
-    # 这一道是**这一轮定下的那份名单 ∩ 实时 presence**，两半的时效性刻意不同：
-    #
-    #   * 名单读的是这一轮的锚（:mod:`app.living.phone.whitelist`）。她要回的就是这一轮开
-    #     头摆在她眼前的那些会话；中途因为时间窗滑过去而掉出名单，不该让她张嘴到一
-    #     半发现刚看的那条会话没了。
-    #   * presence 每次重新查（:meth:`app.living.services.Phone.reachable_conversation` 里那次
-    #     ``find_conversations_with_persona_bot``）。"bot 还在不在那个会话里"是这句
-    #     话**能不能真的送到**的物理前提，读一份这一轮开头的快照等于这道保护不存在 ——
-    #     bot 半路被移出会话，她还会照着过期的判断把话交出去。
-    conv = await self.phone.reachable_conversation(
-        persona_id=persona_id, channel_id=channel_id.strip(), now=now
-    )
-    if conv is None:
-        # fail-loud，绝不伪造一个地址：伪地址的表现是"发出去了"然后石沉大海。
-        raise ValueError(
-            f"{channel_id!r} 不是你手机上的会话，发不了 —— 用通知、会话列表或者"
-            f"看手机时那串 channel_id，照抄。你能发的严格等于你看得见的那些会话。"
+        Args:
+            what: 你要发出去的那句话，原话。
+            channel_id: 发到哪条会话。
+            pictures: 要一起发出去的图的句柄。
+
+        Returns:
+            这条的下场。发出去了的话，后面方括号里那串是这条消息的编号：`发出去了［a1b2……］`，
+            想撤回就把它照抄给 take_back_message。你那句话就在你这次写下的 what 里，这里不再
+            抄一遍。有时候只能告诉你"交出去了但不知道到没到" —— 那就是真的不知道，别当成
+            发出去了，也别当成没发。也可能这句话过不了、压根没发出去，那就换个说法或者换件
+            事说。
+        """
+        this_round = current_round()
+        lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+        moment_id = this_round.round_id
+        said = what.strip()
+        if not said:
+            raise ValueError("说点什么：这句话不能是空的。")
+
+        # 这一道是**这一轮定下的那份名单 ∩ 实时 presence**，两半的时效性刻意不同：
+        #
+        #   * 名单读的是这一轮的锚（:mod:`app.living.phone.whitelist`）。她要回的就是这一轮开
+        #     头摆在她眼前的那些会话；中途因为时间窗滑过去而掉出名单，不该让她张嘴到一
+        #     半发现刚看的那条会话没了。
+        #   * presence 每次重新查（:meth:`app.living.services.Phone.reachable_conversation` 里那次
+        #     ``find_conversations_with_persona_bot``）。"bot 还在不在那个会话里"是这句
+        #     话**能不能真的送到**的物理前提，读一份这一轮开头的快照等于这道保护不存在 ——
+        #     bot 半路被移出会话，她还会照着过期的判断把话交出去。
+        conv = await self.phone.reachable_conversation(
+            persona_id=persona_id, channel_id=channel_id.strip(), now=now
         )
-
-    # 句柄换成永久句柄，就在这里。``lane`` + ``persona_id`` 是**硬条件**：句柄是从
-    # ``file_name`` 派生的，别的泳道上那张同名的图算出来的是同一串，只按句柄取的话
-    # 一个从别处拿到的串就能把姐姐画的、或者 prod 上那张取出来当成自己的发出去。
-    #
-    # 取不到就整条不发，**绝不跳过那一张把剩下的发出去**：她说的是"把这几张给他看"，
-    # 少一张的那条消息不是她要发的那条。这一步在派生 id 之前，所以被挡下的那次不占
-    # 认领 —— 她同一轮里换成自己那张图还发得成。
-    file_names: list[str] = []
-    for handle in _handles_she_gave(pictures):
-        # 认回来那一步走 :meth:`~app.living.services.Pictures.picture_id_in`，**不在这里自己解析**：印给她的是
-        # ``pic=<id>``，每只手都在叫她原样抄回来，这里认裸 id 的话她照做就撞死路。
-        picture = await self.pictures.her_picture(
-            lane=lane, persona_id=persona_id, picture_id=self.pictures.picture_id_in(handle)
-        )
-        if picture is None:
+        if conv is None:
+            # fail-loud，绝不伪造一个地址：伪地址的表现是"发出去了"然后石沉大海。
             raise ValueError(
-                f"{handle!r} 不是你做过的图，发不了 —— 用看图那边给你的那串句柄，"
-                f"照抄。你能发的严格等于你自己做出来的那些。"
+                f"{channel_id!r} 不是你手机上的会话，发不了 —— 用通知、会话列表或者"
+                f"看手机时那串 channel_id，照抄。你能发的严格等于你看得见的那些会话。"
             )
-        file_names.append(picture.file_name)
 
-    # **图算进发送身份。** 不算的话，同一轮、同一条会话、同样的话配另一张图会撞上
-    # 同一个 ``outbound_id``，被下面那道认领闸判成重发直接挡掉 —— 她换了张图重发，
-    # 真人什么都收不到，而她以为发了。选把图算进 seed，**不是**绕开去重：那道闸漏
-    # 一次就是真人收到两条。
-    #
-    # 带图的走**另一个命名空间**，不是在原来那串后面接几段。接着拼的话，正文和图之间
-    # 没有边界：``said`` 里只要正好出现 ``\x1f`` 加那个文件名，"说这句话配这张图"和
-    # "说的话本身长这样、不配图"就算出同一串，后发的那条被当成重放挡掉 —— 真人什么都
-    # 收不到，而她以为发了。``said`` 是她给的自由文本，边界不能由她的措辞来定。
-    #
-    # 不带图那一支**逐字不动**，历史上派生过的每一个 id 都还对得上
-    # （``tests/living/test_mouth.py`` 钉了一个写死的快照 —— 改坏了的症状是认领表在
-    # 历史记录上全部失效，而不是任何一条报错）。带图那一支里，张数写在文件名前面，所
-    # 以"几张、分别是哪几张、剩下的是正文"能唯一还原，两组不同的输入拼不出同一串。
-    # 顺序也算进去：换个顺序发出去的就是另一条消息。
-    if file_names:
-        seed = "\x1f".join(
-            [
-                lane,
-                persona_id,
-                moment_id,
-                conv.channel_id,
-                str(len(file_names)),
-                *file_names,
-                said,
-            ]
-        )
-        namespace = _ID_NS_WITH_PICTURES
-    else:
-        seed = f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{conv.channel_id}\x1f{said}"
-        namespace = _ID_NS
-    # seed 里的每一段都是这一次发送的身份：哪条泳道、谁、这一轮、发到哪、发的什么。
-    # 重放同一次发送必须落回同一个 id，否则整轮重试会真的发出两条。
-    derived = uuid.uuid5(namespace, seed)
-    outbound_id = derived.hex
-    message_id = f"{PROACTIVE_MESSAGE_ID_PREFIX}{derived}"
+        # 句柄换成永久句柄，就在这里。``lane`` + ``persona_id`` 是**硬条件**：句柄是从
+        # ``file_name`` 派生的，别的泳道上那张同名的图算出来的是同一串，只按句柄取的话
+        # 一个从别处拿到的串就能把姐姐画的、或者 prod 上那张取出来当成自己的发出去。
+        #
+        # 取不到就整条不发，**绝不跳过那一张把剩下的发出去**：她说的是"把这几张给他看"，
+        # 少一张的那条消息不是她要发的那条。这一步在派生 id 之前，所以被挡下的那次不占
+        # 认领 —— 她同一轮里换成自己那张图还发得成。
+        file_names: list[str] = []
+        for handle in _handles_she_gave(pictures):
+            # 认回来那一步走 :meth:`~app.living.services.Pictures.picture_id_in`，**不在这里自己解析**：印给她的是
+            # ``pic=<id>``，每只手都在叫她原样抄回来，这里认裸 id 的话她照做就撞死路。
+            picture = await self.pictures.her_picture(
+                lane=lane, persona_id=persona_id, picture_id=self.pictures.picture_id_in(handle)
+            )
+            if picture is None:
+                raise ValueError(
+                    f"{handle!r} 不是你做过的图，发不了 —— 用看图那边给你的那串句柄，"
+                    f"照抄。你能发的严格等于你自己做出来的那些。"
+                )
+            file_names.append(picture.file_name)
 
-    # **去重挡在出站之前，而且在下面那道检查之前。** 下游没有发送级去重（见模块
-    # docstring 里 worker 那两处行号），所以这条闸漏一次就是真人收到两条。放在检查
-    # 之前还顺手省掉一次白花的判词调用 —— 那是一次要等的模型调用。
-    tried = await select_latest(
-        SpokenOutbound, {"lane": lane, "outbound_id": outbound_id}
-    )
-    if tried is not None:
-        assert isinstance(tried, SpokenOutbound)
-        return _already_claimed(tried)
+        # **图算进发送身份。** 不算的话，同一轮、同一条会话、同样的话配另一张图会撞上
+        # 同一个 ``outbound_id``，被下面那道认领闸判成重发直接挡掉 —— 她换了张图重发，
+        # 真人什么都收不到，而她以为发了。选把图算进 seed，**不是**绕开去重：那道闸漏
+        # 一次就是真人收到两条。
+        #
+        # 带图的走**另一个命名空间**，不是在原来那串后面接几段。接着拼的话，正文和图之间
+        # 没有边界：``said`` 里只要正好出现 ``\x1f`` 加那个文件名，"说这句话配这张图"和
+        # "说的话本身长这样、不配图"就算出同一串，后发的那条被当成重放挡掉 —— 真人什么都
+        # 收不到，而她以为发了。``said`` 是她给的自由文本，边界不能由她的措辞来定。
+        #
+        # 不带图那一支**逐字不动**，历史上派生过的每一个 id 都还对得上
+        # （``tests/living/test_mouth.py`` 钉了一个写死的快照 —— 改坏了的症状是认领表在
+        # 历史记录上全部失效，而不是任何一条报错）。带图那一支里，张数写在文件名前面，所
+        # 以"几张、分别是哪几张、剩下的是正文"能唯一还原，两组不同的输入拼不出同一串。
+        # 顺序也算进去：换个顺序发出去的就是另一条消息。
+        if file_names:
+            seed = "\x1f".join(
+                [
+                    lane,
+                    persona_id,
+                    moment_id,
+                    conv.channel_id,
+                    str(len(file_names)),
+                    *file_names,
+                    said,
+                ]
+            )
+            namespace = _ID_NS_WITH_PICTURES
+        else:
+            seed = f"{lane}\x1f{persona_id}\x1f{moment_id}\x1f{conv.channel_id}\x1f{said}"
+            namespace = _ID_NS
+        # seed 里的每一段都是这一次发送的身份：哪条泳道、谁、这一轮、发到哪、发的什么。
+        # 重放同一次发送必须落回同一个 id，否则整轮重试会真的发出两条。
+        derived = uuid.uuid5(namespace, seed)
+        outbound_id = derived.hex
+        message_id = f"{PROACTIVE_MESSAGE_ID_PREFIX}{derived}"
 
-    # 交出去之前先过这一关。判的是 ``said`` —— 她写下的那一串，也就是真人会看见的那
-    # 一串，两者是同一个东西。位置钉死在**认领之前**：拦下时不占那个 id。占了的话，
-    # 她这次醒来里再说同一件事就会撞上"你已经说过了"，而那是假话：她一个字都没说出去。
-    #
-    # 而去重那道闸在这一关**更前面**（上面那段预检查），所以工具重试和整轮重放不会
-    # 各花一次模型调用去判一句根本不会再发的话。
-    verdict = await audit_output(said, timeout_s=_SEND_CHECK_TIMEOUT_S)
-    if not verdict.ok:
-        logger.warning(
-            "living_mouth_blocked lane=%s persona=%s outbound=%s reason=%s"
-            " 这句话没交出去",
-            lane,
-            persona_id,
-            outbound_id,
-            verdict.reason,
-        )
-        # **不抛。** 抛出去会被 :func:`tool_error` 转成一个错误喂回她，而错误她会重
-        # 试 —— 重试会换一套措辞再判一次，那是一条绕过去的路。拦下是一个确定的结果，
-        # 照实说就行。不给她具体是哪个词、哪一条判据：那等于把判据交出去让她绕。
-        return (
-            f"「{said}」—— 这句话没发出去，内容过不了这一关。"
-            f"换个说法，或者换件事说。"
-        )
-
-    # 顺序钉死：认领 → 交出去 → 记忆 → 收口。每一步崩掉留下什么写在模块 docstring 里。
-    # 认领永远是这条链的第一版：认领过就走不到这儿（上面直接返回），所以从零起。
-    # 之后这条链上还会有对账钟写的版本，收口不能假定自己写的就是 v2（见 :func:`_settle`）。
-    claim = SpokenOutbound(
-        lane=lane,
-        outbound_id=outbound_id,
-        ver=1,
-        persona_id=persona_id,
-        channel_id=conv.channel_id,
-        moment_id=moment_id,
-        said=said,
-        state=STATE_CLAIMED,
-        claimed_at=now,
-    )
-    if await insert_append(claim, expected_current_ver=0) != 1:
-        # **认领没抢到就绝对不能 ``publish``。** 有人在预检查之后、这一步之前认领了
-        # 同一句话（同一轮的重入、同一泳道的两个进程），而他可能已经交出去了 ——
-        # 下游没有发送级去重，这里照发就是真人收到两条。这道闸存在的全部意义就是
-        # 挡住这一格，所以返回值必须看。
-        taken = await select_latest(
+        # **去重挡在出站之前，而且在下面那道检查之前。** 下游没有发送级去重（见模块
+        # docstring 里 worker 那两处行号），所以这条闸漏一次就是真人收到两条。放在检查
+        # 之前还顺手省掉一次白花的判词调用 —— 那是一次要等的模型调用。
+        tried = await select_latest(
             SpokenOutbound, {"lane": lane, "outbound_id": outbound_id}
         )
-        if taken is None:
-            # CAS 说这个键上已经有版本了，所以一定读得回来。真读不回来只能是有人
-            # 把整条链删了 —— 那一格还没走到 ``publish``，说"没发出去"是真话，照抛。
-            raise RuntimeError(
-                f"认领 {outbound_id} 被别人抢走了，但抢走的那一版又读不回来"
-            )
-        assert isinstance(taken, SpokenOutbound)
-        logger.info(
-            "living mouth lane=%s persona=%s outbound=%s 认领被抢先了，不再交一次",
-            lane,
-            persona_id,
-            outbound_id,
-        )
-        return _already_claimed(taken)
+        if tried is not None:
+            assert isinstance(tried, SpokenOutbound)
+            return _already_claimed(tried)
 
-    if not verdict.checked:
-        # fail-open：这一关自己坏了的时候照发。挡下来挡的不是一条消息、是整条线 ——
-        # 她和三个姐妹一起哑掉，挂多久哑多久，而这道检查的实测拦截率本来就很低。
-        # 代价是它**静默**，所以欠的这一笔必须留得下来：``living_mouth_unchecked``
-        # 是数"那段时间漏了多少条"的唯一锚，改措辞前先想清楚谁在数它。
+        # 交出去之前先过这一关。判的是 ``said`` —— 她写下的那一串，也就是真人会看见的那
+        # 一串，两者是同一个东西。位置钉死在**认领之前**：拦下时不占那个 id。占了的话，
+        # 她这次醒来里再说同一件事就会撞上"你已经说过了"，而那是假话：她一个字都没说出去。
         #
-        # **记在认领之后、``publish`` 之前**：认领抢输的那次一个字都没发出去，记进去
-        # 这本账就虚了；而 ``publish`` 抛错的那次算数 —— 抛错只说明我们没等到确认，
-        # broker 可能已经收件，那句没判过的话可能已经到了真人手上。
-        logger.warning(
-            "living_mouth_unchecked lane=%s persona=%s outbound=%s"
-            " 这一关没判成，这句话按原样交出去了",
-            lane,
-            persona_id,
-            outbound_id,
-        )
-
-    try:
-        await publish(
-            ChatResponseSegment(
-                channel=conv.channel,
-                message_id=message_id,
-                persona_id=persona_id,
-                part_index=0,
-                session_id=None,          # 主动发没有 chat session
-                chat_id=conv.channel_id,  # 真实会话地址
-                is_p2p=conv.scope == "direct",
-                root_id=None,             # 没有来源消息，不伪造一条被回复的
-                user_id=None,
-                is_proactive=True,
-                bot_name=conv.bot_name,
-                lane=lane,                # sink 不注入 header lane，必须显式带
-                content=said,
-                # 图走这一列，正文里一个字符都不是它（见模块 docstring 上面那段：
-                # 写在正文里的图片引用到不了对方那儿）。传的是永久句柄，地址由投递
-                # 侧在最靠近发送的那一刻现签。
-                picture_file_names=file_names,
-                status="success",
-                is_last=True,
-                full_content=said,
+        # 而去重那道闸在这一关**更前面**（上面那段预检查），所以工具重试和整轮重放不会
+        # 各花一次模型调用去判一句根本不会再发的话。
+        verdict = await audit_output(said, timeout_s=_SEND_CHECK_TIMEOUT_S)
+        if not verdict.ok:
+            logger.warning(
+                "living_mouth_blocked lane=%s persona=%s outbound=%s reason=%s"
+                " 这句话没交出去",
+                lane,
+                persona_id,
+                outbound_id,
+                verdict.reason,
             )
-        )
-    except Exception:
-        # **抛错 = 不知道，不是"确定没发出去"。** publisher confirm 超时、连接断在
-        # 确认之前，broker 都可能已经收件了；而下游出站失败照样 ack、MQ 重投也没有
-        # 发送级去重。所以这一格跟"崩在 publish 和收口之间"是同一件事：行停在
-        # ``claimed``（:func:`unsettled_outbound` 捞得出来）、不留记忆、不重发。
-        #
-        # 不重发不是把这句话判死：``outbound_id`` 从 ``moment_id`` 派生，下一轮就是
-        # 新的一条 —— 要不要再说一次是**她**的决定，不是系统替她按的重试按钮。
-        # 所以这里也没有计数器、没有退避、没有超时阈值。
-        logger.warning(
-            "living mouth lane=%s persona=%s outbound=%s 交给投递时断了，"
-            "结果未知（行停在 claimed，不重发）",
-            lane,
-            persona_id,
-            outbound_id,
-            exc_info=True,
-        )
-        # 如实说：不说"发失败了"（不知道），也不说"发出去了"（同样不知道），更不
-        # 叫她再试一次（那是替她做决定）。
-        return (
-            f"「{said}」—— 这句话交出去的时候断了，不知道对方收没收到。"
-            f"这一轮里不会再发一遍。"
-        )
+            # **不抛。** 抛出去会被 :func:`tool_error` 转成一个错误喂回她，而错误她会重
+            # 试 —— 重试会换一套措辞再判一次，那是一条绕过去的路。拦下是一个确定的结果，
+            # 照实说就行。不给她具体是哪个词、哪一条判据：那等于把判据交出去让她绕。
+            return (
+                f"「{said}」—— 这句话没发出去，内容过不了这一关。"
+                f"换个说法，或者换件事说。"
+            )
 
-    # 落进她自己的记录里 —— 不落的话，她下一轮不知道自己说过这句话。手机隔着设备，
-    # 这条不进 world 的汇总（:mod:`app.living.household.outgoing` 按 medium 分），只她自己回看得到。
-    happening_id = _happening_id(outbound_id)
-    await self.her_records.record_happening(
-        lane=lane,
-        happening_id=happening_id,
-        actor=persona_id,
-        kind=KIND_SPEECH,
-        content=said,
-        occurred_at=now,
-        audience=(),
-        medium=self.phone.medium_for(conv.scope),
-        channel_id=conv.channel_id,
-    )
-    # 收口。崩在这之前的话留下一条 ``claimed``：交出去了、可能已经送到，而她可能不
-    # 记得 —— :func:`unsettled_outbound` 把这种捞出来给人看，**不自动重发**。
-    # 对账钟可能已经在这条链上追过一版，所以收口是"合到最新一版上"，见 :func:`_settle`。
-    await _settle(claim, at=now)
-    # **回执给编号，不给原话。** 原话就在她这次调用的参数里，紧挨着这条回执；两样都
-    # 在上下文里留 4 小时（登记它时声明成留着的那一档），再抄一遍就是同一
-    # 句话在她每一轮的输入里多出现一次。编号必须给：状态块不再每小时列一遍她最近说过的
-    # 话，刚发出去这条的撤回编号在别处拿不到（手机页要她自己再看一次才有）。
-    return f"发出去了{printed_handle(happening_id)}"
+        # 顺序钉死：认领 → 交出去 → 记忆 → 收口。每一步崩掉留下什么写在模块 docstring 里。
+        # 认领永远是这条链的第一版：认领过就走不到这儿（上面直接返回），所以从零起。
+        # 之后这条链上还会有对账钟写的版本，收口不能假定自己写的就是 v2（见 :func:`_settle`）。
+        claim = SpokenOutbound(
+            lane=lane,
+            outbound_id=outbound_id,
+            ver=1,
+            persona_id=persona_id,
+            channel_id=conv.channel_id,
+            moment_id=moment_id,
+            said=said,
+            state=STATE_CLAIMED,
+            claimed_at=now,
+        )
+        if await insert_append(claim, expected_current_ver=0) != 1:
+            # **认领没抢到就绝对不能 ``publish``。** 有人在预检查之后、这一步之前认领了
+            # 同一句话（同一轮的重入、同一泳道的两个进程），而他可能已经交出去了 ——
+            # 下游没有发送级去重，这里照发就是真人收到两条。这道闸存在的全部意义就是
+            # 挡住这一格，所以返回值必须看。
+            taken = await select_latest(
+                SpokenOutbound, {"lane": lane, "outbound_id": outbound_id}
+            )
+            if taken is None:
+                # CAS 说这个键上已经有版本了，所以一定读得回来。真读不回来只能是有人
+                # 把整条链删了 —— 那一格还没走到 ``publish``，说"没发出去"是真话，照抛。
+                raise RuntimeError(
+                    f"认领 {outbound_id} 被别人抢走了，但抢走的那一版又读不回来"
+                )
+            assert isinstance(taken, SpokenOutbound)
+            logger.info(
+                "living mouth lane=%s persona=%s outbound=%s 认领被抢先了，不再交一次",
+                lane,
+                persona_id,
+                outbound_id,
+            )
+            return _already_claimed(taken)
+
+        if not verdict.checked:
+            # fail-open：这一关自己坏了的时候照发。挡下来挡的不是一条消息、是整条线 ——
+            # 她和三个姐妹一起哑掉，挂多久哑多久，而这道检查的实测拦截率本来就很低。
+            # 代价是它**静默**，所以欠的这一笔必须留得下来：``living_mouth_unchecked``
+            # 是数"那段时间漏了多少条"的唯一锚，改措辞前先想清楚谁在数它。
+            #
+            # **记在认领之后、``publish`` 之前**：认领抢输的那次一个字都没发出去，记进去
+            # 这本账就虚了；而 ``publish`` 抛错的那次算数 —— 抛错只说明我们没等到确认，
+            # broker 可能已经收件，那句没判过的话可能已经到了真人手上。
+            logger.warning(
+                "living_mouth_unchecked lane=%s persona=%s outbound=%s"
+                " 这一关没判成，这句话按原样交出去了",
+                lane,
+                persona_id,
+                outbound_id,
+            )
+
+        try:
+            await publish(
+                ChatResponseSegment(
+                    channel=conv.channel,
+                    message_id=message_id,
+                    persona_id=persona_id,
+                    part_index=0,
+                    session_id=None,          # 主动发没有 chat session
+                    chat_id=conv.channel_id,  # 真实会话地址
+                    is_p2p=conv.scope == "direct",
+                    root_id=None,             # 没有来源消息，不伪造一条被回复的
+                    user_id=None,
+                    is_proactive=True,
+                    bot_name=conv.bot_name,
+                    lane=lane,                # sink 不注入 header lane，必须显式带
+                    content=said,
+                    # 图走这一列，正文里一个字符都不是它（见模块 docstring 上面那段：
+                    # 写在正文里的图片引用到不了对方那儿）。传的是永久句柄，地址由投递
+                    # 侧在最靠近发送的那一刻现签。
+                    picture_file_names=file_names,
+                    status="success",
+                    is_last=True,
+                    full_content=said,
+                )
+            )
+        except Exception:
+            # **抛错 = 不知道，不是"确定没发出去"。** publisher confirm 超时、连接断在
+            # 确认之前，broker 都可能已经收件了；而下游出站失败照样 ack、MQ 重投也没有
+            # 发送级去重。所以这一格跟"崩在 publish 和收口之间"是同一件事：行停在
+            # ``claimed``（:func:`unsettled_outbound` 捞得出来）、不留记忆、不重发。
+            #
+            # 不重发不是把这句话判死：``outbound_id`` 从 ``moment_id`` 派生，下一轮就是
+            # 新的一条 —— 要不要再说一次是**她**的决定，不是系统替她按的重试按钮。
+            # 所以这里也没有计数器、没有退避、没有超时阈值。
+            logger.warning(
+                "living mouth lane=%s persona=%s outbound=%s 交给投递时断了，"
+                "结果未知（行停在 claimed，不重发）",
+                lane,
+                persona_id,
+                outbound_id,
+                exc_info=True,
+            )
+            # 如实说：不说"发失败了"（不知道），也不说"发出去了"（同样不知道），更不
+            # 叫她再试一次（那是替她做决定）。
+            return (
+                f"「{said}」—— 这句话交出去的时候断了，不知道对方收没收到。"
+                f"这一轮里不会再发一遍。"
+            )
+
+        # 落进她自己的记录里 —— 不落的话，她下一轮不知道自己说过这句话。手机隔着设备，
+        # 这条不进 world 的汇总（:mod:`app.living.household.outgoing` 按 medium 分），只她自己回看得到。
+        happening_id = _happening_id(outbound_id)
+        await self.her_records.record_happening(
+            lane=lane,
+            happening_id=happening_id,
+            actor=persona_id,
+            kind=KIND_SPEECH,
+            content=said,
+            occurred_at=now,
+            audience=(),
+            medium=self.phone.medium_for(conv.scope),
+            channel_id=conv.channel_id,
+        )
+        # 收口。崩在这之前的话留下一条 ``claimed``：交出去了、可能已经送到，而她可能不
+        # 记得 —— :func:`unsettled_outbound` 把这种捞出来给人看，**不自动重发**。
+        # 对账钟可能已经在这条链上追过一版，所以收口是"合到最新一版上"，见 :func:`_settle`。
+        await _settle(claim, at=now)
+        # **回执给编号，不给原话。** 原话就在她这次调用的参数里，紧挨着这条回执；两样都
+        # 在上下文里留 4 小时（登记它时声明成留着的那一档），再抄一遍就是同一
+        # 句话在她每一轮的输入里多出现一次。编号必须给：状态块不再每小时列一遍她最近说过的
+        # 话，刚发出去这条的撤回编号在别处拿不到（手机页要她自己再看一次才有）。
+        return f"发出去了{printed_handle(happening_id)}"
 
 

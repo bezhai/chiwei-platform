@@ -19,7 +19,7 @@ runtime 不给任何 Data 自动加 lane，不显式带上就跟 prod 的行混�
 
 **图属于她，不属于某条会话。** 她画图那一刻还没有"发给谁"这回事 —— 她就是想画。所以
 这里没有 ``channel_id``：哪张图发到哪条会话去，是她开口那一刻才决定的事
-（:mod:`app.living.mouth`），不是这张图的属性。
+（:mod:`app.living.speaking.mouth`），不是这张图的属性。
 
 **别人发给她的图不进这张表。** 那些是消息内容，住在 ``common_message.content`` 里，
 跟"她做的东西"是两回事。
@@ -342,7 +342,7 @@ def picture_id_in(what_she_copied: str) -> str:
 
     **认回来这件事只在这里做一次。** 印出去的是 ``pic=<id>``（:func:`_handle_of`），
     每只手的 docstring 都在叫她"原样抄回来"；哪个调用方自己再写一遍解析，写的十有
-    八九是"裸 id"那一版，于是她照做就撞死路。:mod:`app.living.mouth` 曾经就是各写
+    八九是"裸 id"那一版，于是她照做就撞死路。:mod:`app.living.speaking.mouth` 曾经就是各写
     了一遍，她抄清单上那串发图，收到的是"这不是你做过的图" —— 系统等于告诉她自己
     的记录是假的。
 

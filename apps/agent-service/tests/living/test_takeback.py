@@ -28,18 +28,18 @@ from app.data.tx import current_session, tx
 from app.living.her_records import book as book_mod
 from app.living.her_records.deeds import recent_own_happenings, record_happening
 from app.living.her_records.whereabouts import note_whereabouts
-from app.living.mouth import (
+from app.living.services import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
+from app.living.speaking.mouth import (
     STATE_CLAIMED,
     STATE_HANDED_OFF,
     SpokenOutbound,
     latest_outbound,
 )
-from app.living.services import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
 from tests.data.read_back import all_versions
-from tests.living.conftest import her_tool, own_records
+from tests.living.conftest import her_mouth, her_taking_back, own_records
 
-send_message = her_tool("send_message")
-take_back_message = her_tool("take_back_message")
+send_message = her_mouth()
+take_back_message = her_taking_back()
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -115,7 +115,7 @@ async def takeback_db(living_db):
 @pytest.fixture
 def recalls(monkeypatch):
     """接住撤回请求，不真的投 MQ。"""
-    from app.living import takeback as takeback_mod
+    from app.living.speaking import takeback as takeback_mod
 
     out: list = []
 
@@ -128,14 +128,14 @@ def recalls(monkeypatch):
 
 @pytest.fixture
 def her_mouth(monkeypatch):
-    """让 :func:`app.living.mouth.send_message` 真的跑完，但不碰模型、不投 MQ。
+    """让 :func:`app.living.speaking.mouth.send_message` 真的跑完，但不碰模型、不投 MQ。
 
     只有要**真的走一遍她开口那条路**的用例需要它（快照印的编号、回执印的编号各一条）：
     ``happening_id`` 由嘴自己拼、快照和回执各自解析、撤回自己收 —— 中间任何一处各写
     一份拼接规则，它们就红。
     """
-    from app.living import mouth as mouth_mod
-    from app.living.output_safety import OutputVerdict
+    from app.living.speaking import mouth as mouth_mod
+    from app.living.speaking.output_safety import OutputVerdict
 
     sent: list = []
 
@@ -311,9 +311,9 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
     快照那段只在她自己的话不在眼前的那一轮才印（一天的第一轮、上一轮没存下来），所以
     这里取的是那一轮的渲染。
 
-    这里走的是真的那条路 —— 嘴发一条（``happening_id`` 由 :mod:`app.living.mouth`
+    这里走的是真的那条路 —— 嘴发一条（``happening_id`` 由 :mod:`app.living.speaking.mouth`
     自己拼）、快照把编号印出来（:mod:`app.living.snapshot` 自己解析）、撤回按等值
-    收（:mod:`app.living.takeback` 自己查）。三处任何一处各写一份拼接规则，这条就红。
+    收（:mod:`app.living.speaking.takeback` 自己查）。三处任何一处各写一份拼接规则，这条就红。
     """
     await _she_is_home()
     # 她要**发**这一条，所以这条私聊得在她视野里 —— 撤回不过白名单闸，开口过
@@ -472,7 +472,7 @@ async def test_the_ledger_is_written_only_after_the_recall_is_handed_off(
     反过来的话，台账写下了而撤回没发出去 —— 她下一轮看台账以为自己撤过了，那句话
     还好端端留在会话里。
     """
-    from app.living import takeback as takeback_mod
+    from app.living.speaking import takeback as takeback_mod
 
     await _she_is_home()
     spoke = await _she_spoke()
@@ -534,7 +534,7 @@ async def test_a_recall_that_never_went_out_leaves_the_ledger_alone(
     条消息会打扰真人；撤回重复投是幂等的（删一条已经删掉的消息，真人一个字都看不到），
     所以这边把"没撤成"如实说出来、台账留空，她想再撤就再撤。
     """
-    from app.living import takeback as takeback_mod
+    from app.living.speaking import takeback as takeback_mod
 
     async def boom(_data):
         raise RuntimeError("MQ 连不上")
@@ -576,7 +576,7 @@ async def test_a_ledger_write_that_fails_after_the_handoff_is_not_reported_as_a_
     台账写不下的后果是这条记录不完整（可查、可补）；报成失败的后果是她相信那句话还
     留在会话里 —— 后者严重得多。
     """
-    from app.living import takeback as takeback_mod
+    from app.living.speaking import takeback as takeback_mod
 
     async def boom(*_a, **_kw):
         raise RuntimeError("库连不上")

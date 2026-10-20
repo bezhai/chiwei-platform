@@ -6,7 +6,7 @@
 world 一次只处理一条消息，每条都叫醒它跑完整的一轮，一个动作一条的话，一轮里的三个动作就是
 world 的三轮，每一轮只看到一部分。她这一段在世界里什么都没做，就不发。
 
-手机上发的消息、撤回消息照常记在她的经历里（:mod:`app.living.mouth`、:mod:`app.living.takeback`），
+手机上发的消息、撤回消息照常记在她的经历里（:mod:`app.living.speaking.mouth`、:mod:`app.living.speaking.takeback`），
 她自己回看得到，但隔着设备，不进汇总：判据是经历上的 ``medium``，不是这一轮记下了哪些
 （这一轮的 :class:`app.living.her_records.deeds.Recorded` 里两种都有）。
 

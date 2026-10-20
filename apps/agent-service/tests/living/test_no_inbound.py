@@ -399,11 +399,11 @@ def test_no_living_module_ever_mentions_the_old_inbound_chain():
     """
     root = Path(living_pkg.__file__).parent
     offenders: list[str] = []
-    for path in sorted(root.glob("*.py")):
+    for path in sorted(root.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         for name in _INBOUND_NAMES:
             if name in text:
-                offenders.append(f"{path.name}: {name}")
+                offenders.append(f"{path.relative_to(root)}: {name}")
     assert offenders == [], (
         f"living 里出现了旧 chat 入站链的名字：{offenders} —— "
         f"一旦引用上了，「@ 触发 chat」离回来只差一行。"
@@ -411,10 +411,10 @@ def test_no_living_module_ever_mentions_the_old_inbound_chain():
 
 
 def test_the_only_clocks_are_livings_landing_and_her_wakes():
-    """宿主上的钟只有 living 对账那一条；她的轮次只由常规节奏和提前叫醒这两个来源的钟叫醒，日记、
+    """宿主上的钟只有对账那一条（speaking 插件登记）；她的轮次只由常规节奏和提前叫醒这两个来源的钟叫醒，日记、
     回看各由自己的钟叫醒，每人各一条队列。"""
     registered = _registered(LANE)
-    assert registered["clocks"] == [["living", "landing"]]
+    assert registered["clocks"] == [["speaking", "landing"]]
     assert registered["wakes"] == sorted(
         [
             *(

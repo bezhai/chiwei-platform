@@ -1,8 +1,8 @@
 """渠道那边关于她这次开口的事实，事后按 id 取回来。
 
-:mod:`app.living.mouth` 把一条消息交给投递之后就断线了：出站走 MQ，写库的是渠道
+:mod:`app.living.speaking.mouth` 把一条消息交给投递之后就断线了：出站走 MQ，写库的是渠道
 服务，两边隔着一个 broker。渠道服务落 assistant 行时会把"这是她哪一次开口"写进
-``common_message.agent_outbound_id``（值就是 :class:`~app.living.mouth.SpokenOutbound`
+``common_message.agent_outbound_id``（值就是 :class:`~app.living.speaking.mouth.SpokenOutbound`
 的 ``outbound_id``）。这个模块负责把这条线**反向接回来**。
 
 **这条钟把两件事对回台账，两件都是渠道那一行上的事实：**
@@ -34,14 +34,14 @@ datetime 会从缝里溜进 TIMESTAMPTZ 列）→ ``insert_append(expected_curre
 → **看返回值**。
 
 **这条链上有三个写者，输了的待遇不一样。** 另外两个是
-:func:`app.living.mouth.send_message` 的收口，和她按下撤回那只手。对账这两侧输了都
+:func:`app.living.speaking.mouth.send_message` 的收口，和她按下撤回那只手。对账这两侧输了都
 直接放掉：下一拍它还在待办里，等着就行。收口那一侧没有下一拍 —— 放掉的话那条记录
 就永久停在"已落地、未收口"，所以它是重读最新一版、把状态那一轴合上去再写
-（:func:`app.living.mouth._settle`）。三边写的是**正交的字段**，所以合并是安全的：
+（:func:`app.living.speaking.mouth._settle`）。三边写的是**正交的字段**，所以合并是安全的：
 谁都只往最新一版上添自己那根轴，绝不用手里那份过期的把别人已经写下的事实抹回 NULL。
 
 **这两件事都不碰 ``state``。** 认领状态、渠道落地、撤回是三根正交的轴，理由写在
-:class:`~app.living.mouth.SpokenOutbound` 的 docstring 里。
+:class:`~app.living.speaking.mouth.SpokenOutbound` 的 docstring 里。
 
 **这不是入站口。** 一条钟（``ctx.clock``）+ 几条 SELECT，没有队列、没有
 HTTP，外面的任何东西都没法通过它进来（``tests/living/test_no_inbound.py``）。
@@ -60,7 +60,7 @@ from app.data.queries.messages import (
 )
 from app.data.schema import table_name
 from app.infra.cst_time import CST
-from app.living.mouth import SpokenOutbound
+from app.living.speaking.mouth import SpokenOutbound
 
 logger = logging.getLogger(__name__)
 

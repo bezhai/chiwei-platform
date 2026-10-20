@@ -34,8 +34,8 @@ from sqlalchemy import text
 from app.data.persist import insert_append, select_latest
 from app.data.tx import current_session, tx
 from app.infra.cst_time import CST
-from app.living.landing import reconcile_landings, reconcile_recalls
-from app.living.mouth import STATE_CLAIMED, STATE_HANDED_OFF, SpokenOutbound
+from app.living.speaking.landing import reconcile_landings, reconcile_recalls
+from app.living.speaking.mouth import STATE_CLAIMED, STATE_HANDED_OFF, SpokenOutbound
 from tests.data.read_back import all_versions
 
 LANE = "coe-living"
@@ -51,7 +51,7 @@ def _ms(moment: dt.datetime) -> int:
 
 
 def _derived(seed: str) -> str:
-    """跟 :func:`app.living.mouth.send_message` 同款：uuid 的 **hex**，没有短横。"""
+    """跟 :func:`app.living.speaking.mouth.send_message` 同款：uuid 的 **hex**，没有短横。"""
     return uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
 
 
@@ -230,10 +230,10 @@ async def test_landing_does_not_disturb_the_claim_it_rides_on(living_db):
 
     "交出去了、结果未知"和"渠道上确实落地了"是两件事，而且**两件都真**：进程崩在
     写记忆之前，她就是不记得自己说过这句话。用一个投递状态盖掉 ``claimed``，
-    :func:`app.living.mouth.unsettled_outbound` 就再也捞不出这一条，那个"她可能不
+    :func:`app.living.speaking.mouth.unsettled_outbound` 就再也捞不出这一条，那个"她可能不
     记得"的事实从此没人看得见。
     """
-    from app.living.mouth import unsettled_outbound
+    from app.living.speaking.mouth import unsettled_outbound
 
     outbound_id = _derived("claimed-but-landed")
     await _she_spoke(outbound_id=outbound_id, state=STATE_CLAIMED)
@@ -333,7 +333,7 @@ async def test_a_lost_race_is_left_for_the_next_tick_not_forced_through(
     ``expected_current_ver`` 整个删掉，这条用例照样绿：它验的只是"看不看返回值"，
     没验"版本号真的挡住了谁"。
     """
-    from app.living import landing as landing_mod
+    from app.living.speaking import landing as landing_mod
 
     outbound_id = _derived("lost-race")
     await _she_spoke(outbound_id=outbound_id, state=STATE_CLAIMED)
@@ -462,14 +462,14 @@ async def _the_clock_ticks(app_host, monkeypatch) -> None:
     await clock.detail["tick"](_at(21, 35))
 
 
-async def test_the_landing_clock_is_registered_by_the_living_plugin(app_host):
+async def test_the_landing_clock_is_registered_by_the_speaking_plugin(app_host):
     """忘了登记的症状是静默的：账永远对不上，而她那边一切照常。"""
     host = await app_host("agent-service")
 
     clocks = [r for r in host.registered() if r.kind == "clock"]
 
     assert [(c.plugin, c.name, c.detail["seconds"]) for c in clocks] == [
-        ("living", "landing", 300.0)
+        ("speaking", "landing", 300.0)
     ]
 
 
@@ -735,7 +735,7 @@ async def test_a_lost_recall_race_is_left_for_the_next_tick(living_db, monkeypat
     下一拍必须**重读最新一版**再补：拿 v1 硬写的话，落地那两列会被抹回 NULL ——
     库里从此说"这次开口没落地"，而它明明落地了，全程零报错。
     """
-    from app.living import landing as landing_mod
+    from app.living.speaking import landing as landing_mod
 
     outbound_id = _derived("recall-lost-race")
     message_id = await _the_channel_wrote(outbound_id=outbound_id, at=_at(21, 31))

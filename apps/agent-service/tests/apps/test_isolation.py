@@ -79,6 +79,7 @@ def test_the_agent_service_app_loads_its_own_plugins():
         "pictures",
         "phone",
         "household",
+        "speaking",
         "web",
         "guides",
         "living",

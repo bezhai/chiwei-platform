@@ -1,7 +1,6 @@
 """Living: the three sisters' life engine — for each sister a queue of rounds with two wakes on it
-and a queue each for her diary and her weekly look back with one, the landing clock, the reading
-inbox, the two outbound queues, the sisters' inboxes, and a one-off admin route that empties the
-old reading queue.
+and a queue each for her diary and her weekly look back with one, the reading inbox, and a one-off
+admin route that empties the old reading queue.
 
   each sister's queue of rounds ("round", ``ctx.turns``), signalled by two wakes (``ctx.wake``):
   every  60 s  regular   -> regular_moment_due / run_due_moment   her regular rhythm
@@ -11,21 +10,17 @@ old reading queue.
   every 300 s  day-page        -> day_page_due / write_due_page          yesterday's page (04:00-06:00)
   every 300 s  persona-review  -> persona_review_due / write_due_review  last week's "who I am" (06:00-08:00)
 
-  every 300 s  landing  -> reconcile_what_she_said  match what she said with what landed
-
-  ChatResponseSegment -> chat_response_{channel}          what she says
-  Recall              -> recall_{channel}                 what she takes back
-
   the reading inbox  -> read_a_round  one stretch of reading
   (the household plugin opens the inboxes named after the three personas: stored only, she reads
-  them on her clock)
+  them on her clock; the speaking plugin has the landing clock and the two outbound queues)
 
   her round, which the manifest's ``resident`` profile places (app.living.moment):
     her tools (``ctx.tool``)    the methods of :class:`NotSplitYet`, each declared with how
                                 trimming treats what it returns and whether it ends her round (the
                                 profile lists them in the order she is given them)
     segments (``ctx.segment``)  her round's prompt (but who she is, which the persona plugin
-                                registers), and the output safety check's
+                                registers, and the output safety check's, which the speaking
+                                plugin does)
     the round before            life.moments      when her last round landed, and whether its
                                                   history was stored
     state sections              day_page.last_written
@@ -69,11 +64,6 @@ diary and review windows) are judged on every tick, in the wake's ``due``; most 
 nothing. Her early wake ticks every minute so that someone calling her waits at most a
 minute.
 
-**The landing clock is not a wake.** Matching what she said with what landed puts nothing on her
-queues: it takes no turn, and its writes are compare-and-set on the version chain, so it may run
-while one of her turns does (:mod:`app.living.landing`). Its tick gets only the time and runs the
-reconcile of this process's lane.
-
 **She has no inbound edge.** Messages on her phone she reads from ``common_message`` in her own
 rounds; what world and her sisters tell her arrives in her inbox, which only stores it
 (``tests/living/test_no_inbound.py``).
@@ -106,18 +96,10 @@ from functools import partial
 from app.agent.contracts import Continue
 from app.agent.round import AssembledProfile
 from app.agent.tooling import Tool
-from app.domain.chat_dataflow import ChatResponseSegment
-from app.domain.safety import Recall
 from app.host import Batch, Coalesce, Context, Plugin, WakeSource
-from app.living import (
-    moment,
-    mouth,
-    reading,
-    takeback,
-)
+from app.living import moment, reading
 from app.living.common import living_lane
 from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
-from app.living.landing import reconcile_what_she_said
 from app.living.moment import (
     LIFE_MOMENT_SEGMENTS,
     DueMoment,
@@ -132,7 +114,6 @@ from app.living.moment import (
     run_due_moment,
 )
 from app.living.nudge import nudged_moment_due
-from app.living.output_safety import GUARD_OUTPUT_SEGMENT
 from app.living.persona_review import DueReview, persona_review_due, write_due_review
 from app.living.reading import read_a_round
 from app.living.services import (
@@ -141,7 +122,6 @@ from app.living.services import (
     Persona,
     PersonaText,
     Phone,
-    Pictures,
     Received,
     WhoLivesHere,
 )
@@ -165,16 +145,6 @@ PERSONA_REVIEW_EVERY = timedelta(minutes=5)
 # raising the limit.
 HOLD_LIMIT = timedelta(seconds=900)
 
-# Five minutes between two matchings of what she said with what landed. Nobody waits for it: her
-# rounds do not read that record, taking a message back looks the message up by its outbound id,
-# and whether she still sees a message she took back is read from the channel's own row. The two
-# writes it follows land seconds to tens of seconds after she acts, so any interval well above that
-# matches them as well. Not denser, because every tick rescans the ones that will never match (a
-# send whose outcome is unknown, a row the channel never wrote, a take-back that never succeeded),
-# and that part does not shrink with time; not sparser, so that what landed is matched before her
-# next regular round (ten minutes).
-LANDING_EVERY = timedelta(minutes=5)
-
 
 class NotSplitYet:
     """What of her features has not been split out into a plugin of its own yet, as one plugin
@@ -193,8 +163,6 @@ class NotSplitYet:
     act = moment.act
     look_around = moment.look_around
     stop_for_now = moment.stop_for_now
-    send_message = mouth.send_message
-    take_back_message = takeback.take_back_message
     look_for_something_to_read = reading.look_for_something_to_read
     read_a_bit = reading.read_a_bit
 
@@ -203,12 +171,10 @@ class NotSplitYet:
         *,
         residents: WhoLivesHere,
         her_records: HerRecords,
-        pictures: Pictures,
         phone: Phone,
     ) -> None:
         self.residents = residents
         self.her_records = her_records
-        self.pictures = pictures
         self.phone = phone
 
 
@@ -314,15 +280,9 @@ def setup(ctx: Context) -> None:
     living = NotSplitYet(
         residents=residents,
         her_records=her_records,
-        pictures=ctx.service("pictures"),
         phone=phone,
     )
     _her_round(ctx, living)
-    ctx.clock(
-        "landing",
-        LANDING_EVERY.total_seconds(),
-        lambda ts: reconcile_what_she_said(lane=lane),
-    )
     ctx.inbox(
         READING,
         on_message=partial(read_a_round, persona=persona),
@@ -338,8 +298,6 @@ def setup(ctx: Context) -> None:
         lane_match=True,
         answers_with_lane=True,
     )
-    ctx.outbound(ChatResponseSegment, "chat_response")
-    ctx.outbound(Recall, "recall")
 
 
 def _her_round(ctx: Context, living: NotSplitYet) -> None:
@@ -347,7 +305,6 @@ def _her_round(ctx: Context, living: NotSplitYet) -> None:
     _her_tools(ctx, living)
     for segment in LIFE_MOMENT_SEGMENTS:
         ctx.segment(segment)
-    ctx.segment(GUARD_OUTPUT_SEGMENT)
     ctx.round_log(
         "life.moments",
         previous_at=previous_moment_at,
@@ -390,11 +347,6 @@ def _her_tools(ctx: Context, living: NotSplitYet) -> None:
     ctx.tool(Tool(living.act), trim="kept")
     ctx.tool(Tool(living.look_around), trim="material")
     ctx.tool(Tool(living.stop_for_now), trim="kept", ends_round=True)
-    # 发消息这只手的回执是"这件事到底做成了没有"的唯一记录（发出去了、已经说过了、交出去但没等到
-    # 确认），裁掉她就会照着一个不知道有没有成功的动作再来一遍，所以留着（:mod:`app.living.mouth`）。
-    ctx.tool(Tool(living.send_message), trim="kept")
-    # 撤回这只手的回执是她自己动作的结果，跟她自己的话一样留着（:mod:`app.living.takeback`）。
-    ctx.tool(Tool(living.take_back_message), trim="kept")
     # 读东西的两只手留着，不当素材裁：``look_for_something_to_read`` 的返回里是 ``file=<attachment_id>``，
     # 被 ``read_a_bit(which=...)`` 吃；``read_a_bit`` 指代不明时抛的那句话里也逐个印着候选的
     # ``file=``（:mod:`app.living.reading`）。
@@ -409,7 +361,6 @@ PLUGIN = Plugin(
         "persona",
         "residents",
         "her_records",
-        "pictures",
         "loose_ends",
         "phone",
         "received",

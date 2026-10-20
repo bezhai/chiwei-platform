@@ -60,11 +60,12 @@ def pod(monkeypatch, tmp_path) -> list[str]:
 
 @pytest.fixture
 def ticks(monkeypatch) -> dict[str, list[object]]:
-    """living's landing clock, ticking every 20 ms into a recorder of the lane it reconciles, and
+    """speaking's landing clock, ticking every 20 ms into a recorder of the lane it reconciles, and
     her wakes, each signalling every 20 ms a source that records who it was asked about and runs
     nothing. Returns what each recorder received, by clock or source name."""
     from datetime import timedelta
 
+    import app.living.speaking as speaking
     import app.plugins.living as living
     from app.host import Coalesce, WakeSource
 
@@ -85,8 +86,8 @@ def ticks(monkeypatch) -> dict[str, list[object]]:
 
         return source
 
-    monkeypatch.setattr(living, "reconcile_what_she_said", reconciles)
-    monkeypatch.setattr(living, "LANDING_EVERY", timedelta(seconds=0.02))
+    monkeypatch.setattr(speaking, "reconcile_what_she_said", reconciles)
+    monkeypatch.setattr(speaking, "LANDING_EVERY", timedelta(seconds=0.02))
     monkeypatch.setattr(living, "regular", recording("regular"))
     monkeypatch.setattr(living, "nudge", recording("nudge"))
     monkeypatch.setattr(living, "day_page", recording("day-page"))

@@ -9,7 +9,7 @@
 
     - 21:00 CST 你对 bezhai 说：「你去过那家抹茶店吗？」［55f3469bd46c5384a9ce22cb4944b77a］
 
-方括号里那串就是 :attr:`app.living.mouth.SpokenOutbound.outbound_id`，两处都经
+方括号里那串就是 :attr:`app.living.speaking.mouth.SpokenOutbound.outbound_id`，两处都经
 :func:`app.living.common.printed_handle` 印出来（前缀常量见
 :data:`app.living.services.OUTBOUND_HAPPENING_PREFIX`，全链只有那一处定义）。所以这只
 手收的是那个编号，在她自己那张认领表里**按等值**找，不管她是从哪一处抄来的。
@@ -49,7 +49,7 @@
 **顺序：先 ``publish``，成功之后才写台账。** 反过来的话，台账写下了而撤回没发出去 ——
 她下一轮看台账以为自己撤过了，那句话还好端端留在会话里。
 
-**``publish`` 失败的判法跟她开口那侧相反，这是刻意的。** :mod:`app.living.mouth` 那边
+**``publish`` 失败的判法跟她开口那侧相反，这是刻意的。** :mod:`app.living.speaking.mouth` 那边
 "``publish`` 抛错 = 不知道，所以不重发"，理由是**重复发一条消息会打扰真人**。撤回反过
 来：重复撤同一条是幂等的、无害的（删一条已经删掉的消息，真人一个字都看不到）。所以
 这边抛错就如实说没撤成、台账留空，她想再撤就再撤。两侧的判法不一致不是疏忽，是因为
@@ -59,7 +59,7 @@
 "没撤成"是假话，而她会据此以为那句话还在。
 
 **这里有一个明确接受的缺口，别当它不存在。** ``took_back_at`` 没写下去的话，
-:mod:`app.living.landing` 那条对账钟从此选不中这条 —— 它的待办是"她按下过撤回、还
+:mod:`app.living.speaking.landing` 那条对账钟从此选不中这条 —— 它的待办是"她按下过撤回、还
 没确认撤掉"，而这条看起来像是她从没撤过。于是台账上永远少一笔"这条撤掉了"，日志之
 外没有第二条补回来的路。
 
@@ -92,8 +92,8 @@ from app.data.persist import fetch_one, from_row, insert_append, select_latest
 from app.data.schema import table_name
 from app.domain.safety import Recall
 from app.infra.outbound import publish
-from app.living.mouth import SpokenOutbound
-from app.living.services import KIND_ACT, HerRecords
+from app.living.services import KIND_ACT, HerRecords, Phone
+from app.living.speaking.mouth import SpokenOutbound
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +179,7 @@ async def _note_took_back(line: SpokenOutbound, *, at: datetime) -> None:
     """把 ``took_back_at`` 这一根轴合到版本链**最新那一版**上。
 
     这条链上有三个写者：她开口那条路径（认领 → 收口）、
-    :mod:`app.living.landing` 那条对账钟（补落地那两列）、和这里。撞版本是常态，所以
+    :mod:`app.living.speaking.landing` 那条对账钟（补落地那两列）、和这里。撞版本是常态，所以
     ``insert_append`` 的返回值必须真的被看：输了就重读最新一版、把自己那根轴合上去再
     写，**绝不用手里那份过期的重写** —— 那会把对账已经补上的落地标识抹回 NULL，而那
     一版记的是已知事实。
@@ -236,112 +236,121 @@ async def _note_took_back(line: SpokenOutbound, *, at: datetime) -> None:
         )
 
 
-@tool_error("这条撤回没送出去")
-async def take_back_message(
-    self,
-    message_id: Annotated[
-        str,
-        Field(
-            description=(
-                "要撤的那条消息的编号：发这条时回执里方括号里那串，"
-                "「你刚做过、说过」里那句话后面方括号里那串，"
-                "或者你打开会话时那条消息的 take_back_id，照抄，别自己编"
+class TakeBack:
+    """speaking 插件对象之一：她撤回自己发出去的一条消息的那只手。那条会话问 ``phone`` 服务不过视野的
+    那一份（:meth:`app.living.services.Phone.conversation_her_bot_is_in`），撤回这件事经
+    ``her_records`` 服务记进她的经历。对象本身不带状态。"""
+
+    def __init__(self, *, phone: Phone, her_records: HerRecords) -> None:
+        self.phone = phone
+        self.her_records = her_records
+
+    @tool_error("这条撤回没送出去")
+    async def take_back_message(
+        self,
+        message_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "要撤的那条消息的编号：发这条时回执里方括号里那串，"
+                    "「你刚做过、说过」里那句话后面方括号里那串，"
+                    "或者你打开会话时那条消息的 take_back_id，照抄，别自己编"
+                )
+            ),
+        ],
+    ) -> str:
+        """把你自己发出去的一条消息撤回来。
+
+        同一个编号你会在三个地方见到它，**形状不全一样，但那是同一串**：
+
+        - 你发这条时的回执里，跟在「发出去了」后面的方括号里：`发出去了［a1b2……］`
+        - 「你刚做过、说过」里，跟在那句话后面的方括号里：`……」［a1b2……］`
+        - 你打开会话时，你自己那条消息上的属性：`<msg from="你" … take_back_id="a1b2……">`
+
+        哪个地方看到的都照抄进来，别自己编。当面说的话、你做的事、你回复别人的消息都
+        没有这个编号，也撤不了；别人发的消息正文里印出来的那种方括号更不是编号。
+
+        只能撤**你自己**发出去的话。
+
+        撤回要过一会儿才落到那边：这一步只是去撤，撤没撤掉这一轮还不知道。你下次拿起
+        手机就看得出来——撤掉了的那条不在会话里了，没撤掉的那条还在。
+
+        Args:
+            message_id: 那条消息的编号，从上面三处任意一处照抄。
+
+        Returns:
+            你去撤了哪一句的一句确认；没有这个编号时一句如实说明。
+        """
+        this_round = current_round()
+        lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+        outbound_id = message_id.strip()
+        if not outbound_id:
+            raise ValueError("你没说要撤哪一条：把那条消息后面方括号里那串编号写进来。")
+
+        line = await her_line(
+            lane=lane, persona_id=persona_id, outbound_id=outbound_id
+        )
+        if line is None:
+            # fail-loud，绝不挑一条最近的顶上：撤掉一句她没想撤的话，比撤不掉更糟。
+            # 对不上的原因这一刻分不出来（编错了、那是姐姐那条、当面说的话本来就没有
+            # 编号），所以只说确定的那一件：没有这条。
+            raise ValueError(
+                f"你没有编号 {outbound_id} 这条消息。这串从你发它时回执里的方括号、"
+                f"「你刚做过、说过」里那句话后面的方括号，或者你打开会话时自己那条消息的 "
+                f"take_back_id 里照抄 —— 当面说的话没有编号，别人发的消息也没有，都撤不了。"
             )
-        ),
-    ],
-) -> str:
-    """把你自己发出去的一条消息撤回来。
 
-    同一个编号你会在三个地方见到它，**形状不全一样，但那是同一串**：
+        # **这一处刻意走未过滤的那份可达性**：判据只有"bot 还在不在那个会话里"，不管这条
+        # 会话此刻在不在她视野里（:mod:`app.living.phone.whitelist`）。她撤的是自己已经发出去
+        # 的话，用的是自己那张认领表上的编号 —— 跟"她现在还看不看得见那条会话"是两件事。
+        # 过白名单闸的话，一条发出去时在名单里、之后掉出名单的消息就撤不回来了，而那句话
+        # 还挂在真人眼前：那是纯粹的倒退。
+        conv = await self.phone.conversation_her_bot_is_in(
+            persona_id=persona_id, channel_id=line.channel_id
+        )
+        if conv is None:
+            # ``channel`` 决定撤回投哪条队列，猜一个就是投到别的渠道去。bot 已经被移出
+            # 那个会话的话，撤回本来也做不成，如实说。
+            raise ValueError(
+                f"「{line.said}」发在一条你现在够不着的会话上，撤不了。"
+            )
 
-    - 你发这条时的回执里，跟在「发出去了」后面的方括号里：`发出去了［a1b2……］`
-    - 「你刚做过、说过」里，跟在那句话后面的方括号里：`……」［a1b2……］`
-    - 你打开会话时，你自己那条消息上的属性：`<msg from="你" … take_back_id="a1b2……">`
-
-    哪个地方看到的都照抄进来，别自己编。当面说的话、你做的事、你回复别人的消息都
-    没有这个编号，也撤不了；别人发的消息正文里印出来的那种方括号更不是编号。
-
-    只能撤**你自己**发出去的话。
-
-    撤回要过一会儿才落到那边：这一步只是去撤，撤没撤掉这一轮还不知道。你下次拿起
-    手机就看得出来——撤掉了的那条不在会话里了，没撤掉的那条还在。
-
-    Args:
-        message_id: 那条消息的编号，从上面三处任意一处照抄。
-
-    Returns:
-        你去撤了哪一句的一句确认；没有这个编号时一句如实说明。
-    """
-    this_round = current_round()
-    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
-    outbound_id = message_id.strip()
-    if not outbound_id:
-        raise ValueError("你没说要撤哪一条：把那条消息后面方括号里那串编号写进来。")
-
-    line = await her_line(
-        lane=lane, persona_id=persona_id, outbound_id=outbound_id
-    )
-    if line is None:
-        # fail-loud，绝不挑一条最近的顶上：撤掉一句她没想撤的话，比撤不掉更糟。
-        # 对不上的原因这一刻分不出来（编错了、那是姐姐那条、当面说的话本来就没有
-        # 编号），所以只说确定的那一件：没有这条。
-        raise ValueError(
-            f"你没有编号 {outbound_id} 这条消息。这串从你发它时回执里的方括号、"
-            f"「你刚做过、说过」里那句话后面的方括号，或者你打开会话时自己那条消息的 "
-            f"take_back_id 里照抄 —— 当面说的话没有编号，别人发的消息也没有，都撤不了。"
+        # 顺序钉死：先交出去，成功了才写台账。反过来的话，台账写下了而撤回没发出去，
+        # 她会以为自己撤过了。
+        #
+        # 这里**不吞异常**：撤回重复投是幂等的（删一条已经删掉的消息，真人一个字都看不
+        # 到），所以"没撤成"照实说、台账留空，她想再撤就再撤。这跟她开口那侧的判法相反，
+        # 理由见模块 docstring —— 那边重复的后果是真人收到两条。
+        await publish(
+            Recall(
+                outbound_id=line.outbound_id,   # 她主动开口那条链，投递侧按它反查公共层
+                session_id=None,                # 主动开口没有会话
+                trigger_message_id=None,        # 也没有触发它的来源消息
+                chat_id=line.channel_id,
+                channel=conv.channel,
+                reason=TAKE_BACK_REASON,
+                lane=lane,                      # sink 拿它当 outbound_context 的 fallback
+            )
         )
 
-    # **这一处刻意走未过滤的那份可达性**：判据只有"bot 还在不在那个会话里"，不管这条
-    # 会话此刻在不在她视野里（:mod:`app.living.phone.whitelist`）。她撤的是自己已经发出去
-    # 的话，用的是自己那张认领表上的编号 —— 跟"她现在还看不看得见那条会话"是两件事。
-    # 过白名单闸的话，一条发出去时在名单里、之后掉出名单的消息就撤不回来了，而那句话
-    # 还挂在真人眼前：那是纯粹的倒退。
-    conv = await self.phone.conversation_her_bot_is_in(
-        persona_id=persona_id, channel_id=line.channel_id
-    )
-    if conv is None:
-        # ``channel`` 决定撤回投哪条队列，猜一个就是投到别的渠道去。bot 已经被移出
-        # 那个会话的话，撤回本来也做不成，如实说。
-        raise ValueError(
-            f"「{line.said}」发在一条你现在够不着的会话上，撤不了。"
+        # 以下两步都**不往外抛**：撤回已经在路上了，报成失败是假话。
+        await _remember_she_took_it_back(
+            her_records=self.her_records,
+            lane=lane,
+            persona_id=persona_id,
+            line=line,
+            # 撤回是在手机上按的，跟她说那句话时同一档：不进 world 的汇总。
+            medium=self.phone.medium_for(conv.scope),
+            now=now,
         )
+        await _note_took_back(line, at=now)
 
-    # 顺序钉死：先交出去，成功了才写台账。反过来的话，台账写下了而撤回没发出去，
-    # 她会以为自己撤过了。
-    #
-    # 这里**不吞异常**：撤回重复投是幂等的（删一条已经删掉的消息，真人一个字都看不
-    # 到），所以"没撤成"照实说、台账留空，她想再撤就再撤。这跟她开口那侧的判法相反，
-    # 理由见模块 docstring —— 那边重复的后果是真人收到两条。
-    await publish(
-        Recall(
-            outbound_id=line.outbound_id,   # 她主动开口那条链，投递侧按它反查公共层
-            session_id=None,                # 主动开口没有会话
-            trigger_message_id=None,        # 也没有触发它的来源消息
-            chat_id=line.channel_id,
-            channel=conv.channel,
-            reason=TAKE_BACK_REASON,
-            lane=lane,                      # sink 拿它当 outbound_context 的 fallback
+        # 只说这一刻确定的那一件：去撤了。撤没撤得掉这一刻还不知道，说成"撤回了"就是编，
+        # 而她会据此以为那句话已经不在了。结果不在这一轮里等（那会把她卡在网络上），
+        # 她下次拿起手机自己看得见。
+        return (
+            f"去撤「{line.said}」了。撤没撤得掉这一轮还不知道 —— "
+            f"你下次拿起手机就看得出来：撤成了的那条不在会话里，没撤成的还在。"
         )
-    )
-
-    # 以下两步都**不往外抛**：撤回已经在路上了，报成失败是假话。
-    await _remember_she_took_it_back(
-        her_records=self.her_records,
-        lane=lane,
-        persona_id=persona_id,
-        line=line,
-        # 撤回是在手机上按的，跟她说那句话时同一档：不进 world 的汇总。
-        medium=self.phone.medium_for(conv.scope),
-        now=now,
-    )
-    await _note_took_back(line, at=now)
-
-    # 只说这一刻确定的那一件：去撤了。撤没撤得掉这一刻还不知道，说成"撤回了"就是编，
-    # 而她会据此以为那句话已经不在了。结果不在这一轮里等（那会把她卡在网络上），
-    # 她下次拿起手机自己看得见。
-    return (
-        f"去撤「{line.said}」了。撤没撤得掉这一轮还不知道 —— "
-        f"你下次拿起手机就看得出来：撤成了的那条不在会话里，没撤成的还在。"
-    )
 
 

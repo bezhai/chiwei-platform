@@ -291,18 +291,39 @@ async def settled() -> None:
 def her_tool(name: str, *, residents=None) -> Tool:
     """她还没拆成插件的一只手：living 插件对象（:class:`app.plugins.living.NotSplitYet`）上的方法，
     包成跟插件登记给模型的同一种 :class:`~app.agent.tooling.Tool`。``residents`` 是交给它的
-    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）；``her_records``、``pictures``、
-    ``phone`` 服务是那几个插件对象本身（不带状态，读写的是用例的库）。"""
+    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）；``her_records``、``phone`` 服务是
+    那两个插件对象本身（不带状态，读写的是用例的库）。"""
     from app.agent.tooling import Tool
-    from app.living.pictures.album import Album
     from app.plugins.living import NotSplitYet
 
     names = residents or NamesRead()
     records = own_records(names)
-    living = NotSplitYet(
-        residents=names, her_records=records, pictures=Album(), phone=her_phone(records)
-    )
+    living = NotSplitYet(residents=names, her_records=records, phone=her_phone(records))
     return Tool(getattr(living, name))
+
+
+def her_mouth() -> Tool:
+    """她开口的那只手（speaking 插件，:class:`app.living.speaking.mouth.Mouth`），包成跟插件登记给模型的
+    同一种 :class:`~app.agent.tooling.Tool`；``phone``、``her_records``、``pictures`` 服务是那几个插件
+    对象本身（不带状态，读写的是用例的库）。"""
+    from app.agent.tooling import Tool
+    from app.living.pictures.album import Album
+    from app.living.speaking.mouth import Mouth
+
+    records = own_records()
+    return Tool(
+        Mouth(phone=her_phone(records), her_records=records, pictures=Album()).send_message
+    )
+
+
+def her_taking_back() -> Tool:
+    """她撤回的那只手（speaking 插件，:class:`app.living.speaking.takeback.TakeBack`），同
+    :func:`her_mouth`。"""
+    from app.agent.tooling import Tool
+    from app.living.speaking.takeback import TakeBack
+
+    records = own_records()
+    return Tool(TakeBack(phone=her_phone(records), her_records=records).take_back_message)
 
 
 def glance_text(shown) -> str:
@@ -372,10 +393,10 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
         OutgoingUpTo,
     )
     from app.living.household.received import ReceivedMessage, ReceivedRead
-    from app.living.mouth import SpokenOutbound
     from app.living.persona.chain import PersonaVersion
     from app.living.phone.handset import PhoneRead
     from app.living.pictures.album import Picture
+    from app.living.speaking.mouth import SpokenOutbound
     from tests.runtime.conftest import migrate
 
     # ``LivingDayPage`` 跟手机那几张一样建在这里：**每一轮都读那一页**（``read_snapshot``

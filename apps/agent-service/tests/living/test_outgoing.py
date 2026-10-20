@@ -188,7 +188,7 @@ async def test_nothing_done_in_the_world_sends_nothing(started, in_a_moment):
 async def test_phone_sends_and_takebacks_stay_out_of_what_world_hears(started):
     """手机上发的、群里说的、撤回，跟当面做的事记在同一份经历里，但隔着设备，不进汇总。
 
-    三条的写法照 :mod:`app.living.mouth` 和 :mod:`app.living.takeback` 记经历的样子。"""
+    三条的写法照 :mod:`app.living.speaking.mouth` 和 :mod:`app.living.speaking.takeback` 记经历的样子。"""
     post = started
     for happening_id, kind, medium, content in (
         ("mouth:dm", KIND_SPEECH, MEDIUM_PHONE, "到家了吗"),

@@ -39,8 +39,8 @@ from app.agent.prompts import PromptSet
 from app.agent.round import Call, in_call, open_call
 from app.agent.tooling import tool
 from app.agent.trace import rendered_from
-from app.capabilities import banned_words
 from app.infra.cst_time import CST
+from app.living.speaking import banned_words
 from tests.replay import seeds
 from tests.replay.conftest import DEFAULT_START, LANE
 from tests.replay.harness import Replay, Reply, ToolUse

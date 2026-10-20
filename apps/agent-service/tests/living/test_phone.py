@@ -36,7 +36,13 @@ from app.living.phone.handset import (
     read_through,
     render_unread,
 )
-from tests.living.conftest import RESIDENTS, glance_text, her_phone, her_tool, own_records
+from tests.living.conftest import (
+    RESIDENTS,
+    glance_text,
+    her_phone,
+    her_taking_back,
+    own_records,
+)
 
 HER_RECORDS = own_records()
 PHONE = her_phone(HER_RECORDS)
@@ -3272,7 +3278,7 @@ async def test_both_tool_descriptions_name_the_place_the_handle_actually_sits(
     撤回那只手还必须说清楚**两处形状不同**（快照那侧在方括号里，手机这侧在属性里），
     否则她会以为那是两种编号。
     """
-    take_back_message = her_tool("take_back_message")
+    take_back_message = her_taking_back()
 
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(21, 29))

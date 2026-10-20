@@ -18,7 +18,7 @@ from __future__ import annotations
 from app.agent.contracts import CostSpec, HistorySpec, Profile
 from app.host.manifest import App, Participant
 from app.living.moment import HISTORY_KEY, LIFE_MOMENT_AGENT, MOMENT_TRIM_POLICY
-from app.living.output_safety import GUARD_OUTPUT_AGENT
+from app.living.speaking.output_safety import GUARD_OUTPUT_AGENT
 from app.manifests.history import HISTORY_TEXTS
 
 RESIDENT = Profile(
@@ -83,6 +83,7 @@ MANIFEST = App(
         "app.living.pictures",
         "app.living.phone",
         "app.living.household",
+        "app.living.speaking",
         "app.living.web",
         "app.living.guides",
         "app.plugins.living",
