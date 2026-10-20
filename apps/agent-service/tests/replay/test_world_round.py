@@ -24,6 +24,12 @@
   round that fails on a configuration error counts against none of its messages (question 3 of
   the phase-two design): the digest stays pending with no failed round. Once the prompt is fixed,
   the redelivered digest runs the round, which takes it.
+* ``prompt_config_error_after_an_unfinished_round`` — a round tells 赤尾 of a change and then its
+  next model call fails, so the notice is left noted (``unfinished.json``). The redelivered
+  digest's round meets the misconfigured release: the step before the round still runs first and
+  tells 赤尾 again under the notice's id, then the round fails before any model call and stores
+  nothing. Once the prompt is fixed, the next round tells her once more under the same id, as
+  every round after an unfinished one does until one is stored, and clears what was noted.
 """
 
 from __future__ import annotations
@@ -472,3 +478,82 @@ async def test_prompt_config_error_digest(replay):
     )
 
     replay.check("world_round/prompt_config_error_digest")
+
+
+def _told_akao(step: dict) -> list[tuple[str, str]]:
+    """What the step told 赤尾: each notice's message id and words (its ``time`` is when it went
+    out)."""
+    return [
+        (e["body"]["message_id"], e["body"]["body"])
+        for e in step["effects"]
+        if e.get("publish") is not None and e["body"].get("recipient") == "赤尾"
+    ]
+
+
+async def test_prompt_config_error_after_an_unfinished_round(replay):
+    await _world_is_up(replay)
+    inbox = _akaos_digest_arrives(replay)
+    unfinished = f"{replay.lane}/unfinished.json"
+
+    replay.model.script(
+        ROUND,
+        Reply(
+            tools=(ToolUse("report_change", {"change": "14:01，家附近下起了小雨。"}),)
+        ),
+        Fail(lambda: CapabilityTimeout("offline-model gave no answer within 180s")),
+    )
+    replay.model.script(
+        PERCEPTION,
+        Reply(
+            tools=(
+                ToolUse(
+                    "someone_notices",
+                    {
+                        "who": "赤尾",
+                        "what": "你听见客厅窗外下起了小雨。",
+                        "right_away": False,
+                    },
+                ),
+            ),
+        ),
+        Reply(text="判断完了。"),
+    )
+    await replay.step(
+        "a round tells 赤尾 of a change, then its next model call fails",
+        lambda: replay.broker.deliver(inbox),
+        at=_at(14, 1),
+    )
+    [told] = _told_akao(replay.steps[-1])
+    assert "added" in replay.steps[-1]["files"][unfinished]
+
+    replay.misconfigure_prompt(ORDER, "mood")
+    await replay.step(
+        "the redelivered digest's round tells 赤尾 again, then fails on the order of a round",
+        lambda: replay.broker.deliver(inbox),
+        at=_at(14, 2),
+    )
+    failed = replay.steps[-1]
+    [resent] = _told_akao(failed)
+    assert resent == told, (
+        "the step before the round ran first and sent the notice again under its id"
+    )
+    _nothing_ran(failed)
+    assert failed["files"] == {}, (
+        "nothing is stored: the notice stays noted, the digest is not counted against"
+    )
+
+    replay.fix_prompt(ORDER)
+    replay.model.script(ROUND, *_sets_its_next_wake())
+    await replay.step(
+        "the prompt is fixed; the redelivered digest runs the round",
+        lambda: replay.broker.deliver(inbox),
+        at=_at(14, 3),
+    )
+    recovered = replay.steps[-1]
+    [again] = _told_akao(recovered)
+    assert again == told, "once more under the same id, as after any failure"
+    assert "removed" in recovered["files"][unfinished], (
+        "the round is stored; nothing left"
+    )
+
+    replay.check("world_round/prompt_config_error_after_an_unfinished_round")

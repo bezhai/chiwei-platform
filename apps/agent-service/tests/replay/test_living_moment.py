@@ -22,6 +22,11 @@
   gives. The round fails when it fixes its prompts, after the steps before the round and before
   any model call: no tool, no cost, nothing lands. Once the prompt is fixed, the same cell runs
   again under the same identity.
+* ``prompt_config_error_after_a_send_fails`` — the round-end digest to world is not confirmed,
+  and the next round meets the same misconfigured release. The step before the round still
+  runs first: the digest goes out again under its message id, then the round fails before any
+  model call. Once the prompt is fixed, the same cell runs again and does not send the digest a
+  third time.
 """
 
 from __future__ import annotations
@@ -304,3 +309,56 @@ async def test_prompt_config_error(replay):
     )
 
     replay.check("living_moment/prompt_config_error")
+
+
+def _to_world(step: dict) -> list[dict]:
+    return [e for e in step["effects"] if e.get("rk", "").startswith("inbox.world.")]
+
+
+async def test_prompt_config_error_after_a_send_fails(replay):
+    await _her_household_is_up(replay)
+    rules = "living_life_moment/rules"
+    replay.broker.refuse_confirms(lambda rk: rk.startswith("inbox.world."))
+
+    replay.model.script(
+        MOMENT, _she_makes_tea(), Reply(tools=(ToolUse("stop_for_now", {}),))
+    )
+    await replay.step(
+        "a moment whose digest to world is not confirmed",
+        _moment(replay),
+        at=_at(14, 0),
+    )
+    [unconfirmed] = _to_world(replay.steps[-1])
+    assert unconfirmed["confirmed"] is False
+    digest_id = unconfirmed["body"]["message_id"]
+
+    replay.misconfigure_prompt(rules, "mood")
+    await replay.step(
+        "the next moment sends the digest again, then fails on her rules",
+        _moment(replay),
+        at=_at(14, 10),
+        raises=PromptConfigError,
+    )
+    failed = replay.steps[-1]
+    [resent] = _to_world(failed)
+    assert (resent["body"]["message_id"], resent["confirmed"]) == (digest_id, True), (
+        "the step before the round ran first and sent the digest under its id"
+    )
+    assert "data_outgoing_result" in failed["rows"], "and recorded that it went out"
+    assert failed["model_calls"] == []
+    assert not {
+        "data_life_moment",
+        "data_session_transcript",
+        "data_thinking_tokens_spent",
+    } & set(failed["rows"]), "no cost, nothing lands"
+
+    replay.fix_prompt(rules)
+    replay.model.script(MOMENT, Reply(text="继续"))
+    await replay.step(
+        "the prompt is fixed; the same cell runs again", _moment(replay), at=_at(14, 11)
+    )
+    recovered = replay.steps[-1]
+    assert recovered["outcome"]["returned"]["moment_id"] == "2026-07-25T14:10+08:00"
+    assert _to_world(recovered) == [], "the digest went out once; it is not sent again"
+
+    replay.check("living_moment/prompt_config_error_after_a_send_fails")
