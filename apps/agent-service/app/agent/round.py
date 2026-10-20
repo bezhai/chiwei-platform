@@ -174,6 +174,7 @@ def open_call(
 
 _current_round: ContextVar[Round] = ContextVar("agent_current_round")
 _current_call: ContextVar[Call] = ContextVar("agent_current_call")
+_wake_source: ContextVar[str | None] = ContextVar("agent_wake_source", default=None)
 
 
 def current_round() -> Round:
@@ -208,6 +209,23 @@ def in_call(call: Call) -> Iterator[Call]:
         yield call
     finally:
         _current_call.reset(token)
+
+
+@contextmanager
+def woken_by(source: str) -> Iterator[None]:
+    """Inside the block, what runs was woken by the wake source named ``source`` ("regular",
+    "world-inbox" ...). The participant's queue binds it around the turn it runs, so the trace of
+    a round can say what woke it; the round itself is not given it."""
+    token = _wake_source.set(source)
+    try:
+        yield
+    finally:
+        _wake_source.reset(token)
+
+
+def wake_source() -> str | None:
+    """The wake source whose turn is running (:func:`woken_by`); ``None`` outside a turn."""
+    return _wake_source.get()
 
 
 # ---------------------------------------------------------------------------

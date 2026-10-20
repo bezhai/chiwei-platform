@@ -82,7 +82,7 @@ from app.agent.neutral import (
     TurnPartKind,
 )
 from app.agent.prompts import PromptSet
-from app.agent.round import Call, in_call
+from app.agent.round import Call, in_call, wake_source
 from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
     mark_failed,
@@ -320,19 +320,25 @@ def _tool_span(*, name: str, input: Any):
         yield span
 
 
-def _record_segments(span: Any, prompts: PromptSet, agent: str) -> None:
-    """Record on the call's root span which segments it rendered, at which label and version
-    (best-effort). An agent rendered from several segments links no one prompt on its model
-    calls, so this is where its versions are read back."""
+def _record_call(span: Any, prompts: PromptSet, call: Call) -> None:
+    """Record on the call's root span which segments it rendered, at which label and version, and,
+    for a call made in a participant's round, what woke that round: the wake source, the round's
+    identity and the reason (best-effort). An agent rendered from several segments links no one
+    prompt on its model calls, so this is where its versions are read back."""
     try:
-        span.update(
-            metadata={
-                "prompt_segments": [
-                    {"prompt_id": prompt_id, "label": label, "version": version}
-                    for prompt_id, label, version in prompts.versions(agent)
-                ]
+        metadata: dict[str, Any] = {
+            "prompt_segments": [
+                {"prompt_id": prompt_id, "label": label, "version": version}
+                for prompt_id, label, version in prompts.versions(call.agent)
+            ]
+        }
+        if call.round is not None:
+            metadata["wake"] = {
+                "source": wake_source(),
+                "round_id": call.round.round_id,
+                "reason": call.round.reason,
             }
-        )
+        span.update(metadata=metadata)
     except Exception as exc:  # pragma: no cover - tracing must not break the call
         logger.warning("langfuse span metadata update failed: %s", exc)
 
@@ -746,7 +752,7 @@ class Agent:
                     session_id=call.session,
                     prompt=prompts.single_prompt(call.agent),
                 ) as span:
-                    _record_segments(span, prompts, call.agent)
+                    _record_call(span, prompts, call)
                     result = await _run_loop(
                         model,
                         messages=full_messages,
@@ -799,7 +805,7 @@ class Agent:
                     session_id=call.session,
                     prompt=prompts.single_prompt(call.agent),
                 ) as span:
-                    _record_segments(span, prompts, call.agent)
+                    _record_call(span, prompts, call)
                     data = await model.structured(
                         full_messages, schema=schema, **dict(spec.model_kwargs)
                     )

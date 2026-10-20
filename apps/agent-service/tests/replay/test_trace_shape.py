@@ -12,6 +12,8 @@ the trace today:
   span of its own hanging under ``tool.send_message``, in the same trace, and renames nothing;
 * every model call world makes (its round, a perception judgement, an NPC, an answer) is a trace
   of its own, all in the one session ``world:<lane>``;
+* the root span of every call made in a participant's round names what woke the round in its
+  metadata (``wake``: the wake source, the round's id and its reason);
 * a perception judgement that fails on every attempt leaves one ERROR trace per attempt;
 * her diary, her weekly look back and a stretch of reading are each a trace of its own, in the
   sessions ``living-day-page:<lane>:<persona>``, ``living-persona-review:<lane>:<persona>`` and
@@ -22,6 +24,8 @@ What the server makes of these spans is not tested here; only what the SDK expor
 
 from __future__ import annotations
 
+import json
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -109,6 +113,12 @@ def _calls_under(found: list[Span], parent: Span) -> list[Span]:
     return [s for s in found if s.generation and s.parent == parent.id]
 
 
+def _metadata(span: Span, key: str) -> Any:
+    """The root-span metadata ``key`` the agent recorded on ``span`` (the SDK exports each key as
+    an attribute of its own, JSON-encoded unless it is a string or an int)."""
+    return json.loads(span.attrs[f"{Attr.OBSERVATION_METADATA}.{key}"])
+
+
 def _at(day: int, hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 7, day, hour, minute, tzinfo=CST)
 
@@ -167,6 +177,12 @@ async def test_her_round_is_one_trace_with_each_tool_under_the_call_that_asked_f
     assert root.attrs[Attr.TRACE_SESSION_ID] == f"living-life:{LANE}:akao"
     assert set(root.attrs[Attr.TRACE_TAGS]) == _agent_service_tags()
     assert {s.trace for s in found} == {root.trace}, "one trace for the whole round"
+    slot = "2026-07-25T14:00+08:00"
+    assert _metadata(root, "wake") == {
+        "source": "regular",
+        "round_id": slot,
+        "reason": f"常规节奏，{slot} 那一格",
+    }
 
     first, second = _calls_under(found, root)
     for call in (first, second):
@@ -273,6 +289,12 @@ async def test_every_call_world_makes_is_a_trace_of_its_own_in_one_session(
             assert call.attrs[Attr.OBSERVATION_PROMPT_NAME] == r.name.replace("-", "_")
 
     round_root = _one(roots, "world-round")
+    wake = _metadata(round_root, "wake")
+    assert wake["source"] == "world-inbox"
+    assert wake["reason"] == "woken by akao-digest-1"
+    uuid.UUID(wake["round_id"])
+    for r in roots:
+        assert _metadata(r, "wake") == wake, "every call of the round names its wake"
     calls = _calls_under(found, round_root)
     assert _one(found, "tool.report_change").parent == calls[0].id
     assert _one(found, "tool.let_npc_appear").parent == calls[1].id

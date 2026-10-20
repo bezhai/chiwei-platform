@@ -68,6 +68,7 @@ from enum import Enum
 from typing import Generic, TypeVar
 
 from app.agent.contracts import Due
+from app.agent.round import woken_by
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,8 @@ class Turns:
                         source.name,
                         due.reason,
                     )
-                    return await source.run(due)
+                    with woken_by(source.name):
+                        return await source.run(due)
             except TimeoutError:
                 # Only this queue's own limit counts. A TimeoutError the turn raised itself (an HTTP
                 # timeout) or an inner queue's limit passes through here too; reporting those as
