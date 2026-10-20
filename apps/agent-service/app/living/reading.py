@@ -78,10 +78,10 @@ from app.data.schema import Data, Key, Version, table_name
 from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
 from app.infra.cst_time import CST, to_cst_dated
+from app.living.common import esc, require_aware
 from app.living.participants import READING, residents
 from app.living.phone import Sender, _who_tag, reachable_conversations
 from app.living.reading_agent import run_reading_round
-from app.living.records import _require_aware, esc
 from app.messaging.message import Delivery, Kind, Message, SendFailed
 
 # module-level 引入，测试从这里换替身（不碰 broker）
@@ -142,7 +142,7 @@ class FileRead(Data):
     @field_validator("read_at")
     @classmethod
     def _aware_read_at(cls, v: datetime) -> datetime:
-        return _require_aware("read_at", v)
+        return require_aware("read_at", v)
 
 
 class FilePickedUp(BaseModel):

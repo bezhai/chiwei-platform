@@ -112,15 +112,12 @@ from app.domain.chat_dataflow import (
     ChatResponseSegment,
 )
 from app.infra.outbound import publish
+from app.living.common import require_aware
 from app.living.happening import note_recorded, printed_handle, record_happening
 from app.living.output_safety import audit_output
 from app.living.phone import medium_for, reachable_conversation
 from app.living.pictures import her_picture, picture_id_in
-from app.living.records import (
-    KIND_SPEECH,
-    OUTBOUND_HAPPENING_PREFIX,
-    _require_aware,
-)
+from app.living.records import KIND_SPEECH, OUTBOUND_HAPPENING_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +215,7 @@ class SpokenOutbound(Data):
     )
     @classmethod
     def _aware_instant(cls, v: datetime | None) -> datetime | None:
-        return _require_aware(
+        return require_aware(
             "claimed_at / settled_at / landed_at / took_back_at / recalled_at", v
         )
 

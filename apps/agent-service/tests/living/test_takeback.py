@@ -131,8 +131,8 @@ def her_mouth(monkeypatch):
     ``happening_id`` 由嘴自己拼、快照和回执各自解析、撤回自己收 —— 中间任何一处各写
     一份拼接规则，它们就红。
     """
-    from app.living.output_safety import OutputVerdict
     from app.living import mouth as mouth_mod
+    from app.living.output_safety import OutputVerdict
 
     sent: list = []
 

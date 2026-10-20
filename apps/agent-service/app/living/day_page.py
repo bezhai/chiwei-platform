@@ -54,10 +54,10 @@ from app.data.persist import fetch_all, fetch_one, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST, dated_clock
+from app.living.common import require_aware
 from app.living.happening import own_line, read_her_happenings_between
 from app.living.persona import persona_prompt_vars
 from app.living.received import read_received_between, received_line
-from app.living.records import _require_aware
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ class LivingDayPage(Data):
     def _aware_written_at(cls, v: datetime) -> datetime:
         # 同 living 另外几张表：naive 落进 TIMESTAMPTZ 会被按服务器时区解释、静默偏
         # 几小时（见 app.living.records）。
-        return _require_aware("written_at", v)
+        return require_aware("written_at", v)
 
 
 _TABLE = table_name(LivingDayPage)

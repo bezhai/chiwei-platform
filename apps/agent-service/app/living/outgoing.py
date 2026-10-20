@@ -65,14 +65,9 @@ from app.data.persist import fetch_all, fetch_one, from_row, insert_append
 from app.data.schema import CommitOrder, Data, Key, table_name
 from app.data.tx import tx
 from app.infra.cst_time import dated_clock
+from app.living.common import require_aware
 from app.living.participants import WORLD, residents
-from app.living.records import (
-    KIND_SPEECH,
-    MEDIUM_IN_PERSON,
-    Happening,
-    Whereabouts,
-    _require_aware,
-)
+from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON, Happening, Whereabouts
 from app.messaging.sending import send
 
 logger = logging.getLogger(__name__)
@@ -127,7 +122,7 @@ class OutgoingMessage(Data):
     @field_validator("message_time")
     @classmethod
     def _aware_message_time(cls, v: datetime) -> datetime:
-        return _require_aware("message_time", v)
+        return require_aware("message_time", v)
 
 
 class OutgoingResult(Data):

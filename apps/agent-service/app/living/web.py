@@ -79,7 +79,7 @@ from app.agent.tools.search import search_web
 
 # 刷那只手用的是下面那一层：它只做"搜一批命中回来"，没有那道按问题筛的重排。
 from app.capabilities.web_search import SearchHit, web_search
-from app.living.records import esc
+from app.living.common import esc
 
 logger = logging.getLogger(__name__)
 

@@ -129,6 +129,7 @@ from app.data.ordered import insert_in_commit_order
 from app.data.persist import fetch_one, from_row
 from app.data.schema import CommitOrder, Data, Key, table_name
 from app.infra.cst_time import CST
+from app.living.common import esc, legacy_null_is, require_aware
 
 # 她手边有哪些说明可读那一份清单（只能从 prompt 变量进，见本模块最后一段 docstring）。
 from app.living.guides import GUIDES_VAR, guides_she_can_read
@@ -160,15 +161,7 @@ from app.living.received import (
     render_received,
     unread_received,
 )
-from app.living.records import (
-    KIND_ACT,
-    KIND_SPEECH,
-    MEDIUM_IN_PERSON,
-    Whereabouts,
-    _require_aware,
-    esc,
-    legacy_null_is,
-)
+from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, Whereabouts
 from app.living.snapshot import MomentSnapshot, read_snapshot
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from app.messaging.sending import ask
@@ -323,7 +316,7 @@ class LifeMoment(Data):
 
     # ``nudged`` / ``seq`` 都是后加的列，已经有数据的泳道上旧行是 NULL —— 不接住就是
     # 读一行炸一行，整条 life 循环推不动。理由和另一半防线（SQL 侧的 COALESCE）见
-    # :func:`app.living.records.legacy_null_is`。
+    # :func:`app.living.common.legacy_null_is`。
     _legacy_nudged = field_validator("nudged", mode="before")(
         classmethod(legacy_null_is(False))
     )
@@ -344,7 +337,7 @@ class LifeMoment(Data):
     @field_validator("began_at")
     @classmethod
     def _aware_began_at(cls, v: datetime) -> datetime:
-        return _require_aware("began_at", v)
+        return require_aware("began_at", v)
 
 
 _MOMENT_TABLE = table_name(LifeMoment)
@@ -818,7 +811,7 @@ async def look_around() -> str:
             answer.reason,
         )
         return NOBODY_ANSWERED
-    # 不加一个字、不少一个字，过 :func:`app.living.records.esc`。回答是 world 写下的字，跟 world
+    # 不加一个字、不少一个字，过 :func:`app.living.common.esc`。回答是 world 写下的字，跟 world
     # 发来的消息是同一类，按同一条规矩交给她（:func:`app.living.received.render_received`）：别的
     # 参与者写下的字不归她管（esc 上"经过模型的不转义"说的是她自己的话和她自己留下的东西），它落进
     # 她这一轮的上下文、跟消息行摆在同一段文本里，不转义就能自己写出一行 ``rel="owner"``。
@@ -1079,7 +1072,7 @@ async def regular_moment_due(
     """
     now = clock()
     minutes = await life_moment_minutes()
-    local = _require_aware("now", now).astimezone(CST)
+    local = require_aware("now", now).astimezone(CST)
     midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
     elapsed = int((local - midnight).total_seconds() // 60)
     cell = midnight + timedelta(minutes=(elapsed // minutes) * minutes)

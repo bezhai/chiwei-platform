@@ -1,7 +1,7 @@
 """环顾四周：她问 world 她这里现在什么样、有谁在，world 怎么答她就拿到什么；没人答就如实说没人答。
 
 world 的回答是别的参与者写下的字，跟 world 发来的消息是同一类：一个字不少地交给她，过同一道转义
-（:func:`app.living.records.esc`），带不进任何结构。
+（:func:`app.living.common.esc`），带不进任何结构。
 
 问题以她的名义发出（她在世界里的名字），里面写着她此刻在哪、在做什么，取自她自己的位置。这一条
 不能省：她这一轮做的事要等这一轮结束才汇总发给 world，同一轮里她刚换了地方就环顾四周，world 还
@@ -19,9 +19,9 @@ import pytest
 
 from app.living import moment as moment_mod
 from app.living import participants as participants_mod
+from app.living.common import esc
 from app.living.moment import look_around
 from app.living.participants import WORLD
-from app.living.records import esc
 from app.living.whereabouts import note_whereabouts
 from app.messaging.message import Answer, SendFailed
 from tests.living.conftest import (

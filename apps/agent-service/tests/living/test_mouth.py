@@ -151,8 +151,8 @@ def spoken(monkeypatch):
 @pytest.fixture
 def guard(monkeypatch):
     """交出去之前那一关的替身。默认放行，而且是**判过之后**放行的。"""
-    from app.living.output_safety import OutputVerdict
     from app.living import mouth as mouth_mod
+    from app.living.output_safety import OutputVerdict
 
     class FakeGuard:
         def __init__(self) -> None:
@@ -709,9 +709,9 @@ async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
     条缝，它是一次要等的模型调用），版本链真的往前走了一版，不是让替身报一个假的
     失败。
     """
-    from app.living.output_safety import OutputVerdict
     from app.living import mouth as mouth_mod
     from app.living.mouth import SpokenOutbound, latest_outbound
+    from app.living.output_safety import OutputVerdict
     from tests.data.read_back import all_versions
 
     await note_whereabouts(
@@ -854,8 +854,8 @@ async def test_words_that_do_not_pass_never_reach_anyone(
     她主动开口没有实时性压力（不像真人在等一条流式回复），所以这一关放得进"交出去
     之前"。放在之后就只剩"先发后撤"，而那意味着真人已经看见了。
     """
-    from app.living.output_safety import OutputVerdict
     from app.living.mouth import latest_outbound
+    from app.living.output_safety import OutputVerdict
 
     guard.verdict = OutputVerdict(
         ok=False, reason="output_unsafe", detail="confidence=0.9"
@@ -1050,8 +1050,8 @@ async def test_a_line_that_lost_the_claim_race_is_not_counted_as_unchecked(
     """
     import logging
 
-    from app.living.output_safety import OutputVerdict
     from app.living import mouth as mouth_mod
+    from app.living.output_safety import OutputVerdict
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",

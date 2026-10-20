@@ -79,7 +79,7 @@ from app.data.persist import fetch_all, from_row, insert_idempotent, select_late
 from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import to_cst_dated
 from app.infra.image import image_client
-from app.living.records import _require_aware, esc
+from app.living.common import esc, require_aware
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,7 @@ class Picture(Data):
     file_name: str       # 对象存储的永久句柄（tool-service to-tos 回的那个）
     # 这张图是什么。两个来源，**其中一个是外面来的**：她画它时说的那句话（她自己写
     # 的），或者上网找到它时那个图片站上的标题（谁都能写）。所以它摆到她眼前之前一律
-    # 过 :func:`app.living.records.esc` —— 分不出哪一张是哪个来源，也不该分：一个字段
+    # 过 :func:`app.living.common.esc` —— 分不出哪一张是哪个来源，也不该分：一个字段
     # 只要有一个外面来的来源，它就是外面来的。
     what: str
     made_at: datetime    # 她做出它的时刻
@@ -149,7 +149,7 @@ class Picture(Data):
     @field_validator("made_at")
     @classmethod
     def _aware_made_at(cls, v: datetime) -> datetime:
-        return _require_aware("made_at", v)
+        return require_aware("made_at", v)
 
 
 _TABLE = table_name(Picture)

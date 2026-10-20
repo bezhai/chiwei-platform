@@ -55,7 +55,7 @@ Python 脚本内部发 HTTP 不受这条限制** —— 那三份说明的脚本
 ------------------
 
 她这一轮的输入是结构化的（``<msg from=".." rel="owner">``，见 :mod:`app.living.phone`），
-所以外面来的字串进去之前要过 :func:`app.living.records.esc`。这两只手上那条界是这么
+所以外面来的字串进去之前要过 :func:`app.living.common.esc`。这两只手上那条界是这么
 划的：
 
   * :func:`run_a_script` 打出来的 ``stdout`` / ``stderr`` **过**。沙箱没有网络命名空间
@@ -88,7 +88,7 @@ from app.agent.tools._common import tool_error
 # 同 :mod:`app.skills.renderer` 的写法。
 from app.capabilities.sandbox import OUTPUT_CUT_MARK
 from app.capabilities.sandbox import run as _sandbox_run
-from app.living.records import esc
+from app.living.common import esc
 from app.skills.registry import SkillRegistry
 from app.skills.renderer import render_skill
 

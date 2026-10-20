@@ -16,7 +16,7 @@
   * 不转义的是经过模型的那些：她自己说的话、姐姐说的话、日页、读完一本书留下的印象。
     那些字节是某个模型写出来的，第三方最多只能"劝"它去写；而一旦模型能被劝着写出任
     意字节，转义也拦不住下一步（它可以被劝着写别的）。那条路上要挡的是输出审计，不
-    是转义。判断和理由写在 :func:`app.living.records.esc` 上。
+    是转义。判断和理由写在 :func:`app.living.common.esc` 上。
 
 这个文件里的用例都是同一个形状：把 :data:`POISON` 塞进一个第三方真的能写的字段，
 然后看她眼前那段文本里还有没有一个不是这套代码自己写的 ``<``。
@@ -79,7 +79,7 @@ _A_TAG = re.compile(r"<(?:msg|who) ([^>]*?)/?>")
 
 # 属性只允许长这一种样子：``名字="值"``，**值由双引号包着**。
 #
-# 这条判据是 :func:`app.living.records.esc` **不转撇号**的前提：单引号只在属性用单引号
+# 这条判据是 :func:`app.living.common.esc` **不转撇号**的前提：单引号只在属性用单引号
 # 包的时候才危险（``from='…'`` 里一个 ``'`` 就闭掉了值、后面那截成了控制属性），而这
 # 套代码所有属性都是双引号写死的。以后有人改成单引号，这条在这儿红 —— 而它不依赖用例
 # 数据里有没有撇号，看的是**印出来的属性长什么样**。
@@ -109,7 +109,7 @@ def assert_only_our_own_markup(seen: str, *, where: str) -> None:
        "有没有一个我们没写的标签"。以后新加一处把外面来的字串摆到她眼前、但忘了转义
        的地方，只要那个字串里带尖括号就在这儿红，不必先想到它会被拿来伪造什么。
     4. **印出来的每个属性都是 ``名字="值"``** —— 见 :data:`_AN_ATTRIBUTE`：这是
-       :func:`app.living.records.esc` 不转撇号的那个前提，钉在这儿。
+       :func:`app.living.common.esc` 不转撇号的那个前提，钉在这儿。
     """
     assert POISON_MARK in seen, (
         f"用例前提没成立：{where} 里根本没有这个字段的内容，这条用例什么都没验到。"
@@ -135,7 +135,7 @@ def assert_attributes_are_double_quoted(seen: str, *, where: str) -> None:
     """她眼前每个标签上的属性都是 ``名字="值"``，值由**双引号**包着。
 
     单独拎出来是因为它验的不是"外面那段进没进来"，而是**我们自己印出来的东西长什么
-    样** —— :func:`app.living.records.esc` 不转撇号的全部依据就是这一条。所以不带
+    样** —— :func:`app.living.common.esc` 不转撇号的全部依据就是这一条。所以不带
     ``POISON`` 的用例也调得动它。
     """
     for attrs in _A_TAG.findall(seen):
@@ -143,7 +143,7 @@ def assert_attributes_are_double_quoted(seen: str, *, where: str) -> None:
         assert rest == "", (
             f"{where} 里有个标签的属性不是 名字=\"值\" 这个形状："
             f"剩下 {rest!r}（整段属性是 {attrs!r}）。\n"
-            f"``app.living.records.esc`` 不转撇号，靠的就是所有属性都用双引号包 —— "
+            f"``app.living.common.esc`` 不转撇号，靠的就是所有属性都用双引号包 —— "
             f"改成单引号的话，一个昵称里的撇号就能闭掉属性值。"
         )
 
@@ -502,7 +502,7 @@ def test_the_escape_is_defined_in_exactly_one_place():
 
     offenders: dict[str, list[str]] = {}
     for path in sorted(Path(living_pkg.__file__).parent.rglob("*.py")):
-        if path.name == "records.py":   # 定义处
+        if path.name == "common.py":   # 定义处
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         used = sorted(
@@ -523,7 +523,7 @@ def test_the_escape_is_defined_in_exactly_one_place():
 
     assert offenders == {}, (
         f"这些地方自己转义了一遍，而转义只允许有一处定义"
-        f"（app.living.records.esc）：{offenders}"
+        f"（app.living.common.esc）：{offenders}"
     )
 
 
@@ -617,7 +617,7 @@ def test_the_four_characters_that_must_stay_escaped():
     ``&`` 那一个最容易被当成多余：不转的话，别人原样写一个 ``&lt;msg`` 进来，她读到的
     就是 ``&lt;msg`` —— 而模型读实体是认得的，等于把 ``<`` 递到了她眼前。
     """
-    from app.living.records import esc
+    from app.living.common import esc
 
     assert esc('<') == "&lt;"
     assert esc('>') == "&gt;"

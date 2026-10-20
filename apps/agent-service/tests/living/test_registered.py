@@ -326,7 +326,7 @@ def test_living_data_reaches_the_registry_when_agent_service_starts():
 
 
 def test_the_package_doc_lists_every_module_in_it():
-    """``app/living/__init__.py`` 那份模块清单就是这个包里的全部模块。
+    """``app/living/__init__.py`` 那份模块清单就是这个包里的全部模块和插件目录。
 
     这份清单是读这个包的人第一眼看到的地图。漏一个的后果跟漏一张表一样是**静默**
     的：没有任何东西会因为它不在清单上而报错，于是清单慢慢变成一份只覆盖一半的名
@@ -339,10 +339,9 @@ def test_the_package_doc_lists_every_module_in_it():
 
     import app.living as living_pkg
 
-    on_disk = {
-        p.stem
-        for p in Path(living_pkg.__file__).parent.glob("*.py")
-        if p.stem != "__init__"
+    root = Path(living_pkg.__file__).parent
+    on_disk = {p.stem for p in root.glob("*.py") if p.stem != "__init__"} | {
+        d.name for d in root.iterdir() if (d / "__init__.py").is_file()
     }
     listed = set(re.findall(r"app\.living\.([a-z_]+)", living_pkg.__doc__ or ""))
     assert on_disk - listed == set(), (

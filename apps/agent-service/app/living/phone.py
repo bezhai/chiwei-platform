@@ -174,7 +174,7 @@ presence 而不是"聊过天就算"，是因为 bot 被移出群之后历史还�
 
 于是她读到的一条消息是结构化的（:func:`_one_message`）：``from`` 装显示名、``rel``
 装系统按 ``common_user_id`` 算出来的身份、标签体装正文，用户来源的字串全部过一道
-:func:`app.living.records.esc`。三种伪造由此一起失效：改名（名字不是身份）、正文自称
+:func:`app.living.common.esc`。三种伪造由此一起失效：改名（名字不是身份）、正文自称
 （正文在标签体里，说什么都不是属性）、闭合标签（转义之后突不破自己那一行）。
 
 ``rel`` 拿不到就整个属性缺席，**绝不回退显示名当身份**。她自己和姐姐的行不盖 ``rel``
@@ -215,14 +215,9 @@ from app.data.queries.persona import (
 from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import CST, to_cst_dated
 from app.infra.image import image_client, image_is_reachable
+from app.living.common import esc, require_aware
 from app.living.pictures import hers_among, printed_handle
-from app.living.records import (
-    MEDIUM_GROUP_CHAT,
-    MEDIUM_PHONE,
-    Happening,
-    _require_aware,
-    esc,
-)
+from app.living.records import MEDIUM_GROUP_CHAT, MEDIUM_PHONE, Happening
 from app.living.whitelist import channels_in_sight
 
 logger = logging.getLogger(__name__)
@@ -303,7 +298,7 @@ class PhoneRead(Data):
     @field_validator("read_at")
     @classmethod
     def _aware_read_at(cls, v: datetime) -> datetime:
-        return _require_aware("read_at", v)
+        return require_aware("read_at", v)
 
 
 _READ_TABLE = table_name(PhoneRead)
@@ -1050,7 +1045,7 @@ def _one_message(row, *, now: datetime, pictures: Iterator[str]) -> str:
 
     ``rel`` 只从 ``common_user_id`` 算出来（``by_owner`` 那一列），拿不到就整个属性
     **缺席**：认不出这个人时绝不回退显示名当身份。她自己和姐姐的行也不盖 —— 她们不是
-    主人。用户来源的字串（显示名、正文）全部 :func:`app.living.records.esc` 过，所以
+    主人。用户来源的字串（显示名、正文）全部 :func:`app.living.common.esc` 过，所以
     正文里写一个闭合标签、昵称里塞个引号都突不破这一行。
 
     **撤回状态和撤回编号也是属性，不是正文旁边的方括号。** 那个散文槽正文和显示名都

@@ -49,8 +49,9 @@ from pydantic import field_validator
 from app.data.persist import fetch_all, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import dated_clock
+from app.living.common import esc, legacy_null_is, require_aware
 from app.living.participants import WORLD, load_residents, residents
-from app.living.records import _require_aware, esc, legacy_null_is, living_lane
+from app.living.records import living_lane
 from app.messaging.message import Kind, Message
 from app.messaging.receiving import Declare
 
@@ -75,7 +76,7 @@ class ReceivedMessage(Data):
     和姐妹直接说的话走两条路，补发的消息也会晚到，到达先后不代表发生先后。
 
     ``wakes_recipient`` 是发件方说的要不要叫醒她（通信机制信封上的同名一项）。这一列是后加的，
-    加之前存下的行是 NULL，读出来当成叫醒（:func:`app.living.records.legacy_null_is`；按它过滤的
+    加之前存下的行是 NULL，读出来当成叫醒（:func:`app.living.common.legacy_null_is`；按它过滤的
     SQL 那一侧是 ``COALESCE``，见 :func:`unread_received`）。pydantic 那侧不给默认值：新存的一行
     漏了它是 bug，该当场炸。
     """
@@ -99,7 +100,7 @@ class ReceivedMessage(Data):
     @field_validator("message_time")
     @classmethod
     def _aware_message_time(cls, v: datetime) -> datetime:
-        return _require_aware("message_time", v)
+        return require_aware("message_time", v)
 
 
 class ReceivedRead(Data):
@@ -242,7 +243,7 @@ def received_line(item: ReceivedMessage) -> str:
     world 发来的是她察觉到的事（窗外下雨了、有人敲门），原样摆，不标是谁说的——那不是谁对她
     说的话。别人发来的带着发送方的名字。
 
-    发送方和正文都过 :func:`app.living.records.esc`：正文由发送方写下，world 和姐妹那边是
+    发送方和正文都过 :func:`app.living.common.esc`：正文由发送方写下，world 和姐妹那边是
     模型、人工参与者那边是人，哪一种都不归她管，而这一列上转义没有代价。她自己的经历不过
     （:func:`app.living.happening.own_line`），判据写在 esc 上。
     """

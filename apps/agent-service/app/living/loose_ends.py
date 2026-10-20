@@ -65,7 +65,7 @@ from pydantic import field_validator
 from app.data.persist import fetch_all, from_row, insert_append, select_latest
 from app.data.schema import Data, Key, Version, table_name
 from app.infra.cst_time import CST
-from app.living.records import _require_aware
+from app.living.common import require_aware
 
 # 派生 thread_id 的命名空间。换掉它 == 历史线头全部对不上、每条的出处一起重置。
 _THREAD_ID_NS = uuid.UUID("2b7f9c14-6d8a-4f31-9e05-7c3a1d4b8e62")
@@ -118,7 +118,7 @@ class LooseEnd(Data):
     @field_validator("opened_at", "closed_at", "due_at")
     @classmethod
     def _aware_instant(cls, v: datetime | None) -> datetime | None:
-        return _require_aware("opened_at / closed_at / due_at", v)
+        return require_aware("opened_at / closed_at / due_at", v)
 
 
 _TABLE = table_name(LooseEnd)
