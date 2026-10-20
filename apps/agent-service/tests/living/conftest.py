@@ -102,6 +102,20 @@ def post(monkeypatch) -> Post:
 HER_LANE = "coe-living"
 
 
+def her_plugins() -> list:
+    """agent-service 清单里她那几个插件（guides 用的 skills，和她自己的全部插件），按清单的顺序，跟
+    线上起的是同一份；运维接口和通信机制的人工入口不在里面。"""
+    import importlib
+
+    from app.manifests.agent_service import MANIFEST
+
+    return [
+        importlib.import_module(module).PLUGIN
+        for module in MANIFEST.plugins
+        if module not in ("app.plugins.ops", "app.plugins.operator")
+    ]
+
+
 @pytest.fixture
 async def resident(app_host, monkeypatch, tmp_path):
     """她的一轮由什么组成：agent-service 的宿主起好（只跑 setup，不碰数据库、broker，不起钟），
@@ -112,7 +126,6 @@ async def resident(app_host, monkeypatch, tmp_path):
     用例要哪几份说明自己装。
     """
     from app.host import Plugin
-    from app.plugins import living, skills
 
     monkeypatch.setenv("LANE", HER_LANE)
     monkeypatch.setenv("SKILLS_DIR", str(tmp_path / "skills"))
@@ -120,7 +133,7 @@ async def resident(app_host, monkeypatch, tmp_path):
     her_round = Plugin(
         name="her-round", setup=lambda ctx: assembled.append(ctx.profile("resident"))
     )
-    await app_host("agent-service", [skills.PLUGIN, living.PLUGIN, her_round])
+    await app_host("agent-service", [*her_plugins(), her_round])
     return assembled[0]
 
 
@@ -275,7 +288,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     from app.living.day_page import LivingDayPage
     from app.living.mouth import SpokenOutbound
     from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
-    from app.living.persona import PersonaVersion
+    from app.living.persona.chain import PersonaVersion
     from app.living.phone import PhoneRead
     from app.living.pictures import Picture
     from app.living.received import ReceivedMessage, ReceivedRead
@@ -285,7 +298,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     # ``LivingDayPage`` 跟手机那几张一样建在这里：**每一轮都读那一页**（``read_snapshot``
     # 把它当第二段摆给她），任何跑她一轮或 ``read_snapshot`` 的用例都要用到，
     # 各文件各建各的迟早会出现"这个文件建了那个没建"。``PersonaVersion`` 同一个理由：
-    # 一轮、日记、开口三条路都要先问一遍"她是谁"（``persona_prompt_vars`` 读这条链）。
+    # 一轮、日记、开口三条路都要先问一遍"她是谁"（persona 服务读这条链）。
     # ``SessionTranscript`` 也是：每一轮开头读连续上下文、结尾写回下一版
     # （``app.agent.continuity``），少了它她的一轮第一步就炸。收到的消息那两张
     # 也是：每一轮都读她还没看过的收件、收尾时记下看过哪几条（``app.living.received``）。

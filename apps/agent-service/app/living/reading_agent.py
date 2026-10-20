@@ -67,7 +67,7 @@ from app.domain.reading_source import (  # module-level so tests can monkeypatch
 )
 from app.domain.thinking_cost import record_round_cost
 from app.infra import cst_time
-from app.memory._persona import load_persona  # module-level so tests can monkeypatch
+from app.living.services import Persona
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,7 @@ async def run_reading_round(
     prior_impression: str | None,
     start_page: int,
     round_id: str,
+    persona: Persona,
 ) -> ReadingResult | None:
     """跑一程阅读：读时取字节 + 现解码现分页 + 硬超时 + 独立成本 + 空产出拦截。
 
@@ -215,6 +216,7 @@ async def run_reading_round(
     ``attachment_id`` 这个附件实例的身份（外壳 / trace 用，本函数不反解它）。
     ``tos_file`` 对象存储引用（``files/<file_key>``），读时按它取字节。``file_name``
     原始文件名（解码分流靠它）。``round_id`` 触发这一程的 life 轮派生标识（成本 round_id）。
+    ``persona`` 给 prompt 的两个变量（:meth:`app.living.services.Persona.lite_vars`）。
     """
     # 读时取字节（决策 2）：按 tos_file 从对象存储取这个附件实例的字节。取不到（未缓存 /
     # 预签失败 / GET 失败）→ fail-soft 返回 None：读不了一个还没准备好的附件，本程不算。
@@ -243,7 +245,7 @@ async def run_reading_round(
     progress = {"frontier": start_page, "reached_end": False, "calls": 0}
     tools = build_reading_tools(pages=pages, total_pages=total_pages, progress=progress)
 
-    pc = await load_persona(persona_id)
+    who = await persona.lite_vars(persona_id=persona_id)
     now = cst_time.now_cst()
     prior_text = (
         prior_impression
@@ -267,7 +269,7 @@ async def run_reading_round(
             [Message(role=Role.USER, content=user_content)],
             call=call,
             prompts=prompts,
-            values={"persona_name": pc.display_name, "persona_lite": pc.persona_lite},
+            values=who,
         )
 
     try:

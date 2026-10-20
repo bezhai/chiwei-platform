@@ -1,5 +1,5 @@
-"""agent-service 的清单：运维接口、通信机制的人工入口、guides、living 引擎；三姐妹的一轮按
-``resident`` 组成。
+"""agent-service 的清单：运维接口、通信机制的人工入口、guides、「她是谁」（persona）、living
+引擎；三姐妹的一轮按 ``resident`` 组成。
 
 她的工具按这里列的顺序给模型（也是请求前缀缓存的一部分，改顺序就是改请求）：``keep_in_mind``
 夹在 life 的几只手中间，所以顺序集中写在这里，不按插件拼。
@@ -76,6 +76,7 @@ MANIFEST = App(
         "app.plugins.ops",
         "app.plugins.operator",
         "app.plugins.skills",
+        "app.living.persona",
         "app.plugins.living",
     ),
     agents={

@@ -31,7 +31,6 @@ from app.agent.prompts import PromptConfigError, PromptSet
 from app.infra import cst_time
 from app.infra.propagation import Context
 from app.living import moment as moment_mod
-from app.living import persona as persona_mod
 from app.living.loose_ends import LooseEnd
 from app.living.moment import (
     LIFE_MOMENT_AGENT,
@@ -39,6 +38,9 @@ from app.living.moment import (
     LIFE_MOMENT_SEGMENTS,
     LifeMoment,
 )
+from app.living.persona import chain as persona_mod
+from app.living.persona import identity_segment
+from app.living.persona.chain import PersonaChain
 from tests.living.conftest import Calls, regular_round
 
 LANE = "coe-living"
@@ -155,8 +157,9 @@ def _life_moment_prompt(prompt_id: str, template: str) -> TextPromptClient:
 
 async def _system_at(templates: dict[str, str], clock: dt.datetime) -> str:
     """按 ``clock`` 这个时刻开始的一轮取齐、编译她这一轮的 prompt（``templates`` 是每一段的模板，按
-    段名），交回 SYSTEM 正文。变量是这一轮算出来的（「她是谁」那一段和「手边能读的说明」那一段各自
-    的，见 :data:`app.living.moment.LIFE_MOMENT_SEGMENTS`），「她是谁」和手边的说明按住不放。"""
+    段名），交回 SYSTEM 正文。变量是这一轮算出来的（「她是谁」那一段是 persona 插件的
+    :func:`app.living.persona.identity_segment`，「手边能读的说明」那一段见
+    :data:`app.living.moment.LIFE_MOMENT_SEGMENTS`），「她是谁」和手边的说明按住不放。"""
     from app.agent.round import Round
 
     langfuse = SimpleNamespace(
@@ -170,6 +173,8 @@ async def _system_at(templates: dict[str, str], clock: dt.datetime) -> str:
             "persona_name": "赤尾",
             "persona_core": "她拍胶片、写角色分析、逛论坛。",
         }
+
+    chain = PersonaChain()
 
     round = Round(
         app="agent-service",
@@ -188,14 +193,17 @@ async def _system_at(templates: dict[str, str], clock: dt.datetime) -> str:
             return_value=Context(trace_id=None, lane=None),
         ),
         patch.object(cst_time, "now_cst", lambda: clock),
-        patch.object(moment_mod, "persona_prompt_vars", who_she_is),
+        patch.object(chain, "prompt_vars", who_she_is),
         patch.object(
             moment_mod, "guides_she_can_read", lambda: "drawing：人物画图指南"
         ),
     ):
         prompts = await PromptSet.resolve(
             {LIFE_MOMENT_PROMPT_ID: LIFE_MOMENT_AGENT},
-            {segment.name: segment for segment in LIFE_MOMENT_SEGMENTS},
+            {
+                segment.name: segment
+                for segment in (identity_segment(chain), *LIFE_MOMENT_SEGMENTS)
+            },
             round,
         )
         [system] = prompts.messages(LIFE_MOMENT_PROMPT_ID)

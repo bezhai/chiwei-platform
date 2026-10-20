@@ -56,8 +56,8 @@ from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST, dated_clock
 from app.living.common import require_aware
 from app.living.happening import own_line, read_her_happenings_between
-from app.living.persona import persona_prompt_vars
 from app.living.received import read_received_between, received_line
+from app.living.services import Persona
 
 logger = logging.getLogger(__name__)
 
@@ -362,8 +362,10 @@ async def day_page_due(
     )
 
 
-async def write_due_page(due: DuePage) -> LivingDayPage | None:
-    """让她把判出来的那一天（:class:`DuePage`）写成一页；没写成返回 ``None``。
+async def write_due_page(due: DuePage, *, persona: Persona) -> LivingDayPage | None:
+    """让她把判出来的那一天（:class:`DuePage`）写成一页；没写成返回 ``None``。「她是谁」那两个
+    prompt 变量从 ``persona`` 服务取（:meth:`app.living.services.Persona.prompt_vars`），和她的一轮
+    是同一份。
 
     模型跑完之后还有一道：**正文 strip 为空 = 这一轮没成**。不落库、不占位——下一拍还在窗口里的
     话她会再写一次。拿空页把这天记成"写过了"是最坏的一种，因为那一天从此永远丢了，而且看起来
@@ -375,7 +377,7 @@ async def write_due_page(due: DuePage) -> LivingDayPage | None:
     """
     lane, persona_id, day = due.lane, due.persona_id, due.day
     previous = await read_day_page_before(lane=lane, persona_id=persona_id, day=day)
-    prompt_vars = await persona_prompt_vars(lane=lane, persona_id=persona_id)
+    prompt_vars = await persona.prompt_vars(lane=lane, persona_id=persona_id)
     call = open_call(DAY_PAGE_PROMPT_ID, DAY_PAGE_AGENT, lane=lane, participant=persona_id)
     prompts = await PromptSet.resolve(
         {DAY_PAGE_PROMPT_ID: DAY_PAGE_AGENT},

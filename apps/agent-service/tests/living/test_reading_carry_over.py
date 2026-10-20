@@ -26,9 +26,7 @@ from app.living.reading import FileRead
 from app.messaging.lifecycle import start_messaging
 from app.messaging.record import read_record
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
-from app.plugins import living as living_plugin
-from app.plugins import skills as skills_plugin
-from tests.living.conftest import RESIDENT_NAMES
+from tests.living.conftest import RESIDENT_NAMES, her_plugins
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
 from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture 名
@@ -139,7 +137,7 @@ async def reading_inbox(broker, messaging_db, living_db, app_host, monkeypatch):
     monkeypatch.setattr(reading_mod, "run_reading_round", one_round)
 
     async def start() -> _Round:
-        await app_host("agent-service", [skills_plugin.PLUGIN, living_plugin.PLUGIN])
+        await app_host("agent-service", her_plugins())
         await start_messaging()
         return one_round
 

@@ -11,8 +11,13 @@ from types import SimpleNamespace
 import pytest
 
 from app.living import participants as participants_mod
-from app.living.participants import READING, WORLD, load_residents, residents
-from app.living.persona import LIVING_PERSONAS
+from app.living.participants import (
+    LIVING_PERSONAS,
+    READING,
+    WORLD,
+    load_residents,
+    residents,
+)
 from app.messaging.operator import OPERATOR
 
 _GOOD = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}

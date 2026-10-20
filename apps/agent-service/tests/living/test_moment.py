@@ -38,7 +38,7 @@ from app.living.moment import (
     say,
     switch_to,
 )
-from app.living.persona import LIVING_PERSONAS
+from app.living.participants import LIVING_PERSONAS
 from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from tests.hosting import in_a_fresh_process
@@ -88,11 +88,11 @@ async def moment_db(living_db):
 def stub_moment(monkeypatch, models):
     """装一个替身 life + 固定 moment 间隔 + 一份不碰真库的 persona。
 
-    打桩打在 ``app.living.persona`` 上：moment 自己不查 ``bot_persona`` 了，那两个
+    打桩打在 ``app.living.persona.chain`` 上：moment 自己不查 ``bot_persona`` 了，那两个
     prompt 变量由那个模块一处组装（版本链优先、主表 fallback）。这里链是空的，所以
     落到 ``persona_core`` 这一层。
     """
-    from app.living import persona as persona_mod
+    from app.living.persona import chain as persona_mod
 
     persona = SimpleNamespace(
         display_name="赤尾",
@@ -393,7 +393,7 @@ async def test_she_can_speak_to_someone_the_code_never_heard_of(
 ):
     """这个世界里住着谁由 world 写，不由代码里的名单说了算。
 
-    旧行为是拿 :data:`~app.living.persona.LIVING_PERSONAS` 当收件人白名单：``to`` 里
+    旧行为是拿 :data:`~app.living.participants.LIVING_PERSONAS` 当收件人白名单：``to`` 里
     出现三姐妹之外的任何名字直接报错。于是 world 可以写"许阿姨下午来敲门"，而她物理
     上对许阿姨开不了口 —— 代码里存着一份"世界上有谁"的断言，越写越不是世界的样子。
     """
@@ -833,7 +833,7 @@ async def test_her_hobbies_are_in_front_of_her_every_moment(
 async def test_a_blank_core_says_so_instead_of_rendering_a_hole(
     moment_db, stub_moment, monkeypatch, resident
 ):
-    from app.living import persona as persona_mod
+    from app.living.persona import chain as persona_mod
 
     async def blank(persona_id: str):
         return SimpleNamespace(display_name="赤尾", persona_core="   ")

@@ -69,6 +69,7 @@ _INBOUND_NAMES = (
 _REGISTERED = """
 import json
 def _id(f):
+    f = getattr(f, 'func', f)  # a functools.partial: the function it calls
     return getattr(f, '__module__', '?') + '.' + getattr(f, '__qualname__', repr(f))
 rs = host.registered()
 print(json.dumps({

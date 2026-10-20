@@ -74,7 +74,7 @@ def ticks(monkeypatch) -> dict[str, list[object]]:
         seen.setdefault("landing", []).append(lane)
 
     def recording(name: str):
-        def source(lane: str) -> WakeSource:
+        def source(*_: object) -> WakeSource:
             async def due(persona_id, batch, clock) -> None:
                 seen.setdefault(name, []).append(persona_id)
 

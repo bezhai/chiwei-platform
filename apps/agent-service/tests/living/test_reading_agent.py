@@ -88,17 +88,11 @@ def cost_records(monkeypatch):
     return costs
 
 
-@pytest.fixture(autouse=True)
-def stub_persona(monkeypatch):
-    """load_persona 打桩（印象 prompt 的 prompt_vars 从这取）。"""
-    from app.memory._persona import PersonaContext
+class _Persona:
+    """persona 服务的替身：读书 prompt 的两个变量从它取（:meth:`app.living.services.Persona.lite_vars`）。"""
 
-    async def fake_load_persona(persona_id):
-        return PersonaContext(
-            persona_id=persona_id, display_name="赤尾", persona_lite="人设速写"
-        )
-
-    monkeypatch.setattr(reading_mod, "load_persona", fake_load_persona)
+    async def lite_vars(self, *, persona_id: str) -> dict[str, str]:
+        return {"persona_name": "赤尾", "persona_lite": "人设速写"}
 
 
 @pytest.fixture(autouse=True)
@@ -156,6 +150,7 @@ async def _run(start_page=0, prior=None):
         prior_impression=prior,
         start_page=start_page,
         round_id=_ROUND,
+        persona=_Persona(),
     )
 
 

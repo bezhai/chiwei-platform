@@ -24,7 +24,7 @@ from app.living.day_page import LivingDayPage
 from app.living.moment import LifeMoment
 from app.living.nudge import NudgeBegun
 from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
-from app.living.persona import PersonaVersion
+from app.living.persona.chain import PersonaVersion
 from app.living.pictures import Picture
 from app.living.reading import FileRead
 from app.living.received import ReceivedMessage, ReceivedRead

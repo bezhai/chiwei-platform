@@ -22,6 +22,7 @@ from sqlalchemy import text
 
 from app.data.tx import current_session, tx
 from app.living.participants import READING
+from app.living.persona.chain import PersonaChain
 from app.living.reading import (
     FILE_LIST_LIMIT,
     READING_TOOLS,
@@ -400,7 +401,8 @@ async def test_a_file_taken_back_keeps_what_she_read_but_offers_no_handle(
     dm_one = _attachment(_M_DM_SHAYANG, "key-dm-shayang")
     one_round.gives(impression="太宰那个调子，我读着有点上头。", pages_read=12)
     await read_a_round(
-        _trigger(attachment_id=dm_one, round_id="r-1", title="斜阳.txt")
+        _trigger(attachment_id=dm_one, round_id="r-1", title="斜阳.txt"),
+        persona=PersonaChain(),
     )
     await _taken_back(_M_DM_SHAYANG, at=_at(22, 30))
 
@@ -652,7 +654,7 @@ async def test_a_round_leaves_where_she_got_to_and_what_it_left_her_with(
 ):
     one_round.gives(impression="直子那段让我心里发紧。", pages_read=7)
 
-    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"))
+    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"), persona=PersonaChain())
 
     mark = await read_so_far(
         lane=LANE, persona_id="akao", attachment_id="msg-1:key-a"
@@ -671,10 +673,10 @@ async def test_the_next_round_picks_up_where_the_last_one_stopped(
 ):
     """连读两程：第二程拿到的是上一程的前沿和上一程的印象，不是从头再来。"""
     one_round.gives(impression="刚翻开，还没什么感觉。", pages_read=7)
-    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"))
+    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"), persona=PersonaChain())
 
     one_round.gives(impression="读到后面，那种沉下去的劲儿上来了。", pages_read=19)
-    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-2"))
+    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-2"), persona=PersonaChain())
 
     assert one_round.calls[1]["start_page"] == 7
     assert one_round.calls[1]["prior_impression"] == "刚翻开，还没什么感觉。"
@@ -692,7 +694,7 @@ async def test_the_first_round_starts_at_the_beginning_with_no_prior_impression(
 ):
     one_round.gives(impression="翻开了。", pages_read=3)
 
-    await read_a_round(_trigger(attachment_id="msg-1:key-a"))
+    await read_a_round(_trigger(attachment_id="msg-1:key-a"), persona=PersonaChain())
 
     assert one_round.calls[0]["start_page"] == 0
     assert one_round.calls[0]["prior_impression"] is None
@@ -702,7 +704,7 @@ async def test_the_first_round_starts_at_the_beginning_with_no_prior_impression(
 async def test_reading_to_the_end_is_recorded_as_such(reading_db, one_round):
     one_round.gives(impression="读完了，最后一页停了很久。", pages_read=42, finished=True)
 
-    await read_a_round(_trigger(attachment_id="msg-1:key-a"))
+    await read_a_round(_trigger(attachment_id="msg-1:key-a"), persona=PersonaChain())
 
     mark = await read_so_far(
         lane=LANE, persona_id="akao", attachment_id="msg-1:key-a"
@@ -720,10 +722,10 @@ async def test_a_round_that_fails_leaves_the_impression_where_it_was(
     reading_db, one_round
 ):
     one_round.gives(impression="第一程留下的。", pages_read=7)
-    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"))
+    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"), persona=PersonaChain())
 
     one_round.result = None  # 这一程没读成（超时 / 空产出 / 取不到字节）
-    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-2"))
+    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-2"), persona=PersonaChain())
 
     mark = await read_so_far(
         lane=LANE, persona_id="akao", attachment_id="msg-1:key-a"
@@ -747,7 +749,7 @@ async def test_bytes_that_never_arrive_do_not_write_half_an_impression(
 
     monkeypatch.setattr(agent_reading, "fetch_attachment_bytes", no_bytes)
 
-    await read_a_round(_trigger(attachment_id="msg-1:key-a"))
+    await read_a_round(_trigger(attachment_id="msg-1:key-a"), persona=PersonaChain())
 
     # 真的走到取字节那一步了才算数：这一步没被调到的话，下面那个"什么都没落"就
     # 可能是别的原因造成的，测不出 fail-soft。
@@ -772,8 +774,8 @@ async def test_the_same_round_delivered_twice_does_not_read_twice(
     """消息重投、占位过期被接手：昂贵的那一程不能重跑，页号更不能双推进。"""
     one_round.gives(impression="读了一程。", pages_read=7)
 
-    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"))
-    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"))
+    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"), persona=PersonaChain())
+    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"), persona=PersonaChain())
 
     assert len(one_round.calls) == 1, "同一程被读了两遍 —— 白烧一次钱"
     mark = await read_so_far(
@@ -809,7 +811,7 @@ async def test_a_stale_round_never_overwrites_a_newer_impression(
     one_round.gives(impression="过时那一程写的。", pages_read=7)
     one_round.before_return = someone_else_got_there_first
 
-    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"))
+    await read_a_round(_trigger(attachment_id="msg-1:key-a", round_id="r-1"), persona=PersonaChain())
 
     mark = await read_so_far(
         lane=LANE, persona_id="akao", attachment_id="msg-1:key-a"
@@ -829,7 +831,8 @@ async def test_a_round_whose_id_is_not_the_message_id_is_refused(reading_db, one
 
     with pytest.raises(ValueError, match="r-2"):
         await read_a_round(
-            _trigger(attachment_id="msg-1:key-a", round_id="r-1", message_id="r-2")
+            _trigger(attachment_id="msg-1:key-a", round_id="r-1", message_id="r-2"),
+            persona=PersonaChain(),
         )
 
     assert one_round.calls == []
@@ -847,7 +850,8 @@ async def test_a_notice_that_is_not_a_message_is_set_aside(reading_db, one_round
 
     with caplog.at_level("WARNING", logger="app.living.reading"):
         await read_a_round(
-            _trigger(attachment_id="msg-1:key-a", kind=Kind.NOT_DELIVERED)
+            _trigger(attachment_id="msg-1:key-a", kind=Kind.NOT_DELIVERED),
+            persona=PersonaChain(),
         )
 
     assert one_round.calls == []
@@ -867,7 +871,8 @@ async def test_she_gets_her_own_impression_back_when_she_asks(
     dm_one = _attachment(_M_DM_SHAYANG, "key-dm-shayang")
     one_round.gives(impression="太宰那个调子，我读着有点上头。", pages_read=12)
     await read_a_round(
-        _trigger(attachment_id=dm_one, round_id="r-1", title="斜阳.txt")
+        _trigger(attachment_id=dm_one, round_id="r-1", title="斜阳.txt"),
+        persona=PersonaChain(),
     )
 
     async with in_a_moment("akao"):
@@ -922,8 +927,9 @@ async def test_the_list_caps_the_unopened_pile_but_never_her_own_memory(
     one_round.gives(impression="很久以前读的，还记得那个开头。", pages_read=5)
     await read_a_round(
         _trigger(
-            attachment_id=read_long_ago, round_id="r-old", title="很久以前那本.txt"
-        )
+            attachment_id=read_long_ago, round_id="r-old", title="很久以前那本.txt",
+        ),
+        persona=PersonaChain(),
     )
 
     async with in_a_moment("akao"):
@@ -964,8 +970,9 @@ def test_the_reading_inbox_is_opened_on_every_lane_and_no_route_takes_a_round():
     probe = (
         "import json;"
         "rs = host.registered();"
+        "fn = lambda f: getattr(f, 'func', f);"  # a functools.partial: the function it calls
         "print(json.dumps(sorted([r.name,"
-        " r.detail['on_message'].__module__ + '.' + r.detail['on_message'].__qualname__,"
+        " fn(r.detail['on_message']).__module__ + '.' + fn(r.detail['on_message']).__qualname__,"
         " str(r.detail['processing_timeout']), r.detail['max_attempts']]"
         " for r in rs if r.kind == 'inbox')));"
         "print(sorted(r.detail['request'].__name__ for r in rs if r.kind == 'route'))"

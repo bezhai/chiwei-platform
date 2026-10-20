@@ -23,7 +23,8 @@ old reading queue.
     her tools (``ctx.tool``)    each declared where it lives, with how trimming treats what it
                                 returns and whether it ends her round (the profile lists them in the
                                 order she is given them)
-    segments (``ctx.segment``)  her round's prompt, and the output safety check's
+    segments (``ctx.segment``)  her round's prompt (but who she is, which the persona plugin
+                                registers), and the output safety check's
     before the round            outgoing.before   send what she did and has not sent yet
     the round before            life.moments      when her last round landed, and whether its
                                                   history was stored
@@ -136,14 +137,14 @@ from app.living.moment import (
 from app.living.mouth import MOUTH_TOOLS
 from app.living.nudge import nudged_moment_due
 from app.living.output_safety import GUARD_OUTPUT_SEGMENT
-from app.living.participants import READING
-from app.living.persona import LIVING_PERSONAS, PersonaVersion
+from app.living.participants import LIVING_PERSONAS, READING
 from app.living.persona_review import DueReview, persona_review_due, write_due_review
 from app.living.phone import PHONE_TOOLS
 from app.living.pictures import PICTURE_TOOLS
 from app.living.reading import READING_TOOLS, read_a_round
 from app.living.received import open_inboxes
 from app.living.records import living_lane
+from app.living.services import Persona, PersonaText
 from app.living.takeback import TAKEBACK_TOOLS
 from app.living.web import WEB_TOOLS
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
@@ -210,34 +211,43 @@ def nudge(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
     )
 
 
-def day_page(lane: str) -> WakeSource[DuePage, LivingDayPage | None]:
+def day_page(lane: str, persona: Persona) -> WakeSource[DuePage, LivingDayPage | None]:
     """Her diary on ``lane``: the page of the living day that just ended, when the tick came in the
-    window and the day has no page yet (:func:`app.living.day_page.day_page_due`)."""
+    window and the day has no page yet (:func:`app.living.day_page.day_page_due`); who she is
+    comes from the ``persona`` service."""
 
     async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DuePage | None:
         (tick,) = batch.close()
         return await day_page_due(lane=lane, persona_id=persona_id, at=tick.at, clock=clock)
 
-    return WakeSource("day-page", Coalesce.QUEUE_EACH, due, write_due_page)
+    return WakeSource(
+        "day-page", Coalesce.QUEUE_EACH, due, partial(write_due_page, persona=persona)
+    )
 
 
-def persona_review(lane: str) -> WakeSource[DueReview, PersonaVersion | None]:
+def persona_review(lane: str, persona: Persona) -> WakeSource[DueReview, PersonaText | None]:
     """Her weekly look back on ``lane``: a new "who I am" from last week's pages, when the tick
     came in the window and this week has no review yet
-    (:func:`app.living.persona_review.persona_review_due`)."""
+    (:func:`app.living.persona_review.persona_review_due`), written to the ``persona`` service's
+    chain."""
 
     async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DueReview | None:
         (tick,) = batch.close()
-        return await persona_review_due(lane=lane, persona_id=persona_id, at=tick.at, clock=clock)
+        return await persona_review_due(
+            lane=lane, persona_id=persona_id, at=tick.at, clock=clock, persona=persona
+        )
 
-    return WakeSource("persona-review", Coalesce.QUEUE_EACH, due, write_due_review)
+    return WakeSource(
+        "persona-review", Coalesce.QUEUE_EACH, due, partial(write_due_review, persona=persona)
+    )
 
 
 def setup(ctx: Context) -> None:
     lane = living_lane()
+    persona = ctx.service("persona")
     resident = ctx.profile("resident")
     regular_rounds, early_wakes = regular(resident), nudge(resident)
-    pages, reviews = day_page(lane), persona_review(lane)
+    pages, reviews = day_page(lane, persona), persona_review(lane, persona)
     for persona_id in LIVING_PERSONAS:
         rounds = ctx.turns(persona_id, "round", hold_limit=HOLD_LIMIT)
         ctx.wake(rounds, regular_rounds, every=REGULAR_EVERY)
@@ -254,7 +264,7 @@ def setup(ctx: Context) -> None:
     )
     ctx.inbox(
         READING,
-        on_message=read_a_round,
+        on_message=partial(read_a_round, persona=persona),
         processing_timeout=timedelta(minutes=5),
         max_attempts=1,
     )
@@ -313,4 +323,4 @@ def _her_round(ctx: Context) -> None:
     ctx.after_commit("outgoing.after", send_her_doings, on_failure=Continue())
 
 
-PLUGIN = Plugin(name="living", setup=setup, requires=("skills",))
+PLUGIN = Plugin(name="living", setup=setup, requires=("skills", "persona"))

@@ -166,7 +166,7 @@ def stub_life(monkeypatch, models):
     moment 之前的快照。``meanwhile`` 是模型那一步跑着的时候发生的事（比如又到了一条消息），
     ``after`` 是她调完工具之后发生的事（比如这一轮在她已经做了些什么之后失败）。"""
     from app.living import moment as moment_mod
-    from app.living import persona as persona_mod
+    from app.living.persona import chain as persona_mod
 
     async def fake_find_persona(persona_id: str):
         return SimpleNamespace(display_name="赤尾", persona_core="她泡抹茶店。")

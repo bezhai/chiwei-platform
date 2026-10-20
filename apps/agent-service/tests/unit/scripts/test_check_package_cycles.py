@@ -180,7 +180,7 @@ def test_the_real_code_tree_has_only_the_listed_cycles():
 
     assert cycle_problems(root, known=KNOWN_CYCLES) == []
     groups = _groups(root)
-    assert groups == [frozenset({"living", "memory"})]
+    assert groups == []
     in_a_cycle = set().union(*groups)
     assert {"data", "messaging", "host"}.isdisjoint(in_a_cycle)
 
@@ -204,11 +204,11 @@ def test_the_command_fails_on_a_new_cycle_and_passes_when_clean(tmp_path):
     assert failed.returncode == 1, failed.stdout + failed.stderr
     assert "a, b" in failed.stdout
 
-    # 临时树里没有名单上那一组，所以"干净"的树也会因为名单上的环消失而失败；
-    # 真实代码树才是干净的那一棵。
+    # 名单是空的：临时树里那棵没有环的是干净的，真实代码树也是。
     passed = run(SERVICE_DIR / "app")
     assert passed.returncode == 0, passed.stdout + passed.stderr
-    assert run(clean).returncode == 1
+    clean_run = run(clean)
+    assert clean_run.returncode == 0, clean_run.stdout + clean_run.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -290,11 +290,9 @@ def test_the_real_code_tree_has_no_forbidden_edge():
     assert edge_problems(Path(app_pkg.__file__).parent) == []
 
 
-# KNOWN_CYCLES 里那一组，写成一个环：命令在临时树上只因为禁止的边失败，不因为名单上的环不在了失败。
-_THE_LISTED_RING = {
-    "living/__init__.py": "from app import memory\n",
-    "memory/__init__.py": "from app import living\n",
-}
+# KNOWN_CYCLES 里那几组，写成环：命令在临时树上只因为禁止的边失败，不因为名单上的环不在了失败。
+# 名单现在是空的，所以一个环都不放。
+_THE_LISTED_RING: dict[str, str] = {}
 
 
 def test_the_command_fails_on_a_forbidden_edge_even_when_the_cycles_are_the_listed_ones(tmp_path):

@@ -1,13 +1,13 @@
 """每周回看 —— 她读上一周自己写的那几页，重写一版「我是谁」。
 
 跨天沉淀（:mod:`app.living.day_page`）让她记得住昨天。这一层管的是另一件事：**她
-会因为过去这一周而变**。写下的那一版进 :class:`app.living.persona.PersonaVersion`
-版本链，而链上最新一版就是她每一轮、写日记时读到的自己
-（:func:`app.living.persona.persona_prompt_vars`）——所以这里落库的东西下一分钟就在
+会因为过去这一周而变**。写下的那一版进「她是谁」那条版本链（persona 服务，
+:mod:`app.living.persona`），而链上最新一版就是她每一轮、写日记时读到的自己
+（:meth:`app.living.services.Persona.prompt_vars`）——所以这里落库的东西下一分钟就在
 她眼前，不是一份存档。
 
 模块名和 ``source='review'`` 这个值都不许改名：prod 那条链上已经写着几十版
-``source='review'``，:func:`~app.living.persona.has_review_version_this_week` 认的就
+``source='review'``，:meth:`~app.living.services.Persona.has_review_this_week` 认的就
 是这个字符串。改了它看不见那些历史版本，她会当场重写一版。
 
 **外部锚是这一轮最要紧的机制。** 她每周基于自己上一版改自己：v(n+1) 的输入里有
@@ -16,11 +16,11 @@ v(n)，v(n) 的输入里有 v(n-1)。没有一个不参与这条循环的参照�
 所以 prompt 变量 ``{{persona_core}}`` 在这一轮装的是 ``bot_persona.persona_core``
 **原始那一列**，它写死在库里、没有任何代码往里写，是唯一不随她漂的东西。
 
-**⚠️ 同名不同值，是刻意的。** :func:`app.living.persona.persona_prompt_vars` 里那个
+**⚠️ 同名不同值，是刻意的。** :meth:`~app.living.services.Persona.prompt_vars` 里那个
 ``{{persona_core}}`` 装的是**链上最新一版**（那是对的：每一轮她该读到现在的自己），
 这一轮装的是**扁平列**（那也是对的：重写自己的时候需要一个循环外的参照）。两个变量
 同名不同值，因为它们答的是两个不同的问题：「她现在是谁」和「她本来是谁」。所以这一
-轮**不复用** ``persona_prompt_vars``，自己拼一份（:func:`persona_review_vars`）——
+轮**不复用** ``prompt_vars``，取的是另一份（:meth:`~app.living.services.Persona.review_vars`）——
 把它们"统一"掉的后果是锚消失、她开始自我回流，而这件事一句报错都不会有。守这条的
 是 ``tests/living/test_persona_review.py`` 里断言 ``prompt_vars["persona_core"]``
 等于扁平列原文的那条。
@@ -51,18 +51,11 @@ from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.agent.trace import collect_usage
-from app.data.queries import find_persona
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST
+from app.living.common import week_start_cst
 from app.living.day_page import LivingDayPage, read_day_pages_between
-from app.living.persona import (
-    PersonaVersion,
-    has_review_version_this_week,
-    read_latest_persona_version,
-    seed_persona_chain,
-    week_start_cst,
-    write_persona_version,
-)
+from app.living.services import Persona, PersonaText
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +100,7 @@ PERSONA_REVIEW_SEGMENT = Segment(
 def last_full_week(now: datetime) -> tuple[date, date]:
     """上一个**完整**自然周的 ``[起, 止)``（两个 ``date``，右开）。
 
-    右开界就是 ``now`` 所在那一周的周一（:func:`app.living.persona.week_start_cst`），
+    右开界就是 ``now`` 所在那一周的周一（:func:`app.living.common.week_start_cst`），
     所以周一早上跑的时候取到的是上周一到上周日那七天，本周一天都不进来。**不是"最近
     七天"**：滑动窗口下每次跑覆盖的日子都不一样，同一天会被两次回看各读一遍，而她读
     到的"这一周"跟她自己感觉到的一周对不上。
@@ -133,34 +126,6 @@ async def week_material(
     return await read_day_pages_between(
         lane=lane, persona_id=persona_id, since=since, until=until
     )
-
-
-async def persona_review_vars(*, persona_id: str) -> dict[str, str]:
-    """这一轮的两个 prompt 变量：她叫什么，和**她本来是谁**（外部锚）。
-
-    ``persona_core`` 装的是 ``bot_persona.persona_core`` **原始那一列的原文**，不是
-    链上最新一版。这跟 :func:`app.living.persona.persona_prompt_vars` 里那个同名变量
-    的值不同，是刻意的——见模块 docstring 那一段⚠️：两者答的是「她本来是谁」和「她现
-    在是谁」两个不同的问题。这一轮要在自己上一版的基础上改自己，参照物必须站在这条循
-    环外面，不然积累的是回声。
-
-    **锚拿不到就 fail fast**（``bot_persona`` 没这行、或者那一列是空白）：这一轮的全
-    部意义就是"在锚的约束下改自己"，没有锚还照跑的话，她会在一段空白的参照下重写自
-    己，而这件事在库里、在日志里、在她的表现上都看不出来——只有几个月后那份「我是谁」
-    已经不是她了。抛出去由她回看队列上的钟记一条 warning，这个人这一周的班不跑，另外两个
-    照跑。
-    """
-    persona = await find_persona(persona_id)
-    core = getattr(persona, "persona_core", None) or ""
-    if not core.strip():
-        raise ValueError(
-            f"persona_review_vars: bot_persona.persona_core is blank for "
-            f"persona_id={persona_id!r} — 这一轮没有外部锚可用，不跑"
-        )
-    return {
-        "persona_name": getattr(persona, "display_name", "") or persona_id,
-        "persona_core": core,
-    }
 
 
 def _persona_review_prompt(
@@ -200,7 +165,12 @@ class DueReview:
 
 
 async def persona_review_due(
-    *, lane: str, persona_id: str, at: datetime, clock: Callable[[], datetime]
+    *,
+    lane: str,
+    persona_id: str,
+    at: datetime,
+    clock: Callable[[], datetime],
+    persona: Persona,
 ) -> DueReview | None:
     """回看的钟在 ``at`` 响的那一拍，轮到她的回看队列时：要回看哪一周；不该跑返回 ``None``。
 
@@ -214,7 +184,7 @@ async def persona_review_due(
     之后两道判断都在模型前面，能不调模型就不调：
 
       1. **本周已经有 review 版**就返回。这是周级幂等的**全部**依据（
-         :func:`~app.living.persona.has_review_version_this_week`），不另设标记——标记和版本是
+         :meth:`~app.living.services.Persona.has_review_this_week`），不另设标记——标记和版本是
          两个事实，中间崩一次就永久对不上。owner 本周盖过版不算，那是 bezhai 的干预，不该顶掉
          她自己的班。窗口每天都开：周一没跑成，同一周后面几天的窗口会补上；过了周日，``now``
          落进下一周，回看的就是刚过去的那一周，没写成的那一周就放弃了。
@@ -229,7 +199,7 @@ async def persona_review_due(
     if not (PERSONA_REVIEW_FROM <= at.astimezone(CST).time() < PERSONA_REVIEW_UNTIL):
         return None
     since, until = last_full_week(now)
-    if await has_review_version_this_week(lane=lane, persona_id=persona_id, now=now):
+    if await persona.has_review_this_week(lane=lane, persona_id=persona_id, now=now):
         return None
     pages = await week_material(lane=lane, persona_id=persona_id, since=since, until=until)
     if not pages:
@@ -251,7 +221,7 @@ async def persona_review_due(
     )
 
 
-async def write_due_review(due: DueReview) -> PersonaVersion | None:
+async def write_due_review(due: DueReview, *, persona: Persona) -> PersonaText | None:
     """让她读判出来的那一周（:class:`DueReview`）自己写的那几页，重写一版「我是谁」；没写成
     返回 ``None``。
 
@@ -271,14 +241,14 @@ async def write_due_review(due: DueReview) -> PersonaVersion | None:
     一条 warning（一个人的失败不拖累另两个人）。
     """
     lane, persona_id, since, until = due.lane, due.persona_id, due.since, due.until
-    current = await read_latest_persona_version(lane=lane, persona_id=persona_id)
+    current = await persona.latest(lane=lane, persona_id=persona_id)
     if current is None:
-        await seed_persona_chain(lane=lane, persona_id=persona_id)
-        current = await read_latest_persona_version(lane=lane, persona_id=persona_id)
+        await persona.seed_chain(lane=lane, persona_id=persona_id)
+        current = await persona.latest(lane=lane, persona_id=persona_id)
         if current is None:
             raise RuntimeError(f"seed 之后链仍然是空的 lane={lane} persona={persona_id}")
 
-    prompt_vars = await persona_review_vars(persona_id=persona_id)
+    prompt_vars = await persona.review_vars(persona_id=persona_id)
     call = open_call(
         PERSONA_REVIEW_PROMPT_ID, PERSONA_REVIEW_AGENT, lane=lane, participant=persona_id
     )
@@ -326,7 +296,7 @@ async def write_due_review(due: DueReview) -> PersonaVersion | None:
         )
         return None
 
-    await write_persona_version(
+    await persona.write_version(
         lane=lane,
         persona_id=persona_id,
         narrative=written,
@@ -335,7 +305,7 @@ async def write_due_review(due: DueReview) -> PersonaVersion | None:
     )
     # 读回来而不是就地拼一个：返回的那一版要带真实的 ``version``，而版本号是
     # ``insert_append`` 在库里定的。这次读仍在她的回看队列上，读到的一定是刚写的那版。
-    version = await read_latest_persona_version(lane=lane, persona_id=persona_id)
+    version = await persona.latest(lane=lane, persona_id=persona_id)
     if version is not None:
         logger.info(
             "living persona review lane=%s persona=%s 重写了一版（v%d）：%s",

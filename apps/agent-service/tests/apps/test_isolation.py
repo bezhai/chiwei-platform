@@ -67,7 +67,7 @@ def test_the_agent_service_app_loads_none_of_the_world_code():
 def test_the_agent_service_app_loads_its_own_plugins():
     loaded = _loaded_by("agent-service")
 
-    assert loaded["plugins"] == ["ops", "operator", "skills", "living"]
+    assert loaded["plugins"] == ["ops", "operator", "skills", "persona", "living"]
     assert "app.living.moment" in loaded["living"]
     assert "regular -> akao/round" in loaded["wakes"]
     # 三姐妹的收件箱名字在人设表里，setup 时只声明"开始接收时再开"，所以起完 setup 只看得到

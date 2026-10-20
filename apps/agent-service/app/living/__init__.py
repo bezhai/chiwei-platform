@@ -7,15 +7,18 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
 只经服务交互（``tests/living/test_plugin_boundaries.py`` 守着）：
 
   * :mod:`app.living.services`    插件之间的服务：接口（Protocol）和接口里出现的数据类型
-  * :mod:`app.living.common`      各插件共用的纯函数：转义、时刻必须带时区、旧行的 NULL
+  * :mod:`app.living.common`      各插件共用的纯函数：转义、时刻必须带时区、旧行的 NULL、周界
+
+已经拆成目录的插件：
+
+  * :mod:`app.living.persona`     她是谁：「她是谁」那份正文的版本链（她自己每周改的那条），和喂进
+    各条 prompt 的人设变量（``persona`` 服务）；她一轮 prompt 的「她是谁」那一段
 
 还没拆成目录的模块：
 
 骨头层——持久的事，不含任何循环 / 轮次 / prompt：
 
   * :mod:`app.living.records`     她做过的事、她在哪，两类持久数据的形态（都只是她自己的）
-  * :mod:`app.living.persona`     这个家里的人：谁住在这儿、「她是谁」那份正文的版本链
-    （她自己每周改的那条），以及喂进 prompt 的那两个变量——三条注入路一处组装
   * :mod:`app.living.happening`   她自己的经历：对谁、通过什么渠道、做了什么说了什么
   * :mod:`app.living.whereabouts` 她此刻在做什么、在哪
 
@@ -49,7 +52,7 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
 
 她在通信机制里的那一面（第二期）——收件箱是她唯一的入口，收件只存储：
 
-  * :mod:`app.living.participants` life 认识的参与者：三姐妹在世界里的名字（取自人设表，
+  * :mod:`app.living.participants` life 认识的参与者：谁住在这儿、三姐妹在世界里的名字（取自人设表，
     启动时检查）和 world 的名字。名字就是地址
   * :mod:`app.living.received`    她收到的消息：三姐妹的收件箱，收件只存储
   * :mod:`app.living.outgoing`    她做的事发出去：一段经历一条汇总给 world，只对姐妹说的话

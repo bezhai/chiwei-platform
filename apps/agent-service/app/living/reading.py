@@ -82,6 +82,7 @@ from app.living.common import esc, require_aware
 from app.living.participants import READING, residents
 from app.living.phone import Sender, _who_tag, reachable_conversations
 from app.living.reading_agent import run_reading_round
+from app.living.services import Persona
 from app.messaging.message import Delivery, Kind, Message, SendFailed
 
 # module-level 引入，测试从这里换替身（不碰 broker）
@@ -540,7 +541,7 @@ READING_TOOLS = [
 # ---------------------------------------------------------------------------
 
 
-async def read_a_round(message: Message) -> None:
+async def read_a_round(message: Message, *, persona: Persona) -> None:
     """读书收件箱收到一条：解开这一程 → 查重 → 取字节、解码、往下读 → CAS 提交读到哪了 + 印象。
 
     不是普通消息的（定时消息被退回的告知；读书收件箱不该收到）记一条 warning，不读。正文里的
@@ -600,6 +601,7 @@ async def read_a_round(message: Message) -> None:
         prior_impression=prior,
         start_page=start_page,
         round_id=picked.round_id,
+        persona=persona,
     )
     if result is None:
         logger.info(

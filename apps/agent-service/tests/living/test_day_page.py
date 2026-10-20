@@ -57,10 +57,12 @@ def _on(day: int, hour: int, minute: int = 0) -> dt.datetime:
 
 
 def _day_pages():
-    """日记这个唤醒来源，跟 living 插件给她登记的一样（:mod:`app.plugins.living`）。"""
+    """日记这个唤醒来源，跟 living 插件给她登记的一样（:mod:`app.plugins.living`）：「她是谁」从
+    persona 服务取。"""
+    from app.living.persona.chain import PersonaChain
     from app.plugins.living import day_page
 
-    return day_page(LANE)
+    return day_page(LANE, PersonaChain())
 
 
 async def _tick(at: dt.datetime, persona_id: str = "akao") -> LivingDayPage | None:
@@ -86,12 +88,12 @@ def stub_page(monkeypatch, models):
     from types import SimpleNamespace
 
     from app.living import day_page as page_mod
-    from app.living import persona as persona_mod
+    from app.living.persona import chain as persona_mod
 
     async def fake_find_persona(persona_id: str):
         return SimpleNamespace(display_name="赤尾", persona_core="她拍胶片、泡抹茶店。")
 
-    # 打在 ``app.living.persona`` 上：日记这一轮不自己查主表，那两个变量由那个模块
+    # 打在 ``app.living.persona.chain`` 上：日记这一轮不自己查主表，那两个变量由那个模块
     # 一处组装（版本链优先，这里链是空的，落到 persona_core 这一层）。
     monkeypatch.setattr(persona_mod, "find_persona", fake_find_persona)
 
@@ -687,7 +689,8 @@ async def test_each_sister_has_a_day_page_queue_the_clock_signals_every_five_min
     症状是静默的：模块写好了、测试全绿，而线上一页都不会有。"""
     from app.host import Coalesce
     from app.living.day_page import write_due_page
-    from app.living.persona import LIVING_PERSONAS
+    from app.living.participants import LIVING_PERSONAS
+    from app.living.persona.chain import PersonaChain
 
     host = await app_host("agent-service")
     queues = {r.name: r.detail["turns"] for r in host.registered() if r.kind == "turns"}
@@ -705,7 +708,8 @@ async def test_each_sister_has_a_day_page_queue_the_clock_signals_every_five_min
         assert w.detail["turns"] is queues[f"{w.detail['turns'].participant}/day-page"]
         assert w.detail["turns"].hold_limit == dt.timedelta(seconds=900)
         assert w.detail["source"].coalesce is Coalesce.QUEUE_EACH
-        assert w.detail["source"].run is write_due_page
+        assert w.detail["source"].run.func is write_due_page
+        assert isinstance(w.detail["source"].run.keywords["persona"], PersonaChain)
 
 
 @pytest.mark.integration

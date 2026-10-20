@@ -3,6 +3,7 @@
   * :func:`esc`             外面来的字串摆进她这一轮之前先过的那一道，全 living 只有这一份
   * :func:`require_aware`   时刻必须带时区，不带就当场炸（各张表的 validator 用它）
   * :func:`legacy_null_is`  后加的非 Optional 列：旧行读出来的 NULL 当成默认值
+  * :func:`week_start_cst`  她的周界：自然周一 00:00 CST（她改写「我是谁」和回看哪一周都按它）
 
 插件之间不互相 import（``tests/living/test_plugin_boundaries.py``），共用的纯函数只能放在这里；
 要读库、要别人数据的东西走 :mod:`app.living.services` 里的服务。
@@ -11,7 +12,9 @@
 from __future__ import annotations
 
 import html
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from app.infra.cst_time import CST
 
 
 def esc(s: str | None) -> str:
@@ -106,3 +109,14 @@ def require_aware(name: str, v: datetime | None) -> datetime | None:
             f"时区解释，静默偏几个小时且不报错。收到 {v!r}"
         )
     return v
+
+
+def week_start_cst(now: datetime) -> datetime:
+    """``now`` 所在自然周的周一 00:00 CST（aware datetime）。
+
+    persona 慢漂的周界口径：生活日是 04:00 界，但周级的钟用**自然周一零点**——别的
+    时区的 aware 时刻先归一到 CST 再取周界。
+    """
+    local = now.astimezone(CST)
+    monday = local.date() - timedelta(days=local.weekday())
+    return datetime(monday.year, monday.month, monday.day, tzinfo=CST)

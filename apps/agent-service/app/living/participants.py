@@ -28,9 +28,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.data.queries import find_persona
-from app.living.persona import LIVING_PERSONAS
 from app.messaging.message import participant
 from app.messaging.operator import OPERATOR
+
+# 这个家里的三姐妹。写死而不是查 ``bot_persona``：这是世界设定（谁住在这儿），不是
+# 可调参数；而库里还有 ``npc:*`` 这类行，全量拉进来就是每一拍白烧三份以上的钱。
+LIVING_PERSONAS: tuple[str, ...] = ("akao", "ayana", "chinagi")
 
 # world 在通信机制里的名字。它发来的是她察觉到的事，不是谁对她说的话（见
 # :func:`app.living.received.render_received`）。
