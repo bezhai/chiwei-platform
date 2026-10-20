@@ -5,17 +5,18 @@
 在 :data:`SOURCES` 里加一项。
 
 **收件箱** ``world``：送来的消息交给 :class:`~app.world.rounds.Rounds`，一轮处理收件箱里所有还没
-经过一轮的消息，同一时刻只有一轮在跑，一轮最多 :data:`app.world.main_agent.ROUND_TIMEOUT`；处理
-时限和占位租约放长到一次投递最多要等的时间（:attr:`~app.world.rounds.Rounds.delivery_timeout`）。
+经过一轮的消息，一轮一轮排在宿主给 world 的轮次队列上（``ctx.turns``），同一时刻只有一轮在跑，
+一轮最多 :data:`app.world.main_agent.ROUND_TIMEOUT`；处理时限和占位租约放长到一次投递最多要等的
+时间（:attr:`~app.world.rounds.Rounds.delivery_timeout`）。
 只在拿着卷的写锁时消费（:func:`app.world.volume.writer_lock`）；开设时按私有状态补醒
 （:func:`app.world.wake.wake_on_start`，也在拿到锁之后才跑）；状态里的最新唤醒那一轮失败时不限
 次数重试、永不进死信（:func:`app.world.wake.retry_latest_wake_without_limit`）。提问由应答 agent
 回答（:func:`app.world.answer.answer_question`）：只读，不叫醒主 agent。
 
-**``Rounds`` 在 setup 里建，每次起来一个新的。** 它带着一把进程内的锁和排着的下一轮。宿主每次起来
-都相当于一个新的 world 进程：同一个 Python 进程里停了再起（回放里的重启、被杀之后再起），也要拿到
-一把没人拿着的锁，不能去等上一次起来时没跑完的那一轮。放在模块级就做不到这一点，因为模块只
-import 一次。
+**``Rounds`` 和它的轮次队列在 setup 里建，每次起来一个新的。** 队列是进程内的，记着正在跑的那一轮
+和排着的下一轮。宿主每次起来都相当于一个新的 world 进程：同一个 Python 进程里停了再起（回放里的
+重启、被杀之后再起），也要拿到一条空的队列，不能去等上一次起来时没跑完的那一轮。放在模块级就做
+不到这一点，因为模块只 import 一次。
 
 **记录的人工读写接口**（:mod:`app.world.admin`）：四条路由都要内网凭据；请求要去的泳道不是这个
 进程的泳道，就一步都不做；回答都带上这个进程的泳道。
@@ -61,7 +62,7 @@ def setup(ctx: Context) -> None:
     for source in SOURCES:
         register(source)
 
-    rounds = Rounds(run_round, round_timeout=ROUND_TIMEOUT)
+    rounds = Rounds(run_round, round_timeout=ROUND_TIMEOUT, turns=ctx.turns(WORLD))
     ctx.inbox(
         WORLD,
         on_message=rounds.receive,
