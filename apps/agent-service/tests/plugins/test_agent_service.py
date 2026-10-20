@@ -37,7 +37,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         "persona_review",
         "web",
         "guides",
-        "living",
+        "life",
     ]
     assert Counter((r.plugin, r.kind) for r in host.registered()) == {
         ("ops", "route"): 5,
@@ -81,20 +81,20 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("web", "tool"): 2,
         ("guides", "tool"): 2,
         ("guides", "segment"): 1,  # what guides she can read, the last segment of her round
-        ("living", "turns"): 3,
-        ("living", "wake"): 6,
-        ("living", "tool"): 6,
-        ("living", "segment"): 3,  # three more segments of her round
-        ("living", "round_log"): 1,
-        ("living", "section"): 1,
-        ("living", "commit"): 1,
-        ("living", "after_commit"): 1,
+        ("life", "turns"): 3,
+        ("life", "wake"): 6,
+        ("life", "tool"): 6,
+        ("life", "segment"): 3,  # three more segments of her round
+        ("life", "round_log"): 1,
+        ("life", "section"): 1,
+        ("life", "commit"): 1,
+        ("life", "after_commit"): 1,
     }
 
 
 async def test_living_declares_each_tool_her_profile_lists(app_host):
-    """Her plugins (living and the ones split out of it) declare every tool the ``resident``
-    profile lists and no other; the order she is given them in is the profile's."""
+    """Her plugins declare every tool the ``resident`` profile lists and no other; the order she
+    is given them in is the profile's."""
     from app.manifests.agent_service import RESIDENT
 
     host = await app_host("agent-service")

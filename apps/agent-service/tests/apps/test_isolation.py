@@ -85,9 +85,9 @@ def test_the_agent_service_app_loads_its_own_plugins():
         "persona_review",
         "web",
         "guides",
-        "living",
+        "life",
     ]
-    assert "app.living.moment" in loaded["living"]
+    assert "app.living.life.moment" in loaded["living"]
     assert "regular -> akao/round" in loaded["wakes"]
     # 三姐妹的收件箱名字在人设表里，setup 时只声明"开始接收时再开"，所以起完 setup 只看得到
     # ``operator`` 和读书收件箱；开出来的是哪几个名字由 ``tests/living/test_received.py`` 验。

@@ -3,13 +3,13 @@
 world 不在这个包里。world 与 life 是两个独立的引擎，互不 import、不共读共写存储，
 唯一的连接是通信机制（:mod:`app.messaging`）。
 
-她的功能正在拆成插件，每个插件一个目录 ``app/living/<插件>/``。插件之间不互相 import，
+她的功能分成插件，每个插件一个目录 ``app/living/<插件>/``。插件之间不互相 import，
 只经服务交互（``tests/living/test_plugin_boundaries.py`` 守着）：
 
   * :mod:`app.living.services`    插件之间的服务：接口（Protocol）和接口里出现的数据类型
   * :mod:`app.living.common`      各插件共用的纯函数：转义、时刻必须带时区、旧行的 NULL、周界
 
-已经拆成目录的插件：
+插件：
 
   * :mod:`app.living.persona`     她是谁：「她是谁」那份正文的版本链（她自己每周改的那条），和喂进
     各条 prompt 的人设变量（``persona`` 服务）；她一轮 prompt 的「她是谁」那一段
@@ -40,23 +40,19 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * :mod:`app.living.guides`      手边那几份写好的说明：读一份 / 照说明在沙箱里跑一条
     命令。她自己长什么样就写在其中一份里；正文在盘上（:mod:`app.skills` 扫目录、热
     加载、渲染），有哪些可读只能从 prompt 变量进——工具 schema 装不下会变的清单
-
-还没拆成目录的模块：
-
-她一直在推进（T2）+ 她对外说话（T4）——嘴在外面，收到什么都不会直接让她跑一轮：
-
-  * :mod:`app.living.snapshot`    她进入这一轮时读到的东西：状态快照，不是历史回放
-  * :mod:`app.living.moment`      她的醒来周期：默认「继续」，被带走时换的是一件事。
-    她跨 moment 的连续上下文（键、阈值、素材表、写失败怎么算）也在这里，存取和裁剪的
-    机制在基础层 :mod:`app.agent.continuity`
-  * :mod:`app.living.nudge`       有人叫她、或者有她没看过、发件方要叫醒她的收件，就提前叫醒她一次，但不代她回复
+  * :mod:`app.living.life`        她的一轮本身（T2 她一直在推进 + T4 她对外说话 —— 嘴在外面，收到什么都不会
+    直接让她跑一轮）：醒来周期默认「继续」，被带走时换的是一件事（:mod:`app.living.life.moment`）；她跨
+    moment 的连续上下文（键、阈值、素材表、写失败怎么算）也在那里，存取和裁剪的机制在基础层
+    :mod:`app.agent.continuity`；有人叫她、或者有她没看过、发件方要叫醒她的收件，就提前叫醒她一次，但不代
+    她回复（:mod:`app.living.life.nudge`）；她进入这一轮时读到的是状态快照，不是历史回放
+    （:mod:`app.living.life.now`）
 
 三条贯穿全包的判断，散在各模块里容易只看到一半：
 
   * **每个人只读她自己的记录。** 她做过的事、她在哪，只给她自己读；别人做了什么由 world
     判断谁会察觉后告诉她，或者姐妹直接对她说，都进她的收件箱。life 里没有一条按位置把别人
     的经历分给她的路（``tests/living/test_only_her_own_records.py`` 守着）。
-  * **占用是进程内的**：她的三条队列（轮次、日记、回看，:mod:`app.plugins.living`、
+  * **占用是进程内的**：她的三条队列（轮次、日记、回看，:mod:`app.living.life`、
     :mod:`app.living.day_page`、:mod:`app.living.persona_review` 向宿主登记的 :class:`app.host.Turns`）都只在一个进程里互斥，前提是 agent-service 单副本；滚动发布时新旧
     两个进程会重叠一段，这段时间里同一格可能被跑两次。
   * **游标按提交序。** 她的经历按提交序 ``seq`` 往外讲（:mod:`app.living.household.outgoing`）；按发生

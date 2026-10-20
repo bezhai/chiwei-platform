@@ -123,7 +123,7 @@ class Whereabouts(Data):
     标识，让同一轮重放只落一行。纯 append——上一轮的位置留在表里，不是被覆盖。
 
     **只给她自己读**：她每一轮眼前那句"手上"、环顾四周时她告诉 world 自己在哪
-    （:func:`app.living.moment.look_around`）、汇总末尾那句她在哪在做什么
+    （:meth:`app.living.life.moment.InPerson.look_around`）、汇总末尾那句她在哪在做什么
     （:mod:`app.living.household.outgoing`）。别人在哪，world 按各人自己报的位置判断，life 不读。
     ``seq`` 同 :class:`Happening`（这里是 per-(lane, persona) 的轴），作用是让
     "最新一条"有唯一确定的答案，不靠 ``created_at`` 的同刻并列去猜。

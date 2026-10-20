@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from dataclasses import dataclass
 
 import pytest
 
@@ -33,6 +34,7 @@ from app.living.her_records.deeds import (
     record_happening,
 )
 from app.living.her_records.whereabouts import note_whereabouts
+from app.living.life.now import now_section
 from app.living.loose_ends.mind import OnHerMind
 from app.living.loose_ends.threads import LooseEnd, rewrite_loose_ends
 from app.living.services import (
@@ -41,7 +43,6 @@ from app.living.services import (
     MEDIUM_PHONE,
     OUTBOUND_HAPPENING_PREFIX,
 )
-from app.living.snapshot import read_snapshot
 from tests.living.conftest import her_diary, own_records
 
 LANE = "coe-living"
@@ -90,8 +91,17 @@ _RECORDS = own_records()
 _DIARY = her_diary(_RECORDS)
 
 
+@dataclass(frozen=True)
+class _Her:
+    """她这一轮：哪条泳道上的谁、她这一轮的『现在』。"""
+
+    lane: str
+    persona_id: str
+    now: dt.datetime
+
+
 def _round(snap, previous_at: dt.datetime | None = None) -> Round:
-    """快照所在的那一轮（只有段要用的那几样）。"""
+    """她这一轮（只有段要用的那几样）。"""
     return Round(
         app="agent-service",
         lane=snap.lane,
@@ -119,7 +129,7 @@ async def _state_sections(snap) -> str:
 async def _new_sections(snap, *, previous_at) -> str:
     """这一轮的实况那三段（现在、手上、刚到点的）连在一起，查某句话在不在里面。"""
     parts = (
-        snap.render_now(previous_at),
+        await now_section(_round(snap, previous_at)),
         await _RECORDS.whereabouts_section(_round(snap)),
         await _MIND.just_due_section(_round(snap, previous_at)),
     )
@@ -145,7 +155,7 @@ async def test_the_state_she_stands_in_carries_nothing_that_just_happened(snap_d
     await _say("akao", "布丁我吃了。", _at(13, 50), to=["ayana"])
     await _say("ayana", "冰箱里还有布丁", _at(14, 2), to=["akao"])
 
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
     state = await _state_sections(snap)
@@ -172,7 +182,7 @@ async def test_what_is_new_is_the_clock_the_gap_and_where_she_is(snap_db):
     await _say("akao", "布丁我吃了。", _at(13, 50), to=["ayana"])
     await _say("ayana", "冰箱里还有布丁", _at(14, 2), to=["akao"])
 
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
     new = await _new_sections(snap, previous_at=_at(14))
@@ -190,7 +200,7 @@ async def test_what_is_new_is_the_clock_the_gap_and_where_she_is(snap_db):
 @pytest.mark.integration
 async def test_the_very_first_moment_says_nothing_about_a_gap(snap_db):
     """一个 moment 都没跑过时不编一句"隔了多久"，只报时刻。"""
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
     new = await _new_sections(snap, previous_at=None)
@@ -202,7 +212,7 @@ async def test_the_very_first_moment_says_nothing_about_a_gap(snap_db):
 @pytest.mark.integration
 async def test_a_long_gap_reads_in_hours(snap_db):
     """停机几小时再起来，"隔了多久"不能只报一个三位数的分钟。"""
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
     new = await _new_sections(snap, previous_at=_at(9, 40))
@@ -219,7 +229,7 @@ async def test_a_moment_that_lands_out_of_order_does_not_report_a_negative_gap(
     那时 ``now - previous_at`` 是负数，照直渲染就是往她眼前塞一句"离上一次过了 -4
     分钟"。
     """
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(21, 30)
     )
     new = await _new_sections(snap, previous_at=_at(21, 34))
@@ -237,7 +247,7 @@ async def test_a_moment_that_lands_out_of_order_does_not_report_a_negative_gap(
 async def test_the_snapshot_opens_with_what_is_in_her_hands(snap_db):
     await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(14))
 
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
 
@@ -250,7 +260,7 @@ async def test_the_snapshot_opens_with_what_is_in_her_hands(snap_db):
 @pytest.mark.integration
 async def test_she_can_be_nowhere_yet_and_the_snapshot_says_so_plainly(snap_db):
     """冷启动第一轮她还没定下在哪 —— 不许编一个位置，也不许渲染出一片空白。"""
-    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(8))
+    snap = _Her(lane=LANE, persona_id="akao", now=_at(8))
 
     assert await _RECORDS.current_whereabouts(lane=snap.lane, persona_id=snap.persona_id) is None
     assert all(
@@ -290,7 +300,7 @@ async def test_she_can_see_what_she_herself_just_said(snap_db):
     await _stand("akao", "家/客厅", "待着", _at(13))
     await _say("akao", "周末祭典我陪你去。", _at(13, 50), to=["ayana"])
 
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14)
     )
 
@@ -308,13 +318,13 @@ async def test_when_her_words_are_already_in_view_the_state_does_not_copy_them(
     每一条都原样在上下文里。2026-09-23 每小时的状态块各带最近 12 句，同一句话在一轮
     输入里出现了好几遍。这一段只在她自己的话不在眼前时给（上下文是空的、断过、上一轮
     没存下来）—— 判据不在这里，摆不摆由她这一轮的那一段判
-    （:func:`app.living.moment.own_recent_section`，``tests/living/test_her_round_profile.py``）。
+    （:meth:`app.living.her_records.book.OwnRecords.recent_section`，``tests/living/test_her_round_profile.py``）。
     """
     await _stand("akao", "家/客厅", "看昨天拍的胶片", _at(14))
     await _keep("周末陪绫奈去祭典", at=_at(12))
     await _say("akao", "布丁我吃了。", _at(13, 50), to=["ayana"])
 
-    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 10))
+    snap = _Her(lane=LANE, persona_id="akao", now=_at(14, 10))
     page = await _DIARY.last_written_section(_round(snap))
     open_ends = await _MIND.open_section(_round(snap))
 
@@ -331,7 +341,7 @@ async def test_when_her_words_are_already_in_view_the_state_does_not_copy_them(
 async def test_her_own_acts_show_up_too(snap_db):
     await _say("akao", "把胶片摊在茶几上", _at(14, 5), kind=KIND_ACT)
 
-    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 6))
+    snap = _Her(lane=LANE, persona_id="akao", now=_at(14, 6))
 
     assert [h.content for h in (await recent_own_happenings(lane=snap.lane, persona_id=snap.persona_id))] == ["把胶片摊在茶几上"]
 
@@ -361,7 +371,7 @@ async def test_a_message_she_sent_carries_the_handle_that_takes_it_back(snap_db)
         channel_id=str(uuid.uuid5(uuid.NAMESPACE_OID, "conv-dm")),
     )
 
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 40)
     )
     text = await _RECORDS.recent_section(_round(snap))
@@ -380,7 +390,7 @@ async def test_what_she_said_face_to_face_carries_no_handle(snap_db):
     """
     await _say("akao", "布丁我吃了。", _at(14, 5), to=["ayana"])
 
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
     text = await _RECORDS.recent_section(_round(snap))
@@ -400,7 +410,7 @@ async def test_a_sister_named_by_id_in_her_records_reads_as_her_name(snap_db):
     await _say("akao", "开饭了。", _at(14, 6), to=["绫奈", "chinagi", "许阿姨"])
     await _say("akao", "汤好了。", _at(14, 7), to=["千凪", "chinagi"])
 
-    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 10))
+    snap = _Her(lane=LANE, persona_id="akao", now=_at(14, 10))
     text = await _RECORDS.recent_section(_round(snap))
 
     assert "- 14:05 CST 你对 绫奈 说：「布丁我吃了。」" in text
@@ -415,7 +425,7 @@ async def test_her_own_trail_is_bounded_by_count_not_by_a_clock(snap_db):
     for i in range(OWN_RECENT_LIMIT + 5):
         await _say("akao", f"第{i}件事", _at(10, i), kind=KIND_ACT)
 
-    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(20))
+    snap = _Her(lane=LANE, persona_id="akao", now=_at(20))
 
     assert len(await recent_own_happenings(lane=snap.lane, persona_id=snap.persona_id)) == OWN_RECENT_LIMIT
     assert [h.content for h in (await recent_own_happenings(lane=snap.lane, persona_id=snap.persona_id))] == [
@@ -427,7 +437,7 @@ async def test_her_own_trail_is_bounded_by_count_not_by_a_clock(snap_db):
 async def test_another_sisters_acts_are_not_her_own_trail(snap_db):
     await _say("ayana", "在厨房煮东西", _at(14), kind=KIND_ACT)
 
-    snap = await read_snapshot(lane=LANE, persona_id="akao", now=_at(14, 5))
+    snap = _Her(lane=LANE, persona_id="akao", now=_at(14, 5))
 
     assert (await recent_own_happenings(lane=snap.lane, persona_id=snap.persona_id)) == []
 
@@ -452,7 +462,7 @@ async def test_last_nights_line_does_not_read_as_tonight(snap_db):
         kind=KIND_ACT,
     )
 
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(23, 45)
     )
     text = await _RECORDS.recent_section(_round(snap))
@@ -468,7 +478,7 @@ async def test_todays_own_lines_stay_undated(snap_db):
     """同一天的**刻意不带**日期：全带上会稀释掉「这条是昨天的」这个真正的信号。"""
     await _say("akao", "把胶片摊在茶几上", _at(14, 5), kind=KIND_ACT)
 
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
     text = await _RECORDS.recent_section(_round(snap))
@@ -481,11 +491,11 @@ async def test_todays_own_lines_stay_undated(snap_db):
 async def test_the_now_line_says_which_calendar_day_it_is(snap_db):
     """带日期的行只有在「今天是几号」也说了的时候才读得懂。
 
-    这一轮喂给她的全部输入就是快照 + 信封（见 ``app.living.moment.run_due_moment``），
+    这一轮喂给她的全部输入就是快照 + 信封（见 ``app.living.life.moment.run_due_moment``），
     没有别的地方告诉她今天几号、星期几。只给 ``07-24`` 而不说今天是 ``07-25``，她算
     不出那是昨天还是上个月；日程 / 提醒要填绝对日期时更是只能瞎填。
     """
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(23, 45)
     )
     text = await _new_sections(snap, previous_at=_at(23, 40))
@@ -510,7 +520,7 @@ async def test_the_now_line_says_which_calendar_day_it_is(snap_db):
 async def test_where_she_is_comes_with_every_round(snap_db):
     await _stand("akao", "家/厨房", "煮抹茶", _at(14))
 
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
     new = await _new_sections(snap, previous_at=_at(14))
@@ -524,7 +534,7 @@ async def test_where_she_is_is_not_also_in_the_checkpoint(snap_db):
     """一份输入里不该有两处说她在哪 —— 而且界桩那份还可能是过期的那一个。"""
     await _stand("akao", "家/厨房", "煮抹茶", _at(14))
 
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
 
@@ -534,7 +544,7 @@ async def test_where_she_is_is_not_also_in_the_checkpoint(snap_db):
 @pytest.mark.integration
 async def test_having_never_stood_anywhere_still_says_so(snap_db):
     """空的时候如实说空，不留白洞 —— 她第一轮得知道"我还没定下自己在哪"。"""
-    snap = await read_snapshot(
+    snap = _Her(
         lane=LANE, persona_id="akao", now=_at(14, 10)
     )
 

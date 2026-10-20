@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from app.infra.cst_time import CST
-from app.living.moment import LIFE_MOMENT_AGENT
+from app.living.life.moment import LIFE_MOMENT_AGENT
 from app.world.main_agent import ROUND_SEGMENTS
 from tests.replay import seeds
 from tests.replay.harness import Reply, ToolUse

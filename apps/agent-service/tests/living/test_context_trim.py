@@ -1,7 +1,7 @@
 """分层裁剪 —— 她的上下文在固定时刻按两档时长裁，全程不做总结。
 
 这个文件从她这一侧钉裁剪（机制在基础层 :mod:`app.agent.continuity`，她的阈值和
-分类表在 :mod:`app.living.moment`）：
+分类表在 :mod:`app.living.life.moment`）：
 
   1. **分类表覆盖全部工具**：加一只手不分类就跑不过，不会静默落进某一档；
   2. **时间语义按明确截止线验**：整点清理下"保留 1 小时"实际是 1–2 小时，用例
@@ -32,7 +32,7 @@ from app.agent.continuity import (
 )
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
 from app.agent.session import load_session
-from app.living.moment import HISTORY_KEY, MOMENT_TRIM_POLICY
+from app.living.life.moment import HISTORY_KEY, MOMENT_TRIM_POLICY
 from app.manifests.history import HISTORY_TEXTS
 from tests.living.conftest import regular_round
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
@@ -123,7 +123,7 @@ def _round(
 ) -> list[Message]:
     """跑一轮：先按这一刻裁一遍历史，再把这一轮的输入和产出接上去。
 
-    两步的顺序跟 :func:`app.living.moment.run_due_moment` 一样 —— 裁在模型调用之前，
+    两步的顺序跟 :func:`app.living.life.moment.run_due_moment` 一样 —— 裁在模型调用之前，
     存下去的就是喂进去的那份加上这一轮。
     """
     kept = trim_for_round(
@@ -442,7 +442,7 @@ def test_a_picture_never_outlives_its_signed_url():
     这里先炸，而不是上线以后每一轮都在同一个地方抛错。
     """
     from app.agent.continuity import MAX_CLEANUP_MINUTES, PICTURE_URL_MINUTES
-    from app.living.moment import DEFAULT_LIFE_MOMENT_MINUTES
+    from app.living.life.moment import DEFAULT_LIFE_MOMENT_MINUTES
 
     assert MAX_CLEANUP_MINUTES + DEFAULT_LIFE_MOMENT_MINUTES < PICTURE_URL_MINUTES
 
@@ -659,7 +659,7 @@ def test_no_state_is_laid_down_between_two_cleanups():
 def test_the_first_round_of_a_day_starts_from_her_state():
     """一天的第一轮历史是空的 —— 那一下也要立一根界桩。
 
-    每轮的刺激只送新发生的事（:func:`app.living.moment.run_due_moment`），全量状态只从界桩
+    每轮的刺激只送新发生的事（:func:`app.living.life.moment.run_due_moment`），全量状态只从界桩
     来。历史空的时候不立，她这一轮就不知道自己在哪、在做什么、心里挂着什么 —— 跨过
     04:00 的第一轮、以及重启之后的第一轮，都是这个形状。
     """

@@ -24,8 +24,8 @@ from app.living.day_page.pages import LivingDayPage
 from app.living.her_records.records import Happening, Whereabouts
 from app.living.household.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
 from app.living.household.received import ReceivedMessage, ReceivedRead
-from app.living.moment import LifeMoment
-from app.living.nudge import NudgeBegun
+from app.living.life.moment import LifeMoment
+from app.living.life.nudge import NudgeBegun
 from app.living.persona.chain import PersonaVersion
 from app.living.pictures.album import Picture
 from app.living.reading.files import FileRead
@@ -414,12 +414,12 @@ async def test_a_row_written_before_the_column_existed_still_reads_back(living_d
     from sqlalchemy import text as _text
 
     from app.data.tx import current_session, tx
-    from app.living.loose_ends.threads import LooseEnd
-    from app.living.moment import (
+    from app.living.life.moment import (
         LifeMoment,
         latest_moment,
         latest_regular_moment,
     )
+    from app.living.loose_ends.threads import LooseEnd
     from tests.runtime.conftest import migrate
 
     for cls in (LooseEnd, LifeMoment):
@@ -470,8 +470,8 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
 
     from app.data.persist import insert_idempotent
     from app.data.tx import current_session, tx
+    from app.living.life.moment import LifeMoment, latest_moment
     from app.living.loose_ends.threads import LooseEnd
-    from app.living.moment import LifeMoment, latest_moment
     from tests.runtime.conftest import migrate
 
     cst = dt.timezone(dt.timedelta(hours=8))

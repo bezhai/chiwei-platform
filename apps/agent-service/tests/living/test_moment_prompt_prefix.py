@@ -30,15 +30,15 @@ from langfuse.model import TextPromptClient
 from app.agent.prompts import PromptConfigError, PromptSet
 from app.infra import cst_time
 from app.infra.propagation import Context
-from app.living import moment as moment_mod
 from app.living.guides import GUIDES_SEGMENT, at_hand
-from app.living.loose_ends.threads import LooseEnd
-from app.living.moment import (
+from app.living.life import moment as moment_mod
+from app.living.life.moment import (
     LIFE_MOMENT_AGENT,
     LIFE_MOMENT_PROMPT_ID,
     LIFE_MOMENT_SEGMENTS,
     LifeMoment,
 )
+from app.living.loose_ends.threads import LooseEnd
 from app.living.persona import chain as persona_mod
 from app.living.persona import identity_segment
 from app.living.persona.chain import PersonaChain

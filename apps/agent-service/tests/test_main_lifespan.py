@@ -7,10 +7,10 @@ task, and the clocks phase with the lane gating.
 
 Neither the surface test (``tests/apps``) nor the replay starts clocks, so this file is where the
 clocks are seen to start through the lifespan: in a coe lane with
-``DATAFLOW_ENABLE_TIME_SOURCES=1`` living's landing clock ticks and each of her four wakes
-signals her queues, and without it none does. What the clock runs and the wake sources are
-replaced by recorders and the intervals shortened; which clocks and wakes living registers is
-pinned by ``tests/living/test_landing.py``, ``tests/living/test_moment.py``,
+``DATAFLOW_ENABLE_TIME_SOURCES=1`` speaking's landing clock ticks and each of her four wakes
+(life's two, day_page's and persona_review's) signals her queues, and without it none does. What
+the clock runs and the wake sources are replaced by recorders and the intervals shortened; which
+clocks and wakes her plugins register is pinned by ``tests/living/test_landing.py``, ``tests/living/test_moment.py``,
 ``tests/living/test_day_page.py`` and ``tests/living/test_persona_review.py``.
 """
 from __future__ import annotations
@@ -66,9 +66,9 @@ def ticks(monkeypatch) -> dict[str, list[object]]:
     from datetime import timedelta
 
     import app.living.day_page as day_page
+    import app.living.life as life
     import app.living.persona_review as persona_review
     import app.living.speaking as speaking
-    import app.plugins.living as living
     from app.host import Coalesce, WakeSource
 
     seen: dict[str, list[object]] = {}
@@ -90,12 +90,12 @@ def ticks(monkeypatch) -> dict[str, list[object]]:
 
     monkeypatch.setattr(speaking, "reconcile_what_she_said", reconciles)
     monkeypatch.setattr(speaking, "LANDING_EVERY", timedelta(seconds=0.02))
-    monkeypatch.setattr(living, "regular", recording("regular"))
-    monkeypatch.setattr(living, "nudge", recording("nudge"))
+    monkeypatch.setattr(life, "regular_wake", recording("regular"))
+    monkeypatch.setattr(life, "nudge_wake", recording("nudge"))
     monkeypatch.setattr(day_page, "day_page_wake", recording("day-page"))
     monkeypatch.setattr(persona_review, "persona_review_wake", recording("persona-review"))
-    monkeypatch.setattr(living, "REGULAR_EVERY", timedelta(seconds=0.02))
-    monkeypatch.setattr(living, "NUDGE_EVERY", timedelta(seconds=0.02))
+    monkeypatch.setattr(life, "REGULAR_EVERY", timedelta(seconds=0.02))
+    monkeypatch.setattr(life, "NUDGE_EVERY", timedelta(seconds=0.02))
     monkeypatch.setattr(day_page, "DAY_PAGE_EVERY", timedelta(seconds=0.02))
     monkeypatch.setattr(persona_review, "PERSONA_REVIEW_EVERY", timedelta(seconds=0.02))
     return seen

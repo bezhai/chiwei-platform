@@ -15,7 +15,6 @@ import pytest
 from app.agent.tooling import Tool
 from app.data.persist import fetch_all, from_row
 from app.data.schema import table_name
-from app.living import moment as moment_mod
 from app.living.her_records.deeds import record_happening
 from app.living.her_records.records import Happening, Whereabouts
 from app.living.her_records.whereabouts import note_whereabouts
@@ -25,6 +24,7 @@ from app.living.household.outgoing import (
     OutgoingUpTo,
     send_what_she_did,
 )
+from app.living.life import moment as moment_mod
 from app.living.loose_ends.mind import OnHerMind
 from app.living.services import KIND_ACT, KIND_SPEECH, MEDIUM_GROUP_CHAT, MEDIUM_PHONE
 from tests.living.conftest import (
@@ -668,10 +668,10 @@ async def _round(
     """她的一拍常规节奏，按 ``resident`` 跑，在一条新的轮次队列上，钟停在 ``at``；``hold_limit`` 是
     这条队列的占用上限。"""
     from app.host import Signal
-    from app.plugins.living import regular
+    from app.living.life import regular_wake
 
     turns = her_queue(persona, clock=clock_at(at), hold_limit=hold_limit)
-    return await turns.take(regular(resident), Signal(at=at))
+    return await turns.take(regular_wake(resident), Signal(at=at))
 
 
 @pytest.mark.integration
@@ -722,8 +722,8 @@ async def test_a_round_that_waited_behind_a_stuck_one_happens_when_it_gets_her(
     from app.host import Signal
     from app.living.her_records.deeds import recent_own_happenings
     from app.living.her_records.whereabouts import current_whereabouts
-    from app.living.moment import latest_moment
-    from app.plugins.living import regular
+    from app.living.life import regular_wake
+    from app.living.life.moment import latest_moment
 
     post = started
     stub_moment(
@@ -734,7 +734,7 @@ async def test_a_round_that_waited_behind_a_stuck_one_happens_when_it_gets_her(
     clock = [_at(21, 10)]
     turns = her_queue("akao", clock=lambda: clock[0])
     async with her_round_runs(turns):  # 挂住的那一轮
-        tick = asyncio.create_task(turns.take(regular(resident), Signal(at=clock[0])))
+        tick = asyncio.create_task(turns.take(regular_wake(resident), Signal(at=clock[0])))
         await settled()
         clock[0] = _at(21, 26)
     await tick
@@ -808,7 +808,7 @@ async def test_what_she_did_in_a_round_cut_off_for_taking_too_long_is_told_next_
     started, stub_moment, resident  # noqa: F811 — 形参名就是 fixture 名
 ):
     """一轮占着她的时间到顶被掐断（她轮次队列的占用上限，线上是
-    :data:`app.plugins.living.HOLD_LIMIT`），跟失败一样：做了的事下一轮开始前发出去。"""
+    :data:`app.living.common.HOLD_LIMIT`），跟失败一样：做了的事下一轮开始前发出去。"""
     post = started
     runner = stub_moment(("act", {"what": "把锅端上桌"}))
     _fails_after_its_hands(runner, hangs=True)
@@ -928,13 +928,13 @@ async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_othe
     started, moment_db, stub_moment, in_a_moment, monkeypatch, resident  # noqa: F811 — 形参名就是 fixture 名
 ):
     """world 的一条把她叫醒，那一轮在她做完事之后失败了两次，每一拍都以同一个身份重跑
-    （:class:`app.living.nudge.NudgeBegun`）——哪怕中间又到了一条发生得更早的、按"最早没看过的
+    （:class:`app.living.life.nudge.NudgeBegun`）——哪怕中间又到了一条发生得更早的、按"最早没看过的
     那条"本该换它叫醒她；第三次她多做了一件事、落了地。这期间千凪一直在记自己的经历，经历的
     seq 是全泳道一条轴，两人的号交错。
 
     她要发的消息一条不多一条不少：那句话、每件事各进一次；讲到哪了只停在她自己的号上；重跑的
     那几次『现在』一次比一次晚，消息上的时间还是她第一次做那件事的时候。"""
-    from app.living.nudge import NudgeBegun
+    from app.living.life.nudge import NudgeBegun
     from app.messaging.message import Kind, new_message
     from tests.living.conftest import receive
     from tests.runtime.conftest import migrate

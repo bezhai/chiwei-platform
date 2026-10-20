@@ -4,7 +4,7 @@
 
 **只给她自己读。** 每一条查询都按 ``persona_id`` 筛到一个人
 （``tests/living/test_only_her_own_records.py`` 守着）。别人在哪，world 按各人自己报的
-位置判断（:mod:`app.living.household.outgoing` 的汇总末尾、:func:`app.living.moment.look_around`
+位置判断（:mod:`app.living.household.outgoing` 的汇总末尾、:meth:`app.living.life.moment.InPerson.look_around`
 的提问里都写着她在哪），life 不读。
 """
 

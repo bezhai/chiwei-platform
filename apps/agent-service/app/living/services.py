@@ -109,7 +109,7 @@ class Residents:
 
         两处用它：
 
-          * ``say`` 记下这句话时（:func:`app.living.moment._record`）。她在 ``to`` 里写了姐妹的
+          * ``say`` 记下这句话时（:func:`app.living.life.moment._record`）。她在 ``to`` 里写了姐妹的
             id，记下来的就是姐妹的名字，发消息时按名字认出是姐妹、直接送到她那里，跟写名字
             一样。
           * 她记下的"说给谁"摆到她眼前时（:func:`app.living.her_records.deeds.own_line`）。``say`` 以前

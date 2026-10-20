@@ -131,7 +131,7 @@ def dated_clock(moment: datetime, *, now: datetime) -> str:
     往群里发「大半夜的发什么疯、赶紧滚去睡觉」）。
 
     ``now`` 一律从调用方传进来，**不在这里现取**：一轮一个 now 是这套引擎的地基
-    （她的一轮，见 :class:`app.living.moment.DueMoment`），渲染层自己读钟会让同一轮的输入跟它的
+    （她的一轮，见 :class:`app.living.life.moment.DueMoment`），渲染层自己读钟会让同一轮的输入跟它的
     身份对不上。
 
     秒一律不给：秒对读一条记录没有意义，只是噪声。

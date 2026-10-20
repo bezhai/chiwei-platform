@@ -6,7 +6,7 @@
 
 她的一轮：一轮开始前把她之前做了还没发出去的发出去；状态段是她此刻的样子（清理那一下重铺），输入段是
 这一轮新发生的，两组各按这里的顺序用空行拼；落地的三步在一个事务里；存上下文和往外发失败只记日志，
-这一轮照样算数（各段各步见 :mod:`app.living.moment`）。
+这一轮照样算数（各段各步见 :mod:`app.living.life.moment`）。
 
 agent 的定义（:class:`~app.agent.contracts.AgentSpec`）在它们原来的模块里：安全检查是她发消息时
 在那一轮里调的，调它的代码要用同一份定义。上下文的键、裁剪的数和标记消息的文字也都引用各自唯一的
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from app.agent.contracts import CostSpec, HistorySpec, Profile
 from app.host.manifest import App, Participant
-from app.living.moment import HISTORY_KEY, LIFE_MOMENT_AGENT, MOMENT_TRIM_POLICY
+from app.living.life.moment import HISTORY_KEY, LIFE_MOMENT_AGENT, MOMENT_TRIM_POLICY
 from app.living.speaking.output_safety import GUARD_OUTPUT_AGENT
 from app.manifests.history import HISTORY_TEXTS
 
@@ -89,7 +89,7 @@ MANIFEST = App(
         "app.living.persona_review",
         "app.living.web",
         "app.living.guides",
-        "app.plugins.living",
+        "app.living.life",
     ),
     agents={
         "living_life_moment": LIFE_MOMENT_AGENT,

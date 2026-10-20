@@ -29,9 +29,9 @@
 它。那一轮的身份就是它，那一轮落地它就算看过；不然它会一直排在最前，每一拍拿它叫醒她都撞上
 "这一轮跑过了"，收件箱的提前叫醒就卡在那儿。
 
-**判"是什么叫醒了她"和跑那一轮在同一次轮到她的时候**（她的轮次队列，:mod:`app.plugins.living`）。
+**判"是什么叫醒了她"和跑那一轮在同一次轮到她的时候**（她的轮次队列，:mod:`app.living.life`）。
 她正在跑一轮的时候，这条钟排一拍在后面，等那一轮结束才判（一轮最长占着她的队列 15 分钟，见
-:data:`app.plugins.living.HOLD_LIMIT`）。判在轮到她之前的话，判完到轮到她之间隔着的那一轮会把
+:data:`app.living.common.HOLD_LIMIT`）。判在轮到她之前的话，判完到轮到她之间隔着的那一轮会把
 判据改掉（看过了、跑过了），判出来的是过期的结论。那一轮跑着时到的消息没摆进去，还没看过，
 也还没叫醒过她，所以一轮结束后的下一拍叫醒她一次。
 
@@ -42,7 +42,7 @@
 回来。
 
 **开始了却没落地的那一轮，下一拍重跑的还是它自己**（:class:`NudgeBegun`）。她在那一轮里做的
-事、发出去的话，id 都从那一轮的身份派生（见 :class:`app.living.moment.DueMoment`）；那一轮
+事、发出去的话，id 都从那一轮的身份派生（见 :class:`app.living.life.moment.DueMoment`）；那一轮
 在她已经做了些什么之后失败、超时、赶上部署，重跑时换了身份，同一个动作就落两遍、同一句话就
 对真人发两遍。所以开跑之前先记下"被什么叫醒的那一轮开始了"，之后每一拍先看有没有开始了而
 没落地的那一轮，有就原样重跑它，不管这期间手机上来了更新的一条、收件箱里到了更早的一条。
@@ -78,7 +78,7 @@ from typing import Annotated
 
 from app.data.persist import fetch_value, insert_append
 from app.data.schema import Data, Key, table_name
-from app.living.moment import (
+from app.living.life.moment import (
     DueMoment,
     moment_ran,
     nudged_moment_id,
@@ -94,7 +94,7 @@ class NudgeBegun(Data):
 
     自然键 ``(lane, persona_id, nudged_by)``：一个身份只开始一次。没落地的那一轮由
     :func:`nudged_moment_due` 原样判出、重跑，不再开始新的一轮。纯 append：落没落地不记在这一行上，看的是
-    那一轮的 ``LifeMoment`` 在不在（:func:`app.living.moment.moment_ran`），那一轮落地的那次
+    那一轮的 ``LifeMoment`` 在不在（:func:`app.living.life.moment.moment_ran`），那一轮落地的那次
     提交就是它的了结，不用回来改这一行。
     """
 
@@ -120,7 +120,7 @@ async def nudged_moment_due(
 ) -> DueMoment | None:
     """有什么在叫她、而且还没叫醒过她，就判出被它叫醒的那一轮；没有返回 ``None``。
 
-    先读钟（她这一轮的『现在』，理由见 :class:`app.living.moment.DueMoment`），再看有没有开始了而
+    先读钟（她这一轮的『现在』，理由见 :class:`app.living.life.moment.DueMoment`），再看有没有开始了而
     没落地的那一轮（:class:`NudgeBegun`），有就原样判出它，不再看手机和收件箱；没有再看现在有
     什么在叫她（:func:`_calling_her`，手机上的问 ``phone`` 服务，收件箱的问 ``received`` 服务）。判出
     新的一轮时先写下"开始了"再交回，模型还没调、她还什么都没做：之后这一轮失败，重跑的还是它。除了这

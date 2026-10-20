@@ -1,7 +1,7 @@
 """连续上下文的契约用例 —— 键、日界、恢复、写失败、以及"谁不许裁剪"。
 
 这个文件从她这一侧钉连续上下文（存取和裁剪的机制在基础层 :mod:`app.agent.continuity`，
-键、写失败怎么算在 :mod:`app.living.moment`），逐条对应：
+键、写失败怎么算在 :mod:`app.living.life.moment`），逐条对应：
 
   1. 一个 persona 一条、键是 ``lane:persona``，不分天；
   2. 上下文写失败不拖垮这一轮，但留得下一行 ERROR，不是悄悄冷启动；
@@ -28,7 +28,7 @@ from app.data.persist import fetch_value, insert_idempotent
 from app.living.her_records.deeds import record_happening
 from app.living.her_records.whereabouts import note_whereabouts
 from app.living.household.received import ReceivedMessage, ReceivedRead
-from app.living.moment import LifeMoment, latest_moment
+from app.living.life.moment import LifeMoment, latest_moment
 from app.living.services import KIND_SPEECH
 from app.manifests.agent_service import RESIDENT
 from app.manifests.history import HISTORY_TEXTS
@@ -93,7 +93,7 @@ async def _reaches_her(body: str, at: dt.datetime) -> None:
     )
 
 
-# 状态里「你刚做过、说过」那一段的标题（:meth:`app.living.snapshot.MomentSnapshot.render_state`）。
+# 状态里「你刚做过、说过」那一段的标题（:meth:`app.living.her_records.book.OwnRecords.recent_section`）。
 _OWN_HEAD = "你刚做过、说过"
 
 
@@ -408,7 +408,7 @@ async def test_a_failed_context_write_leaves_the_round_standing(
     await _reaches_her("当面对你说：「你在看什么」", _at(13, 59))
 
     from app.agent.round import ROUND_STEP_FAILURES
-    from app.living.moment import CONTEXT_WRITE_FAILED
+    from app.living.life.moment import CONTEXT_WRITE_FAILED
 
     async def boom(*_a, **_kw):
         raise RuntimeError("上下文写不进去")
@@ -505,7 +505,7 @@ async def test_a_lost_round_puts_her_state_back_in_front_of_her(
 
     monkeypatch.setattr(round_mod, "commit_transcript", real_commit)
     runner = stub_moment(said="第三轮")
-    with caplog.at_level(logging.ERROR, logger="app.living.moment"):
+    with caplog.at_level(logging.ERROR, logger="app.living.life.moment"):
         await regular_round(resident, "akao", _at(14, 20))
 
     fed = runner.runs[0][0]
@@ -541,7 +541,7 @@ async def test_a_crash_between_the_two_commits_is_found_by_the_next_round(
     await _stand("akao", "家/客厅", "待着", _at(13))
     await _stand("ayana", "家/客厅", "看书", _at(13))
 
-    from app.living import moment as moment_mod
+    from app.living.life import moment as moment_mod
 
     stub_moment(said="第一轮")
     await regular_round(resident, "akao", _at(14))
@@ -621,7 +621,7 @@ async def test_the_replay_after_a_failed_close_stores_the_round_once(
     await _stand("akao", "家/客厅", "待着", _at(13))
     await _reaches_her("当面对你说：「你在看什么」", _at(13, 59))
 
-    from app.living import moment as moment_mod
+    from app.living.life import moment as moment_mod
 
     real_insert = moment_mod.insert_in_commit_order
 
@@ -650,7 +650,7 @@ async def test_the_replay_after_a_failed_close_stores_the_round_once(
 @pytest.mark.integration
 async def test_the_same_summons_only_wakes_her_once(moment_db, stub_moment, resident):
     """同一条消息把她叫来两次时，第二次一句模型都不调，上下文也不多一条。"""
-    from app.living.nudge import NudgeBegun
+    from app.living.life.nudge import NudgeBegun
     from tests.runtime.conftest import migrate
 
     await migrate(NudgeBegun, moment_db)
@@ -768,7 +768,7 @@ async def test_crossing_four_in_the_morning_does_not_copy_her_words_again(
 ):
     """跨过 04:00 那根标记消息跟别的整点一样，不带「你刚做过、说过」。
 
-    上下文不按天清零（:data:`app.living.moment.HISTORY_KEY` 不分天），她昨晚说过的话
+    上下文不按天清零（:data:`app.living.life.moment.HISTORY_KEY` 不分天），她昨晚说过的话
     还原样在上下文里，再抄一份就是重复。
     """
     await _stand("akao", "家/我房间", "准备睡了", _at(3, 30, day=26))

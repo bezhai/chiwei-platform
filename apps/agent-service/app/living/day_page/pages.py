@@ -1,6 +1,6 @@
 """跨天沉淀 —— 刚过去那一天收拢成一页，她第二天读得到。
 
-**她跨不过一天。** 快照那几层（:mod:`app.living.snapshot`）全是"当下"：手上的事、
+**她跨不过一天。** 快照那几层（:mod:`app.living.life.now`）全是"当下"：手上的事、
 心里挂着没了结的、她自己最近十二条（只在上下文接不住她最近说过的话时给）；传到她这里
 的消息也只摆一次。滚出窗口的东西没有任何一层接得住，所以今天问她昨天干了什么，她答不
 上来。
@@ -30,7 +30,7 @@
 
 prompt 在 Langfuse（:data:`DAY_PAGE_PROMPT_ID`），变量只有 persona 那两个；那一天的
 材料和上一页走 USER 消息 —— 它们每天都变，而 prompt 变量改名会**静默**渲染成字面量
-（同 :mod:`app.living.moment`）。
+（同 :mod:`app.living.life.moment`）。
 """
 
 from __future__ import annotations

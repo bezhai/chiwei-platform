@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from app.agent.round import AssembledProfile
     from app.agent.tooling import Tool
     from app.host import Turns
-    from app.living.moment import LifeMoment
+    from app.living.life.moment import LifeMoment
 
 # 三姐妹在世界里的名字（线上取自人设表的显示名）。
 RESIDENT_NAMES = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
@@ -194,8 +194,8 @@ def her_plugins() -> list:
 @pytest.fixture
 async def resident(app_host, monkeypatch, tmp_path):
     """她的一轮由什么组成：agent-service 的宿主起好（只跑 setup，不碰数据库、broker，不起钟），
-    清单里 ``resident`` 那份按 living 登记的东西组好，跟线上交给她两个唤醒来源的是同一份
-    （:mod:`app.plugins.living`）。
+    清单里 ``resident`` 那份按她的插件登记的东西组好，跟线上交给她两个唤醒来源的是同一份
+    （:mod:`app.living.life`）。
 
     进程的泳道设成 :data:`HER_LANE`。手边的说明从一个空目录读：skills 插件起来时会重读一遍，
     用例要哪几份说明自己装。
@@ -224,7 +224,7 @@ def her_queue(
     clock: Callable[[], datetime],
     hold_limit: timedelta | None = None,
 ) -> Turns:
-    """她的一条队列，跟宿主给她登记的一样（:mod:`app.plugins.living`）：``round`` 是她的轮次，
+    """她的一条队列，跟宿主给她登记的一样（:mod:`app.living.life`）：``round`` 是她的轮次，
     ``day-page``、``persona-review`` 是日记和每周回看。一条新的就是一个刚起来的进程。钟由用例给，
     轮到她的那一刻读它。"""
     from app.host import Turns
@@ -238,10 +238,10 @@ async def regular_round(
     """钟点上该来的一拍：常规节奏的一个信号，送到一条新的队列上，钟停在 ``at``；这一轮按
     ``resident``（:func:`resident`）跑，泳道是它的。"""
     from app.host import Signal
-    from app.plugins.living import regular
+    from app.living.life import regular_wake
 
     return await her_queue(persona_id, clock=clock_at(at)).take(
-        regular(resident), Signal(at=at)
+        regular_wake(resident), Signal(at=at)
     )
 
 
@@ -251,10 +251,10 @@ async def nudged_round(
     """提前叫醒的一拍：送到一条新的队列上，钟停在 ``at``；这一轮按 ``resident`` 跑，手机上谁在叫她问
     phone 插件对象（:func:`her_phone`）。"""
     from app.host import Signal
-    from app.plugins.living import nudge
+    from app.living.life import nudge_wake
 
     return await her_queue(persona_id, clock=clock_at(at)).take(
-        nudge(resident, her_phone(), her_mailbox()), Signal(at=at)
+        nudge_wake(resident, her_phone(), her_mailbox()), Signal(at=at)
     )
 
 
@@ -303,16 +303,16 @@ async def settled() -> None:
 
 
 def her_tool(name: str, *, residents=None) -> Tool:
-    """她还没拆成插件的一只手：living 插件对象（:class:`app.plugins.living.NotSplitYet`）上的方法，
-    包成跟插件登记给模型的同一种 :class:`~app.agent.tooling.Tool`。``residents`` 是交给它的
-    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）；``her_records`` 服务是那个插件
-    对象本身（不带状态，读写的是用例的库）。"""
+    """她亲身的一只手：life 插件对象（:class:`app.living.life.moment.InPerson`）上的方法，包成跟插件登记给
+    模型的同一种 :class:`~app.agent.tooling.Tool`。``residents`` 是交给它的 ``residents`` 服务，默认是名字
+    已经读好的替身（:class:`NamesRead`）；``her_records`` 服务是那个插件对象本身（不带状态，读写的是用例
+    的库）。"""
     from app.agent.tooling import Tool
-    from app.plugins.living import NotSplitYet
+    from app.living.life.moment import InPerson
 
     names = residents or NamesRead()
-    living = NotSplitYet(residents=names, her_records=own_records(names))
-    return Tool(getattr(living, name))
+    in_person = InPerson(residents=names, her_records=own_records(names))
+    return Tool(getattr(in_person, name))
 
 
 def her_reader():

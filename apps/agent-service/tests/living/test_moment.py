@@ -25,15 +25,15 @@ from app.agent.neutral import Role
 from app.agent.tooling import Tool
 from app.data.schema import pg_type
 from app.living.her_records.whereabouts import current_whereabouts, note_whereabouts
-from app.living.loose_ends.mind import OnHerMind
-from app.living.loose_ends.threads import LooseEnd, list_open_loose_ends
-from app.living.moment import (
+from app.living.life.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
     LIFE_MOMENT_PROMPT_ID,
     LifeMoment,
     latest_moment,
     life_moment_minutes,
 )
+from app.living.loose_ends.mind import OnHerMind
+from app.living.loose_ends.threads import LooseEnd, list_open_loose_ends
 from app.living.services import KIND_SPEECH, MEDIUM_IN_PERSON
 from tests.hosting import in_a_fresh_process
 from tests.living.conftest import (
@@ -107,7 +107,7 @@ def stub_moment(monkeypatch, models):
 
     monkeypatch.setattr(persona_mod, "find_persona", fake_find_persona)
 
-    from app.living import moment as moment_mod
+    from app.living.life import moment as moment_mod
 
     async def fixed_minutes() -> int:
         return DEFAULT_LIFE_MOMENT_MINUTES
@@ -349,7 +349,7 @@ async def test_saying_and_acting_hand_back_no_copy_of_her_words(
     """说一句、做一件：回执不把她的原话再抄一遍。
 
     原话就在紧挨着的那次调用参数里，而这两只手的回执跟她的话一样在上下文里留 4 小时
-    （living 插件登记它们时声明成留着的那一档）—— 每抄一遍，同一句话就在她每一轮的
+    （life 插件登记它们时声明成留着的那一档）—— 每抄一遍，同一句话就在她每一轮的
     输入里多出现一次。
     """
     await _stand("akao", "家/客厅", "待着", _at(13))
@@ -466,7 +466,7 @@ def test_the_moment_tool_descriptions_carry_no_medical_examples():
     剧情的输入源之一。所以上一条边界只能用**类目**说（"别人的身体怎么样""测出来是
     多少"），不能拿一个具体病例当例子——那等于一边立边界一边递剧本。
 
-    只守 :mod:`app.living.moment` 自己定义的六件工具；手机和嘴住在别的模块里，各自
+    只守 :mod:`app.living.life.moment` 自己定义的六件工具；手机和嘴住在别的模块里，各自
     的文案归各自的用例守。
     """
     for t in (switch_to, move_to, keep_in_mind, say, act, look_around):
@@ -596,7 +596,7 @@ def _what_she_read(run) -> str:
     """这个 moment **新**摆到她眼前的那条 USER 消息（增量 + 手机信封）。
 
     喂给模型的列表是"连续上下文 + 这一轮的刺激"，刺激永远是最后一条
-    （:func:`app.living.moment.run_due_moment`）。验"这个 moment 有没有**新**看到 X"只能
+    （:func:`app.living.life.moment.run_due_moment`）。验"这个 moment 有没有**新**看到 X"只能
     看这一条：把整个列表连起来读的话，前几个 moment 的输入也算进来，答案从此永远是 yes。
     """
     stimulus = run[0][-1]
@@ -679,7 +679,7 @@ async def test_a_thing_she_hung_an_hour_on_comes_due_in_front_of_her(
 
     **"到点了"必须在到点那一个 moment 就送到她手上**，不能等下一次重铺。挂着的清单跟
     着状态走、清理时才重铺（默认一小时），所以"刚到点的"单独走每轮的增量
-    （:meth:`app.living.snapshot.MomentSnapshot.render_new`）；少了那一段，一件 15:30
+    （:meth:`app.living.loose_ends.mind.OnHerMind.just_due_section`）；少了那一段，一件 15:30
     该做的事要到 16:00 她才看得见。
     """
     await _stand("akao", "家/客厅", "看书", _at(13))
@@ -937,7 +937,7 @@ async def test_one_sisters_moment_does_not_gate_another(
 
 @pytest.mark.integration
 async def test_the_gap_comes_from_dynamic_config(moment_db, monkeypatch):
-    from app.living import moment as moment_mod
+    from app.living.life import moment as moment_mod
 
     seen: dict[str, str] = {}
 
@@ -952,7 +952,7 @@ async def test_the_gap_comes_from_dynamic_config(moment_db, monkeypatch):
 
 @pytest.mark.integration
 async def test_a_junk_gap_falls_back_to_ten_minutes(moment_db, monkeypatch):
-    from app.living import moment as moment_mod
+    from app.living.life import moment as moment_mod
 
     monkeypatch.setattr(
         moment_mod.dynamic_config, "get", lambda key, *, default="": "十分钟"
@@ -1044,7 +1044,7 @@ async def test_each_sister_has_a_queue_of_rounds_with_both_wakes_on_it(app_host)
     登记合成一条钟，每一拍同时发给三个人，一个人出错不拖累另两个（``tests/host/test_wakes.py``）。
     没登记她永远不会醒。"""
     from app.host import Coalesce
-    from app.living.moment import run_due_moment
+    from app.living.life.moment import run_due_moment
 
     host = await app_host("agent-service")
     queues = {
@@ -1064,7 +1064,7 @@ async def test_each_sister_has_a_queue_of_rounds_with_both_wakes_on_it(app_host)
         (w.plugin, w.detail["turns"].participant, w.detail["source"].name, w.detail["every"])
         for w in wakes
     ) == sorted(
-        ("living", p, name, dt.timedelta(seconds=60))
+        ("life", p, name, dt.timedelta(seconds=60))
         for p in her_residents()
         for name in ("nudge", "regular")
     )
@@ -1113,7 +1113,7 @@ async def test_a_moment_is_not_replayed_by_the_agent_retry(
     moment_db, stub_moment, resident
 ):
     """durable mutation：整轮 ReAct 被 @retry 包着，重放会把已经写过的库再写一遍。"""
-    from app.living.moment import LIFE_MOMENT_AGENT
+    from app.living.life.moment import LIFE_MOMENT_AGENT
 
     runner = stub_moment(said="继续")
 
@@ -1138,8 +1138,8 @@ async def test_a_crash_before_the_record_lands_does_not_redo_her_actions(
     / whereabouts 的自然键全跟着变 → 她把同一句话又说了一遍、同一次移动又走了一遍，
     而且两条记录长得不一样，事后查不出来是重复。
     """
-    from app.living import moment as moment_mod
     from app.living.her_records.deeds import recent_own_happenings
+    from app.living.life import moment as moment_mod
 
     await _stand("akao", "家/客厅", "看书", _at(13))
     stub_moment(
@@ -1229,7 +1229,7 @@ async def test_a_cell_that_already_ran_late_does_not_run_again(
 async def test_a_regular_round_is_named_by_the_minute_its_cell_starts(
     moment_db, stub_moment, monkeypatch, minutes, now, named, resident
 ):
-    from app.living import moment as moment_mod
+    from app.living.life import moment as moment_mod
 
     stub_moment(said="继续")
 
@@ -1312,8 +1312,8 @@ async def _a_regular_round_landed(at: dt.datetime, *, cell: str, nudged: bool = 
 @pytest.mark.integration
 async def test_the_regular_due_reads_the_clock_before_it_reads_anything(moment_db, monkeypatch):
     """排在挂住的那一轮后面的那一拍，『现在』是轮到她的那一刻：钟在读任何状态之前读。"""
-    from app.living import moment as moment_mod
-    from app.living.moment import regular_moment_due
+    from app.living.life import moment as moment_mod
+    from app.living.life.moment import regular_moment_due
 
     read: list[str] = []
 
@@ -1348,7 +1348,7 @@ async def test_the_regular_due_reads_the_clock_before_it_reads_anything(moment_d
 
 @pytest.mark.integration
 async def test_the_regular_due_says_no_once_the_cell_has_a_regular_round(moment_db, stub_moment):
-    from app.living.moment import regular_moment_due
+    from app.living.life.moment import regular_moment_due
 
     await _a_regular_round_landed(_at(14, 7), cell="2026-07-25T14:00+08:00")
 
@@ -1360,7 +1360,7 @@ async def test_the_regular_due_says_no_once_the_cell_has_a_regular_round(moment_
 @pytest.mark.integration
 async def test_the_regular_due_counts_only_regular_rounds(moment_db, stub_moment):
     """一轮被叫醒提前来的落在这一格里，这一格的常规那一轮照样要跑。"""
-    from app.living.moment import regular_moment_due
+    from app.living.life.moment import regular_moment_due
 
     await _a_regular_round_landed(_at(14, 3), cell="nudge:m-1", nudged=True)
 
@@ -1370,8 +1370,8 @@ async def test_the_regular_due_counts_only_regular_rounds(moment_db, stub_moment
 
 @pytest.mark.integration
 async def test_the_regular_due_takes_the_cell_size_from_dynamic_config(moment_db, monkeypatch):
-    from app.living import moment as moment_mod
-    from app.living.moment import regular_moment_due
+    from app.living.life import moment as moment_mod
+    from app.living.life.moment import regular_moment_due
 
     monkeypatch.setattr(
         moment_mod.dynamic_config,
@@ -1388,7 +1388,7 @@ async def test_a_new_process_decides_on_the_regular_round_from_the_database_alon
     moment_db, stub_moment
 ):
     """进程在这一格的一轮落地之前死了，新进程在同一格里判出同一个身份；落地之后新进程判不跑。"""
-    from app.living.moment import regular_moment_due
+    from app.living.life.moment import regular_moment_due
 
     first = await regular_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 1)))
     # 这一轮没落地，进程没了；新进程这一格里的下一拍：
@@ -1404,8 +1404,8 @@ async def test_a_new_process_decides_on_the_regular_round_from_the_database_alon
 async def test_the_cells_start_again_at_midnight(moment_db, monkeypatch):
     """格子按北京时间的午夜起算：七分钟一格时，第二天 00:03 落在 00:00 那一格，不接着前一天的格往下
     排（那样它会落在 00:02）。同一个钟点每天落在同一格上。"""
-    from app.living import moment as moment_mod
-    from app.living.moment import regular_moment_due
+    from app.living.life import moment as moment_mod
+    from app.living.life.moment import regular_moment_due
 
     async def seven() -> int:
         return 7
@@ -1426,7 +1426,7 @@ async def test_a_cell_size_that_is_not_positive_falls_back_to_ten_minutes(
     moment_db, monkeypatch, configured
 ):
     """非正的格子等于没有格子：每一拍都成了新的一轮，派生 id 全跟着变。读的时候就退回默认值。"""
-    from app.living import moment as moment_mod
+    from app.living.life import moment as moment_mod
 
     monkeypatch.setattr(moment_mod.dynamic_config, "get", lambda key, *, default="": configured)
 
@@ -1436,7 +1436,7 @@ async def test_a_cell_size_that_is_not_positive_falls_back_to_ten_minutes(
 @pytest.mark.integration
 async def test_a_clock_without_a_time_zone_is_refused(moment_db, stub_moment):
     """不带时区的时刻落进身份会被按服务器时区解释，静默偏几个小时、派生 id 全跟着错。"""
-    from app.living.moment import regular_moment_due
+    from app.living.life.moment import regular_moment_due
 
     with pytest.raises(ValueError, match="时区"):
         await regular_moment_due(
@@ -1451,14 +1451,14 @@ def test_one_wake_has_room_for_more_than_one_whole_thing():
     8 只够两件；而她 2026-09-11 实测那 12 只需要中间结果的工具一次都没用过。上限本身
     不是节奏——节奏由 ``stop_for_now`` 交给她自己，这个数只是兜底。
     """
-    from app.living.moment import LIFE_MOMENT_AGENT
+    from app.living.life.moment import LIFE_MOMENT_AGENT
 
     assert LIFE_MOMENT_AGENT.recursion_limit == 12
 
 
 def test_the_moment_runs_on_the_life_model():
     """life 一天 432 个 moment × 三个人 —— 这条高频线走 ``life-model``，不占离线调用的档位。"""
-    from app.living.moment import LIFE_MOMENT_AGENT
+    from app.living.life.moment import LIFE_MOMENT_AGENT
 
     assert LIFE_MOMENT_AGENT.model == "life-model"
 
@@ -1474,7 +1474,7 @@ async def _early_round(resident, at: dt.datetime, *, woken_by: str) -> LifeMomen
     from functools import partial
 
     from app.host import Coalesce, Signal, WakeSource
-    from app.living.moment import DueMoment, nudged_moment_id, run_due_moment
+    from app.living.life.moment import DueMoment, nudged_moment_id, run_due_moment
 
     async def due(participant, batch, clock) -> DueMoment:
         batch.close()
@@ -1536,7 +1536,7 @@ async def test_the_regular_rhythm_counts_only_the_regular_cells(
     这条和上一条是**两个问题**：游标问"最后落地的那个 moment"，节奏问"最近跑过的那一格"。
     21:35 才跑的 21:30 那一格跑过了，21:39 那一拍不再跑它；21:40 是新的一格，照常来。
     """
-    from app.living.moment import latest_regular_moment
+    from app.living.life.moment import latest_regular_moment
 
     stub_moment(said="继续")
 
@@ -1588,13 +1588,13 @@ async def test_ticks_while_her_round_is_stuck_do_not_pile_up_behind_it(
     import asyncio
 
     from app.host import Signal
-    from app.plugins.living import regular
+    from app.living.life import regular_wake
 
     stub_moment(said="继续")
     turns = her_queue("akao", clock=clock_at(_at(14, 3)))
     async with her_round_runs(turns):  # 挂住的那一轮
         ticks = [
-            asyncio.create_task(turns.take(regular(resident), Signal(at=_at(14, m))))
+            asyncio.create_task(turns.take(regular_wake(resident), Signal(at=_at(14, m))))
             for m in (0, 1, 2)
         ]
         await settled()

@@ -2,7 +2,7 @@
 
 「被 @ 不能触发 chat」「收到一条消息不能当场让她开口」这两件事，靠的**不是**哪个分支里
 写了 if：靠的是**能把东西送进来的地方只有一个，而它只存储**。她只在自己的钟上醒来
-（常规的那一拍，或者有新东西时提前的那一拍，见 :mod:`app.living.nudge`），醒来之后自己去
+（常规的那一拍，或者有新东西时提前的那一拍，见 :mod:`app.living.life.nudge`），醒来之后自己去
 读。纪律会被下一个人绕过去，结构不会。
 
 第二期之前 life 一个收件箱都没有。现在三姐妹各有一个收件箱（通信机制，
@@ -19,7 +19,7 @@
     模型调用；它所在的模块连同它 import 的一切，一行能跑模型的代码都没有；
   * 读书收件箱和别的收件箱一样，运维入口（``/admin/messaging/send``）能以任何身份往里投。投进来
     能做到的只有读一程：处理函数 :func:`app.living.reading.files.read_a_round` 所在的模块连同它
-    import 的一切，碰不到她的一轮（:mod:`app.living.moment`）；搬运那条路由的处理函数也一样；
+    import 的一切，碰不到她的一轮（:mod:`app.living.life.moment`）；搬运那条路由的处理函数也一样；
   * ``app.living`` 的源码里一次都没有出现旧 chat 入站那几个名字；
   * living 自己登记的钟只有对账那一条；她的轮次、日记和回看由宿主的钟给她的队列发信号。钟给出去
     的只有钟响的时刻：对账那条钟每一拍对一次这个进程泳道的账，她的队列收到的信号里也只有时刻
@@ -269,7 +269,7 @@ _READING_INBOX = ["reading", "app.living.reading.files.read_a_round"]
 _READING_HANDLER = "app.living.reading.files"
 
 # 她的一轮。读书收件箱的处理函数所在的模块连同它 import 的一切，不许碰到它。
-_HER_ROUND = "app.living.moment"
+_HER_ROUND = "app.living.life.moment"
 
 # 能跑模型的代码住在这几处。收件处理所在的模块连同它 import 的一切，一个都不许碰到。
 _MODEL_RUNNING = ("app.agent", "app.capabilities", _HER_ROUND)
@@ -351,7 +351,7 @@ def test_the_reading_inbox_handler_cannot_run_her_round():
     """读书收件箱的处理函数所在的模块，连同它 import 的一切，碰不到她的一轮。
 
     运维入口能以任何身份往读书收件箱里投（跟往三姐妹的收件箱里投是同一个信任级别），投进来的
-    东西能让读书 agent 读一程，不能让她跑一轮：处理函数手边没有 :mod:`app.living.moment`。
+    东西能让读书 agent 读一程，不能让她跑一轮：处理函数手边没有 :mod:`app.living.life.moment`。
     """
     loaded = _app_modules_loaded_by_importing(_READING_HANDLER)
     reached = [m for m in loaded if m == _HER_ROUND or m.startswith(_HER_ROUND + ".")]
@@ -376,17 +376,29 @@ def test_the_carry_over_handler_cannot_run_her_round():
 
 @pytest.mark.integration
 async def test_her_inbox_only_stores(living_db, monkeypatch):
-    """跑一遍她的收件处理：落一行，一次模型都不调，也不推进她的任何一轮。"""
+    """跑一遍她的收件处理：落一行，一次模型都不调，也不推进她的任何一轮 —— 没开始一轮（没有
+    ``NudgeBegun``），没跑一轮（她一轮的固定循环一次都没进），也没落下一轮（没有 ``LifeMoment``）。
+
+    盯的是跑一轮时在调用那一刻才去查的名字：:func:`app.living.life.moment.run_due_moment` 每跑一轮都从它
+    的模块里取 ``run_round``。``run_due_moment`` 本身换不得：两个唤醒来源在 setup 时就把它绑进去了，换掉
+    它什么都拦不住。
+    """
     from types import SimpleNamespace
 
     from app.data.persist import fetch_all
-    from app.living import moment as moment_mod
+    from app.data.schema import table_name
+    from app.living.life import moment as moment_mod
+    from app.living.life.moment import LifeMoment
+    from app.living.life.nudge import NudgeBegun
     from app.living.residents import names as names_mod
     from app.living.residents.names import PersonaNames
     from app.messaging.message import Kind, new_message
     from app.messaging.receiving import INBOX_REGISTRY, inbox
     from tests.living.conftest import her_mailbox
+    from tests.runtime.conftest import migrate
 
+    for cls in (LifeMoment, NudgeBegun):
+        await migrate(cls, living_db)
     monkeypatch.setenv("LANE", LANE)
     names = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
 
@@ -398,8 +410,14 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
     def no_model(*args, **kwargs):
         raise AssertionError("收件处理调到模型了")
 
+    rounds: list[str] = []
+
+    async def her_round_ran(profile, *, participant, **kwargs):
+        rounds.append(participant)
+        raise AssertionError("收件处理跑了她一轮")
+
     monkeypatch.setattr("app.agent.core.build_model_client", no_model)
-    monkeypatch.setattr(moment_mod, "run_due_moment", no_model)
+    monkeypatch.setattr(moment_mod, "run_round", her_round_ran)
 
     await her_mailbox(PersonaNames(tuple(names))).open_inboxes(inbox)
     for name in names.values():
@@ -414,6 +432,10 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
         )
     ]
     assert stored == sorted(names)
+    assert rounds == [], f"收件处理跑了她们的一轮：{rounds}"
+    for cls in (NudgeBegun, LifeMoment):
+        rows = await fetch_all(f"SELECT persona_id FROM {table_name(cls)}")
+        assert rows == [], f"收件处理推进了她的一轮（{cls.__name__}）：{rows}"
 
 
 def test_no_living_module_ever_mentions_the_old_inbound_chain():
@@ -442,7 +464,7 @@ def test_the_only_clocks_are_livings_landing_and_her_wakes():
     assert registered["wakes"] == sorted(
         [
             *(
-                ["living", f"{source} -> {persona}/round"]
+                ["life", f"{source} -> {persona}/round"]
                 for source in ("nudge", "regular")
                 for persona in ("akao", "ayana", "chinagi")
             ),

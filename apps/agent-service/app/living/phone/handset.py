@@ -275,7 +275,7 @@ class PhoneRead(Data):
     这件发生过的事。当前游标 = 这条轴上 ``read_through_ms`` 的最大值。
 
     选 append 而不是版本链 CAS，是因为同一个 persona 的 moment 本来就串行（她的轮次队列，
-    :mod:`app.plugins.living`），不存在并发推同一条游标的写者；而 append 白送
+    :mod:`app.living.life`），不存在并发推同一条游标的写者；而 append 白送
     一份可查的历史——"哪一轮读了哪条会话、读到哪条消息为止"事后能逐条查出来，版本链
     只留得下最后一版。
 
@@ -525,7 +525,7 @@ async def envelopes_for(
     **没有谁被提到前面去。** 改之前在叫她的那些（私聊全部 + 群里点名）无条件排在最前、
     条数上限只截后半批，理由是"被挤出去的那条她连它存在都不知道"。那条理由现在不成立
     了：会话列表按这条会话最后一条消息的时刻倒序，翻得到它（:meth:`Handset.look_through_your_phone`）；
-    而且私聊一到就把她叫醒过一次（:mod:`app.living.nudge`），那一轮的上下文她还带着。
+    而且私聊一到就把她叫醒过一次（:mod:`app.living.life.nudge`），那一轮的上下文她还带着。
     留着那个提前，"按时间排"这句话就不成立，而且它是在替她裁决注意力。
 
     会话集合是过了白名单的那份（:func:`reachable_conversations`）：名单外的会话连
@@ -591,7 +591,7 @@ def _clock(moment: datetime, *, now: datetime) -> str:
     说过"和"昨晚说过"。
 
     ``now`` 从调用方传进来（这一轮的『现在』），**不在这里现取**：一轮一个 now 是这套引擎
-    的地基（:class:`app.living.moment.DueMoment`），渲染层自己读钟会让同一轮的输入跟它的身份对不上。
+    的地基（:class:`app.living.life.moment.DueMoment`），渲染层自己读钟会让同一轮的输入跟它的身份对不上。
 
     走 :func:`app.infra.cst_time.to_cst_dated` 而不是自己比日期：跨天判定要按 CST 日历
     日（不是 UTC、也不是"差了 24 小时"），这条逻辑只该有一处定义。它收的是原始时间串，
@@ -702,7 +702,7 @@ def render_unread(envelopes: list[Envelope], *, now: datetime) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 谁在叫她（提前一轮的输入；判断在 app.living.nudge）
+# 谁在叫她（提前一轮的输入；判断在 app.living.life.nudge）
 # ---------------------------------------------------------------------------
 
 

@@ -312,7 +312,7 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
     这里取的是那一轮的渲染。
 
     这里走的是真的那条路 —— 嘴发一条（``happening_id`` 由 :mod:`app.living.speaking.mouth`
-    自己拼）、快照把编号印出来（:mod:`app.living.snapshot` 自己解析）、撤回按等值
+    自己拼）、快照把编号印出来（:mod:`app.living.common` 自己解析）、撤回按等值
     收（:mod:`app.living.speaking.takeback` 自己查）。三处任何一处各写一份拼接规则，这条就红。
     """
     await _she_is_home()

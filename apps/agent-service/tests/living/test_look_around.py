@@ -17,10 +17,10 @@ import datetime as dt
 
 import pytest
 
-from app.living import moment as moment_mod
 from app.living.common import esc
 from app.living.her_records import book as book_mod
 from app.living.her_records.whereabouts import note_whereabouts
+from app.living.life import moment as moment_mod
 from app.living.services import WORLD, Residents
 from app.messaging.message import Answer, SendFailed
 from tests.living.conftest import (
@@ -344,10 +344,10 @@ async def test_her_round_cut_off_at_its_cap_while_she_waits_is_cut_and_let_go(
     moment_db, stub_moment, world, resident  # noqa: F811
 ):
     """等回答的时候她这一轮撞上了她轮次队列的占用上限（线上是
-    :data:`app.plugins.living.HOLD_LIMIT`）：这一轮照常被掐断、队列放开，下一拍重来。环顾四周要是
+    :data:`app.living.common.HOLD_LIMIT`）：这一轮照常被掐断、队列放开，下一拍重来。环顾四周要是
     把这次掐断吞成"没人回答"，这一轮就会接着往下跑，上限等于没有。"""
     from app.host import Signal
-    from app.plugins.living import regular
+    from app.living.life import regular_wake
 
     await _stand("akao", "家/客厅", "看书", _at(21))
     world.hangs = True
@@ -356,7 +356,7 @@ async def test_her_round_cut_off_at_its_cap_while_she_waits_is_cut_and_let_go(
 
     async with asyncio.timeout(10):
         with pytest.raises(TimeoutError):
-            await turns.take(regular(resident), Signal(at=_at(21, 30)))
+            await turns.take(regular_wake(resident), Signal(at=_at(21, 30)))
 
     assert world.asked, "前提不成立：掐断时她不是在等 world 的回答"
     assert runner.results == [], f"掐断被吞成了一句话交给她：{runner.results}"

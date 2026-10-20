@@ -15,8 +15,8 @@
 （:data:`HISTORY_KEY`），在这条记录和手机已读提交之后单独写，写失败只记一行 ERROR、
 这一轮照样算数（:func:`remember_this_round`））。
 
-**所以醒来只送新发生的事**：几点了、离上一次隔了多久、她在哪在做什么
-（:class:`app.living.snapshot.MomentSnapshot` 的那几段）、有什么到点了（loose_ends 插件那一段）、传到她这里的消息里还没看过的
+**所以醒来只送新发生的事**：几点了、离上一次隔了多久（:mod:`app.living.life.now`）、她在哪在做什么
+（her_records 插件那一段）、有什么到点了（loose_ends 插件那一段）、传到她这里的消息里还没看过的
 （household 插件那一段，:mod:`app.living.household`；别人做了什么，只有传到她这里的这一段）、手机上刚来了什么
 （phone 插件那一段，:mod:`app.living.phone`）。她此刻的样子（在哪、在做什么、上一次写下的
 那天、心里挂着什么、手机上还有什么没看）读一百遍字字一样，上一轮读过的还在上下文里，
@@ -33,7 +33,7 @@
 说话方式跟着一天天收窄成同一个样子。
 
 **位置和手上的事是例外，每轮都给**（:meth:`app.living.her_records.book.OwnRecords.whereabouts_section`）：那两样她自己就能改
-（:func:`switch_to`、:func:`move_to`），铺在界桩上的那份到下一个清理点之前一直是旧的，
+（:meth:`InPerson.switch_to`、:meth:`InPerson.move_to`），铺在界桩上的那份到下一个清理点之前一直是旧的，
 而她在哪是她这一轮里最不能过期的一样（world 按她报的位置判断谁看得见她）。
 
 **挂线头是独立的一件事，不绑在 ``switch_to`` 上。** 「是否换事」不等于「是否记住」：
@@ -44,7 +44,7 @@
 
 **每个 moment 串行。** 一个人不能同时想两件事——这是物理事实，不是给她加冷却。她的每一轮都在
 她自己的一条轮次队列上跑，一次一轮，后到的排队等前一次做完（两条路：钟点上该来的，和
-:mod:`app.living.nudge` 那条被叫醒提前来的；队列由宿主建，登记在 :mod:`app.plugins.living`）。
+:mod:`app.living.life.nudge` 那条被叫醒提前来的；队列由宿主建，登记在 :mod:`app.living.life`）。
 
 **moment 的身份是格子，不是钟表上那一瞬**（:func:`regular_moment_due`）。
 副作用先落库、``LifeMoment`` 后落库，中间崩掉的话下一拍会重跑；身份落在格上，重试拿到
@@ -63,13 +63,13 @@
 
 工具（``keep_in_mind`` 夹在这几只中间给她，但它是 loose_ends 插件的，见 :mod:`app.living.loose_ends`）：
 
-  * :func:`switch_to`    我现在改去做 X、在哪、什么把我带走的
-  * :func:`move_to`      人挪了地方，手上的事没变
-  * :func:`say` / :func:`act`  当面说一句话 / 做一个别人看得见的动作。这一轮结束时，她在
+  * :meth:`InPerson.switch_to`    我现在改去做 X、在哪、什么把我带走的
+  * :meth:`InPerson.move_to`      人挪了地方，手上的事没变
+  * :meth:`InPerson.say` / :meth:`InPerson.act`  当面说一句话 / 做一个别人看得见的动作。这一轮结束时，她在
     世界里做的事一条发给 world，只对姐妹说的话直接给那位姐妹（household 插件，
     :mod:`app.living.household.outgoing`）
-  * :func:`look_around`  问 world 她这里现在什么样、有谁在；没人回答就如实告诉她
-  * :func:`stop_for_now` 这一轮我到此为止（零参数，调完这一轮就结束）
+  * :meth:`InPerson.look_around`  问 world 她这里现在什么样、有谁在；没人回答就如实告诉她
+  * :meth:`InPerson.stop_for_now` 这一轮我到此为止（零参数，调完这一轮就结束）
   * ``look_at_phone``    拿起手机打开某条会话，看说了什么（phone 插件，:mod:`app.living.phone`）
   * ``look_through_your_phone`` 翻一翻手机上都有哪些会话（同上，三层里的第二层：
     通知只给刚来的那几条动静，这只手给整张名单）
@@ -139,7 +139,6 @@ from app.living.services import (
     Place,
     WhoLivesHere,
 )
-from app.living.snapshot import MomentSnapshot, read_snapshot
 from app.messaging.sending import ask
 
 logger = logging.getLogger(__name__)
@@ -156,7 +155,7 @@ LIFE_MOMENT_PROMPT_ID = "living_life_moment"
 # 来），12 给的是三件的余量。8 只够两件，而 2026-09-11 实测 5 小时 66 个 moment 里，那
 # 12 只需要先拿中间结果才用得上的工具一次都没被调用过。
 #
-# **这个数不是节奏，是兜底。** 什么时候收口由她自己调 :func:`stop_for_now` 决定；撞上
+# **这个数不是节奏，是兜底。** 什么时候收口由她自己调 :meth:`InPerson.stop_for_now` 决定；撞上
 # 这个数说明她一直没停，那一下不静默截断，而是再调一次模型、这次不给任何工具，让她把
 # 话说完（见 :func:`app.agent.core._run_loop`）。
 #
@@ -200,7 +199,7 @@ LIFE_MOMENT_AGENT = AgentSpec(
 
 @dataclass
 class Switched:
-    """这一轮她换过的事（每次 :func:`switch_to` 追加一条 ``{"doing", "because"}``）。数它而不是
+    """这一轮她换过的事（每次 :meth:`InPerson.switch_to` 追加一条 ``{"doing", "because"}``）。数它而不是
     数"有没有调过工具"：换事情和说话是两回事，而"换的理由"要能逐次查出来。这一轮的状态。"""
 
     changes: list[dict[str, str]] = field(default_factory=list)
@@ -334,9 +333,9 @@ def _derive(*parts: str) -> str:
 # ---------------------------------------------------------------------------
 # place 这个参数交给她的字
 #
-# 说这几句的是她那两只落位置的手（:func:`switch_to` / :func:`move_to`）。她写下的位置是她
+# 说这几句的是她那两只落位置的手（:meth:`InPerson.switch_to` / :meth:`InPerson.move_to`）。她写下的位置是她
 # 自己"手上"那一句，也是 world 判断谁会察觉到她的依据：一轮的汇总末尾写着她在哪
-# （:mod:`app.living.household.outgoing`），环顾四周时她先说自己在哪（:func:`look_around`）。三个人
+# （:mod:`app.living.household.outgoing`），环顾四周时她先说自己在哪（:meth:`InPerson.look_around`）。三个人
 # 写的是同一个世界里的地方，同一个地方说法一致，world 才认得出是同一处。
 #
 # **举例就是词表。** 她不读文档，唯一见过的地名样本就是这段描述，写在这儿的地名会被
@@ -380,191 +379,308 @@ PLACE_CANNOT_BE_EMPTY = (
 )
 
 
-@tool_error("换事情失败")
-async def switch_to(
-    self,
-    doing: Annotated[
-        str, Field(description="你现在改去做的这件事，一句话，例如「去洗澡」")
-    ],
-    # 这段描述里一个地名都不给，为什么见 :data:`PLACE_DESCRIPTION` 上方那段。
-    place: Annotated[str, Field(description=PLACE_DESCRIPTION)],
-    because: Annotated[
-        str, Field(description="什么把你从刚才那件事里带走的，一句话")
-    ],
-) -> str:
-    """我现在改去做别的了。
+# ---------------------------------------------------------------------------
+# 环顾四周：问 world
+#
+# 这里现在什么样、有谁在，由 world 回答，life 不按地名比对谁跟谁在一处：地名是三个人各自写的
+# 字符串，同一个家会被写成两条不一样的路径，比对的结果就是她跟同在厨房的妹妹"不在一个地方"。
+# world 读的是自然语言，依据是它的记录、各人自己报的位置和现实里的天气。
+# ---------------------------------------------------------------------------
 
-    你被带走的时候调它。说清楚你改去做什么、人在哪、什么把你带走的。
+# 她环顾四周时最多等 world 回答多久。world 那边每个问题起一个应答 agent（一次模型调用，中间可能
+# 查几次记录），coe 上实测 12–16 秒；45 秒是它的三倍左右，慢一些的那次也等得到。再久就不等了，
+# 如实告诉她没人回答，她过一会儿可以再看一眼。这个时刻随问题带过去（通信机制的截止时刻），过了
+# 它 world 那边不再答。
+#
+# 这个数只管一次环顾四周，管不住她这一轮。一次最多 55 秒（加上下面问出去那一步的上限），可一轮里
+# 环顾几次不由它定：recursion_limit（``LIFE_MOMENT_AGENT``）数的是模型调用，一次模型调用可以连着要几只手，
+# 这些手一只接一只跑，模型调用本身也要花时间，所以一轮能花多久没有一个从这里乘得出来的上限。
+# 兜住一轮的是她轮次队列的占用上限（:data:`app.living.common.HOLD_LIMIT`，900 秒）：等回答时
+# 撞上它，这一轮照常被掐断、队列放开、下一拍重来。环顾四周不绕过它，掐断传进来的取消原样往上走，
+# 不当成"没人回答"。
+# 不做成配置：这是"不让她干等"的上限，不是她生活里的一个参数。
+LOOK_AROUND_ANSWER_SECONDS = 45.0
 
-    别报时长——你不知道自己要做多久，也不用知道。
+# 没等到回答时交给她的那一句。只说没人回答，不说为什么：超时、world 没在跑、出错，对她来说都
+# 是同一件事——这一眼没看到。原因记在日志和通信机制的记录里。
+NOBODY_ANSWERED = "没人回答：你不知道这里现在什么样。"
 
-    人挪了地方但手上还是同一件事，那是 move_to。
 
-    心里挂着什么是另一回事，走 keep_in_mind，跟换不换事没有关系。
+def _looking_around_from(me: Place) -> str:
+    """她问 world 的那一句：先说她自己此刻在哪、在做什么，再问这里现在什么样、有谁在。
 
-    Args:
-        doing: 你现在改去做的这件事。
-        place: 你人在哪（层级路径）。
-        because: 什么把你带走的。
-
-    Returns:
-        一句确认文本。
+    **她在哪必须写在问题里。** 她这一轮做的事要等这一轮结束才汇总发给 world
+    （:mod:`app.living.household.outgoing`），提问又不排在普通消息后面，所以同一轮里她刚换了地方就环顾
+    四周，world 还不知道她挪了。她自己知道，就由她说；``me`` 是她此刻最新的那条位置，这一轮
+    里 ``switch_to`` / ``move_to`` 刚写下的也在内。
     """
-    this_round = current_round()
-    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
-    moment_id = this_round.round_id
-    what, where = doing.strip(), place.strip()
-    if not what:
-        raise ValueError("doing 不能是空的：说一句你改去做什么。")
-    if not where:
-        raise ValueError(PLACE_CANNOT_BE_EMPTY)
-
-    # whereabouts 的自然键带上内容派生的后缀：同一个 moment 里她改两次主意要落两行
-    # （最新的那条才是"当前"），而重放同样的内容仍然只落一行。
-    await self.her_records.note_whereabouts(
-        lane=lane,
-        persona_id=persona_id,
-        moment_id=f"{moment_id}:{_derive(what, where)[:8]}",
-        place=where,
-        doing=what,
-        noted_at=now,
-    )
-    this_round.state(Switched).changes.append({"doing": what, "because": because.strip()})
-    return f"你在 {where}，{what}。"
+    return f"我现在在 {me.place}，正在 {me.doing}。我看一眼周围：这里现在什么样？有谁在？"
 
 
-@tool_error("挪个地方失败")
-async def move_to(
-    self,
-    # 同上，一个地名都不给：见 :data:`PLACE_DESCRIPTION` 上方那段。
-    place: Annotated[str, Field(description=PLACE_DESCRIPTION)],
-) -> str:
-    """我人换地方了，手上的事没变。
+class InPerson:
+    """life 插件对象：她亲身在世界里的那几只手 —— 换一件事、挪个地方、当面说一句、做一个别人看得见的动作、
+    看一眼周围、这一轮到此为止。她在哪、做过什么记在 ``her_records`` 服务上，说给谁、问 world 时署的名经
+    ``residents`` 服务认。对象本身不带状态：这一轮换过的事记在这一轮的状态上（:class:`Switched`）。"""
 
-    走到别处、但还在做同一件事的时候调它。
+    def __init__(self, *, residents: WhoLivesHere, her_records: HerRecords) -> None:
+        self.residents = residents
+        self.her_records = her_records
 
-    你在哪，决定了谁看得见你、你看得见谁。人挪了而这里没挪，你在所有人眼里就还
-    待在原地——你说你已经到了别处，她们看到的你还在你上一次落下的那个地方。
+    @tool_error("换事情失败")
+    async def switch_to(
+        self,
+        doing: Annotated[
+            str, Field(description="你现在改去做的这件事，一句话，例如「去洗澡」")
+        ],
+        # 这段描述里一个地名都不给，为什么见 :data:`PLACE_DESCRIPTION` 上方那段。
+        place: Annotated[str, Field(description=PLACE_DESCRIPTION)],
+        because: Annotated[
+            str, Field(description="什么把你从刚才那件事里带走的，一句话")
+        ],
+    ) -> str:
+        """我现在改去做别的了。
 
-    被别的事带走了、手上这件事本身换了，那是 switch_to；那只手也会顺带记下位置。
+        你被带走的时候调它。说清楚你改去做什么、人在哪、什么把你带走的。
 
-    Args:
-        place: 你现在人在哪（层级路径）。
+        别报时长——你不知道自己要做多久，也不用知道。
 
-    Returns:
-        一句确认文本。
-    """
-    this_round = current_round()
-    lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
-    moment_id = this_round.round_id
-    where = place.strip()
-    if not where:
-        raise ValueError(PLACE_CANNOT_BE_EMPTY)
+        人挪了地方但手上还是同一件事，那是 move_to。
 
-    # 手上那件事原样带走 —— 这只手改的只有位置。没有"当前"就没有可带走的事：
-    # 她还没落过位置，这一步无从下脚（第一次落位走 switch_to）。
-    current = await self.her_records.current_whereabouts(lane=lane, persona_id=persona_id)
-    if current is None:
-        raise ValueError(
-            "你还没定下过自己在哪，也就没有一件'照旧做着'的事可以带到新地方去。"
+        心里挂着什么是另一回事，走 keep_in_mind，跟换不换事没有关系。
+
+        Args:
+            doing: 你现在改去做的这件事。
+            place: 你人在哪（层级路径）。
+            because: 什么把你带走的。
+
+        Returns:
+            一句确认文本。
+        """
+        this_round = current_round()
+        lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+        moment_id = this_round.round_id
+        what, where = doing.strip(), place.strip()
+        if not what:
+            raise ValueError("doing 不能是空的：说一句你改去做什么。")
+        if not where:
+            raise ValueError(PLACE_CANNOT_BE_EMPTY)
+
+        # whereabouts 的自然键带上内容派生的后缀：同一个 moment 里她改两次主意要落两行
+        # （最新的那条才是"当前"），而重放同样的内容仍然只落一行。
+        await self.her_records.note_whereabouts(
+            lane=lane,
+            persona_id=persona_id,
+            moment_id=f"{moment_id}:{_derive(what, where)[:8]}",
+            place=where,
+            doing=what,
+            noted_at=now,
+        )
+        this_round.state(Switched).changes.append({"doing": what, "because": because.strip()})
+        return f"你在 {where}，{what}。"
+
+    @tool_error("挪个地方失败")
+    async def move_to(
+        self,
+        # 同上，一个地名都不给：见 :data:`PLACE_DESCRIPTION` 上方那段。
+        place: Annotated[str, Field(description=PLACE_DESCRIPTION)],
+    ) -> str:
+        """我人换地方了，手上的事没变。
+
+        走到别处、但还在做同一件事的时候调它。
+
+        你在哪，决定了谁看得见你、你看得见谁。人挪了而这里没挪，你在所有人眼里就还
+        待在原地——你说你已经到了别处，她们看到的你还在你上一次落下的那个地方。
+
+        被别的事带走了、手上这件事本身换了，那是 switch_to；那只手也会顺带记下位置。
+
+        Args:
+            place: 你现在人在哪（层级路径）。
+
+        Returns:
+            一句确认文本。
+        """
+        this_round = current_round()
+        lane, now, persona_id = this_round.lane, this_round.now, this_round.participant
+        moment_id = this_round.round_id
+        where = place.strip()
+        if not where:
+            raise ValueError(PLACE_CANNOT_BE_EMPTY)
+
+        # 手上那件事原样带走 —— 这只手改的只有位置。没有"当前"就没有可带走的事：
+        # 她还没落过位置，这一步无从下脚（第一次落位走 switch_to）。
+        current = await self.her_records.current_whereabouts(lane=lane, persona_id=persona_id)
+        if current is None:
+            raise ValueError(
+                "你还没定下过自己在哪，也就没有一件'照旧做着'的事可以带到新地方去。"
+            )
+
+        # 自然键跟 switch_to 同款：同一个 moment 里挪两次要落两行（最新那条才是"当前"），
+        # 而重放同样的内容仍然只落一行。
+        await self.her_records.note_whereabouts(
+            lane=lane,
+            persona_id=persona_id,
+            moment_id=f"{moment_id}:{_derive(current.doing, where)[:8]}",
+            place=where,
+            doing=current.doing,
+            noted_at=now,
+        )
+        # **不进 Switched**：走一步不是"什么把你从这件事里带走了"。混进去会让
+        # 逐个 moment 复盘里的换事率把单纯的走动也算成换事情。
+        return f"你在 {where}，还在{current.doing}。"
+
+    @tool_error("说话失败")
+    async def say(
+        self,
+        what: Annotated[str, Field(description="你说出口的那句话，原话")],
+        to: Annotated[
+            list[str],
+            # 这里**不举例**：举出来的名字就是词表，她会逐字抄走（同 switch_to / move_to
+            # 的 place 举例事故）。而且一旦举的是"这个家里的三个人"，就等于把"世界上有
+            # 谁"重新写回了工具描述里 —— 那正是这只手刚拆掉的那道门。姐妹的名字在人设表里
+            # （:mod:`app.living.residents`），代码里一个都不写。
+            Field(
+                description=(
+                    "说给谁，写这个人在世界里的名字，可以同时对好几个人；"
+                    "不冲着谁说就传空数组"
+                )
+            ),
+        ],
+    ) -> str:
+        """当面说一句话。
+
+        写你**真的说出口的那句话**。「我和她说了几句」不是说话，那是记账——记账在
+        这个家里等于什么都没发生过，别人读到的就是一句空话。
+
+        说给你姐妹的，她一定听到原话，跟她在哪没关系。说给别人的、不冲着谁说的，谁听得见
+        要看当时的情形。
+
+        Args:
+            what: 你说出口的那句话，原话。
+            to: 说给谁，写名字，可以多个。
+
+        Returns:
+            一句确认文本。
+        """
+        return await _record(
+            kind=KIND_SPEECH,
+            content=what,
+            audience=to,
+            residents=self.residents,
+            her_records=self.her_records,
         )
 
-    # 自然键跟 switch_to 同款：同一个 moment 里挪两次要落两行（最新那条才是"当前"），
-    # 而重放同样的内容仍然只落一行。
-    await self.her_records.note_whereabouts(
-        lane=lane,
-        persona_id=persona_id,
-        moment_id=f"{moment_id}:{_derive(current.doing, where)[:8]}",
-        place=where,
-        doing=current.doing,
-        noted_at=now,
-    )
-    # **不进 Switched**：走一步不是"什么把你从这件事里带走了"。混进去会让
-    # 逐个 moment 复盘里的换事率把单纯的走动也算成换事情。
-    return f"你在 {where}，还在{current.doing}。"
+    @tool_error("做这个动作失败")
+    async def act(
+        self,
+        what: Annotated[
+            str, Field(description="你做的这个动作，一句自然语言，例如「把胶片摊了一茶几」")
+        ],
+    ) -> str:
+        """做一个别人看得见的动作。
 
+        谁会看见，要看当时的情形。
 
-@tool_error("说话失败")
-async def say(
-    self,
-    what: Annotated[str, Field(description="你说出口的那句话，原话")],
-    to: Annotated[
-        list[str],
-        # 这里**不举例**：举出来的名字就是词表，她会逐字抄走（同 switch_to / move_to
-        # 的 place 举例事故）。而且一旦举的是"这个家里的三个人"，就等于把"世界上有
-        # 谁"重新写回了工具描述里 —— 那正是这只手刚拆掉的那道门。姐妹的名字在人设表里
-        # （:mod:`app.living.residents`），代码里一个都不写。
-        Field(
-            description=(
-                "说给谁，写这个人在世界里的名字，可以同时对好几个人；"
-                "不冲着谁说就传空数组"
+        只用来记**别人感知得到**的动作。你自己安静做的事不用调它——那是你手上的事，
+        在 switch_to 里。
+
+        **你写下的这句话，原样就是姐姐下一次感知到的客观动静，中间没有谁替你核一遍。**
+        所以这里写你做的那件事，连着它直接造成的结果一起写完整——把饭端上桌，桌上就有
+        饭；推开窗，窗就开着。这些是你做出来的，照写。
+
+        别在里面顺手替世界宣布不由这个动作产生的事：别人的身体怎么样、外面出了什么事、
+        测出来是多少。「我去阳台把衣服收进来」是你做的；捎带一句「外面下过雨，衣服全湿
+        了」就不是——那场雨谁也没下过，可它写进去全家就都得当真。你自己身上的感觉（冷、
+        烫、手在抖）是你的，照写；但感觉不替你确立一个数字，也不替你断定别人是怎么了。
+
+        真想让人知道你看见了什么、担心什么，就用 say 说出口——说出口的话，别人读到的是
+        "你说的"，不是"事情就是这样"。
+
+        Args:
+            what: 你做的这个动作，一句自然语言。
+
+        Returns:
+            一句确认文本。
+        """
+        return await _record(
+            kind=KIND_ACT,
+            content=what,
+            audience=[],
+            residents=self.residents,
+            her_records=self.her_records,
+        )
+
+    @tool_error("停下失败")
+    async def stop_for_now(self) -> str:
+        """我这一轮就到这儿了。
+
+        该做的做完了、或者看了一圈没什么要做的，调它，这一轮到此为止。调完不会再有人问
+        你一句，你也不用再说什么。
+
+        **别说多久。** 下次什么时候再回到自己身上不是你定的 —— 时间自己会走，别人也会
+        叫你。你只决定现在停。
+
+        心里还挂着没了结的事，先 keep_in_mind 记下来再调它：这一轮之后你眼前的东西会换
+        一批，没记下来的下次就想不起来了。
+
+        Returns:
+            一句确认文本。
+        """
+        return "就到这儿。"
+
+    @tool_error("看一眼周围失败")
+    async def look_around(self) -> str:
+        """看一眼你这里现在什么样、有谁在。
+
+        你在哪、在做什么，以你最后一次定下的为准，这一轮里刚换过、刚挪过的也算。
+
+        回来的就是此刻这里的样子。回来的是"没人回答"时，你就是不知道这里现在什么样，
+        别自己补上。
+
+        Returns:
+            此刻这里的样子；没人回答时如实说没人回答。
+        """
+        this_round = current_round()
+        lane, persona_id = this_round.lane, this_round.participant
+        try:
+            me = await self.her_records.current_whereabouts(lane=lane, persona_id=persona_id)
+            if me is None:
+                # 没有"这里"可问：她自己没定下在哪，world 也不知道。
+                return "你还没定下自己在哪，所以什么都够不着。先用 switch_to 落个位置。"
+            asker = self.residents.residents().by_persona[persona_id]
+            # 通信机制只给等回答那一段封了顶。问出去那一步（查 world 开没开收件箱、记几行记录、
+            # 发给 broker 等确认）跟发一条消息是同一套动作，broker 不应答时会一直挂着，所以整个
+            # 提问再按发一条消息的上限（:data:`app.living.common.SEND_SECONDS`）多给一段。
+            async with asyncio.timeout(LOOK_AROUND_ANSWER_SECONDS + SEND_SECONDS):
+                answer = await ask(
+                    sender=asker,
+                    recipient=WORLD,
+                    body=_looking_around_from(me),
+                    timeout_seconds=LOOK_AROUND_ANSWER_SECONDS,
+                )
+        except Exception:
+            # 提问不重试（通信机制的约定）。什么原因没问成，都是这一眼没看到：问之前查她在哪、查她
+            # 叫什么出的错也算。只接 Exception：她这一轮被取消（队列的占用上限到点掐断、进程收尾）不是
+            # 没问成，取消原样往上走，这一轮该停就停。
+            logger.warning(
+                "living look_around lane=%s persona=%s 问 world 没问成",
+                lane,
+                persona_id,
+                exc_info=True,
             )
-        ),
-    ],
-) -> str:
-    """当面说一句话。
-
-    写你**真的说出口的那句话**。「我和她说了几句」不是说话，那是记账——记账在
-    这个家里等于什么都没发生过，别人读到的就是一句空话。
-
-    说给你姐妹的，她一定听到原话，跟她在哪没关系。说给别人的、不冲着谁说的，谁听得见
-    要看当时的情形。
-
-    Args:
-        what: 你说出口的那句话，原话。
-        to: 说给谁，写名字，可以多个。
-
-    Returns:
-        一句确认文本。
-    """
-    return await _record(
-        kind=KIND_SPEECH,
-        content=what,
-        audience=to,
-        residents=self.residents,
-        her_records=self.her_records,
-    )
-
-
-@tool_error("做这个动作失败")
-async def act(
-    self,
-    what: Annotated[
-        str, Field(description="你做的这个动作，一句自然语言，例如「把胶片摊了一茶几」")
-    ],
-) -> str:
-    """做一个别人看得见的动作。
-
-    谁会看见，要看当时的情形。
-
-    只用来记**别人感知得到**的动作。你自己安静做的事不用调它——那是你手上的事，
-    在 switch_to 里。
-
-    **你写下的这句话，原样就是姐姐下一次感知到的客观动静，中间没有谁替你核一遍。**
-    所以这里写你做的那件事，连着它直接造成的结果一起写完整——把饭端上桌，桌上就有
-    饭；推开窗，窗就开着。这些是你做出来的，照写。
-
-    别在里面顺手替世界宣布不由这个动作产生的事：别人的身体怎么样、外面出了什么事、
-    测出来是多少。「我去阳台把衣服收进来」是你做的；捎带一句「外面下过雨，衣服全湿
-    了」就不是——那场雨谁也没下过，可它写进去全家就都得当真。你自己身上的感觉（冷、
-    烫、手在抖）是你的，照写；但感觉不替你确立一个数字，也不替你断定别人是怎么了。
-
-    真想让人知道你看见了什么、担心什么，就用 say 说出口——说出口的话，别人读到的是
-    "你说的"，不是"事情就是这样"。
-
-    Args:
-        what: 你做的这个动作，一句自然语言。
-
-    Returns:
-        一句确认文本。
-    """
-    return await _record(
-        kind=KIND_ACT,
-        content=what,
-        audience=[],
-        residents=self.residents,
-        her_records=self.her_records,
-    )
+            return NOBODY_ANSWERED
+        if answer.text is None:
+            logger.info(
+                "living look_around lane=%s persona=%s world 没有回答：%s",
+                lane,
+                persona_id,
+                answer.reason,
+            )
+            return NOBODY_ANSWERED
+        # 不加一个字、不少一个字，过 :func:`app.living.common.esc`。回答是 world 写下的字，跟 world
+        # 发来的消息是同一类，按同一条规矩交给她（:func:`app.living.household.received.render_received`）：别的
+        # 参与者写下的字不归她管（esc 上"经过模型的不转义"说的是她自己的话和她自己留下的东西），它落进
+        # 她这一轮的上下文、跟消息行摆在同一段文本里，不转义就能自己写出一行 ``rel="owner"``。
+        return esc(answer.text)
 
 
 async def _record(
@@ -629,119 +745,6 @@ async def _record(
     # 4 小时（登记它时声明成留着的那一档），抄一遍就是同一句话在她每一轮的输入里多出现一次。
     # 当面说的话没有撤回编号，所以这里也没有编号可给。
     return "记下了。"
-
-
-@tool_error("停下失败")
-async def stop_for_now(self) -> str:
-    """我这一轮就到这儿了。
-
-    该做的做完了、或者看了一圈没什么要做的，调它，这一轮到此为止。调完不会再有人问
-    你一句，你也不用再说什么。
-
-    **别说多久。** 下次什么时候再回到自己身上不是你定的 —— 时间自己会走，别人也会
-    叫你。你只决定现在停。
-
-    心里还挂着没了结的事，先 keep_in_mind 记下来再调它：这一轮之后你眼前的东西会换
-    一批，没记下来的下次就想不起来了。
-
-    Returns:
-        一句确认文本。
-    """
-    return "就到这儿。"
-
-
-# ---------------------------------------------------------------------------
-# 环顾四周：问 world
-#
-# 这里现在什么样、有谁在，由 world 回答，life 不按地名比对谁跟谁在一处：地名是三个人各自写的
-# 字符串，同一个家会被写成两条不一样的路径，比对的结果就是她跟同在厨房的妹妹"不在一个地方"。
-# world 读的是自然语言，依据是它的记录、各人自己报的位置和现实里的天气。
-# ---------------------------------------------------------------------------
-
-# 她环顾四周时最多等 world 回答多久。world 那边每个问题起一个应答 agent（一次模型调用，中间可能
-# 查几次记录），coe 上实测 12–16 秒；45 秒是它的三倍左右，慢一些的那次也等得到。再久就不等了，
-# 如实告诉她没人回答，她过一会儿可以再看一眼。这个时刻随问题带过去（通信机制的截止时刻），过了
-# 它 world 那边不再答。
-#
-# 这个数只管一次环顾四周，管不住她这一轮。一次最多 55 秒（加上下面问出去那一步的上限），可一轮里
-# 环顾几次不由它定：recursion_limit（``LIFE_MOMENT_AGENT``）数的是模型调用，一次模型调用可以连着要几只手，
-# 这些手一只接一只跑，模型调用本身也要花时间，所以一轮能花多久没有一个从这里乘得出来的上限。
-# 兜住一轮的是她轮次队列的占用上限（:data:`app.plugins.living.HOLD_LIMIT`，900 秒）：等回答时
-# 撞上它，这一轮照常被掐断、队列放开、下一拍重来。环顾四周不绕过它，掐断传进来的取消原样往上走，
-# 不当成"没人回答"。
-# 不做成配置：这是"不让她干等"的上限，不是她生活里的一个参数。
-LOOK_AROUND_ANSWER_SECONDS = 45.0
-
-# 没等到回答时交给她的那一句。只说没人回答，不说为什么：超时、world 没在跑、出错，对她来说都
-# 是同一件事——这一眼没看到。原因记在日志和通信机制的记录里。
-NOBODY_ANSWERED = "没人回答：你不知道这里现在什么样。"
-
-
-def _looking_around_from(me: Place) -> str:
-    """她问 world 的那一句：先说她自己此刻在哪、在做什么，再问这里现在什么样、有谁在。
-
-    **她在哪必须写在问题里。** 她这一轮做的事要等这一轮结束才汇总发给 world
-    （:mod:`app.living.household.outgoing`），提问又不排在普通消息后面，所以同一轮里她刚换了地方就环顾
-    四周，world 还不知道她挪了。她自己知道，就由她说；``me`` 是她此刻最新的那条位置，这一轮
-    里 ``switch_to`` / ``move_to`` 刚写下的也在内。
-    """
-    return f"我现在在 {me.place}，正在 {me.doing}。我看一眼周围：这里现在什么样？有谁在？"
-
-
-@tool_error("看一眼周围失败")
-async def look_around(self) -> str:
-    """看一眼你这里现在什么样、有谁在。
-
-    你在哪、在做什么，以你最后一次定下的为准，这一轮里刚换过、刚挪过的也算。
-
-    回来的就是此刻这里的样子。回来的是"没人回答"时，你就是不知道这里现在什么样，
-    别自己补上。
-
-    Returns:
-        此刻这里的样子；没人回答时如实说没人回答。
-    """
-    this_round = current_round()
-    lane, persona_id = this_round.lane, this_round.participant
-    try:
-        me = await self.her_records.current_whereabouts(lane=lane, persona_id=persona_id)
-        if me is None:
-            # 没有"这里"可问：她自己没定下在哪，world 也不知道。
-            return "你还没定下自己在哪，所以什么都够不着。先用 switch_to 落个位置。"
-        asker = self.residents.residents().by_persona[persona_id]
-        # 通信机制只给等回答那一段封了顶。问出去那一步（查 world 开没开收件箱、记几行记录、
-        # 发给 broker 等确认）跟发一条消息是同一套动作，broker 不应答时会一直挂着，所以整个
-        # 提问再按发一条消息的上限（:data:`app.living.common.SEND_SECONDS`）多给一段。
-        async with asyncio.timeout(LOOK_AROUND_ANSWER_SECONDS + SEND_SECONDS):
-            answer = await ask(
-                sender=asker,
-                recipient=WORLD,
-                body=_looking_around_from(me),
-                timeout_seconds=LOOK_AROUND_ANSWER_SECONDS,
-            )
-    except Exception:
-        # 提问不重试（通信机制的约定）。什么原因没问成，都是这一眼没看到：问之前查她在哪、查她
-        # 叫什么出的错也算。只接 Exception：她这一轮被取消（队列的占用上限到点掐断、进程收尾）不是
-        # 没问成，取消原样往上走，这一轮该停就停。
-        logger.warning(
-            "living look_around lane=%s persona=%s 问 world 没问成",
-            lane,
-            persona_id,
-            exc_info=True,
-        )
-        return NOBODY_ANSWERED
-    if answer.text is None:
-        logger.info(
-            "living look_around lane=%s persona=%s world 没有回答：%s",
-            lane,
-            persona_id,
-            answer.reason,
-        )
-        return NOBODY_ANSWERED
-    # 不加一个字、不少一个字，过 :func:`app.living.common.esc`。回答是 world 写下的字，跟 world
-    # 发来的消息是同一类，按同一条规矩交给她（:func:`app.living.household.received.render_received`）：别的
-    # 参与者写下的字不归她管（esc 上"经过模型的不转义"说的是她自己的话和她自己留下的东西），它落进
-    # 她这一轮的上下文、跟消息行摆在同一段文本里，不转义就能自己写出一行 ``rel="owner"``。
-    return esc(answer.text)
 
 
 # 她的上下文裁多久。**写死在这儿，不走 Dynamic Config**：这五个数不随运行时变化，
@@ -900,8 +903,8 @@ class DueMoment:
     """判出来要跑的她的一轮：身份、她这一轮的『现在』、为什么跑。
 
     两条路判它：钟点上该来的（:func:`regular_moment_due`）和被人叫来提前的
-    （:func:`app.living.nudge.nudged_moment_due`）；跑它的是同一个 :func:`run_due_moment`。
-    判和跑在同一次轮到她的时候（她的轮次队列，:mod:`app.plugins.living`）：判在轮到她之前的话，
+    （:func:`app.living.life.nudge.nudged_moment_due`）；跑它的是同一个 :func:`run_due_moment`。
+    判和跑在同一次轮到她的时候（她的轮次队列，:mod:`app.living.life`）：判在轮到她之前的话，
     判完到轮到她之间可能隔着一整轮，那一轮会把判据改掉（看过了、跑过了），判出来的就是过期的结论。
 
     **两种 moment，身份不一样。**
@@ -918,14 +921,14 @@ class DueMoment:
 
     **她这一轮的『现在』是判它时读的钟**，两种都一样：拿到占用之后、读任何状态之前读的那一刻，
     不是钟敲响那一拍。前一轮挂住时（模型调用卡住，最长占锁 15 分钟，见
-    :data:`app.plugins.living.HOLD_LIMIT`），排在后面的那一拍要过一阵才轮到她；她看到的是轮到她
+    :data:`app.living.common.HOLD_LIMIT`），排在后面的那一拍要过一阵才轮到她；她看到的是轮到她
     时的样子（收件箱、手机、她自己的经历都是那时读的），她做的事、发出去的消息带的也就必须是那一
     刻。拿那一拍的时刻，world 收到的汇总就比汇总里回应的那件事还早。
 
     『现在』每次重跑都不一样，幂等却不丢：一个 moment 里所有派生 id（happening_id、whereabouts
     的自然键）都从 ``moment_id`` 来，**不从『现在』来**；``moment_id`` 稳了，重跑照样是 no-op，
     第一遍已经落下的那几件留着第一遍的钟点。前提是重跑时身份不变：常规的那种靠格子；被叫来的
-    那一轮没落地，重跑判出的是它记下的"开始了"的那一轮（:class:`app.living.nudge.NudgeBegun`），
+    那一轮没落地，重跑判出的是它记下的"开始了"的那一轮（:class:`app.living.life.nudge.NudgeBegun`），
     不会因为这期间又来了别的消息就换一个身份。
     """
 
@@ -993,9 +996,9 @@ async def regular_moment_due(
 
 async def run_due_moment(resident: AssembledProfile, due: DueMoment) -> LifeMoment:
     """跑判出来的这一轮（:class:`DueMoment`），交回落了地的那一行。它在她的轮次队列上跑，判它和
-    跑它在同一次轮到她的时候（:mod:`app.plugins.living`）。
+    跑它在同一次轮到她的时候（:mod:`app.living.life`）。
 
-    这一轮按 ``resident``（宿主按清单组好的那份，:mod:`app.plugins.living` 交给两个唤醒来源）由固定
+    这一轮按 ``resident``（宿主按清单组好的那份，:mod:`app.living.life` 交给两个唤醒来源）由固定
     循环跑（:func:`app.agent.round.run_round`）：身份、『现在』、为什么跑都是 ``due`` 里判好的。一轮
     由哪些东西组成、各自为什么在那个位置，写在下面那一节。
 
@@ -1027,7 +1030,7 @@ async def run_due_moment(resident: AssembledProfile, due: DueMoment) -> LifeMome
 # ---------------------------------------------------------------------------
 # 她的一轮由什么组成
 #
-# 下面这些由 :mod:`app.plugins.living` 登记，清单的 ``resident`` 定它们的位置和顺序：一轮开始前
+# 下面这些由 :mod:`app.living.life` 登记，清单的 ``resident`` 定它们的位置和顺序：一轮开始前
 # 把她之前做了还没发出去的发出去；读上一个 moment 和她的上下文；摆状态段（她此刻的样子）和输入段
 # （这一轮新发生的）；调模型、记成本；在一个事务里落这一轮（LifeMoment → 手机已读 → 收件已读）；
 # 然后存上下文、把这一轮做的事发出去。
@@ -1047,14 +1050,6 @@ class _LastMoment:
     :func:`lost_the_last_round` 判上一轮的上下文落没落地用的也是它。"""
 
     moment: LifeMoment | None = None
-
-
-@dataclass
-class _InFront:
-    """这一轮摆到她眼前的东西（这一轮的状态），只读一次，由第一个要用它的段读：``snapshot``
-    她自己的那几层（:func:`app.living.snapshot.read_snapshot`）。"""
-
-    snapshot: MomentSnapshot | None = None
 
 
 @dataclass
@@ -1101,21 +1096,8 @@ async def lost_the_last_round(round: Round, version: int) -> bool:
 # 这里的消息、手机上刚来了什么。她此刻的样子（状态段：上一次写下的那天、心里挂着什么、手机上还有
 # 什么没看）读一百遍字字一样，每轮重发就是把同一段话抄一遍，而她上一轮读过的还在上下文里。它由
 # 清理那一下作为新起点重铺（默认一小时一次；上下文是空的那一轮也会立一根界桩，所以冷启动她照样
-# 知道自己站在哪）。状态段每一轮都算，只有立界桩的那一轮进请求。
-
-
-async def _snapshot(round: Round) -> MomentSnapshot:
-    front = round.state(_InFront)
-    if front.snapshot is None:
-        front.snapshot = await read_snapshot(
-            lane=round.lane, persona_id=round.participant, now=round.now
-        )
-    return front.snapshot
-
-
-async def now_section(round: Round) -> str:
-    """输入：几点了、离上一次隔了多久。"""
-    return (await _snapshot(round)).render_now(round.previous_at)
+# 知道自己站在哪）。状态段每一轮都算，只有立界桩的那一轮进请求。几点了、离上一次隔了多久那一段在
+# :mod:`app.living.life.now`，"离上一次"读的是 :func:`previous_moment_at`。
 
 
 # -- 落地 ----------------------------------------------------------------------

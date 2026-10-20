@@ -18,7 +18,7 @@
 还有一层「挂着没了结的事」由 loose_ends 插件自己读、自己摆（:mod:`app.living.loose_ends.mind`）；
 「手上正在做的事」「她刚做过 / 说过」两层由 her_records 插件自己读、自己摆
 （:mod:`app.living.her_records.book`）；「上一次写下的那天」由 day_page 插件自己读、自己摆
-（:meth:`app.living.day_page.pages.Diary.last_written_section`）。这里只剩"现在"。
+（:meth:`app.living.day_page.pages.Diary.last_written_section`）。这里只有"现在"那一段（:func:`now_section`）。
 
 **几层全是她自己的。** 别人做了什么、说了什么，不从这里读：谁会察觉由 world 判断后告诉她，
 姐妹对她说的话直接送到她那里，都进她的收件箱，那一段由 :mod:`app.living.household.received` 读、由
@@ -30,7 +30,7 @@
 重要的东西从滚动窗口里救出来的那只手，救不救是她的决定（见 :mod:`app.living.loose_ends`）。
 
 **这几层分两半送，因为她的上下文是连续的。** 每层一段，各是她一轮里的一个状态段或输入段
-（:mod:`app.living.moment` 摆进去，清单 ``resident`` 定顺序）：
+（各自的插件登记，清单 ``resident`` 定顺序）：
 
   * **她此刻的样子**：上一次写下的那天（:meth:`app.living.day_page.pages.Diary.last_written_section`）、刚做过说过
     什么（:meth:`app.living.her_records.book.OwnRecords.recent_section`）。读一百遍字字一样，所以每轮重发就是把同一段话
@@ -39,13 +39,13 @@
     硬顶把标记消息全裁掉了、上一轮没存下来，判据见 :func:`app.agent.continuity.continues_unbroken`）：
     其余时候她 4 小时内说过的话都原样在上下文里，每小时再抄一份就是同一句话在一轮输入里
     出现好几遍。
-  * **这一轮的实况**：几点了、离上一次隔了多久（:meth:`MomentSnapshot.render_now`）、她在哪在做
+  * **这一轮的实况**：几点了、离上一次隔了多久（:func:`now_section`）、她在哪在做
     什么（:meth:`app.living.her_records.book.OwnRecords.whereabouts_section`）。每轮都送，因为每轮都不一样。
 
 **日记那一层是她自己写的，不是折叠出来的。** 这是它跟被否掉的 ``SessionTranscript``
 唯一但决定性的区别：一条原始记录都没被动过，那一页是她另写的一份东西（见
 :mod:`app.living.day_page`）。少了它她跨不过一天——上面几层全是"当下"，滚出窗口的
-东西没有任何一层接得住。这里只负责读和摆，"读哪一页"那条严格早于当前生活日的判据在
+东西没有任何一层接得住。day_page 插件只负责读和摆，"读哪一页"那条严格早于当前生活日的判据在
 :func:`~app.living.day_page.pages.read_day_page_before` 里。
 
 **"她刚做过、说过"那层为什么必须单独存在**：她的上下文会被裁剪，传到她这里的消息也只摆
@@ -56,40 +56,30 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 
+from app.agent.round import Round
 from app.infra.cst_time import to_cst_full
 
 
-@dataclass(frozen=True)
-class MomentSnapshot:
-    """她这一轮读到的、她自己的那几层。"""
-
-    lane: str
-    persona_id: str
-    now: datetime
-
-    # -- 这一轮的实况 ----------------------------------------------------
-
-    def render_now(self, previous_at: datetime | None) -> str:
-        """几点了、离上一次隔了多久。``previous_at`` 是上一个落地的 moment 的『现在』；一个都
-        没跑过传 ``None``。"""
-        # 完整口径（年月日 + 星期），不是裸时分：下面几段跨天的行渲染成 ``07-24 23:41
-        # CST``，而这一轮喂给她的全部新东西就是这一段加手机信封（``app.living.moment``），
-        # 没有第二个地方说今天几号 —— 不说的话 ``07-24`` 是昨天还是上个月她算不出来，
-        # 记日程 / 算 ``remind_at`` 时更是只能瞎填日期分量。
-        now = f"现在 {to_cst_full(self.now.isoformat())}"
-        if previous_at is None:
-            return f"{now}。"
-        gap = self.now - previous_at
-        # **不到一分钟（含负数）说"就在刚才"。** 常规 moment 的『现在』还记着格子的那些
-        # 旧行，可能比先落地那个提前来的 moment 的真实时刻还早（见
-        # :class:`app.living.moment.LifeMoment`），那时这个差是负的 —— 照直渲染就是往她
-        # 眼前塞一句"离上一次过了 -4 分钟"。
-        if gap < timedelta(minutes=1):
-            return f"{now}，上一次就在刚才。"
-        return f"{now}，离上一次过了 {_gap(gap)}。"
+async def now_section(round: Round) -> str:
+    """输入：几点了、离上一次隔了多久。『现在』是这一轮的，上一次是上一个落地的 moment 的『现在』
+    （``round.previous_at``，一个都没跑过是 ``None``）。"""
+    # 完整口径（年月日 + 星期），不是裸时分：下面几段跨天的行渲染成 ``07-24 23:41
+    # CST``，而这一轮喂给她的全部新东西就是这一段加手机信封（``app.living.life.moment``），
+    # 没有第二个地方说今天几号 —— 不说的话 ``07-24`` 是昨天还是上个月她算不出来，
+    # 记日程 / 算 ``remind_at`` 时更是只能瞎填日期分量。
+    now = f"现在 {to_cst_full(round.now.isoformat())}"
+    if round.previous_at is None:
+        return f"{now}。"
+    gap = round.now - round.previous_at
+    # **不到一分钟（含负数）说"就在刚才"。** 常规 moment 的『现在』还记着格子的那些
+    # 旧行，可能比先落地那个提前来的 moment 的真实时刻还早（见
+    # :class:`app.living.life.moment.LifeMoment`），那时这个差是负的 —— 照直渲染就是往她
+    # 眼前塞一句"离上一次过了 -4 分钟"。
+    if gap < timedelta(minutes=1):
+        return f"{now}，上一次就在刚才。"
+    return f"{now}，离上一次过了 {_gap(gap)}。"
 
 
 def _gap(delta: timedelta) -> str:
@@ -99,10 +89,3 @@ def _gap(delta: timedelta) -> str:
         return f"{minutes} 分钟"
     hours, rest = divmod(minutes, 60)
     return f"{hours} 小时" if rest == 0 else f"{hours} 小时 {rest} 分钟"
-
-
-async def read_snapshot(
-    *, lane: str, persona_id: str, now: datetime
-) -> MomentSnapshot:
-    """她这一轮自己的那一层：几点了、离上一次隔了多久。"""
-    return MomentSnapshot(lane=lane, persona_id=persona_id, now=now)

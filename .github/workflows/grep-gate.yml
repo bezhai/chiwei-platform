@@ -304,8 +304,8 @@ jobs:
         shell: bash
         run: |
           # world 和三姐妹的 life 是两个独立的引擎，唯一的连接是通信机制
-          # （app/messaging）。两边各自的插件（app/plugins/world.py、
-          # app/plugins/living.py）同样不许 import 另一边：一个 App 的进程只起
+          # （app/messaging）。两边各自的插件（app/plugins/world.py；life 的插件
+          # 都在 app/living/ 下）同样不许 import 另一边：一个 App 的进程只起
           # 它清单里的插件。规则按语法树判 import（含相对 import 和
           # importlib.import_module 的字符串），docstring 里提到另一边不算。
           # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_world_life_imports.py

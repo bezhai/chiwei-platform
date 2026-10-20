@@ -19,7 +19,7 @@
 
 **为什么是事后对账，不是投递回执/撤回回调。** 让嘴等一个回执 = 把"她说话"和"渠道
 写库"绑成一次同步往返：broker 慢一点她就卡在工具调用里，而她这一轮是有节奏的。撤回
-那一侧更彻底：生活引擎这里**没有、也不会有任何入站边**（``app/plugins/living.py``
+那一侧更彻底：生活引擎这里**没有、也不会有任何入站边**（:mod:`app.living.life`
 写死，``tests/living/test_no_inbound.py`` 守着），渠道撤成功了没有回调也没有队列能
 告诉我们，只能自己按节奏去查。事后对账把这两件事解开——她说完就走，账晚几分钟对上
 没有任何影响。
@@ -257,7 +257,7 @@ async def reconcile_what_she_said(*, lane: str) -> None:
     两件事都可能这一拍一条都没有（她可能根本没撤过任何东西），那是正常的 —— 记
     info，不是错误。
 
-    ``lane`` 是登记这条钟的进程所在的泳道（:mod:`app.plugins.living`）：钟只给出钟响的时刻，
+    ``lane`` 是登记这条钟的进程所在的泳道（:mod:`app.living.speaking`）：钟只给出钟响的时刻，
     不携带任何内容。
     """
     filled = await reconcile_landings(lane=lane)
