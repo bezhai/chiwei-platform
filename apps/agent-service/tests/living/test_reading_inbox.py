@@ -20,12 +20,12 @@ from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, lane_queue
 from app.living import participants as participants_mod
 from app.living import reading as reading_mod
 from app.living.participants import READING
-from app.living.reading import FileRead, SentFile, read_a_bit, read_so_far
+from app.living.reading import FileRead, SentFile, read_so_far
 from app.messaging import receiving
 from app.messaging.broker import inbox_route
 from app.messaging.lifecycle import start_messaging
 from app.messaging.record import read_record
-from tests.living.conftest import RESIDENT_NAMES, her_plugins
+from tests.living.conftest import RESIDENT_NAMES, her_plugins, her_tool
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
 from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture 名
@@ -36,6 +36,8 @@ from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture
 )
 from tests.messaging.helpers import eventually
 from tests.runtime.conftest import migrate
+
+read_a_bit = her_tool("read_a_bit")
 
 pytestmark = pytest.mark.integration
 

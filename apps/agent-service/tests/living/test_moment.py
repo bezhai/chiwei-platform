@@ -29,15 +29,9 @@ from app.living.loose_ends.threads import LooseEnd, list_open_loose_ends
 from app.living.moment import (
     DEFAULT_LIFE_MOMENT_MINUTES,
     LIFE_MOMENT_PROMPT_ID,
-    LIFE_TOOLS,
     LifeMoment,
-    act,
     latest_moment,
     life_moment_minutes,
-    look_around,
-    move_to,
-    say,
-    switch_to,
 )
 from app.living.participants import LIVING_PERSONAS
 from app.living.records import KIND_SPEECH, MEDIUM_IN_PERSON
@@ -48,18 +42,22 @@ from tests.living.conftest import (
     clock_at,
     her_queue,
     her_round_runs,
+    her_tool,
     regular_round,
     settled,
 )
 
 # ``keep_in_mind`` 是 loose_ends 插件的手（:mod:`app.living.loose_ends`），跟它登记的那只一样从插件对象来。
 keep_in_mind = Tool(OnHerMind().keep_in_mind)
+switch_to = her_tool("switch_to")
+move_to = her_tool("move_to")
+say = her_tool("say")
+act = her_tool("act")
+look_around = her_tool("look_around")
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
 _STEP = dt.timedelta(minutes=DEFAULT_LIFE_MOMENT_MINUTES)
-
-_LIFE_TOOLS = {t.tool.name: t.tool for t in LIFE_TOOLS}
 
 
 async def _wipe_transcripts() -> None:
@@ -222,9 +220,7 @@ async def test_keeping_something_in_mind_does_not_require_changing_what_she_is_d
 
 async def test_she_has_a_hand_that_ends_this_round(resident):
     """她自己说「就到这儿」的那只手 —— 不然这一轮什么时候结束只能由代码判。"""
-    from app.living.moment import stop_for_now
-
-    assert stop_for_now in [t.value.tool for t in resident.tools]
+    [stop_for_now] = [t.value.tool for t in resident.tools if t.value.tool.name == "stop_for_now"]
     assert stop_for_now.definition.parameters.get("properties", {}) == {}, (
         "这只手有参数 —— 她只决定停，别的什么都不该问她"
     )
@@ -236,9 +232,7 @@ async def test_ending_the_round_really_ends_it(resident):
     循环不认名字，只认声明（``ToolSpec.ends_round``）：声明掉了就是**静默**失效 —— 她调了
     这只手，模型接着被问下一轮，谁也不会报错。
     """
-    from app.living.moment import stop_for_now
-
-    [declared] = [t.value for t in resident.tools if t.value.tool is stop_for_now]
+    [declared] = [t.value for t in resident.tools if t.value.tool.name == "stop_for_now"]
     assert declared.ends_round is True
     assert [t.name for t in resident.tools if t.value.ends_round] == ["stop_for_now"]
 
@@ -355,7 +349,7 @@ async def test_saying_and_acting_hand_back_no_copy_of_her_words(
     """说一句、做一件：回执不把她的原话再抄一遍。
 
     原话就在紧挨着的那次调用参数里，而这两只手的回执跟她的话一样在上下文里留 4 小时
-    （:data:`app.living.moment.LIFE_TOOLS` 里它们是留着的那一档）—— 每抄一遍，同一句话就在她每一轮的
+    （living 插件登记它们时声明成留着的那一档）—— 每抄一遍，同一句话就在她每一轮的
     输入里多出现一次。
     """
     await _stand("akao", "家/客厅", "待着", _at(13))
@@ -475,8 +469,6 @@ def test_the_moment_tool_descriptions_carry_no_medical_examples():
     只守 :mod:`app.living.moment` 自己定义的六件工具；手机和嘴住在别的模块里，各自
     的文案归各自的用例守。
     """
-    from app.living.moment import move_to
-
     for t in (switch_to, move_to, keep_in_mind, say, act, look_around):
         desc = t.definition.description
         for word in ("发烧", "医院", "急诊", "生病", "体温", "多少度"):
@@ -1772,9 +1764,7 @@ async def test_moving_before_she_ever_stood_anywhere_says_so(
 
 async def test_moving_is_one_of_the_hands_she_actually_has(resident):
     """没注册 = 她永远调不到，症状跟原 bug 一模一样但更难查。"""
-    from app.living.moment import move_to
-
-    assert move_to in [t.value.tool for t in resident.tools]
+    [move_to] = [t.value.tool for t in resident.tools if t.value.tool.name == "move_to"]
     assert set(move_to.definition.parameters["properties"]) == {"place"}
 
 
@@ -1944,7 +1934,7 @@ def test_the_place_parameter_hands_her_no_place_name(hand):
         path_samples,
     )
 
-    for where, text in model_facing_text(_LIFE_TOOLS[hand]).items():
+    for where, text in model_facing_text(her_tool(hand)).items():
         assert not path_samples(text), (
             f"{hand} 的{where}里摆着一条路径样本 {path_samples(text)!r} —— "
             f"她会逐字抄走它。原文：\n{text}"
@@ -1964,7 +1954,7 @@ def test_the_place_parameter_quotes_no_example_at_all(hand):
     它照样是样本，照样会被逐字抄走（``超市`` 那次就是一段）。在这个参数的描述里，
     引号引起来的东西只可能是一个可以照着填的名字。
     """
-    described = _LIFE_TOOLS[hand].definition.parameters["properties"]["place"][
+    described = her_tool(hand).definition.parameters["properties"]["place"][
         "description"
     ]
 
@@ -1978,7 +1968,7 @@ def test_the_place_parameter_still_says_what_shape_a_path_is(hand):
 
     只钉"没有样本"的话，把整段描述删空也能绿，而那时她连该写成几层都不知道。
     """
-    described = _LIFE_TOOLS[hand].definition.parameters["properties"]["place"][
+    described = her_tool(hand).definition.parameters["properties"]["place"][
         "description"
     ]
 

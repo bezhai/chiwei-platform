@@ -30,15 +30,16 @@ from app.living.phone import (
     PHONE_PAGE_AFTER,
     conversations_her_bot_is_in,
     envelopes_for,
-    look_at_phone,
-    look_through_your_phone,
-    look_up_contact,
     newest_unread_summons,
     reachable_conversations,
     read_through,
     render_unread,
 )
-from tests.living.conftest import glance_text
+from tests.living.conftest import glance_text, her_tool
+
+look_at_phone = her_tool("look_at_phone")
+look_through_your_phone = her_tool("look_through_your_phone")
+look_up_contact = her_tool("look_up_contact")
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -2175,7 +2176,7 @@ async def test_finding_someone_is_one_of_the_hands_she_actually_has(
     没注册是**静默失败**：代码写好了、测试也绿，但她那一轮的工具列表里没有它，
     于是永远不会调——症状跟"零未读就找不回这个人"一模一样，而且更难查。
     """
-    assert look_up_contact in [t.value.tool for t in resident.tools], "她手里没有这只手"
+    assert "look_up_contact" in [t.value.tool.name for t in resident.tools], "她手里没有这只手"
 
 
 # --------------------------------------------------------------------------
@@ -2321,7 +2322,7 @@ async def test_the_listed_address_sits_next_to_the_name(living_db, in_a_moment):
 
 async def test_looking_through_her_phone_is_one_of_the_hands_she_has(resident):
     """这只手要真在她的工具集里 —— 没注册是静默失败（同「找人」那条）。"""
-    assert look_through_your_phone in [t.value.tool for t in resident.tools], (
+    assert "look_through_your_phone" in [t.value.tool.name for t in resident.tools], (
         "她手里没有这只手"
     )
 
@@ -3270,7 +3271,7 @@ async def test_both_tool_descriptions_name_the_place_the_handle_actually_sits(
     撤回那只手还必须说清楚**两处形状不同**（快照那侧在方括号里，手机这侧在属性里），
     否则她会以为那是两种编号。
     """
-    from app.living.takeback import take_back_message
+    take_back_message = her_tool("take_back_message")
 
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(21, 29))

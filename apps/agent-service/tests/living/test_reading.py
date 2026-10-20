@@ -25,17 +25,17 @@ from app.living.participants import READING
 from app.living.persona.chain import PersonaChain
 from app.living.reading import (
     FILE_LIST_LIMIT,
-    READING_TOOLS,
     FilePickedUp,
     FileRead,
-    look_for_something_to_read,
-    read_a_bit,
     read_a_round,
     read_so_far,
 )
 from app.messaging.message import Kind, Message, new_message
 from tests.hosting import in_a_fresh_process
-from tests.living.conftest import RESIDENT_NAMES, Post
+from tests.living.conftest import RESIDENT_NAMES, Post, her_tool
+
+look_for_something_to_read = her_tool("look_for_something_to_read")
+read_a_bit = her_tool("read_a_bit")
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -952,7 +952,7 @@ async def test_the_list_caps_the_unopened_pile_but_never_her_own_memory(
 def test_no_reading_tool_ever_asks_her_how_long_something_takes():
     """真人对"多久"没有内感受。问她要一个分钟数就是把生活切成日程表。"""
     banned = ("minute", "duration", "how_long", "seconds", "until", "hour")
-    for t in [s.tool for s in READING_TOOLS]:
+    for t in (look_for_something_to_read, read_a_bit):
         params = t.definition.parameters.get("properties", {})
         for pname in params:
             assert not any(b in pname.lower() for b in banned), (
@@ -995,10 +995,10 @@ async def test_both_hands_are_ones_she_actually_has(resident):
     但她的工具列表里没有它们，于是永远不会调、读书收件箱永远收不到东西。同款用例
     见 ``test_phone.py`` 的 ``test_finding_someone_is_one_of_the_hands_she_actually_has``。
     """
-    assert look_for_something_to_read in [t.value.tool for t in resident.tools], (
+    assert "look_for_something_to_read" in [t.value.tool.name for t in resident.tools], (
         "她手里没有找东西读这只手"
     )
-    assert read_a_bit in [t.value.tool for t in resident.tools], (
+    assert "read_a_bit" in [t.value.tool.name for t in resident.tools], (
         "她手里没有往下读一程这只手"
     )
 

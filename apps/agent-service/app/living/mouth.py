@@ -95,9 +95,7 @@ from typing import Annotated
 
 from pydantic import Field, field_validator
 
-from app.agent.contracts import ToolSpec
 from app.agent.round import current_round
-from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.data.persist import (
     fetch_all,
@@ -395,9 +393,9 @@ def _handles_she_gave(pictures: list[str] | str | None) -> list[str]:
     return [wanted]
 
 
-@tool
 @tool_error("这条消息没发出去")
 async def send_message(
+    self,
     what: Annotated[
         str,
         Field(description="你要发出去的那句话，原话"),
@@ -676,12 +674,9 @@ async def send_message(
     # 对账钟可能已经在这条链上追过一版，所以收口是"合到最新一版上"，见 :func:`_settle`。
     await _settle(claim, at=now)
     # **回执给编号，不给原话。** 原话就在她这次调用的参数里，紧挨着这条回执；两样都
-    # 在上下文里留 4 小时（它在 :data:`app.living.mouth.MOUTH_TOOLS` 里声明成留着的那一档），再抄一遍就是同一
+    # 在上下文里留 4 小时（登记它时声明成留着的那一档），再抄一遍就是同一
     # 句话在她每一轮的输入里多出现一次。编号必须给：状态块不再每小时列一遍她最近说过的
     # 话，刚发出去这条的撤回编号在别处拿不到（手机页要她自己再看一次才有）。
     return f"发出去了{printed_handle(happening_id)}"
 
 
-# 发消息这只手的回执是"这件事到底做成了没有"的唯一记录（发出去了、已经说过了、交出去但没等到
-# 确认），裁掉她就会照着一个不知道有没有成功的动作再来一遍，所以留着。
-MOUTH_TOOLS = [ToolSpec(send_message, trim="kept")]

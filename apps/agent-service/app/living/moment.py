@@ -113,7 +113,7 @@ from inner_shared.dynamic_config import dynamic_config
 from pydantic import Field, field_validator
 
 from app.agent.continuity import TrimPolicy
-from app.agent.contracts import AgentSpec, Segment, ToolSpec, VarsFn
+from app.agent.contracts import AgentSpec, Segment, VarsFn
 from app.agent.round import (
     AssembledProfile,
     Round,
@@ -121,7 +121,6 @@ from app.agent.round import (
     run_round,
     store_history,
 )
-from app.agent.tooling import tool
 from app.agent.tools._common import get_or_create_counter, tool_error
 from app.agent.tools.outcome import BAD_ARGUMENTS
 from app.data.ordered import insert_in_commit_order
@@ -390,9 +389,9 @@ PLACE_CANNOT_BE_EMPTY = (
 )
 
 
-@tool
 @tool_error("换事情失败")
 async def switch_to(
+    self,
     doing: Annotated[
         str, Field(description="你现在改去做的这件事，一句话，例如「去洗澡」")
     ],
@@ -443,9 +442,9 @@ async def switch_to(
     return f"你在 {where}，{what}。"
 
 
-@tool
 @tool_error("挪个地方失败")
 async def move_to(
+    self,
     # 同上，一个地名都不给：见 :data:`PLACE_DESCRIPTION` 上方那段。
     place: Annotated[str, Field(description=PLACE_DESCRIPTION)],
 ) -> str:
@@ -494,9 +493,9 @@ async def move_to(
     return f"你在 {where}，还在{current.doing}。"
 
 
-@tool
 @tool_error("说话失败")
 async def say(
+    self,
     what: Annotated[str, Field(description="你说出口的那句话，原话")],
     to: Annotated[
         list[str],
@@ -530,9 +529,9 @@ async def say(
     return await _record(kind=KIND_SPEECH, content=what, audience=to)
 
 
-@tool
 @tool_error("做这个动作失败")
 async def act(
+    self,
     what: Annotated[
         str, Field(description="你做的这个动作，一句自然语言，例如「把胶片摊了一茶几」")
     ],
@@ -618,14 +617,13 @@ async def _record(*, kind: str, content: str, audience: list[str]) -> str:
     )
     note_recorded(happening_id)
     # 不把原话再抄一遍：它就在这次调用的参数里，而这条回执跟她的话一样在上下文里留
-    # 4 小时（:data:`LIFE_TOOLS` 里它是留着的那一档），抄一遍就是同一句话在她每一轮的输入里多出现一次。
+    # 4 小时（登记它时声明成留着的那一档），抄一遍就是同一句话在她每一轮的输入里多出现一次。
     # 当面说的话没有撤回编号，所以这里也没有编号可给。
     return "记下了。"
 
 
-@tool
 @tool_error("停下失败")
-async def stop_for_now() -> str:
+async def stop_for_now(self) -> str:
     """我这一轮就到这儿了。
 
     该做的做完了、或者看了一圈没什么要做的，调它，这一轮到此为止。调完不会再有人问
@@ -681,9 +679,8 @@ def _looking_around_from(me: Whereabouts) -> str:
     return f"我现在在 {me.place}，正在 {me.doing}。我看一眼周围：这里现在什么样？有谁在？"
 
 
-@tool
 @tool_error("看一眼周围失败")
-async def look_around() -> str:
+async def look_around(self) -> str:
     """看一眼你这里现在什么样、有谁在。
 
     你在哪、在做什么，以你最后一次定下的为准，这一轮里刚换过、刚挪过的也算。
@@ -737,30 +734,6 @@ async def look_around() -> str:
     # 她这一轮的上下文、跟消息行摆在同一段文本里，不转义就能自己写出一行 ``rel="owner"``。
     return esc(answer.text)
 
-
-# 这个模块里的几只手：手上的事、心上的线头、当面说和做、看一眼周围、到此为止。她这一轮能做的全部
-# 由 :mod:`app.plugins.living` 一只一只登记（手机、嘴、上网、读东西、图、手边那几份说明各住在
-# 自己的模块里，各自声明），给模型的顺序由清单 ``resident`` 的 ``tools`` 定（也是前缀缓存的一部分，
-# 改顺序会改请求）。
-#
-# 每只手都声明它的返回怎么裁剪（:class:`app.agent.contracts.ToolSpec` 的 ``trim``，必填）：
-#
-#   * ``look_around``  素材：world 回答的那一刻这里什么样，过了一阵早就变了，想知道就再看一眼。
-#   * 其余几只是**她自己动作的回执**（``switch_to`` / ``move_to`` / ``keep_in_mind`` / ``say`` /
-#     ``act`` / ``stop_for_now``），留着：这几条是"这件事到底做成了没有"的唯一记录，裁掉她就会
-#     照着一个不知道有没有成功的动作再来一遍。``stop_for_now`` 那句确认是她上一轮怎么收尾的唯一
-#     痕迹（它结束这一轮，后面没有她的话跟着），而且整条就几个字，换成短语省不下任何东西。
-#
-# 分不清就放"留着"那一档：留错了只是多占 token。``stop_for_now`` 是唯一一只结束这一轮的手
-# （``ends_round``）。
-LIFE_TOOLS = [
-    ToolSpec(switch_to, trim="kept"),
-    ToolSpec(move_to, trim="kept"),
-    ToolSpec(say, trim="kept"),
-    ToolSpec(act, trim="kept"),
-    ToolSpec(look_around, trim="material"),
-    ToolSpec(stop_for_now, trim="kept", ends_round=True),
-]
 
 # 她的上下文裁多久。**写死在这儿，不走 Dynamic Config**：这五个数不随运行时变化，
 # 它们是"她是什么东西"的一部分，不是可调的旋钮。裁剪那一层只给形状，填什么归这里

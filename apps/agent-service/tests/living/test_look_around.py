@@ -20,7 +20,6 @@ import pytest
 from app.living import moment as moment_mod
 from app.living import participants as participants_mod
 from app.living.common import esc
-from app.living.moment import look_around
 from app.living.participants import WORLD
 from app.living.whereabouts import note_whereabouts
 from app.messaging.message import Answer, SendFailed
@@ -29,6 +28,7 @@ from tests.living.conftest import (
     clock_at,
     her_queue,
     her_round_runs,
+    her_tool,
     model_facing_text,
     names_of_places_in,
     path_samples,
@@ -46,6 +46,8 @@ from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture
     delayed_broker,
     messaging_db,
 )
+
+look_around = her_tool("look_around")
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))

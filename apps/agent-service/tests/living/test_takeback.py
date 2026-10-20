@@ -30,13 +30,15 @@ from app.living.mouth import (
     STATE_HANDED_OFF,
     SpokenOutbound,
     latest_outbound,
-    send_message,
 )
 from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
 from app.living.snapshot import read_snapshot, recent_own_happenings
-from app.living.takeback import take_back_message
 from app.living.whereabouts import note_whereabouts
 from tests.data.read_back import all_versions
+from tests.living.conftest import her_tool
+
+send_message = her_tool("send_message")
+take_back_message = her_tool("take_back_message")
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -761,7 +763,7 @@ async def test_she_is_told_the_outcome_comes_later_not_that_it_is_already_gone(
 
 
 async def test_the_take_back_hand_is_in_her_hands(resident):
-    assert take_back_message in [t.value.tool for t in resident.tools], (
+    assert "take_back_message" in [t.value.tool.name for t in resident.tools], (
         "她手里没有撤回这只手"
     )
 

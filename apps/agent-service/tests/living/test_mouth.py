@@ -22,10 +22,13 @@ from sqlalchemy import text
 
 from app.data.tx import current_session, tx
 from app.domain.chat_dataflow import PROACTIVE_MESSAGE_ID_PREFIX
-from app.living.mouth import _SEND_CHECK_TIMEOUT_S, send_message
+from app.living.mouth import _SEND_CHECK_TIMEOUT_S
 from app.living.records import MEDIUM_GROUP_CHAT, MEDIUM_PHONE
 from app.living.snapshot import recent_own_happenings
 from app.living.whereabouts import note_whereabouts
+from tests.living.conftest import her_tool
+
+send_message = her_tool("send_message")
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))

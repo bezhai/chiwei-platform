@@ -28,16 +28,22 @@ from app.living import pictures as pictures_mod
 from app.living.pictures import (
     PICTURE_LIST_LIMIT,
     PICTURE_SEARCH_COUNT,
-    PICTURE_TOOLS,
     Picture,
-    draw_a_picture,
-    find_a_picture_online,
     handle_for,
     her_picture,
-    look_at_a_picture,
-    look_through_your_pictures,
     pictures_she_made,
     remember_a_picture,
+)
+from tests.living.conftest import her_tool
+
+_HANDS = (
+    "draw_a_picture",
+    "find_a_picture_online",
+    "look_through_your_pictures",
+    "look_at_a_picture",
+)
+draw_a_picture, find_a_picture_online, look_through_your_pictures, look_at_a_picture = (
+    her_tool(name) for name in _HANDS
 )
 
 LANE = "coe-living"
@@ -649,7 +655,6 @@ async def test_all_four_hands_are_actually_in_her_tool_belt(resident):
         "look_at_a_picture",
     ):
         assert hand in mounted, f"{hand} 没登记进她的一轮，她根本没有这只手"
-    assert {s.tool.name for s in PICTURE_TOOLS} <= mounted
 
 
 def test_her_instruction_manual_is_written_for_her():
@@ -657,7 +662,7 @@ def test_her_instruction_manual_is_written_for_her():
 
     空 docstring = 她拿到一只不知道干什么用的手。
     """
-    for t in [s.tool for s in PICTURE_TOOLS]:
+    for t in (her_tool(name) for name in _HANDS):
         assert t.definition.description.strip(), f"{t.name} 没有给她的说明"
 
 

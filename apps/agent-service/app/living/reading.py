@@ -68,9 +68,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field, field_validator
 
 # module-level 引入，测试从这里换替身（一程真跑起来要取字节 + 几轮模型调用）
-from app.agent.contracts import ToolSpec
 from app.agent.round import current_round
-from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.data.persist import fetch_all, from_row, insert_append, select_latest
 from app.data.queries.messages import find_file_items_in_conversations
@@ -344,9 +342,8 @@ def _one_file(f: SentFile, mark: FileRead | None, *, now: datetime) -> str:
     return f"{head}\n  {read}。这个东西在你心里：{mark.impression}"
 
 
-@tool
 @tool_error("看看有什么能读的失败")
-async def look_for_something_to_read() -> str:
+async def look_for_something_to_read(self) -> str:
     """看看有人给你发过什么能读的东西，还有你读过的那些现在在你心里是什么样。
 
     别人发到你手机上的文件都在这儿，每个带一串 file=…，拿它调 read_a_bit 就能
@@ -392,9 +389,9 @@ async def look_for_something_to_read() -> str:
     return "\n".join(lines)
 
 
-@tool
 @tool_error("拿起这个文件失败")
 async def read_a_bit(
+    self,
     which: Annotated[
         str,
         Field(
@@ -525,15 +522,6 @@ async def send_round(this_round: FilePickedUp, *, sender: str) -> Delivery:
         body=this_round.model_dump_json(),
         message_id=this_round.round_id,
     )
-
-
-# 读东西的两只手留着，不当素材裁：``look_for_something_to_read`` 的返回里是 ``file=<attachment_id>``，
-# 被 ``read_a_bit(which=...)`` 吃；``read_a_bit`` 指代不明时抛的那句话里也逐个印着候选的
-# ``file=``。
-READING_TOOLS = [
-    ToolSpec(look_for_something_to_read, trim="kept"),
-    ToolSpec(read_a_bit, trim="kept"),
-]
 
 
 # ---------------------------------------------------------------------------

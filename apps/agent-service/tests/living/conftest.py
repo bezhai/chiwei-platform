@@ -24,6 +24,7 @@ from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
 
 if TYPE_CHECKING:
     from app.agent.round import AssembledProfile
+    from app.agent.tooling import Tool
     from app.host import Turns
     from app.living.moment import LifeMoment
 
@@ -224,6 +225,15 @@ async def settled() -> None:
 
     for _ in range(50):
         await asyncio.sleep(0)
+
+
+def her_tool(name: str) -> Tool:
+    """她还没拆成插件的一只手：living 插件对象（:class:`app.plugins.living.NotSplitYet`）上的方法，
+    包成跟插件登记给模型的同一种 :class:`~app.agent.tooling.Tool`。"""
+    from app.agent.tooling import Tool
+    from app.plugins.living import NotSplitYet
+
+    return Tool(getattr(NotSplitYet(), name))
 
 
 def glance_text(shown) -> str:

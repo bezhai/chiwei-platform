@@ -86,9 +86,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from app.agent.contracts import ToolSpec
 from app.agent.round import current_round
-from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.data.persist import fetch_one, from_row, insert_append, select_latest
 from app.data.schema import table_name
@@ -240,9 +238,9 @@ async def _note_took_back(line: SpokenOutbound, *, at: datetime) -> None:
         )
 
 
-@tool
 @tool_error("这条撤回没送出去")
 async def take_back_message(
+    self,
     message_id: Annotated[
         str,
         Field(
@@ -348,5 +346,3 @@ async def take_back_message(
     )
 
 
-# 撤回这只手的回执是她自己动作的结果，跟她自己的话一样留着。
-TAKEBACK_TOOLS = [ToolSpec(take_back_message, trim="kept")]

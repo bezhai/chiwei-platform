@@ -20,9 +20,9 @@ old reading queue.
   the reading inbox                          -> read_a_round  one stretch of reading
 
   her round, which the manifest's ``resident`` profile places (app.living.moment):
-    her tools (``ctx.tool``)    each declared where it lives, with how trimming treats what it
-                                returns and whether it ends her round (the profile lists them in the
-                                order she is given them)
+    her tools (``ctx.tool``)    the methods of :class:`NotSplitYet`, each declared with how
+                                trimming treats what it returns and whether it ends her round (the
+                                profile lists them in the order she is given them)
     segments (``ctx.segment``)  her round's prompt (but who she is, which the persona plugin
                                 registers), and the output safety check's
     before the round            outgoing.before   send what she did and has not sent yet
@@ -37,6 +37,10 @@ old reading queue.
     after the commit            history, outgoing.after   (both Continue: logged, the round counts)
 
   POST /admin/reading/carry-over  carry_over_reading  the old reading queue -> the reading inbox
+
+**What has not been split out is one plugin object** (:class:`NotSplitYet`), so that a tool which
+needs another plugin's service can be handed it. Each plugin split out of it takes its tools along,
+and what is left at the end is the life plugin.
 
 **Her two wakes run her round from the assembled profile.** The plugin asks for ``resident`` in its
 setup (``ctx.profile``); the host fills it in once every plugin has registered, before any IO, and
@@ -91,10 +95,10 @@ switched over and the old queue is deleted.
 at import (:func:`app.living.received.open_inboxes`, which declares them through the function the
 host hands it).
 
-**``records`` and ``pictures`` are imported for their Data classes.** A Data class registers when
-its module is imported, and the schema step builds tables only for registered classes. Both are
-also reached through ``moment`` today; importing them here keeps their tables from depending on
-that chain. The other living Data classes come in with the modules below.
+**``records`` is imported for its Data classes.** A Data class registers when its module is
+imported, and the schema step builds tables only for registered classes. It is also reached through
+``moment`` today; importing it here keeps its tables from depending on that chain. The other living
+Data classes come in with the modules below.
 """
 from __future__ import annotations
 
@@ -104,15 +108,23 @@ from functools import partial
 
 from app.agent.contracts import Continue
 from app.agent.round import AssembledProfile
+from app.agent.tooling import Tool
 from app.domain.chat_dataflow import ChatResponseSegment
 from app.domain.safety import Recall
 from app.host import Batch, Coalesce, Context, Plugin, WakeSource
-from app.living import pictures, records  # noqa: F401
+from app.living import (
+    moment,
+    mouth,
+    phone,
+    pictures,
+    reading,
+    records,  # noqa: F401
+    takeback,
+)
 from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
 from app.living.landing import reconcile_what_she_said
 from app.living.moment import (
     LIFE_MOMENT_SEGMENTS,
-    LIFE_TOOLS,
     DueMoment,
     LifeMoment,
     commit_her_glances,
@@ -132,18 +144,14 @@ from app.living.moment import (
     send_her_doings,
     whereabouts_section,
 )
-from app.living.mouth import MOUTH_TOOLS
 from app.living.nudge import nudged_moment_due
 from app.living.output_safety import GUARD_OUTPUT_SEGMENT
 from app.living.participants import LIVING_PERSONAS, READING
 from app.living.persona_review import DueReview, persona_review_due, write_due_review
-from app.living.phone import PHONE_TOOLS
-from app.living.pictures import PICTURE_TOOLS
-from app.living.reading import READING_TOOLS, read_a_round
+from app.living.reading import read_a_round
 from app.living.received import open_inboxes
 from app.living.records import living_lane
 from app.living.services import Persona, PersonaText
-from app.living.takeback import TAKEBACK_TOOLS
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
 
 # How often her wakes tick (see "Clocks tick denser than the work they drive").
@@ -173,6 +181,36 @@ HOLD_LIMIT = timedelta(seconds=900)
 # and that part does not shrink with time; not sparser, so that what landed is matched before her
 # next regular round (ten minutes).
 LANDING_EVERY = timedelta(minutes=5)
+
+
+class NotSplitYet:
+    """What of her features has not been split out into a plugin of its own yet, as one plugin
+    object. Transitional: it is gone once the last of them is split out.
+
+    Her tools are its methods. Their bodies are still written in the modules they came from, as
+    functions whose first parameter is this object, so a tool that needs another plugin's service
+    reads it from ``self``, and setup hands the services in. Splitting a plugin out moves its tools
+    and the state they keep into that plugin's own object, and hands the service it provides to the
+    tools left here.
+    """
+
+    switch_to = moment.switch_to
+    move_to = moment.move_to
+    say = moment.say
+    act = moment.act
+    look_around = moment.look_around
+    stop_for_now = moment.stop_for_now
+    look_at_phone = phone.look_at_phone
+    look_through_your_phone = phone.look_through_your_phone
+    look_up_contact = phone.look_up_contact
+    send_message = mouth.send_message
+    take_back_message = takeback.take_back_message
+    look_for_something_to_read = reading.look_for_something_to_read
+    read_a_bit = reading.read_a_bit
+    draw_a_picture = pictures.draw_a_picture
+    find_a_picture_online = pictures.find_a_picture_online
+    look_through_your_pictures = pictures.look_through_your_pictures
+    look_at_a_picture = pictures.look_at_a_picture
 
 
 def regular(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
@@ -253,7 +291,7 @@ def setup(ctx: Context) -> None:
         ctx.wake(diary, pages, every=DAY_PAGE_EVERY)
         look_back = ctx.turns(persona_id, "persona-review", hold_limit=HOLD_LIMIT)
         ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
-    _her_round(ctx)
+    _her_round(ctx, NotSplitYet())
     ctx.clock(
         "landing",
         LANDING_EVERY.total_seconds(),
@@ -279,17 +317,9 @@ def setup(ctx: Context) -> None:
     ctx.inboxes_at_start(open_inboxes)
 
 
-def _her_round(ctx: Context) -> None:
+def _her_round(ctx: Context, living: NotSplitYet) -> None:
     """Everything her round is made of; the manifest's ``resident`` profile places it."""
-    for spec in (
-        *LIFE_TOOLS,
-        *PHONE_TOOLS,
-        *MOUTH_TOOLS,
-        *TAKEBACK_TOOLS,
-        *READING_TOOLS,
-        *PICTURE_TOOLS,
-    ):
-        ctx.tool(spec.tool, trim=spec.trim, ends_round=spec.ends_round)
+    _her_tools(ctx, living)
     for segment in LIFE_MOMENT_SEGMENTS:
         ctx.segment(segment)
     ctx.segment(GUARD_OUTPUT_SEGMENT)
@@ -314,6 +344,63 @@ def _her_round(ctx: Context) -> None:
     ctx.commit("household.read", mark_received_read)
     ctx.after_commit("history", remember_this_round, on_failure=Continue())
     ctx.after_commit("outgoing.after", send_her_doings, on_failure=Continue())
+
+
+def _her_tools(ctx: Context, living: NotSplitYet) -> None:
+    """Her tools that have not been split out, each with how trimming treats what it returns. The
+    order she is given them in is the ``resident`` profile's (part of the prompt cache's prefix:
+    changing it changes the request).
+
+    分不清就放"留着"那一档：留错了只是多占 token。
+    """
+    # 手上的事、当面说和做、看一眼周围、到此为止（:mod:`app.living.moment`）：
+    #
+    #   * ``look_around``  素材：world 回答的那一刻这里什么样，过了一阵早就变了，想知道就再看一眼。
+    #   * 其余几只是**她自己动作的回执**（``switch_to`` / ``move_to`` / ``say`` / ``act`` /
+    #     ``stop_for_now``），留着：这几条是"这件事到底做成了没有"的唯一记录，裁掉她就会照着一个
+    #     不知道有没有成功的动作再来一遍。``stop_for_now`` 那句确认是她上一轮怎么收尾的唯一痕迹（它
+    #     结束这一轮，后面没有她的话跟着），而且整条就几个字，换成短语省不下任何东西。它是唯一一只
+    #     结束这一轮的手（``ends_round``）。
+    ctx.tool(Tool(living.switch_to), trim="kept")
+    ctx.tool(Tool(living.move_to), trim="kept")
+    ctx.tool(Tool(living.say), trim="kept")
+    ctx.tool(Tool(living.act), trim="kept")
+    ctx.tool(Tool(living.look_around), trim="material")
+    ctx.tool(Tool(living.stop_for_now), trim="kept", ends_round=True)
+    # 手机的三只手都留着，不当素材裁（:mod:`app.living.phone`）：
+    #
+    #   * ``look_up_contact`` / ``look_through_your_phone``  ``channel_id=<id>``，被 ``look_at_phone`` /
+    #     ``send_message`` 吃（翻页那只手的最后一串还是往下翻的游标）。安静下来的会话不在手机通知上，
+    #     这两只手是找回它的仅有的两条路。
+    #   * ``look_at_phone``  **唯一一只返回是别人内容、却留着的手。** 它那一页上有两样凭据：每条她自己
+    #     发的消息带的 ``take_back_id``，和头上那串 ``before=``。前者在快照的"你刚做过、说过"那段有
+    #     副本，但那段只有最近 12 条，滚出去的旧消息就没有第二份了；后者是往前翻**唯一**的入口，从头
+    #     到尾只出现在这一次返回里，换掉正文她就再也翻不回这条会话更早的地方。只保留句柄、把正文
+    #     换掉更精确，但那要在裁剪这一层解析手机这边渲染出来的标签 —— 渲染改一个字，句柄就静默地留
+    #     不住了，而症状是几小时后她拿着一个不存在的编号去撤消息。别人的正文因此多留 3 小时：一页十几
+    #     条文本，跟这个风险不是一个量级（图片块**不**跟着多留，它走
+    #     ``HistoryTexts.picture_trimmed``（:mod:`app.manifests.history`） 那条独立的线）。
+    ctx.tool(Tool(living.look_at_phone), trim="kept")
+    ctx.tool(Tool(living.look_through_your_phone), trim="kept")
+    ctx.tool(Tool(living.look_up_contact), trim="kept")
+    # 发消息这只手的回执是"这件事到底做成了没有"的唯一记录（发出去了、已经说过了、交出去但没等到
+    # 确认），裁掉她就会照着一个不知道有没有成功的动作再来一遍，所以留着（:mod:`app.living.mouth`）。
+    ctx.tool(Tool(living.send_message), trim="kept")
+    # 撤回这只手的回执是她自己动作的结果，跟她自己的话一样留着（:mod:`app.living.takeback`）。
+    ctx.tool(Tool(living.take_back_message), trim="kept")
+    # 读东西的两只手留着，不当素材裁：``look_for_something_to_read`` 的返回里是 ``file=<attachment_id>``，
+    # 被 ``read_a_bit(which=...)`` 吃；``read_a_bit`` 指代不明时抛的那句话里也逐个印着候选的
+    # ``file=``（:mod:`app.living.reading`）。
+    ctx.tool(Tool(living.look_for_something_to_read), trim="kept")
+    ctx.tool(Tool(living.read_a_bit), trim="kept")
+    # 她的图的四只手，返回里都留着 ``pic=<32 位十六进制>``：它们是她后面还要原样抄回去的凭据
+    # （``send_message(pictures=[...])`` / ``look_at_a_picture(which=...)`` /
+    # ``look_through_your_pictures(before=...)`` 吃；翻页那只手的最后一串还是往前翻的游标），所以
+    # 跟她自己的话一样留着，不当素材裁（:mod:`app.living.pictures`）。
+    ctx.tool(Tool(living.draw_a_picture), trim="kept")
+    ctx.tool(Tool(living.find_a_picture_online), trim="kept")
+    ctx.tool(Tool(living.look_through_your_pictures), trim="kept")
+    ctx.tool(Tool(living.look_at_a_picture), trim="kept")
 
 
 PLUGIN = Plugin(name="living", setup=setup, requires=("persona", "loose_ends"))

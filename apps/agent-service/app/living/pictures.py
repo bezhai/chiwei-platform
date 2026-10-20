@@ -37,7 +37,7 @@ runtime 不给任何 Data 自动加 lane，不显式带上就跟 prod 的行混�
   * :func:`look_at_a_picture`          拿出其中一张看
 
 **"看"为什么要拆成两只手。** 上一次的工具结果在她的上下文里只留 4 小时
-（:data:`PICTURE_TOOLS` 声明成留着的那一档，裁剪在 :mod:`app.agent.continuity`）；状态里
+（登记时声明成留着的那一档，裁剪在 :mod:`app.agent.continuity`）；状态里
 「你刚做过、说过」那一段只在上下文接不住她最近说过的话时才给，而且只有最近有限几条
 （:data:`app.living.snapshot.OWN_RECENT_LIMIT`）。所以句柄如果只出现在画图那一刻的返回
 值里，过了那几个小时它就永远消失了 —— 库里那一行还在，而她两手空空。先列出
@@ -69,10 +69,8 @@ from typing import Annotated, Any
 from pydantic import Field, field_validator
 
 # module-level 引入，测试从这里换替身（真跑起来要调生图模型、搜图服务和对象存储）。
-from app.agent.contracts import ToolSpec
 from app.agent.image_gen import generate_image
 from app.agent.round import current_round
-from app.agent.tooling import tool
 from app.agent.tools._common import tool_error, upload_image
 from app.capabilities.image_search import image_search
 from app.data.persist import fetch_all, from_row, insert_idempotent, select_latest
@@ -379,9 +377,9 @@ async def _draw(prompt: str) -> str:
     raise RuntimeError(f"画图这条路这会儿走不通：{last}")
 
 
-@tool
 @tool_error("这张图没画成")
 async def draw_a_picture(
+    self,
     what: Annotated[
         str,
         Field(description="你想画的这张图是什么样，画面里有什么、什么氛围，写具体点"),
@@ -438,9 +436,9 @@ async def draw_a_picture(
     )
 
 
-@tool
 @tool_error("这一趟没找着图")
 async def find_a_picture_online(
+    self,
     what: Annotated[
         str,
         Field(description="你想找什么样的图，一句大白话，你心里怎么想的就怎么写"),
@@ -525,9 +523,9 @@ def _one_picture(p: Picture, *, now: datetime) -> str:
     return f"- 「{esc(p.what)}」 {when} {_handle_of(p)}"
 
 
-@tool
 @tool_error("翻你手上的图失败")
 async def look_through_your_pictures(
+    self,
     before: Annotated[
         str | None,
         Field(
@@ -587,9 +585,9 @@ async def look_through_your_pictures(
     return "\n".join(lines)
 
 
-@tool
 @tool_error("拿出这张图失败")
 async def look_at_a_picture(
+    self,
     which: Annotated[
         str,
         Field(
@@ -664,13 +662,3 @@ async def look_at_a_picture(
     return _shown(f"{when} 的「{esc(picked.what)}」 {_handle_of(picked)}", url)
 
 
-# 她的图的四只手，返回里都留着 ``pic=<32 位十六进制>``：它们是她后面还要原样抄回去的凭据
-# （``send_message(pictures=[...])`` / ``look_at_a_picture(which=...)`` /
-# ``look_through_your_pictures(before=...)`` 吃；翻页那只手的最后一串还是往前翻的游标），所以
-# 跟她自己的话一样留着，不当素材裁。
-PICTURE_TOOLS = [
-    ToolSpec(draw_a_picture, trim="kept"),
-    ToolSpec(find_a_picture_online, trim="kept"),
-    ToolSpec(look_through_your_pictures, trim="kept"),
-    ToolSpec(look_at_a_picture, trim="kept"),
-]

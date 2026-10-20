@@ -18,7 +18,6 @@ from app.living import moment as moment_mod
 from app.living import outgoing as outgoing_mod
 from app.living.happening import record_happening
 from app.living.loose_ends.mind import OnHerMind
-from app.living.moment import act, move_to, say, switch_to
 from app.living.outgoing import OutgoingResult, OutgoingUpTo, send_what_she_did
 from app.living.records import (
     KIND_ACT,
@@ -32,6 +31,7 @@ from tests.living.conftest import (
     clock_at,
     her_queue,
     her_round_runs,
+    her_tool,
     model_facing_text,
     nudged_round,
     settled,
@@ -47,6 +47,11 @@ from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture
     delayed_broker,
     messaging_db,
 )
+
+switch_to = her_tool("switch_to")
+move_to = her_tool("move_to")
+say = her_tool("say")
+act = her_tool("act")
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))

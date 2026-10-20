@@ -30,12 +30,7 @@ import pytest
 from sqlalchemy import text
 
 from app.data.tx import current_session, tx
-from app.living.phone import (
-    look_at_phone,
-    look_through_your_phone,
-    look_up_contact,
-)
-from tests.living.conftest import glance_text
+from tests.living.conftest import glance_text, her_tool
 from tests.living.test_phone import (
     _DM,
     _GROUP,
@@ -53,6 +48,10 @@ from tests.living.test_pictures_tools import (  # noqa: F401 — 形参名就是
     her_hands,
     pictures_db,
 )
+
+look_at_phone = her_tool("look_at_phone")
+look_through_your_phone = her_tool("look_through_your_phone")
+look_up_contact = her_tool("look_up_contact")
 
 # 第三方写进一个没转义的字段之后，她眼前就会多出的那一段。**两部分各有各的用处**：
 #
@@ -289,7 +288,7 @@ async def test_a_file_name_cannot_carry_markup_into_her_reading_list(
     reading_db, in_a_moment
 ):
     """**这是最短的一条路**：不用改昵称、不用进群，给文件起个名字发过来就行。"""
-    from app.living.reading import look_for_something_to_read
+    look_for_something_to_read = her_tool("look_for_something_to_read")
 
     await _seed_world()
     await _incoming(
@@ -307,7 +306,7 @@ async def test_a_sender_name_and_a_group_name_stay_out_of_her_reading_list(
     reading_db, in_a_moment, pinned
 ):
     """清单上还有两样外面来的：谁发的（昵称）、发在哪（会话名）。"""
-    from app.living.reading import look_for_something_to_read
+    look_for_something_to_read = her_tool("look_for_something_to_read")
 
     await _seed_world()
     async with tx():
@@ -340,7 +339,7 @@ async def test_the_reask_that_spreads_same_named_files_escapes_them_too(
     reading_db, in_a_moment
 ):
     """同名多份时摊开候选那一段同样是她眼前的文本。"""
-    from app.living.reading import read_a_bit
+    read_a_bit = her_tool("read_a_bit")
 
     await _seed_world()
     for i in range(2):
@@ -422,11 +421,10 @@ async def test_an_image_title_from_the_internet_cannot_carry_markup(
     pictures_db, in_a_moment, her_hands  # noqa: F811 — 形参名就是 fixture 名
 ):
     from app.capabilities.image_search import ImageHit
-    from app.living.pictures import (
-        find_a_picture_online,
-        look_at_a_picture,
-        look_through_your_pictures,
-    )
+
+    find_a_picture_online = her_tool("find_a_picture_online")
+    look_at_a_picture = her_tool("look_at_a_picture")
+    look_through_your_pictures = her_tool("look_through_your_pictures")
 
     her_hands.hits = [
         ImageHit(
