@@ -25,9 +25,9 @@ old reading queue.
 rhythm and her early wakes share her queue, a turn at a time, first come first served. Each of the
 two drops a tick while it already has one queued or running (``DROP_WHILE_ACTIVE``): one tick
 waiting behind a stuck round is enough, since it decides on what is true when it gets its turn.
-A turn holds her queue for at most :data:`app.living.serial.HELD_SECONDS`; a turn that never ends
-is cut off there and handled as a crash. Each tick reads the database and compares; most run
-nothing. Her diary and her weekly look back do not take turns on this queue.
+A turn holds her queue for at most :data:`HOLD_LIMIT`; a turn that never ends is cut off there
+and handled as a crash. Each tick reads the database and compares; most run nothing. Her diary and
+her weekly look back do not take turns on this queue.
 
 **Her diary and her weekly look back have a queue each** ("day-page", "persona-review"), with the
 same hold limit, so writing yesterday's page or rewriting who she is never keeps her from living
@@ -94,7 +94,6 @@ from app.living.persona_review import DueReview, persona_review_due, write_due_r
 from app.living.reading import read_a_round
 from app.living.received import open_inboxes
 from app.living.records import living_lane
-from app.living.serial import HELD_SECONDS
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
 
 # How often her wakes tick (see "Clocks tick denser than the work they drive").
@@ -105,8 +104,15 @@ NUDGE_EVERY = timedelta(seconds=60)
 DAY_PAGE_EVERY = timedelta(minutes=5)
 PERSONA_REVIEW_EVERY = timedelta(minutes=5)
 
-# How long a turn may hold one of her queues (:mod:`app.host.turns`).
-HOLD_LIMIT = timedelta(seconds=HELD_SECONDS)
+# How long a turn may hold one of her queues before it is cut off and handled as a crash
+# (:mod:`app.host.turns`). Not a budget for a round: it turns a turn that never ends into one that
+# fails. Calibrated on prod, not picked: on 2026-09-16, 1413 prod rounds in Langfuse took 8.5 s at
+# p50, 76.4 s at p95, 121.8 s at p99 and 188.9 s at the most (a world round); 900 s is 4.8 times the
+# longest. That distribution counts only rounds that finished (the stuck ones left no trace), so it
+# says how slow a normal round can be, which is what the limit has to stay clear of. If the log shows
+# a turn cut off that was only slow, the distribution has changed: measure it again rather than
+# raising the limit.
+HOLD_LIMIT = timedelta(seconds=900)
 
 # Five minutes between two matchings of what she said with what landed. Nobody waits for it: her
 # rounds do not read that record, taking a message back looks the message up by its outbound id,

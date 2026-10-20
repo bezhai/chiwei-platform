@@ -797,7 +797,7 @@ async def test_what_she_did_in_a_round_cut_off_for_taking_too_long_is_told_next_
     started, stub_moment  # noqa: F811 — 形参名就是 fixture 名
 ):
     """一轮占着她的时间到顶被掐断（她轮次队列的占用上限，线上是
-    :data:`app.living.serial.HELD_SECONDS`），跟失败一样：做了的事下一轮开始前发出去。"""
+    :data:`app.plugins.living.HOLD_LIMIT`），跟失败一样：做了的事下一轮开始前发出去。"""
     post = started
     runner = stub_moment(("act", {"what": "把锅端上桌"}))
     _fails_after_its_hands(runner, hangs=True)

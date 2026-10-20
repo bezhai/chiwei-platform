@@ -35,11 +35,24 @@ not across processes. Two processes of a rolling deploy can each run a turn of t
 at the same time; what the database deduplicates (a round landing once, a send claimed once) does
 not undo a model call or a send that already happened. Today's risk, unchanged by this queue.
 
+Not a Postgres advisory lock, which her rounds used before: a session lock held for a whole turn
+(model calls of tens of seconds included) takes a business connection for the holder and one for
+each waiter, so a backlog drains the pool and the holder itself fails for want of a connection; and
+a session lock is released silently when its connection drops during a model call while the turn
+goes on, so a second turn enters and both run, unseen. An asyncio lock is let go only when the turn
+holding it ends. A turn must not take a turn on its own queue: the lock is not reentrant, and it
+would wait for itself until the hold limit.
+
 **hold_limit.** A turn that holds the queue longer than this is cut off with ``TimeoutError`` in
 the holder, and the queue moves on. It is not a budget for a round: it turns "never ends" into a
 crash, which every round already recovers from (2026-09-16 on prod: one call that hung, with no
 answer and no timeout, stopped two of the sisters for fifteen hours, silently). The limit covers
-``due`` and ``run`` and starts when the turn comes, not while the signal waits.
+``due`` and ``run`` and starts when the turn comes, not while the signal waits. A turn cut off is
+not left clean: a send whose outcome is unknown is settled by the reconciliation that already
+exists. Cancellation is cooperative, so a turn that spins without awaiting, or that swallows the
+cancellation and returns, is not cut off (the queue is let go when it returns). The limit does not
+replace the timeouts below it (the model call, HTTP, the database); it keeps the queue from being
+held forever whichever of them is missing.
 """
 
 from __future__ import annotations

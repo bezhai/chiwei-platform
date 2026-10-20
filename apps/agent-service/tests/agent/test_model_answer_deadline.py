@@ -310,7 +310,7 @@ async def test_an_outer_deadline_that_comes_first_stays_the_outer_ones_timeout(
 ):
     """moment 的占用、读书的 ``wait_for`` 这类外层期限先到：报出来的是外层自己的 TimeoutError。
 
-    ``app.living.serial.hold`` 靠"是不是自己这层到点"决定记不记"占住超过 900 秒"；这次调用的
+    轮次队列的占用上限（``app.host.turns``）靠"是不是自己这层到点"决定记不记"占住超过上限"；这次调用的
     期限要是冒领了外层的取消，或者吞掉了它，那条日志就错了。取消计数也要还原，外层之后的
     ``asyncio.timeout`` 才判得对。
     """

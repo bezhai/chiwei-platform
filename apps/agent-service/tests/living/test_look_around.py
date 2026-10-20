@@ -333,7 +333,7 @@ async def test_her_round_cut_off_at_its_cap_while_she_waits_is_cut_and_let_go(
     moment_db, stub_moment, world  # noqa: F811
 ):
     """等回答的时候她这一轮撞上了她轮次队列的占用上限（线上是
-    :data:`app.living.serial.HELD_SECONDS`）：这一轮照常被掐断、队列放开，下一拍重来。环顾四周要是
+    :data:`app.plugins.living.HOLD_LIMIT`）：这一轮照常被掐断、队列放开，下一拍重来。环顾四周要是
     把这次掐断吞成"没人回答"，这一轮就会接着往下跑，上限等于没有。"""
     from app.host import Signal
     from app.plugins.living import regular

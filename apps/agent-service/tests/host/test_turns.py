@@ -14,9 +14,9 @@ What these tests pin (agent-service plugin host, phase 2 design, section 3.2):
   :class:`JoinedTurnFailed`; a leader cancelled before its batch is closed fails its joiners
   instead of leaving them waiting.
 
-The sixteen scenarios of ``tests/living/test_serial.py`` (the in-process lock her rounds took
-before Turns) are carried over one for one: the four of ``at_most_one`` are the
-``DROP_WHILE_ACTIVE`` tests of the first section, the twelve of ``hold`` the last section.
+The sixteen scenarios of the in-process lock her rounds, her diary and her weekly look back took
+before Turns are carried over one for one: the four of its gate per clock are the
+``DROP_WHILE_ACTIVE`` tests of the first section, the twelve of the lock itself the last section.
 """
 
 from __future__ import annotations
@@ -591,7 +591,7 @@ async def test_a_leader_cancelled_in_due_before_it_closed_the_batch_fails_its_jo
 
 
 # ---------------------------------------------------------------------------
-# what serial.hold guaranteed (tests/living/test_serial.py, carried over)
+# what the in-process lock before Turns guaranteed, carried over
 # ---------------------------------------------------------------------------
 
 

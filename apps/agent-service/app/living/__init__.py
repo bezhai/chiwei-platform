@@ -3,12 +3,11 @@
 world 不在这个包里。world 与 life 是两个独立的引擎，互不 import、不共读共写存储，
 唯一的连接是通信机制（:mod:`app.messaging`）。
 
-骨头层——持久的事和一条并发纪律，不含任何循环 / 轮次 / prompt：
+骨头层——持久的事，不含任何循环 / 轮次 / prompt：
 
   * :mod:`app.living.records`     她做过的事、她在哪，两类持久数据的形态（都只是她自己的）
   * :mod:`app.living.persona`     这个家里的人：谁住在这儿、「她是谁」那份正文的版本链
     （她自己每周改的那条），以及喂进 prompt 的那两个变量——三条注入路一处组装
-  * :mod:`app.living.serial`      进程内排他占用 + 提交序 append
   * :mod:`app.living.happening`   她自己的经历：对谁、通过什么渠道、做了什么说了什么
   * :mod:`app.living.whereabouts` 她此刻在做什么、在哪
 
@@ -52,9 +51,9 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * **每个人只读她自己的记录。** 她做过的事、她在哪，只给她自己读；别人做了什么由 world
     判断谁会察觉后告诉她，或者姐妹直接对她说，都进她的收件箱。life 里没有一条按位置把别人
     的经历分给她的路（``tests/living/test_only_her_own_records.py`` 守着）。
-  * **占用是进程内的**：她的轮次队列（:mod:`app.plugins.living`）和日记、回看的占用
-    （:mod:`app.living.serial`）都只在一个进程里互斥，前提是 agent-service 单副本；滚动发布时
-    新旧两个进程会重叠一段，这段时间里同一格可能被跑两次。
+  * **占用是进程内的**：她的三条队列（轮次、日记、回看，:mod:`app.plugins.living` 向宿主登记的
+    :class:`app.host.Turns`）都只在一个进程里互斥，前提是 agent-service 单副本；滚动发布时新旧
+    两个进程会重叠一段，这段时间里同一格可能被跑两次。
   * **游标按提交序。** 她的经历按提交序 ``seq`` 往外讲（:mod:`app.living.outgoing`）；按发生
     时刻开窗会漏掉晚提交的记录。
 

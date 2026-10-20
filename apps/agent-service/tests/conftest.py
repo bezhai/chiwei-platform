@@ -137,7 +137,7 @@ def real_pg_required() -> None:
             "它验的是只在真库上成立的契约（提交序、事务边界、收件去重、到期消费），"
             "静默 skip 会让整个套件绿着过去 —— 等于没有门禁。\n"
             "起 docker 后重跑；确实要在无 docker 的机器上只跑纯函数部分，"
-            "显式点名：pytest tests/living/test_serial.py tests/living/test_only_her_own_records.py",
+            "显式点名：pytest tests/host/test_turns.py tests/living/test_only_her_own_records.py",
             pytrace=False,
         )
 
