@@ -82,7 +82,7 @@ async def reading_inbox(broker, messaging_db, living_db, app_host, monkeypatch):
     async def find_persona(persona_id: str):
         return SimpleNamespace(persona_id=persona_id, display_name=RESIDENT_NAMES[persona_id])
 
-    async def on_her_phone(*, persona_id: str, now: dt.datetime) -> list[SentFile]:
+    async def on_her_phone(*, persona_id: str, now: dt.datetime, phone) -> list[SentFile]:
         return [_BOOK]
 
     await migrate(FileRead, living_db)

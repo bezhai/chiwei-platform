@@ -2,9 +2,9 @@
 
 **没有"书"这个注册物。** 她能读的严格等于她手机上收到过的文件（``common_message``
 里一条普通的 file 项，和图片走同一条媒体轨）。所以"读什么"这个问题的答案只能从她
-的会话里来，而且**就是** :func:`app.living.phone.reachable_conversations` 那一次调用
+的会话里来，而且**就是** :meth:`app.living.services.Phone.reachable_conversations` 那一次调用
 的结果（不是"同一条口径的另一份实现"）：bot 还在、而且这条会话在她视野里
-（:mod:`app.living.whitelist`）—— 她读得到的严格等于她看得见的。
+（:mod:`app.living.phone.whitelist`）—— 她读得到的严格等于她看得见的。
 
 **认不准是哪个文件就回问，不替她选。** 同一本书被两个人各发过一次是常事，而这两份
 是**两个不同的东西**：附件实例身份由「收到它那一次」派生（``derive_attachment_id``
@@ -77,9 +77,8 @@ from app.domain.reading_source import derive_attachment_id, derive_tos_file
 from app.infra import cst_time
 from app.infra.cst_time import CST, to_cst_dated
 from app.living.common import esc, require_aware
-from app.living.phone import Sender, _who_tag, reachable_conversations
 from app.living.reading_agent import run_reading_round
-from app.living.services import READING, Persona
+from app.living.services import READING, Persona, Phone, Sender
 from app.messaging.message import Delivery, Kind, Message, SendFailed
 
 # module-level 引入，测试从这里换替身（不碰 broker）
@@ -198,16 +197,16 @@ class SentFile:
     is_bot: bool = False
 
 
-def _file_sender(file: SentFile) -> str:
+def _file_sender(file: SentFile, *, phone: Phone) -> str:
     if file.is_bot:
-        return _who_tag(Sender(file.who, is_owner=False, is_bot=True))
+        return phone.who_tag(Sender(file.who, is_owner=False, is_bot=True))
     return esc(file.who)
 
 
 def _where_of(scope: str, title: str, who: str) -> str:
     """这个文件发在哪儿 —— 私聊多半没有会话名，那就用发的人当它的名字。
 
-    跟 :func:`app.living.phone.look_up_contact` 同一条处理：在她眼里那条私聊本来
+    跟 :meth:`app.living.phone.handset.Handset.look_up_contact` 同一条处理：在她眼里那条私聊本来
     就叫那个人。
 
     群名和显示名都是别人写的，所以进她眼前那段文本之前过 :func:`esc` —— 这一段跟
@@ -218,10 +217,10 @@ def _where_of(scope: str, title: str, who: str) -> str:
     return f"群「{label}」" if scope != "direct" else f"私聊「{label}」"
 
 
-async def files_sent_to(*, persona_id: str, now: datetime) -> list[SentFile]:
+async def files_sent_to(*, persona_id: str, now: datetime, phone: Phone) -> list[SentFile]:
     """有人发到她手机上的全部文件，最近的在前。查不到就是查不到，不猜、不兜底。
 
-    会话集合**就是** :func:`app.living.phone.reachable_conversations` 那一份（不是
+    会话集合**就是** :meth:`app.living.services.Phone.reachable_conversations` 那一份（不是
     "同一条口径的另一份实现"，是同一个调用的结果传进查询）：**她读得到的严格等于她
     看得见的** —— 白名单收窄之后一样，名单外那条会话里的文件连着文件名、谁发的、发在
     哪个群，一个字都不该露出来。``now`` 是调用方的时间锚，名单按它算。
@@ -235,7 +234,7 @@ async def files_sent_to(*, persona_id: str, now: datetime) -> list[SentFile]:
     rows = await find_file_items_in_conversations(
         [
             {"channel_id": c.channel_id, "scope": c.scope, "title": c.title}
-            for c in await reachable_conversations(persona_id=persona_id, now=now)
+            for c in await phone.reachable_conversations(persona_id=persona_id, now=now)
         ]
     )
     return [
@@ -315,7 +314,7 @@ _NOT_STARTED = "你没拿起来，这一程没开始读。可以再拿起来一�
 _NO_LONGER_GETTABLE = "已经撤回了，你现在拿不到它了"
 
 
-def _one_file(f: SentFile, mark: FileRead | None, *, now: datetime) -> str:
+def _one_file(f: SentFile, mark: FileRead | None, *, now: datetime, phone: Phone) -> str:
     """一个文件在她眼里的样子：叫什么、谁什么时候发在哪儿、她读到哪了、记得什么。
 
     时刻走 :func:`app.infra.cst_time.to_cst_dated` 而不是裸时分：几个月前收到的
@@ -334,7 +333,7 @@ def _one_file(f: SentFile, mark: FileRead | None, *, now: datetime) -> str:
     # 名字、谁发的、发在哪三样都是外面来的（``_name_of`` / ``_where_of`` 自己过了
     # :func:`esc`，显示名在这儿过）。**印象不过** —— 那是她读完之后自己写下的一段话，
     # 不是谁能决定字节的通道，判据写在 :func:`esc` 上。
-    head = f"- {_name_of(f)} {_file_sender(f)} {when} 发在{f.where} {tail}"
+    head = f"- {_name_of(f)} {_file_sender(f, phone=phone)} {when} 发在{f.where} {tail}"
     if mark is None:
         return head + "\n  （还没翻开过）"
     read = "你读完了" if mark.finished else f"你已经读了 {mark.pages_read} 页"
@@ -358,7 +357,7 @@ async def look_for_something_to_read(self) -> str:
     """
     her_round = current_round()
     lane, now, persona_id = her_round.lane, her_round.now, her_round.participant
-    files = await files_sent_to(persona_id=persona_id, now=now)
+    files = await files_sent_to(persona_id=persona_id, now=now, phone=self.phone)
     if not files:
         return "没有谁给你发过什么可以读的东西。"
 
@@ -379,7 +378,7 @@ async def look_for_something_to_read(self) -> str:
 
     lines = ["有人发给你的（想读就拿起来读一程）："]
     lines += [
-        _one_file(f, marks.get(f.attachment_id), now=now) for f in shown
+        _one_file(f, marks.get(f.attachment_id), now=now, phone=self.phone) for f in shown
     ]
     if skipped:
         lines.append(
@@ -428,7 +427,7 @@ async def read_a_bit(
     if not wanted:
         raise ValueError("你没说要读哪个：写一个名字，或者原样抄一串 file=… 进来。")
 
-    files = await files_sent_to(persona_id=persona_id, now=now)
+    files = await files_sent_to(persona_id=persona_id, now=now, phone=self.phone)
     # 一条判据两条腿：报的是那串身份（照抄回来的），或者是名字的一部分。**不排序、
     # 不取第一个** —— 命中几个就是几个，认不准由她自己认。
     #
@@ -466,7 +465,7 @@ async def read_a_bit(
         # 跟 :func:`_one_file` 同一批外面来的字串，同样过 :func:`esc`：这段回问也是
         # 她眼前那段文本的一部分，摊开候选跟摆清单没有区别。
         spread = "\n".join(
-            f"- {_name_of(f)} {_file_sender(f)} "
+            f"- {_name_of(f)} {_file_sender(f, phone=self.phone)} "
             f"{to_cst_dated(f.at.isoformat(), now=now, seconds=False)} "
             f"发在{f.where} {_HANDLE_PREFIX}{f.attachment_id}"
             for f in hit

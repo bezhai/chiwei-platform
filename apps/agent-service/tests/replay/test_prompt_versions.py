@@ -154,10 +154,10 @@ async def test_her_prompts_are_fixed_after_her_input_and_before_her_first_model_
 ):
     """The fetch sits where it always was: everything the round reads to put her input together
     comes first (her phone's notices last), the model after it."""
-    import app.living.moment as moment_mod
+    import app.living.phone.handset as handset_mod
 
     order: list[str] = []
-    real_envelopes = moment_mod.envelopes_for
+    real_envelopes = handset_mod.envelopes_for
 
     async def envelopes_for(**kw):
         order.append("her phone's notices")
@@ -169,7 +169,7 @@ async def test_her_prompts_are_fixed_after_her_input_and_before_her_first_model_
         order.append(f"fetch {prompt_id}")
         return real_get_prompt(prompt_id, **kw)
 
-    monkeypatch.setattr(moment_mod, "envelopes_for", envelopes_for)
+    monkeypatch.setattr(handset_mod, "envelopes_for", envelopes_for)
     monkeypatch.setattr(releasing, "get_prompt", get_prompt)
     await seeds.seed_household()
     await seeds.seed_akaos_phone()

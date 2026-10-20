@@ -28,12 +28,13 @@ old reading queue.
     before the round            outgoing.before   send what she did and has not sent yet
     the round before            life.moments      when her last round landed, and whether its
                                                   history was stored
-    state sections              day_page.last_written, phone.unread
-    input sections              life.now, household.received, phone.arrived
+    state sections              day_page.last_written
+    input sections              life.now, household.received
                                 (the loose_ends plugin registers keep_in_mind and the state and
                                 input sections about what is on her mind, the her_records plugin
-                                the ones about what she just did and where she is)
-    commit (one transaction)    life.moment, phone.glances, household.read
+                                the ones about what she just did and where she is, the phone plugin
+                                her three phone tools and the sections about her phone)
+    commit (one transaction)    life.moment, household.read   (and the phone plugin's phone.glances)
     after the commit            history, outgoing.after   (both Continue: logged, the round counts)
 
   POST /admin/reading/carry-over  carry_over_reading  the old reading queue -> the reading inbox
@@ -115,7 +116,6 @@ from app.host import Batch, Coalesce, Context, Plugin, WakeSource
 from app.living import (
     moment,
     mouth,
-    phone,
     reading,
     takeback,
 )
@@ -126,14 +126,11 @@ from app.living.moment import (
     LIFE_MOMENT_SEGMENTS,
     DueMoment,
     LifeMoment,
-    commit_her_glances,
     day_page_section,
     land_the_moment,
     lost_the_last_round,
     mark_received_read,
     now_section,
-    phone_arrived_section,
-    phone_unread_section,
     previous_moment_at,
     received_section,
     regular_moment_due,
@@ -151,6 +148,7 @@ from app.living.services import (
     HerRecords,
     Persona,
     PersonaText,
+    Phone,
     Pictures,
     WhoLivesHere,
 )
@@ -202,20 +200,23 @@ class NotSplitYet:
     act = moment.act
     look_around = moment.look_around
     stop_for_now = moment.stop_for_now
-    look_at_phone = phone.look_at_phone
-    look_through_your_phone = phone.look_through_your_phone
-    look_up_contact = phone.look_up_contact
     send_message = mouth.send_message
     take_back_message = takeback.take_back_message
     look_for_something_to_read = reading.look_for_something_to_read
     read_a_bit = reading.read_a_bit
 
     def __init__(
-        self, *, residents: WhoLivesHere, her_records: HerRecords, pictures: Pictures
+        self,
+        *,
+        residents: WhoLivesHere,
+        her_records: HerRecords,
+        pictures: Pictures,
+        phone: Phone,
     ) -> None:
         self.residents = residents
         self.her_records = her_records
         self.pictures = pictures
+        self.phone = phone
 
 
 def regular(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
@@ -235,15 +236,16 @@ def regular(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
     )
 
 
-def nudge(resident: AssembledProfile) -> WakeSource[DueMoment, LifeMoment]:
-    """Her early wakes: a round when someone calls her on her phone or a message for her wants to
-    wake her (:func:`app.living.nudge.nudged_moment_due`), run from ``resident`` on its lane."""
+def nudge(resident: AssembledProfile, phone: Phone) -> WakeSource[DueMoment, LifeMoment]:
+    """Her early wakes: a round when someone calls her on her phone (the ``phone`` service) or a
+    message for her wants to wake her (:func:`app.living.nudge.nudged_moment_due`), run from
+    ``resident`` on its lane."""
 
     async def due(
         persona_id: str, batch: Batch, clock: Callable[[], datetime]
     ) -> DueMoment | None:
         return await nudged_moment_due(
-            lane=resident.lane, persona_id=persona_id, clock=clock
+            lane=resident.lane, persona_id=persona_id, clock=clock, phone=phone
         )
 
     return WakeSource(
@@ -295,7 +297,8 @@ def setup(ctx: Context) -> None:
     persona = ctx.service("persona")
     residents = ctx.service("residents")
     resident = ctx.profile("resident")
-    regular_rounds, early_wakes = regular(resident), nudge(resident)
+    phone = ctx.service("phone")
+    regular_rounds, early_wakes = regular(resident), nudge(resident, phone)
     her_records = ctx.service("her_records")
     pages, reviews = day_page(lane, persona, her_records), persona_review(lane, persona)
     for persona_id in ctx.participants(profile="resident"):
@@ -307,7 +310,10 @@ def setup(ctx: Context) -> None:
         look_back = ctx.turns(persona_id, "persona-review", hold_limit=HOLD_LIMIT)
         ctx.wake(look_back, reviews, every=PERSONA_REVIEW_EVERY)
     living = NotSplitYet(
-        residents=residents, her_records=her_records, pictures=ctx.service("pictures")
+        residents=residents,
+        her_records=her_records,
+        pictures=ctx.service("pictures"),
+        phone=phone,
     )
     _her_round(ctx, living)
     ctx.clock(
@@ -341,8 +347,6 @@ def _her_round(ctx: Context, living: NotSplitYet) -> None:
     send_doings = partial(
         send_her_doings, residents=living.residents, her_records=living.her_records
     )
-    phone_unread = partial(phone_unread_section, her_records=living.her_records)
-    phone_arrived = partial(phone_arrived_section, her_records=living.her_records)
     for segment in LIFE_MOMENT_SEGMENTS:
         ctx.segment(segment)
     ctx.segment(GUARD_OUTPUT_SEGMENT)
@@ -354,10 +358,8 @@ def _her_round(ctx: Context, living: NotSplitYet) -> None:
     )
     for name, section in (
         ("day_page.last_written", day_page_section),
-        ("phone.unread", phone_unread),
         ("life.now", now_section),
         ("household.received", received_section),
-        ("phone.arrived", phone_arrived),
     ):
         ctx.section(name, section)
     ctx.commit(
@@ -368,7 +370,6 @@ def _her_round(ctx: Context, living: NotSplitYet) -> None:
             her_records=living.her_records,
         ),
     )
-    ctx.commit("phone.glances", commit_her_glances)
     ctx.commit("household.read", mark_received_read)
     ctx.after_commit("history", remember_this_round, on_failure=Continue())
     ctx.after_commit("outgoing.after", send_doings, on_failure=Continue())
@@ -395,22 +396,6 @@ def _her_tools(ctx: Context, living: NotSplitYet) -> None:
     ctx.tool(Tool(living.act), trim="kept")
     ctx.tool(Tool(living.look_around), trim="material")
     ctx.tool(Tool(living.stop_for_now), trim="kept", ends_round=True)
-    # 手机的三只手都留着，不当素材裁（:mod:`app.living.phone`）：
-    #
-    #   * ``look_up_contact`` / ``look_through_your_phone``  ``channel_id=<id>``，被 ``look_at_phone`` /
-    #     ``send_message`` 吃（翻页那只手的最后一串还是往下翻的游标）。安静下来的会话不在手机通知上，
-    #     这两只手是找回它的仅有的两条路。
-    #   * ``look_at_phone``  **唯一一只返回是别人内容、却留着的手。** 它那一页上有两样凭据：每条她自己
-    #     发的消息带的 ``take_back_id``，和头上那串 ``before=``。前者在快照的"你刚做过、说过"那段有
-    #     副本，但那段只有最近 12 条，滚出去的旧消息就没有第二份了；后者是往前翻**唯一**的入口，从头
-    #     到尾只出现在这一次返回里，换掉正文她就再也翻不回这条会话更早的地方。只保留句柄、把正文
-    #     换掉更精确，但那要在裁剪这一层解析手机这边渲染出来的标签 —— 渲染改一个字，句柄就静默地留
-    #     不住了，而症状是几小时后她拿着一个不存在的编号去撤消息。别人的正文因此多留 3 小时：一页十几
-    #     条文本，跟这个风险不是一个量级（图片块**不**跟着多留，它走
-    #     ``HistoryTexts.picture_trimmed``（:mod:`app.manifests.history`） 那条独立的线）。
-    ctx.tool(Tool(living.look_at_phone), trim="kept")
-    ctx.tool(Tool(living.look_through_your_phone), trim="kept")
-    ctx.tool(Tool(living.look_up_contact), trim="kept")
     # 发消息这只手的回执是"这件事到底做成了没有"的唯一记录（发出去了、已经说过了、交出去但没等到
     # 确认），裁掉她就会照着一个不知道有没有成功的动作再来一遍，所以留着（:mod:`app.living.mouth`）。
     ctx.tool(Tool(living.send_message), trim="kept")
@@ -426,5 +411,5 @@ def _her_tools(ctx: Context, living: NotSplitYet) -> None:
 PLUGIN = Plugin(
     name="living",
     setup=setup,
-    requires=("persona", "residents", "her_records", "pictures", "loose_ends"),
+    requires=("persona", "residents", "her_records", "pictures", "loose_ends", "phone"),
 )

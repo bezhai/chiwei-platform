@@ -16,8 +16,9 @@ from app.living.day_page import LivingDayPage
 from app.living.her_records.records import Happening, Whereabouts
 from app.living.loose_ends.threads import LooseEnd
 from app.living.moment import DueMoment
-from app.living.phone import Envelope, Sender
+from app.living.phone.handset import Envelope
 from app.living.received import ReceivedMessage
+from app.living.services import Sender
 from app.living.snapshot import MomentSnapshot
 
 LANE = "coe-living"
@@ -72,6 +73,9 @@ def test_living_places_every_part_of_her_round_the_manifest_lists(resident):
         "loose_ends.just_due": "loose_ends",
         "her_records.recent": "her_records",
         "her_records.whereabouts": "her_records",
+        "phone.unread": "phone",
+        "phone.arrived": "phone",
+        "phone.glances": "phone",
     }
     assert resident.profile.history.key == "{lane}:{participant}"
     assert resident.profile.cost == CostSpec(
@@ -184,6 +188,7 @@ def _reads(
     from app.living import moment as moment_mod
     from app.living.her_records import book as book_mod
     from app.living.loose_ends import mind as mind_mod
+    from app.living.phone import handset as handset_mod
 
     reads = {
         "snapshot": 0,
@@ -228,7 +233,7 @@ def _reads(
     monkeypatch.setattr(book_mod, "current_whereabouts", current_whereabouts)
     monkeypatch.setattr(book_mod, "recent_own_happenings", recent_own_happenings)
     monkeypatch.setattr(mind_mod, "list_open_loose_ends", list_open_loose_ends)
-    monkeypatch.setattr(moment_mod, "envelopes_for", envelopes_for)
+    monkeypatch.setattr(handset_mod, "envelopes_for", envelopes_for)
     monkeypatch.setattr(moment_mod, "unread_received", unread_received)
     return reads
 

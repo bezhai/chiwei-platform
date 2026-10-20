@@ -1811,12 +1811,12 @@ async def test_the_conversations_she_can_see_are_settled_once_for_the_whole_mome
 ):
     """"她这个 moment 看得见哪些会话"在信封那一眼定下来，整个 moment 共用那一份。
 
-    信封是她这个 moment 看到的第一样东西，所以名单也在那儿定（:mod:`app.living.whitelist`）。
+    信封是她这个 moment 看到的第一样东西，所以名单也在那儿定（:mod:`app.living.phone.whitelist`）。
     信封摆在这个 moment 的 context 外面算的话会有两个后果：这份名单被算两遍（它是这个功能
     最贵的一项），而且两遍之间到达的消息会让一条会话在信封上没有、她后半程却搜得到、
     发得出去。
     """
-    from app.living import whitelist as whitelist_mod
+    from app.living.phone import whitelist as whitelist_mod
     from tests.living.test_phone import _DM, _incoming, _seed_world
 
     await _seed_world()
@@ -1891,7 +1891,7 @@ async def test_what_she_still_has_not_read_comes_back_on_the_checkpoint(
 
     await _seed_world()
     # 消息落在 21:50：跨过 22:00 那个清理点之后它仍在"她看得见的会话"那一档里
-    # （:mod:`app.living.whitelist`，一小时内一句就够），不然这条用例验的是名单过期。
+    # （:mod:`app.living.phone.whitelist`，一小时内一句就够），不然这条用例验的是名单过期。
     await _incoming(_DM, text_body="在吗", at=_at(21, 50))
 
     stub_moment(said="嗯")

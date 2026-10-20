@@ -38,6 +38,7 @@ from app.plugins.living import nudge, regular
 from tests.living.conftest import (
     Calls,
     clock_at,
+    her_phone,
     her_queue,
     her_round_runs,
     nudged_round,
@@ -248,7 +249,7 @@ async def test_group_chatter_that_does_not_name_her_waits_for_the_next_regular_m
     nudge_db, stub_life, pinned, resident
 ):
     # 群固定加白，所以这个群**在**她视野里：这条用例要验的是"不点名不提前、但下一个
-    # 常规轮次看得见"，不是白名单挡没挡住它（:mod:`app.living.whitelist`）。
+    # 常规轮次看得见"，不是白名单挡没挡住它（:mod:`app.living.phone.whitelist`）。
     pinned(str(_GROUP))
     await regular_round(resident, "akao", _at(21, 30))
     await _incoming(
@@ -397,7 +398,7 @@ async def test_a_moment_that_blew_up_did_not_read_her_phone(
     工具返回不等于她看见了。游标跟 ``LifeMoment`` 在同一个事务里落库，这一轮没落地就
     一条都不算已读 —— 宁可重看，不可漏看。
     """
-    from app.living.phone import read_through
+    from app.living.phone.handset import read_through
 
     await _incoming(_DM, body="在吗", at=_at(21, 31))
     stub_life.calls = [("look_at_phone", {"channel_id": str(_DM)})]
@@ -424,7 +425,7 @@ async def test_a_moment_that_blew_up_did_not_read_her_phone(
 @pytest.mark.integration
 async def test_a_finished_moment_did_read_her_phone(nudge_db, stub_life, resident):
     """反面：这一轮跑完了，看过的就是看过了。"""
-    from app.living.phone import read_through
+    from app.living.phone.handset import read_through
 
     await _incoming(_DM, body="在吗", at=_at(21, 31))
     stub_life.calls = [("look_at_phone", {"channel_id": str(_DM)})]
@@ -818,7 +819,7 @@ async def test_the_message_that_woke_her_is_in_that_round_even_if_earlier_ones_p
     turns = her_queue("akao", clock=clock_at(_at(21, 32)))
     async with her_round_runs(turns):  # 她正在跑的那一轮
         waiting = asyncio.create_task(
-            turns.take(nudge(resident), Signal(at=_at(21, 32)))
+            turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 32)))
         )
         await settled()
         for i in range(RECEIVED_LIMIT):
@@ -865,7 +866,7 @@ async def test_a_nudge_that_waited_behind_a_stuck_round_happens_when_it_gets_her
     clock = [_at(21, 32)]
     turns = her_queue("akao", clock=lambda: clock[0])
     async with her_round_runs(turns):  # 挂住的那一轮
-        tick = asyncio.create_task(turns.take(nudge(resident), Signal(at=clock[0])))
+        tick = asyncio.create_task(turns.take(nudge(resident, her_phone()), Signal(at=clock[0])))
         await settled()
         clock[0] = _at(21, 47)
     await tick
@@ -899,8 +900,8 @@ async def test_two_ticks_queued_behind_her_round_wake_her_once(
     turns = her_queue("akao", clock=clock_at(_at(21, 33)))
     async with her_round_runs(turns):  # 她正在跑的那一轮
         ticks = asyncio.gather(
-            turns.take(nudge(resident), Signal(at=_at(21, 32))),
-            turns.take(nudge(resident), Signal(at=_at(21, 33))),
+            turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 32))),
+            turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 33))),
             return_exceptions=True,
         )
         await asyncio.sleep(0.5)  # 两拍都到了她的队列门口
@@ -927,7 +928,7 @@ async def test_ticks_while_her_round_is_stuck_do_not_pile_up_behind_it(
     turns = her_queue("akao", clock=clock_at(_at(21, 35)))
     async with her_round_runs(turns):  # 挂住的那一轮
         ticks = [
-            asyncio.create_task(turns.take(nudge(resident), Signal(at=_at(21, m))))
+            asyncio.create_task(turns.take(nudge(resident, her_phone()), Signal(at=_at(21, m))))
             for m in (32, 33, 34)
         ]
         await settled()
@@ -959,12 +960,12 @@ async def test_a_message_that_arrives_while_her_round_holds_her_wakes_her_after_
 
     async def it_arrives_and_the_clock_ticks():
         await receive(doorbell)
-        tick = asyncio.create_task(turns.take(nudge(resident), Signal(at=_at(21, 33))))
+        tick = asyncio.create_task(turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 33))))
         await asyncio.sleep(0.2)
         during.append(tick)
 
     stub_life.meanwhile = it_arrives_and_the_clock_ticks
-    woke_for_rain = await turns.take(nudge(resident), Signal(at=_at(21, 32)))
+    woke_for_rain = await turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 32)))
     stub_life.meanwhile = None
 
     assert woke_for_rain is not None and rain.message_id in woke_for_rain.moment_id
@@ -973,7 +974,7 @@ async def test_a_message_that_arrives_while_her_round_holds_her_wakes_her_after_
     assert "楼下有人按门铃。" not in stub_life.prompts[-1], "前提没造出来：那一轮看到了它"
 
     clock[0] = _at(21, 34)
-    woke_for_doorbell = await turns.take(nudge(resident), Signal(at=_at(21, 34)))
+    woke_for_doorbell = await turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 34)))
     assert woke_for_doorbell is not None
     assert doorbell.message_id in woke_for_doorbell.moment_id
     assert "楼下有人按门铃。" in stub_life.prompts[-1]
@@ -995,7 +996,7 @@ async def test_a_tick_that_waited_decides_on_what_is_true_when_it_gets_her(
 
     turns = her_queue("akao", clock=clock_at(_at(21, 32)))
     async with her_round_runs(turns):  # 她正在跑的那一轮
-        tick = asyncio.create_task(turns.take(nudge(resident), Signal(at=_at(21, 32))))
+        tick = asyncio.create_task(turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 32))))
         await settled()
         seen = await unread_received(lane=LANE, persona_id="akao")
         async with tx():  # 那一轮落地，把它记成看过
@@ -1022,7 +1023,7 @@ async def test_the_two_clocks_still_queue_behind_each_other(
     turns = her_queue("akao", clock=lambda: next(turns_at))
     async with her_round_runs(turns):  # 挂住的那一轮
         nudged = asyncio.create_task(
-            turns.take(nudge(resident), Signal(at=_at(21, 41)))
+            turns.take(nudge(resident, her_phone()), Signal(at=_at(21, 41)))
         )
         await settled()
         regular_tick = asyncio.create_task(
@@ -1242,7 +1243,7 @@ async def test_the_nudge_due_reads_the_clock_before_it_reads_anything(nudge_db, 
 
     monkeypatch.setattr(nudge_mod, "_begun_not_landed", begun)
 
-    assert await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock) is None
+    assert await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock, phone=her_phone()) is None
     assert read[:2] == ["clock", "begun"]
 
 
@@ -1250,7 +1251,7 @@ async def test_the_nudge_due_reads_the_clock_before_it_reads_anything(nudge_db, 
 async def test_nothing_calling_her_is_no_round_and_nothing_written(nudge_db, stub_life):
     from app.living.nudge import nudged_moment_due
 
-    assert await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32))) is None
+    assert await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone()) is None
     assert await _begun() == []
 
 
@@ -1264,7 +1265,7 @@ async def test_the_nudge_due_writes_that_the_round_began_before_it_hands_it_back
 
     await receive(_to_her("窗外下起了雨。", at=_at(21, 31), message_id="rain"))
 
-    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone())
 
     assert (due.moment_id, due.now, due.nudged, due.must_show) == (
         "nudge:inbox:rain",
@@ -1284,7 +1285,7 @@ async def test_a_summons_on_her_phone_comes_before_her_inbox(nudge_db, stub_life
     await receive(_to_her("窗外下起了雨。", at=_at(21, 30), message_id="rain"))
     summons = await _incoming(_DM, body="在吗", at=_at(21, 31))
 
-    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone())
 
     assert (due.moment_id, due.must_show) == (f"nudge:{summons}", None)
     assert await _begun() == [summons]
@@ -1300,7 +1301,7 @@ async def test_her_inbox_wakes_her_for_the_earliest_message_she_has_not_seen(
     await receive(_to_her("楼下有人按门铃。", at=_at(21, 31), message_id="doorbell"))
     await receive(_to_her("窗外下起了雨。", at=_at(21, 20), message_id="rain"))
 
-    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+    due = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone())
 
     assert due.moment_id == "nudge:inbox:rain"
 
@@ -1315,12 +1316,12 @@ async def test_a_round_that_began_and_never_landed_is_due_again_as_itself_before
     from tests.living.conftest import receive
 
     await receive(_to_her("窗外下起了雨。", at=_at(21, 31), message_id="rain"))
-    first = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)))
+    first = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 32)), phone=her_phone())
     # 那一轮没落地，进程没了。之后手机上来了叫她的一条，收件箱里也到了一条更早的。
     await _incoming(_DM, body="在吗", at=_at(21, 33))
     await receive(_to_her("千凪在厨房喊你。", at=_at(21, 0), message_id="dinner"))
 
-    again = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)))
+    again = await nudged_moment_due(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)), phone=her_phone())
 
     assert first.moment_id == again.moment_id == "nudge:inbox:rain"
     assert (again.now, again.must_show) == (_at(21, 34), "rain")

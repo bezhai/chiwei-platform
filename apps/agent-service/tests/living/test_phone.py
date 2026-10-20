@@ -22,8 +22,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
+from app.agent.tooling import Tool
 from app.data.tx import current_session, tx
-from app.living.phone import (
+from app.living.phone.handset import (
     CONVERSATION_LIST_LIMIT,
     NEVER_LOOKED,
     PHONE_PAGE,
@@ -35,12 +36,13 @@ from app.living.phone import (
     read_through,
     render_unread,
 )
-from tests.living.conftest import RESIDENTS, glance_text, her_tool, own_records
+from tests.living.conftest import RESIDENTS, glance_text, her_phone, her_tool, own_records
 
 HER_RECORDS = own_records()
-look_at_phone = her_tool("look_at_phone")
-look_through_your_phone = her_tool("look_through_your_phone")
-look_up_contact = her_tool("look_up_contact")
+PHONE = her_phone(HER_RECORDS)
+look_at_phone = Tool(PHONE.look_at_phone)
+look_through_your_phone = Tool(PHONE.look_through_your_phone)
+look_up_contact = Tool(PHONE.look_up_contact)
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -128,7 +130,7 @@ async def _unread_now(now: dt.datetime, *, persona_id: str = "akao") -> str:
 
     信封的内容这一层用它验：这份跟"这一轮新到没到"无关，所以用例不必为每条消息安排
     一个"上一轮是什么时候"。每轮摆到她眼前的那一份（只给新到的）由
-    :func:`app.living.phone.render_arrived` 单独验，在第七之二节。
+    :func:`app.living.phone.handset.render_arrived` 单独验，在第七之二节。
     """
     return render_unread(
         await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id=persona_id, now=now), now=now
@@ -927,7 +929,7 @@ async def test_a_glance_that_failed_is_not_counted_as_read(
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(21, 30))
 
-    from app.living import phone as phone_mod
+    from app.living.phone import handset as phone_mod
 
     def boom(*_a, **_kw):
         raise RuntimeError("渲染这一步炸了")
@@ -1162,7 +1164,7 @@ async def test_a_page_handle_that_points_nowhere_is_refused(living_db, in_a_mome
 # 改之前"看一眼 = 所有未读都算看过"（游标推到 ``max(U)``）。那在"每次只给最近十条"
 # 时是有意的取舍，分页之后照搬就成了"翻一页 = 几千条算看过"。
 #
-# 新契约三条（实现写在 :func:`app.living.phone.look_at_phone` 上）：
+# 新契约三条（实现写在 :meth:`app.living.phone.handset.Handset.look_at_phone` 上）：
 #
 #   * **翻页推到哪**：推到**这一页里真摆到她眼前、而且之前没看过的那些**中最新的一条。
 #   * **通知层的瞥见不算看过**：通知一个字正文都没有，游标只有"打开会话"推得动。
@@ -1514,10 +1516,10 @@ async def test_the_notifications_are_in_plain_time_order(
     "按时间排"这句话不成立了。
 
     **条数上限截在通知栏那一份上，不在查库那一步。** 查库那步一条不少：被挤下去的那
-    条还要铺到界桩上去（:func:`app.living.phone.render_unread`），截在下面的话它两处
+    条还要铺到界桩上去（:func:`app.living.phone.handset.render_unread`），截在下面的话它两处
     都进不去。
     """
-    from app.living.phone import ENVELOPE_LIMIT, render_arrived
+    from app.living.phone.handset import ENVELOPE_LIMIT, render_arrived
 
     await _seed_world()
     # 私聊最旧 —— 按时间排它排在最后。
@@ -1569,7 +1571,8 @@ async def test_the_notifications_are_in_plain_time_order(
 
 
 def _envelope(*, channel_id: str, latest: dt.datetime, unread: int = 1) -> object:
-    from app.living.phone import Envelope, Sender
+    from app.living.phone.handset import Envelope
+    from app.living.services import Sender
 
     return Envelope(
         channel_id=channel_id,
@@ -1585,7 +1588,7 @@ def _envelope(*, channel_id: str, latest: dt.datetime, unread: int = 1) -> objec
 
 
 def test_a_conversation_with_nothing_new_is_not_put_in_front_of_her_again():
-    from app.living.phone import render_arrived
+    from app.living.phone.handset import render_arrived
 
     quiet = _envelope(channel_id="old", latest=_at(20, 40))
     fresh = _envelope(channel_id="new", latest=_at(21, 3))
@@ -1605,7 +1608,7 @@ def test_the_count_on_a_buzzing_conversation_is_still_everything_unread():
     只数这一轮新到的那几条，她就会以为前面那些已经处理过了。真人手机的角标也是这样：
     响一声，上面写的是这条会话攒下的总数。
     """
-    from app.living.phone import render_arrived
+    from app.living.phone.handset import render_arrived
 
     piled = _envelope(channel_id="dm", latest=_at(21, 3), unread=7)
 
@@ -1615,7 +1618,7 @@ def test_the_count_on_a_buzzing_conversation_is_still_everything_unread():
 
 
 def test_a_quiet_round_says_so_instead_of_repeating_last_round_s_list():
-    from app.living.phone import render_arrived
+    from app.living.phone.handset import render_arrived
 
     quiet = _envelope(channel_id="old", latest=_at(20, 40))
 
@@ -1632,7 +1635,7 @@ def test_a_cold_start_gets_everything_because_none_of_it_is_in_front_of_her_yet(
     （:func:`app.agent.continuity.trim_for_round`，空上下文一律立），所以这两份会重
     一次 —— 重一次的代价是几百个 token，漏一次的代价是有人找她而她不知道。
     """
-    from app.living.phone import render_arrived
+    from app.living.phone.handset import render_arrived
 
     old = _envelope(channel_id="old", latest=_at(20, 40))
 
@@ -1643,7 +1646,7 @@ def test_a_cold_start_gets_everything_because_none_of_it_is_in_front_of_her_yet(
 
 def test_what_she_has_not_read_is_all_on_the_checkpoint():
     """界桩上是全貌，跟"这一轮新到没到"无关 —— 它答的是"此刻还有什么没看"。"""
-    from app.living.phone import render_unread
+    from app.living.phone.handset import render_unread
 
     quiet = _envelope(channel_id="old", latest=_at(20, 40))
     fresh = _envelope(channel_id="new", latest=_at(21, 3))
@@ -1660,15 +1663,15 @@ def test_a_conversation_crowded_off_the_notifications_is_still_on_the_checkpoint
     """被挤出通知栏的那条，界桩上必须有 —— 不然它会**永久**地再也叫不到她。
 
     两件事撞在一起才有这个洞：通知栏一次只给
-    :data:`app.living.phone.ENVELOPE_LIMIT` 条，而每轮只给"比上一轮新"的那些。一条
+    :data:`app.living.phone.handset.ENVELOPE_LIMIT` 条，而每轮只给"比上一轮新"的那些。一条
     消息到的那一轮被八条更新的挤下去、没露过面；等挤它的那些被看掉、它重新排得进
     来的时候，它已经比"上一轮"旧了，于是永远排不进新到的那一档。改之前每轮重摆全量，
     它只是当轮没露面、下一轮就露了。
 
     所以界桩那一份**不截断**：它答的是"此刻还有什么没看"，截断会让这个答案变成假话。
-    条数由白名单兜着（:mod:`app.living.whitelist`），而且一小时才铺一次。
+    条数由白名单兜着（:mod:`app.living.phone.whitelist`），而且一小时才铺一次。
     """
-    from app.living.phone import ENVELOPE_LIMIT, render_arrived, render_unread
+    from app.living.phone.handset import ENVELOPE_LIMIT, render_arrived, render_unread
 
     crowd = [
         _envelope(channel_id=f"c{i}", latest=_at(21, 10 + i))
@@ -1691,7 +1694,7 @@ def test_a_conversation_crowded_off_the_notifications_is_still_on_the_checkpoint
 
 def test_neither_rendering_leaks_a_word_of_the_message():
     """两段文本都还是信封：正文一个字都不在里面。"""
-    from app.living.phone import render_arrived, render_unread
+    from app.living.phone.handset import render_arrived, render_unread
 
     one = _envelope(channel_id="dm", latest=_at(21, 3))
 
@@ -1806,8 +1809,8 @@ async def test_messages_she_reads_today_stay_undated(living_db, in_a_moment):
     """同一天的那几条**刻意不带**日期。
 
     信封那侧有同一条断言，但两侧是两个渲染出口（信封走
-    :func:`app.living.phone._render`，消息行走
-    :func:`app.living.phone._one_message`）。消息行这侧改成一律带日期的话，
+    :func:`app.living.phone.handset._render`，消息行走
+    :func:`app.living.phone.handset._one_message`）。消息行这侧改成一律带日期的话，
     信封那条用例照样绿 —— 所以这条否定断言在这侧也得有。
     """
     await _seed_world()
@@ -2852,7 +2855,7 @@ def test_nothing_but_taking_back_reaches_around_the_gate():
       ``conversation_her_bot_is_in``）—— 撤回**必须**能拿（她撤的是自己已经发出去的
       话，跟"她现在还能不能看见那条会话"是两件事），别处一个都不许；
     * 直接调底层那条 presence 查询 ``find_conversations_with_persona_bot`` —— 只有
-      ``phone.py`` 自己该碰它，别处碰上就是又拼了一份不过闸的可达性（T1 删掉的那份
+      phone 插件自己该碰它，别处碰上就是又拼了一份不过闸的可达性（T1 删掉的那份
       手抄副本就是这么来的）。
 
     两条各自钉死唯一的调用方，加一个就要么改这里、要么改回主闸。
@@ -2862,17 +2865,17 @@ def test_nothing_but_taking_back_reaches_around_the_gate():
 
     import app as app_pkg
 
-    # 名字 → 允许出现它的文件（``phone.py`` 是定义处，永远不算）。
+    # 名字 → 允许出现它的文件（phone 插件的目录是定义处，永远不算）。
     only_for = {
         "conversations_her_bot_is_in": "takeback.py",
         "conversation_her_bot_is_in": "takeback.py",
-        "find_conversations_with_persona_bot": None,  # 除 phone.py 外谁都不许
+        "find_conversations_with_persona_bot": None,  # 除 phone 插件外谁都不许
     }
     trespassers: dict[str, list[str]] = {}
     # 扫整个 ``app/``，不只是 ``app/living/``：绕过白名单不需要住在 living 里面。
     for path in sorted(Path(app_pkg.__file__).parent.rglob("*.py")):
-        if path.name == "phone.py":  # 定义 / 唯一该碰底层查询的地方
-            continue
+        if path.parent == Path(app_pkg.__file__).parent / "living" / "phone":
+            continue  # 定义 / 唯一该碰底层查询的地方
         tree = ast.parse(path.read_text(encoding="utf-8"))
         used = {
             alias.name
@@ -2892,7 +2895,7 @@ def test_nothing_but_taking_back_reaches_around_the_gate():
             trespassers[path.name] = offending
 
     assert trespassers == {}, (
-        f"白名单被绕过去了 —— 这些地方碰了只有撤回（或 phone.py 自己）该碰的东西："
+        f"白名单被绕过去了 —— 这些地方碰了只有撤回（或 phone 插件自己）该碰的东西："
         f"{trespassers}"
     )
 
@@ -3104,7 +3107,7 @@ async def test_the_envelope_marks_the_owner_and_never_merges_him_with_a_namesake
     在信封上会缩成一个），渲染那层把主人的印摆出来。少了任何一层，她拿起手机之前就
     已经以为"只有主人在说话"。
     """
-    from app.living.phone import Sender
+    from app.living.services import Sender
 
     await _seed_world()
     await _seed_a_stranger_wearing_his_name()
@@ -3315,7 +3318,7 @@ async def test_a_window_row_that_lost_the_recall_columns_fails_loudly(
     （跟渲染那步自己炸掉是同一条路），她下一轮原样再看到这条会话。
     旧形态是她收到一条**已经撤回、却挂着可撤编号**的消息，而且没有任何报错。
     """
-    from app.living import phone as phone_mod
+    from app.living.phone import handset as phone_mod
 
     await _seed_world()
     await _incoming(_DM, text_body="在吗", at=_at(21, 29))
@@ -3376,7 +3379,7 @@ def pictures(monkeypatch):
     真跑要打 tool-service（签名）和对象存储（下载），用例里两样都没有。交回的控制器
     让用例说清哪个对象签不出来、哪个签得出来但取不到 —— 默认全都取得到。
     """
-    from app.living import phone as phone_mod
+    from app.living.phone import handset as phone_mod
 
     class _Store:
         def __init__(self) -> None:
@@ -3696,7 +3699,7 @@ async def test_a_flood_of_pictures_stops_at_a_generous_cap(
     上限不是精心算过的数：真实数据里最近十条里有好几张图很罕见。它挡的是把整个上下
     文塞满那种情况，而不是"她该看几张"。
     """
-    from app.living.phone import PHONE_PICTURE_LIMIT
+    from app.living.phone.handset import PHONE_PICTURE_LIMIT
 
     await _seed_world()
     await _incoming(
@@ -3732,7 +3735,7 @@ async def test_a_picture_with_no_object_says_so_even_past_the_cap(
     所以「有没有位置」先判，「排在第几位」后判。这一页两档同时在场：名额之外那两张
     是真的"这轮没给你看"，最后那张没有位置的不是。
     """
-    from app.living.phone import PHONE_PICTURE_LIMIT
+    from app.living.phone.handset import PHONE_PICTURE_LIMIT
 
     await _seed_world()
     await _incoming(
@@ -3769,7 +3772,7 @@ async def test_a_picture_with_no_object_does_not_take_a_slot(
     零，占着名额唯一的后果就是把一张真摆得出来的图推到名额之外 —— 她因此看不到本该
     看到的东西。删掉派生之后取不回来的图变多了（历史行一律没有位置），这个浪费被放大。
     """
-    from app.living.phone import PHONE_PICTURE_LIMIT
+    from app.living.phone.handset import PHONE_PICTURE_LIMIT
 
     await _seed_world()
     await _incoming(
@@ -3963,7 +3966,7 @@ async def test_her_own_pictures_do_not_take_slots_from_other_peoples(
     living_db, in_a_moment, pictures
 ):
     """她自己发的图不占展示名额 —— 抢输的那张真人的图会整个看不到。"""
-    from app.living.phone import PHONE_PICTURE_LIMIT
+    from app.living.phone.handset import PHONE_PICTURE_LIMIT
 
     await _seed_world()
     await _incoming(_DM, text_body="发几张图看看", at=_at(22, 18))

@@ -29,8 +29,9 @@ import re
 import pytest
 from sqlalchemy import text
 
+from app.agent.tooling import Tool
 from app.data.tx import current_session, tx
-from tests.living.conftest import glance_text, her_tool
+from tests.living.conftest import glance_text, her_phone, her_tool
 from tests.living.test_phone import (
     _DM,
     _GROUP,
@@ -49,9 +50,10 @@ from tests.living.test_pictures_tools import (  # noqa: F401 — 形参名就是
     pictures_db,
 )
 
-look_at_phone = her_tool("look_at_phone")
-look_through_your_phone = her_tool("look_through_your_phone")
-look_up_contact = her_tool("look_up_contact")
+PHONE = her_phone()
+look_at_phone = Tool(PHONE.look_at_phone)
+look_through_your_phone = Tool(PHONE.look_through_your_phone)
+look_up_contact = Tool(PHONE.look_up_contact)
 
 # 第三方写进一个没转义的字段之后，她眼前就会多出的那一段。**两部分各有各的用处**：
 #

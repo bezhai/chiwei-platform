@@ -316,6 +316,97 @@ class Pictures(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# phone：她的手机（phone 插件提供）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Reachable:
+    """她手机上的一条会话：地址、是私聊还是群、叫什么、用哪个 bot 身份说话。
+
+    ``bot_name`` 在这里就解析出来，不留到发消息的时候再查：出站的身份必须是确定的
+    （主动发不写 ``common_agent_response``，worker 没有别处可推断用哪个 bot），
+    而"她能不能听见"和"她用什么身份说话"本来就是同一件事的两面。
+    """
+
+    channel_id: str
+    scope: str        # 'direct'（私聊） | 'group'（群）
+    title: str
+    channel: str      # 渠道（lark / qq / ...），出站段原样带走
+    bot_name: str
+
+
+@dataclass(frozen=True)
+class Sender:
+    """信封上点到的一个人：她见到的那个名字，和"这是不是主人"这个事实。
+
+    **两件事必须分开带。** 名字是 ``sender_display_name``，改得动；``is_owner`` 是
+    ``common_user`` 上那一列，改不动。把它们合成一个字符串（"bezhai（主人）"）就等于
+    把身份交还给名字 —— 冒充者把昵称改成同样的字，输出一模一样。
+    """
+
+    name: str
+    is_owner: bool
+    is_bot: bool = False
+
+
+@dataclass(frozen=True)
+class Summons:
+    """一条**在叫她**的消息：私聊来的，或者群里点了她的名。
+
+    "强"不是发送方标的：私聊之所以强，是因为私聊本身意味着有人在等她回；群里点名之所以
+    强，是因为那是直接叫她。除此之外没有分级、没有权重表——那是替她做决定。
+    """
+
+    message_id: str
+    channel_id: str
+    at: datetime
+
+
+class Phone(Protocol):
+    """她的手机：哪些会话在她手机上、谁在叫她、她在一条会话上说的话算哪一档、一个人摆在她眼前的样子。
+
+    **哪些会话在她手机上只有一道闸**：她自己的 bot 还在，而且这条会话在她视野里。闸就在
+    :meth:`reachable_conversations` 上，发消息、读文件问的都是这一份，别处不许自己拼一份；视野在她的
+    一轮之内只定一次（一轮里多处各算一次的话，她看到的会话会在这一轮中途变化）。唯一不过视野那一半
+    的是撤回（:meth:`conversation_her_bot_is_in`）。
+    """
+
+    async def reachable_conversations(
+        self, *, persona_id: str, now: datetime
+    ) -> list[Reachable]:
+        """她此刻手机上的会话。``now`` 是调用方的时间锚：这一轮的 ``now``，或者那一拍的时刻。"""
+        ...
+
+    async def reachable_conversation(
+        self, *, persona_id: str, channel_id: str, now: datetime
+    ) -> Reachable | None:
+        """她此刻手机上的某一条会话；不在她手机上返回 ``None``。"""
+        ...
+
+    async def conversation_her_bot_is_in(
+        self, *, persona_id: str, channel_id: str
+    ) -> Reachable | None:
+        """她的 bot 还在的某一条会话，不管它此刻在不在她视野里；bot 已经不在了返回 ``None``。只给撤回用：
+        她撤的是自己已经发出去的话，跟她现在还看不看得见那条会话是两件事。"""
+        ...
+
+    async def newest_unread_summons(
+        self, *, lane: str, persona_id: str, now: datetime
+    ) -> Summons | None:
+        """她手机上还没看过、而且是在叫她的那条消息里最新的一条；没有返回 ``None``。"""
+        ...
+
+    def medium_for(self, scope: str) -> str:
+        """这条会话（:attr:`Reachable.scope`）上说的话落成哪一档 medium。"""
+        ...
+
+    def who_tag(self, sender: Sender) -> str:
+        """一个人摆在她眼前的样子（``<who from=".." rel="owner"/>``），跟她手机上的署名是同一套。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
 # loose_ends：她心里挂着没了结的事（loose_ends 插件提供）
 # ---------------------------------------------------------------------------
 

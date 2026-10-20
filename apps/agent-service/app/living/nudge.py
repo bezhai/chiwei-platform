@@ -49,7 +49,7 @@
 这是工程上的幂等，不是替她做决定：重跑的那一轮里她照样看得到这期间新到的一切，怎么做由她；
 叫她的那些等它落地之后照常叫醒她。
 
-**这条钟只看她视野里的会话**（:mod:`app.living.whitelist`）：名单外的那些整个不进她
+**这条钟只看她视野里的会话**（:mod:`app.living.phone.whitelist`）：名单外的那些整个不进她
 视野，那里的一次点名也把她带不到那一刻。这一拍算出来的名单跟随后被唤醒的那一轮**是
 两次独立计算**（中间隔着模型调用的时间），不是同一个快照——这条钟只决定"要不要把她带
 到这一刻"，一轮之内那份锚由那一轮自己定。
@@ -83,8 +83,8 @@ from app.living.moment import (
     moment_ran,
     nudged_moment_id,
 )
-from app.living.phone import newest_unread_summons
 from app.living.received import unread_received
+from app.living.services import Phone
 
 # 收件箱里的消息叫醒她时，那一轮身份里 id 前面的这一截（见模块说明）。
 _INBOX = "inbox:"
@@ -112,22 +112,24 @@ _BEGUN_TABLE = table_name(NudgeBegun)
 
 
 async def nudged_moment_due(
-    *, lane: str, persona_id: str, clock: Callable[[], datetime]
+    *, lane: str, persona_id: str, clock: Callable[[], datetime], phone: Phone
 ) -> DueMoment | None:
     """有什么在叫她、而且还没叫醒过她，就判出被它叫醒的那一轮；没有返回 ``None``。
 
     先读钟（她这一轮的『现在』，理由见 :class:`app.living.moment.DueMoment`），再看有没有开始了而
     没落地的那一轮（:class:`NudgeBegun`），有就原样判出它，不再看手机和收件箱；没有再看现在有
-    什么在叫她（:func:`_calling_her`）。判出新的一轮时先写下"开始了"再交回，模型还没调、她还什么
-    都没做：之后这一轮失败，重跑的还是它。除了这一行它什么都不记，一个刚起来的进程从库里判出的
-    跟一直跑着的进程一样。
+    什么在叫她（:func:`_calling_her`，手机上的问 ``phone`` 服务）。判出新的一轮时先写下"开始了"再
+    交回，模型还没调、她还什么都没做：之后这一轮失败，重跑的还是它。除了这一行它什么都不记，一个刚
+    起来的进程从库里判出的跟一直跑着的进程一样。
     """
     now = clock()
     nudged_by = await _begun_not_landed(lane=lane, persona_id=persona_id)
     if nudged_by is not None:
         reason = f"重跑被 {nudged_by} 叫醒、开始了没落地的那一轮"
     else:
-        nudged_by = await _calling_her(lane=lane, persona_id=persona_id, now=now)
+        nudged_by = await _calling_her(
+            lane=lane, persona_id=persona_id, now=now, phone=phone
+        )
         if nudged_by is None:
             return None
         await insert_append(
@@ -166,7 +168,9 @@ async def _begun_not_landed(*, lane: str, persona_id: str) -> str | None:
     return nudged_by
 
 
-async def _calling_her(*, lane: str, persona_id: str, now: datetime) -> str | None:
+async def _calling_her(
+    *, lane: str, persona_id: str, now: datetime, phone: Phone
+) -> str | None:
     """现在有什么在叫她、而且还没叫醒过她：先看手机，再看收件箱；都没有返回 ``None``。
 
     手机上那条已经叫醒过她（她没看手机，所以它一直是最新那条未读）不算数，接着看收件箱。
@@ -174,7 +178,7 @@ async def _calling_her(*, lane: str, persona_id: str, now: datetime) -> str | No
     它一起算看过），照样问一句：改成这样之前的版本留下过"那一轮落地了、它还没看过"的状态，不问
     的话每一拍都会拿它再开始一轮，撞上已经记过的"开始了"。
     """
-    summons = await newest_unread_summons(
+    summons = await phone.newest_unread_summons(
         lane=lane, persona_id=persona_id, now=now
     )
     if summons is not None and not await _woke_her(

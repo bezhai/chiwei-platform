@@ -429,7 +429,7 @@ async def test_a_failed_context_write_leaves_the_round_standing(
     assert landed is not None and landed.moment_id == moment.moment_id
     assert await _rows(ReceivedRead) == 1, "收到的那条没跟着这一轮记成看过"
 
-    from app.living.phone import PhoneRead
+    from app.living.phone.handset import PhoneRead
 
     assert await _rows(PhoneRead) == 1, "手机已读跟着上下文一起被回滚了"
 

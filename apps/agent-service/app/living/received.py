@@ -35,7 +35,7 @@
 
 **只记这一轮实际放进输入的那几条，跟这一轮的 ``LifeMoment`` 在同一个事务里落地**
 （:func:`mark_read`）。这一轮跑着的时候新到的不在这几条里，留到下一轮；这一轮失败了一条都
-不记，下一轮原样再给她看。跟手机已读同一个道理（:func:`app.living.phone.commit_glances`）：
+不记，下一轮原样再给她看。跟手机已读同一个道理（:meth:`app.living.phone.handset.Handset.commit_glances`）：
 宁可重看，不可漏看。
 """
 from __future__ import annotations

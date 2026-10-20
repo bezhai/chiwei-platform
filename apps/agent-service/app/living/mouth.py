@@ -112,7 +112,6 @@ from app.domain.chat_dataflow import (
 from app.infra.outbound import publish
 from app.living.common import printed_handle, require_aware
 from app.living.output_safety import audit_output
-from app.living.phone import medium_for, reachable_conversation
 from app.living.services import KIND_SPEECH, OUTBOUND_HAPPENING_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -440,14 +439,14 @@ async def send_message(
 
     # 这一道是**这一轮定下的那份名单 ∩ 实时 presence**，两半的时效性刻意不同：
     #
-    #   * 名单读的是这一轮的锚（:mod:`app.living.whitelist`）。她要回的就是这一轮开
+    #   * 名单读的是这一轮的锚（:mod:`app.living.phone.whitelist`）。她要回的就是这一轮开
     #     头摆在她眼前的那些会话；中途因为时间窗滑过去而掉出名单，不该让她张嘴到一
     #     半发现刚看的那条会话没了。
-    #   * presence 每次重新查（:func:`reachable_conversation` 里那次
+    #   * presence 每次重新查（:meth:`app.living.services.Phone.reachable_conversation` 里那次
     #     ``find_conversations_with_persona_bot``）。"bot 还在不在那个会话里"是这句
     #     话**能不能真的送到**的物理前提，读一份这一轮开头的快照等于这道保护不存在 ——
     #     bot 半路被移出会话，她还会照着过期的判断把话交出去。
-    conv = await reachable_conversation(
+    conv = await self.phone.reachable_conversation(
         persona_id=persona_id, channel_id=channel_id.strip(), now=now
     )
     if conv is None:
@@ -663,7 +662,7 @@ async def send_message(
         content=said,
         occurred_at=now,
         audience=(),
-        medium=medium_for(conv.scope),
+        medium=self.phone.medium_for(conv.scope),
         channel_id=conv.channel_id,
     )
     # 收口。崩在这之前的话留下一条 ``claimed``：交出去了、可能已经送到，而她可能不

@@ -14,7 +14,7 @@
 :data:`app.living.services.OUTBOUND_HAPPENING_PREFIX`，全链只有那一处定义）。所以这只
 手收的是那个编号，在她自己那张认领表里**按等值**找，不管她是从哪一处抄来的。
 
-**同一个值她会在三处看到，印法有两种。** 手机那侧（:func:`app.living.phone._one_message`）
+**同一个值她会在三处看到，印法有两种。** 手机那侧（:func:`app.living.phone.handset._one_message`）
 把它印成消息标签上的 ``take_back_id`` 属性，因为那儿的正文和显示名都来自别人 ——
 方括号加一串 hex 是别人印得出来的，留着那个散文槽等于让别人递给她一个假编号。回执和
 快照这两侧印的都是她自己这一侧的东西，别人伪造不了，所以保持方括号不动。三处是**同一
@@ -36,8 +36,8 @@
 且被撤的那个人一个字都感知不到。
 
 **撤回不过会话白名单那道闸。** 别处每一只手都只碰她视野里的会话
-（:func:`app.living.phone.reachable_conversations`），这里走的是未过滤的那份
-（:func:`app.living.phone.conversation_her_bot_is_in`）：判据只有"bot 还在不在那个会
+（:meth:`app.living.services.Phone.reachable_conversations`），这里走的是未过滤的那份
+（:meth:`app.living.services.Phone.conversation_her_bot_is_in`）：判据只有"bot 还在不在那个会
 话里"。她撤的是自己已经发出去的话，用的是自己那张认领表上的编号（模型编不出别人
 的），跟"她现在还看不看得见那条会话"是两件事 —— 让一条发出去时在名单里、之后掉出名单
 的消息撤不回来，是纯粹的倒退：那句话还挂在真人眼前，而她眼睁睁没办法。
@@ -93,7 +93,6 @@ from app.data.schema import table_name
 from app.domain.safety import Recall
 from app.infra.outbound import publish
 from app.living.mouth import SpokenOutbound
-from app.living.phone import conversation_her_bot_is_in, medium_for
 from app.living.services import KIND_ACT, HerRecords
 
 logger = logging.getLogger(__name__)
@@ -293,11 +292,11 @@ async def take_back_message(
         )
 
     # **这一处刻意走未过滤的那份可达性**：判据只有"bot 还在不在那个会话里"，不管这条
-    # 会话此刻在不在她视野里（:mod:`app.living.whitelist`）。她撤的是自己已经发出去
+    # 会话此刻在不在她视野里（:mod:`app.living.phone.whitelist`）。她撤的是自己已经发出去
     # 的话，用的是自己那张认领表上的编号 —— 跟"她现在还看不看得见那条会话"是两件事。
     # 过白名单闸的话，一条发出去时在名单里、之后掉出名单的消息就撤不回来了，而那句话
     # 还挂在真人眼前：那是纯粹的倒退。
-    conv = await conversation_her_bot_is_in(
+    conv = await self.phone.conversation_her_bot_is_in(
         persona_id=persona_id, channel_id=line.channel_id
     )
     if conv is None:
@@ -332,7 +331,7 @@ async def take_back_message(
         persona_id=persona_id,
         line=line,
         # 撤回是在手机上按的，跟她说那句话时同一档：不进 world 的汇总。
-        medium=medium_for(conv.scope),
+        medium=self.phone.medium_for(conv.scope),
         now=now,
     )
     await _note_took_back(line, at=now)

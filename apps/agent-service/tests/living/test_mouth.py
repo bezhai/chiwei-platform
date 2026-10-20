@@ -57,7 +57,7 @@ async def _somebody_called_her(
 ) -> None:
     """真人在这条会话里叫了她一声（私聊里任意一条就算，群里要点她的名）。
 
-    判据跟 nudge 那条钟同一份，见 :mod:`app.living.whitelist`。
+    判据跟 nudge 那条钟同一份，见 :mod:`app.living.phone.whitelist`。
     """
     async with tx():
         s = current_session()
@@ -89,7 +89,7 @@ async def mouth_db(living_db):
     """两个 bot 身份、一条私聊、一个群、一个不是她的群 —— 嘴要发的地址都在这儿。
 
     私聊和群里各有一条**有人在叫她**的消息：白名单收窄之后"bot 还在这个会话里"不再
-    等于"她看得见它"（:mod:`app.living.whitelist`），一条动静都没有的会话她根本发不
+    等于"她看得见它"（:mod:`app.living.phone.whitelist`），一条动静都没有的会话她根本发不
     出去。这几条消息不改变下面任何一条用例要验的东西 —— 她没看过它们，所以既不进她
     开口前读的那段上下文，也不影响出站的任何一样。
     """
@@ -1128,7 +1128,7 @@ async def test_a_conversation_out_of_sight_is_refused_even_though_her_bot_is_in_
     """bot 还在那个群里、但没人叫她 —— 她发不出去。
 
     这是白名单主闸在嘴这一侧的样子：她能发的严格等于她能看见的那些会话
-    （:func:`app.living.phone.reachable_conversations`），而不是"bot 还在的那些"。
+    （:func:`app.living.phone.handset.reachable_conversations`），而不是"bot 还在的那些"。
     """
     quiet = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-nobody-calls-her")
     async with tx():
@@ -1168,7 +1168,7 @@ async def test_sending_checks_where_her_bot_is_right_now_not_the_settled_list(
     提，读一份这一轮开头的快照等于这道保护不存在 —— bot 半路被移出会话，她还会照着过
     期的判断把话交出去。
     """
-    from app.living.phone import reachable_conversations
+    from app.living.phone.handset import reachable_conversations
 
     async with in_a_moment("akao"):
         settled = {
@@ -1208,7 +1208,7 @@ async def test_she_can_still_answer_a_line_that_slid_out_of_the_window_mid_momen
     "刚看完那条私聊、正要回"的中途发现那条会话没了 —— 而消息还挂在真人眼前。
     """
     from app.data.queries.messages import count_summons_since
-    from app.living.phone import reachable_conversations
+    from app.living.phone.handset import reachable_conversations
 
     async with in_a_moment("akao"):
         settled = {

@@ -29,6 +29,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         "her_records",
         "loose_ends",
         "pictures",
+        "phone",
         "web",
         "guides",
         "living",
@@ -49,6 +50,10 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("loose_ends", "section"): 2,
         ("pictures", "service"): 1,
         ("pictures", "tool"): 4,
+        ("phone", "service"): 1,
+        ("phone", "tool"): 3,
+        ("phone", "section"): 2,
+        ("phone", "commit"): 1,
         ("web", "tool"): 2,
         ("guides", "tool"): 2,
         ("guides", "segment"): 1,  # what guides she can read, the last segment of her round
@@ -59,12 +64,12 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("living", "inbox"): 1,
         ("living", "outbound"): 2,
         ("living", "inboxes_at_start"): 1,
-        ("living", "tool"): 13,
+        ("living", "tool"): 10,
         ("living", "segment"): 4,  # three more segments of her round and the output check
         ("living", "round_start"): 1,
         ("living", "round_log"): 1,
-        ("living", "section"): 5,
-        ("living", "commit"): 3,
+        ("living", "section"): 3,
+        ("living", "commit"): 2,
         ("living", "after_commit"): 2,
     }
 

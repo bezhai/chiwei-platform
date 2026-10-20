@@ -77,6 +77,7 @@ def test_the_agent_service_app_loads_its_own_plugins():
         "her_records",
         "loose_ends",
         "pictures",
+        "phone",
         "web",
         "guides",
         "living",

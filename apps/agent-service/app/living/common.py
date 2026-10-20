@@ -160,7 +160,7 @@ def printed_handle(happening_id: str) -> str:
     （:func:`app.living.her_records.deeds.own_line`）和发送回执（:func:`app.living.mouth.send_message`）—— 两处都走
     它，所以她照抄给 :func:`app.living.takeback.take_back_message` 的是同一种东西。
     手机那侧刻意不用这个印法（``take_back_id`` 属性，理由见
-    :func:`app.living.phone._one_message`）。
+    :func:`app.living.phone.handset._one_message`）。
     """
     handle = message_handle(happening_id)
     return f"［{handle}］" if handle is not None else ""

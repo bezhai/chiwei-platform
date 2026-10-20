@@ -73,6 +73,15 @@ def own_records(residents=None):
     return OwnRecords(residents=residents or NamesRead())
 
 
+def her_phone(her_records=None):
+    """``phone`` 服务：phone 插件对象本身（不带状态，读的是用例的库）。``her_records`` 默认是
+    :func:`own_records`，``pictures`` 是那个插件对象本身。"""
+    from app.living.phone.handset import Handset
+    from app.living.pictures.album import Album
+
+    return Handset(her_records=her_records or own_records(), pictures=Album())
+
+
 async def receive(message) -> None:
     """一条消息进了她的收件箱：跟三姐妹收件箱的处理函数一样存下
     （:func:`app.living.received.receive`），收件人按读好的名字认。"""
@@ -216,12 +225,13 @@ async def regular_round(
 async def nudged_round(
     resident: AssembledProfile, persona_id: str, at: datetime
 ) -> LifeMoment | None:
-    """提前叫醒的一拍：送到一条新的队列上，钟停在 ``at``；这一轮按 ``resident`` 跑。"""
+    """提前叫醒的一拍：送到一条新的队列上，钟停在 ``at``；这一轮按 ``resident`` 跑，手机上谁在叫她问
+    phone 插件对象（:func:`her_phone`）。"""
     from app.host import Signal
     from app.plugins.living import nudge
 
     return await her_queue(persona_id, clock=clock_at(at)).take(
-        nudge(resident), Signal(at=at)
+        nudge(resident, her_phone()), Signal(at=at)
     )
 
 
@@ -272,14 +282,17 @@ async def settled() -> None:
 def her_tool(name: str, *, residents=None) -> Tool:
     """她还没拆成插件的一只手：living 插件对象（:class:`app.plugins.living.NotSplitYet`）上的方法，
     包成跟插件登记给模型的同一种 :class:`~app.agent.tooling.Tool`。``residents`` 是交给它的
-    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）；``her_records``、``pictures``
-    服务是那两个插件对象本身（不带状态，读写的是用例的库）。"""
+    ``residents`` 服务，默认是名字已经读好的替身（:class:`NamesRead`）；``her_records``、``pictures``、
+    ``phone`` 服务是那几个插件对象本身（不带状态，读写的是用例的库）。"""
     from app.agent.tooling import Tool
     from app.living.pictures.album import Album
     from app.plugins.living import NotSplitYet
 
     names = residents or NamesRead()
-    living = NotSplitYet(residents=names, her_records=own_records(names), pictures=Album())
+    records = own_records(names)
+    living = NotSplitYet(
+        residents=names, her_records=records, pictures=Album(), phone=her_phone(records)
+    )
     return Tool(getattr(living, name))
 
 
@@ -287,7 +300,7 @@ def glance_text(shown) -> str:
     """「看手机」交回来的那段文本。
 
     ``look_at_phone`` 交回的是一串内容块：第一项是她读到的那段会话，后面跟着别人发
-    来的图（一句说明 + 一个图片块，见 :func:`app.living.phone._shown_picture`）。断
+    来的图（一句说明 + 一个图片块，见 :func:`app.living.phone.handset._shown_picture`）。断
     言文本的用例只关心第一项，从这里取，各文件不各拆一遍。
 
     形状不对就当场炸：拿一个 ``@tool_error`` 的失败 dict 去 ``in`` 一个字串，结果是
@@ -347,7 +360,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     from app.living.mouth import SpokenOutbound
     from app.living.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
     from app.living.persona.chain import PersonaVersion
-    from app.living.phone import PhoneRead
+    from app.living.phone.handset import PhoneRead
     from app.living.pictures.album import Picture
     from app.living.received import ReceivedMessage, ReceivedRead
     from tests.runtime.conftest import migrate
@@ -397,7 +410,7 @@ def pinned(monkeypatch):
     """
     import json
 
-    from app.living import whitelist as whitelist_mod
+    from app.living.phone import whitelist as whitelist_mod
 
     real_get = whitelist_mod.dynamic_config.get
 
@@ -440,7 +453,7 @@ def in_a_moment():
     ):
         """``finishes=False`` = 这一轮崩在半路，收尾那一步没跑到。
 
-        手机游标是**跟着这一轮落地的**（见 :func:`app.living.phone.commit_glances`），
+        手机游标是**跟着这一轮落地的**（见 :meth:`app.living.phone.handset.Handset.commit_glances`），
         所以"这一轮跑完没有"是它的输入，不能不给。
         """
         at = now or dt.datetime(2026, 7, 25, 21, 30, tzinfo=cst)
@@ -458,10 +471,8 @@ def in_a_moment():
             yield her_round
         if finishes:
             from app.data.tx import tx
-            from app.living.phone import Glances, commit_glances
-
             async with tx():
-                await commit_glances(glances=her_round.state(Glances).pending)
+                await her_phone().commit_glances(her_round)
 
     return bind
 

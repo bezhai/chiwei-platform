@@ -18,7 +18,7 @@
 **所以醒来只送新发生的事**：几点了、离上一次隔了多久、她在哪在做什么
 （:class:`app.living.snapshot.MomentSnapshot` 的那几段）、有什么到点了（loose_ends 插件那一段）、传到她这里的消息里还没看过的
 （:func:`app.living.received.render_received`；别人做了什么，只有传到她这里的这一段）、手机上刚来了什么
-（:func:`app.living.phone.render_arrived`）。她此刻的样子（在哪、在做什么、上一次写下的
+（phone 插件那一段，:mod:`app.living.phone`）。她此刻的样子（在哪、在做什么、上一次写下的
 那天、心里挂着什么、手机上还有什么没看）读一百遍字字一样，上一轮读过的还在上下文里，
 所以它只在清理那一下作为新起点重铺一次（:func:`app.agent.continuity.trim_for_round`），
 而且上下文里永远只留最新那一份。"心里挂着没了结的事"那份清单由 ``keep_in_mind``
@@ -69,10 +69,10 @@
     世界里做的事一条发给 world，只对姐妹说的话直接给那位姐妹（:mod:`app.living.outgoing`）
   * :func:`look_around`  问 world 她这里现在什么样、有谁在；没人回答就如实告诉她
   * :func:`stop_for_now` 这一轮我到此为止（零参数，调完这一轮就结束）
-  * ``look_at_phone``    拿起手机打开某条会话，看说了什么（:mod:`app.living.phone`）
+  * ``look_at_phone``    拿起手机打开某条会话，看说了什么（phone 插件，:mod:`app.living.phone`）
   * ``look_through_your_phone`` 翻一翻手机上都有哪些会话（同上，三层里的第二层：
     通知只给刚来的那几条动静，这只手给整张名单）
-  * ``look_up_contact``  按名字找回一条会话（:mod:`app.living.phone`）
+  * ``look_up_contact``  按名字找回一条会话（同上）
   * ``send_message``     给手机上某条会话发一条（:mod:`app.living.mouth`）
   * ``search_online`` / ``browse_online``  带着问题上网查 / 没事逛一圈刷一批
     （:mod:`app.living.web`，跟 ``look_at_phone`` 是两件事：那只手看别人发给她的
@@ -129,14 +129,6 @@ from app.data.schema import CommitOrder, Data, Key, table_name
 from app.infra.cst_time import CST
 from app.living.common import esc, legacy_null_is, require_aware
 from app.living.outgoing import SEND_SECONDS, send_what_she_did
-from app.living.phone import (
-    Envelope,
-    Glances,
-    commit_glances,
-    envelopes_for,
-    render_arrived,
-    render_unread,
-)
 from app.living.received import (
     ReceivedMessage,
     mark_read,
@@ -1066,11 +1058,9 @@ class _LastMoment:
 @dataclass
 class _InFront:
     """这一轮摆到她眼前的东西（这一轮的状态），每样只读一次，由第一个要用它的段读：``snapshot``
-    她自己的那几层（:func:`app.living.snapshot.read_snapshot`），``envelopes`` 手机上有动静的会话，
-    ``received`` 收件箱里还没看过的。"""
+    她自己的那几层（:func:`app.living.snapshot.read_snapshot`），``received`` 收件箱里还没看过的。"""
 
     snapshot: MomentSnapshot | None = None
-    envelopes: list[Envelope] | None = None
     received: list[ReceivedMessage] | None = None
 
 
@@ -1148,26 +1138,6 @@ async def _snapshot(round: Round) -> MomentSnapshot:
     return front.snapshot
 
 
-async def _envelopes(round: Round, her_records: HerRecords) -> list[Envelope]:
-    """手机上只给通知（谁、多少条、多密、你上次在那儿开口是什么时候），按时间排、只给最新那几条。
-    内容要她自己调 look_at_phone，整张会话名单要她自己调 look_through_your_phone —— 白送进来的
-    话，"她没看见"这个状态就再也不会发生。
-
-    **通知在这一轮里算**，所以"她看得见哪些会话"这份名单在她看到第一眼时就定下来，之后整个
-    moment（看手机、找人、发消息、找可读文件）用的都是那一份（:mod:`app.living.whitelist`）。
-
-    **查一次，渲两次**：摆到她眼前的只有这一轮新到的（:func:`phone_arrived_section`），还没看的
-    全貌铺在界桩上（:func:`phone_unread_section`）。两次渲染是纯函数，查库那一遍一条会话一次往返，
-    不能为了两段文本走两遍。
-    """
-    front = round.state(_InFront)
-    if front.envelopes is None:
-        front.envelopes = await envelopes_for(
-            lane=round.lane, persona_id=round.participant, now=round.now, her_records=her_records
-        )
-    return front.envelopes
-
-
 async def _received(round: Round) -> list[ReceivedMessage]:
     """传到她这里、她还没看过的消息（:mod:`app.living.received`）。读在模型调用之前：只有这几条会
     跟这一轮一起记成看过（:func:`mark_received_read`），这一轮跑着的时候新到的留给下一轮。
@@ -1191,13 +1161,6 @@ async def day_page_section(round: Round) -> str:
     return (await _snapshot(round)).render_day_page()
 
 
-async def phone_unread_section(round: Round, *, her_records: HerRecords) -> str:
-    """状态：手机上还没看的全貌。**未读必须在界桩上**：眼前那份只给新到的，一条她一直不看的通知会
-    随着摆出它的那一轮刺激一起在 own_minutes 之后被裁掉，界桩不重铺的话之后再没有第二处说得出有人
-    找过她。"""
-    return render_unread(await _envelopes(round, her_records), now=round.now)
-
-
 async def now_section(round: Round) -> str:
     """输入：几点了、离上一次隔了多久。"""
     return (await _snapshot(round)).render_now(round.previous_at)
@@ -1206,13 +1169,6 @@ async def now_section(round: Round) -> str:
 async def received_section(round: Round) -> str:
     """输入：这段时间传到她这里的。"""
     return render_received(await _received(round), now=round.now)
-
-
-async def phone_arrived_section(round: Round, *, her_records: HerRecords) -> str:
-    """输入：手机上刚来的。"""
-    return render_arrived(
-        await _envelopes(round, her_records), since=round.previous_at, now=round.now
-    )
 
 
 # -- 落地 ----------------------------------------------------------------------
@@ -1253,11 +1209,6 @@ async def land_the_moment(
         nudged=round.due.nudged,
     )
     round.state(_Landed).moment = await insert_in_commit_order(moment)
-
-
-async def commit_her_glances(round: Round) -> None:
-    """她这一轮看过的手机记成已读（:func:`app.living.phone.commit_glances`）。"""
-    await commit_glances(glances=round.state(Glances).pending)
 
 
 async def mark_received_read(round: Round) -> None:

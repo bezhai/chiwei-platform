@@ -21,6 +21,8 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
     刚到点的那两段（``loose_ends`` 服务）
   * :mod:`app.living.pictures`    她自己做过的图：画 / 上网找 / 翻一翻 / 拿出一张看，存永久句柄，跨轮
     找得回（``pictures`` 服务：手机和嘴经它认她的图）
+  * :mod:`app.living.phone`       手机：信封可感、内容要她去看，持久游标；会话白名单决定哪些会话进她的
+    视野，一轮之内只定一次（``phone`` 服务：发消息、撤回、读文件、提前叫醒她经它问手机上有什么）
   * :mod:`app.living.web`         上网：手里有问题就查，没有就随便翻
   * :mod:`app.living.guides`      手边那几份写好的说明：读一份 / 照说明在沙箱里跑一条
     命令。她自己长什么样就写在其中一份里；正文在盘上（:mod:`app.skills` 扫目录、热
@@ -39,8 +41,6 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * :mod:`app.living.moment`      她的醒来周期：默认「继续」，被带走时换的是一件事。
     她跨 moment 的连续上下文（键、阈值、素材表、写失败怎么算）也在这里，存取和裁剪的
     机制在基础层 :mod:`app.agent.continuity`
-  * :mod:`app.living.phone`       手机：信封可感、内容要她去看，持久游标
-  * :mod:`app.living.whitelist`   会话白名单：哪些会话进她的视野（手机那道主闸的判据）
   * :mod:`app.living.reading`     读别人发给她的文件（没有"书"这个注册物）
   * :mod:`app.living.reading_agent` 读一程的 agent：只有一只往后翻页的手，读完揉出新印象
   * :mod:`app.living.mouth`       嘴：把她写下的那句话发出去（**没有入口**）

@@ -32,7 +32,7 @@ from app.living.reading import (
 from app.living.services import READING
 from app.messaging.message import Kind, Message, new_message
 from tests.hosting import in_a_fresh_process
-from tests.living.conftest import RESIDENT_NAMES, Post, her_tool
+from tests.living.conftest import RESIDENT_NAMES, Post, her_phone, her_tool
 
 look_for_something_to_read = her_tool("look_for_something_to_read")
 read_a_bit = her_tool("read_a_bit")
@@ -111,7 +111,7 @@ async def reading_db(living_db, pinned):
     """她的两条会话 + 一条不是她的会话，外加读到哪了那张表。
 
     两条会话都摆进她的视野：私聊里有人刚跟她说过话，群固定加白
-    （:mod:`app.living.whitelist`）。白名单收窄之后"bot 还在"不再等于"她看得见" ——
+    （:mod:`app.living.phone.whitelist`）。白名单收窄之后"bot 还在"不再等于"她看得见" ——
     而这个文件里的用例验的是**她读得到的等于她收到过的**，不是白名单本身，所以那道
     闸在这里按住。名单外那条会话里的文件她一个字都看不到，用例在本文件最后一节。
     """
@@ -324,7 +324,7 @@ async def test_a_file_in_the_shape_lark_actually_writes_is_found(reading_db):
             },
         )
 
-    found = await files_sent_to(persona_id="akao", now=_at(21, 30))
+    found = await files_sent_to(persona_id="akao", now=_at(21, 30), phone=her_phone())
 
     assert [f.title for f in found if f.title == "斜阳.epub"] == [
         "斜阳.epub"

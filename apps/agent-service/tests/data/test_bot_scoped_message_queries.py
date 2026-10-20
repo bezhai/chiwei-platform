@@ -1368,7 +1368,8 @@ async def test_the_same_person_speaking_twice_is_still_one_sender(bot_db):
 
 
 async def test_bot_messages_remain_readable_and_marked_across_phone_views(bot_db):
-    from app.living.phone import Sender, _one_message, _who_tag
+    from app.living.phone.handset import _one_message, _who_tag
+    from app.living.services import Sender
 
     await _seed_her_phone()
     await _message(_GROUP, at=_at(10), role='bot', who='通知', bot_name='tool', body='工具消息')
@@ -1401,7 +1402,8 @@ async def test_bot_messages_remain_readable_and_marked_across_phone_views(bot_db
 
 
 async def test_contact_search_preserves_owner_and_bot_identity_for_namesakes(bot_db):
-    from app.living.phone import Sender, _who_tag
+    from app.living.phone.handset import _who_tag
+    from app.living.services import Sender
 
     await _seed_her_phone()
     await _message(_GROUP, at=_at(10), sender=_OWNER, who='bezhai', body='主人')

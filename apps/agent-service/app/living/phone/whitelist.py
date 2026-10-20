@@ -45,7 +45,7 @@
 跟随后被唤醒的那次 moment 是**两次独立计算**，中间隔着模型调用的时间。
 
 **名单只用来收窄视野，不用来放行动作。** 她真要把话发出去时查的是实时的 presence
-（:func:`app.living.phone.reachable_conversation` 每次都重新问一遍 bot 还在不在），
+（:func:`app.living.phone.handset.reachable_conversation` 每次都重新问一遍 bot 还在不在），
 锚只决定"这条会话在不在她眼前"。
 """
 
@@ -273,7 +273,7 @@ def _anchored(*, persona_id: str, now: datetime) -> frozenset[str] | None:
     """这次 moment 已经定下的那份名单；不在她的一轮里、或者还没算过返回 ``None``。
 
     不在一轮里就没有"本次 moment 定下的"这回事（同
-    :func:`app.living.phone._pending_cursor`），**不能**跟着工具体一起 fail-fast：nudge
+    :func:`app.living.phone.handset._pending_cursor`），**不能**跟着工具体一起 fail-fast：nudge
     那条钟和运维查一眼本来就在她的一轮之外。
     """
     try:

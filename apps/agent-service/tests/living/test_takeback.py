@@ -317,7 +317,7 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
     """
     await _she_is_home()
     # 她要**发**这一条，所以这条私聊得在她视野里 —— 撤回不过白名单闸，开口过
-    # （:mod:`app.living.whitelist`）。真人刚说过一句就够了。
+    # （:mod:`app.living.phone.whitelist`）。真人刚说过一句就够了。
     await _somebody_said_something(at=_at(21, 0))
 
     async with in_a_moment("akao", moment_id=_MOMENT):
@@ -808,7 +808,7 @@ async def test_she_can_take_back_a_line_in_a_conversation_out_of_sight(
     takeback_db, in_a_moment, recalls
 ):
     """掉出白名单、但 bot 还在那个会话里 —— 撤得了。"""
-    from app.living.phone import reachable_conversations
+    from app.living.phone.handset import reachable_conversations
 
     line = await _she_spoke()
     await _she_is_home()
