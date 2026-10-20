@@ -25,8 +25,8 @@ from pathlib import Path
 import pytest
 
 from app.capabilities.sandbox import OUTPUT_CUT_MARK, SandboxResult
-from app.living import guides as guides_mod
-from app.living.guides import (
+from app.living.guides import at_hand as guides_mod
+from app.living.guides.at_hand import (
     GUIDE_TOOLS,
     GUIDES_VAR,
     guides_she_can_read,
@@ -344,7 +344,7 @@ async def test_a_cut_result_reaches_her_with_the_notice_still_on_it(
     capped = "x" * 40 + f"\n\n……（后面还有 96000 {OUTPUT_CUT_MARK} —— 略）"
     sandbox(stdout=capped, dropped=96_000)
 
-    with caplog.at_level(logging.INFO, logger="app.living.guides"):
+    with caplog.at_level(logging.INFO, logger="app.living.guides.at_hand"):
         async with in_a_moment("akao", finishes=False):
             out = await run_a_script.invoke({"command": "python3 -c ..."})
 
@@ -366,7 +366,7 @@ async def test_a_guide_whose_preprocessing_flooded_leaves_a_trace_too(
     shelf(bangumi=_BANGUMI)
     sandbox(stdout=f"usage: ...\n……（后面还有 70000 {OUTPUT_CUT_MARK} —— 略）")
 
-    with caplog.at_level(logging.INFO, logger="app.living.guides"):
+    with caplog.at_level(logging.INFO, logger="app.living.guides.at_hand"):
         async with in_a_moment("akao", finishes=False):
             body = await read_a_guide.invoke({"which": "bangumi"})
 
@@ -458,12 +458,39 @@ async def test_both_hands_are_ones_she_actually_has(resident):
 def test_the_list_variable_is_named_the_same_everywhere():
     """变量名没有编译期校验：改一个字，Langfuse 那边就原样渲染成 ``{{...}}`` 给她看。
 
-    所以名字只在这里定义一次，moment 那侧引它，不各写一遍字面量。
+    所以名字只在这里定义一次，guides 插件登记的那一段引它，不各写一遍字面量。
     """
-    from app.living import moment as moment_mod
-
     assert GUIDES_VAR == "guides_you_can_read"
-    assert moment_mod.GUIDES_VAR is GUIDES_VAR
+
+
+async def test_the_guides_plugin_places_both_hands_and_the_list_in_her_round(app_host):
+    """guides 插件登记两只手（读回来的说明和跑出来的结果都是材料）和她一轮 prompt 里「手边能读的
+    说明」那一段：变量只有这一个，值在一轮开始取齐 prompt 时现算（注册表每 30 秒热加载）。"""
+    from app.agent.round import Round
+
+    host = await app_host("agent-service")
+    mine = [r for r in host.registered() if r.plugin == "guides"]
+
+    assert [(r.kind, r.name) for r in mine] == [
+        ("tool", "read_a_guide"),
+        ("tool", "run_a_script"),
+        ("segment", "living_life_moment/guides"),
+    ]
+    assert [r.detail["spec"].trim for r in mine[:2]] == ["material", "material"]
+    segment = mine[2].detail["segment"]
+    assert segment.prompt_id == "living_life_moment/guides"
+    assert segment.variables == (GUIDES_VAR,)
+    her_round = Round(
+        app="agent-service",
+        lane="coe-living",
+        participant="akao",
+        profile="resident",
+        round_id="2026-07-25T14:00+08:00",
+        now=None,
+        reason="常规节奏",
+        due=None,
+    )
+    assert await segment.values(her_round) == {GUIDES_VAR: guides_she_can_read()}
 
 
 def test_nothing_she_reads_or_runs_survives_past_this_moment():

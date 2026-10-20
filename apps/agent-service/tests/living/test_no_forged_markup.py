@@ -536,7 +536,7 @@ def test_the_escape_is_defined_in_exactly_one_place():
 # 管。所以"脚本抓一个网页、把内容 print 出来"跟 :func:`app.living.web.online.browse_online`
 # 是同一条通道：那几个字节由网页那边决定，逐字进她眼前。
 #
-# 转义落在 ``guides.py`` 这一侧，**不落在 capability 里** —— 那个 capability 还被
+# 转义落在 ``guides/at_hand.py`` 这一侧，**不落在 capability 里** —— 那个 capability 还被
 # ``render_skill`` 用着，而说明正文是主人自己写在 NFS 上的 markdown，整段转义会把他的
 # 正文糟蹋掉。
 
@@ -544,8 +544,8 @@ def test_the_escape_is_defined_in_exactly_one_place():
 @pytest.mark.integration
 async def test_what_a_script_prints_cannot_carry_markup(in_a_moment, monkeypatch):
     from app.capabilities.sandbox import SandboxResult
-    from app.living import guides as guides_mod
-    from app.living.guides import run_a_script
+    from app.living.guides import at_hand as guides_mod
+    from app.living.guides.at_hand import run_a_script
 
     async def printed_poison(*, command, skill_name=""):
         return SandboxResult(exit_code=0, stdout=f"抓回来的：{POISON}", stderr="")
@@ -564,8 +564,8 @@ async def test_what_a_script_fails_with_cannot_carry_markup_either(
 ):
     """跑挂那条路把 stdout 和 stderr 一起交回去，两股都是外面来的。"""
     from app.capabilities.sandbox import SandboxResult
-    from app.living import guides as guides_mod
-    from app.living.guides import run_a_script
+    from app.living.guides import at_hand as guides_mod
+    from app.living.guides.at_hand import run_a_script
 
     async def blew_up(*, command, skill_name=""):
         return SandboxResult(

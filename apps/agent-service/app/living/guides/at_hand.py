@@ -32,7 +32,7 @@ import 时就定死了，而注册表是启动时填、每 30 秒热加载的 �
 
 **这两只手一个字都不落库。** 读回来的正文、跑出来的结果只进这一轮的上下文，下一轮就没了
 （跟 :mod:`app.living.web` 同一条）。她想把什么留到下一轮，用她自己那份"心里挂着没了
-结的事"（:func:`app.living.moment.keep_in_mind`）。
+结的事"（``keep_in_mind``，:mod:`app.living.loose_ends`）。
 
 沙箱的边界按现状写，不夸大
 --------------------------
@@ -80,7 +80,7 @@ from typing import Annotated
 from pydantic import Field
 
 from app.agent.contracts import ToolSpec
-from app.agent.round import current_round
+from app.agent.round import Round, current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 
@@ -113,6 +113,13 @@ def guides_she_can_read() -> str:
     每轮现算：注册表每 30 秒热加载一次，缓存下来就等于给她一份会过期的清单。
     """
     return SkillRegistry.list_descriptions() or _NOTHING_ON_HAND
+
+
+async def guides_at_hand(round: Round) -> dict[str, str]:
+    """她一轮 prompt 里「手边能读的说明」那一段的变量，一轮开始取齐 prompt 时算一次。**只加在她这一轮
+    上**：只有这一轮有读它、跑它的那两只手，塞进「她是谁」那个共用的那一段就等于把一份写日记时用不上
+    的清单也灌进那个 agent 的 prompt。"""
+    return {GUIDES_VAR: guides_she_can_read()}
 
 
 def _which_ones_she_can_read() -> str:

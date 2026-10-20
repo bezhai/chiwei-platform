@@ -27,6 +27,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         "persona",
         "loose_ends",
         "web",
+        "guides",
         "living",
     ]
     assert Counter((r.plugin, r.kind) for r in host.registered()) == {
@@ -41,6 +42,8 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("loose_ends", "tool"): 1,
         ("loose_ends", "section"): 2,
         ("web", "tool"): 2,
+        ("guides", "tool"): 2,
+        ("guides", "segment"): 1,  # what guides she can read, the last segment of her round
         ("living", "turns"): 9,
         ("living", "wake"): 12,
         ("living", "clock"): 1,
@@ -48,8 +51,8 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("living", "inbox"): 1,
         ("living", "outbound"): 2,
         ("living", "inboxes_at_start"): 1,
-        ("living", "tool"): 19,
-        ("living", "segment"): 5,  # four more segments of her round and the output check
+        ("living", "tool"): 17,
+        ("living", "segment"): 4,  # three more segments of her round and the output check
         ("living", "round_start"): 1,
         ("living", "round_log"): 1,
         ("living", "section"): 7,
@@ -79,7 +82,7 @@ async def test_living_declares_each_tool_her_profile_lists(app_host):
     assert [s.tool.name for s in declared if s.ends_round] == ["stop_for_now"]
 
 
-def test_living_without_skills_is_refused_naming_both():
+def test_her_guides_without_skills_are_refused_naming_both():
     manifest = importlib.import_module(APPS["agent-service"]).MANIFEST
     ops, operator, _skills, *hers = (
         importlib.import_module(m).PLUGIN for m in manifest.plugins
@@ -89,5 +92,5 @@ def test_living_without_skills_is_refused_naming_both():
         Host("agent-service", [ops, operator, *hers])
 
     message = str(refused.value)
-    assert "'living'" in message
+    assert "'guides'" in message
     assert "'skills'" in message

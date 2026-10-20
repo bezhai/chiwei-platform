@@ -31,6 +31,7 @@ from app.agent.prompts import PromptConfigError, PromptSet
 from app.infra import cst_time
 from app.infra.propagation import Context
 from app.living import moment as moment_mod
+from app.living.guides import GUIDES_SEGMENT, at_hand
 from app.living.loose_ends.threads import LooseEnd
 from app.living.moment import (
     LIFE_MOMENT_AGENT,
@@ -158,8 +159,8 @@ def _life_moment_prompt(prompt_id: str, template: str) -> TextPromptClient:
 async def _system_at(templates: dict[str, str], clock: dt.datetime) -> str:
     """按 ``clock`` 这个时刻开始的一轮取齐、编译她这一轮的 prompt（``templates`` 是每一段的模板，按
     段名），交回 SYSTEM 正文。变量是这一轮算出来的（「她是谁」那一段是 persona 插件的
-    :func:`app.living.persona.identity_segment`，「手边能读的说明」那一段见
-    :data:`app.living.moment.LIFE_MOMENT_SEGMENTS`），「她是谁」和手边的说明按住不放。"""
+    :func:`app.living.persona.identity_segment`，「手边能读的说明」那一段是 guides 插件的
+    :data:`app.living.guides.GUIDES_SEGMENT`），「她是谁」和手边的说明按住不放。"""
     from app.agent.round import Round
 
     langfuse = SimpleNamespace(
@@ -194,15 +195,17 @@ async def _system_at(templates: dict[str, str], clock: dt.datetime) -> str:
         ),
         patch.object(cst_time, "now_cst", lambda: clock),
         patch.object(chain, "prompt_vars", who_she_is),
-        patch.object(
-            moment_mod, "guides_she_can_read", lambda: "drawing：人物画图指南"
-        ),
+        patch.object(at_hand, "guides_she_can_read", lambda: "drawing：人物画图指南"),
     ):
         prompts = await PromptSet.resolve(
             {LIFE_MOMENT_PROMPT_ID: LIFE_MOMENT_AGENT},
             {
                 segment.name: segment
-                for segment in (identity_segment(chain), *LIFE_MOMENT_SEGMENTS)
+                for segment in (
+                    identity_segment(chain),
+                    *LIFE_MOMENT_SEGMENTS,
+                    GUIDES_SEGMENT,
+                )
             },
             round,
         )

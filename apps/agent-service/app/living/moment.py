@@ -87,12 +87,13 @@
     来、再点一张。**"看"这只手拆出来是必须的**——句柄只出现在画图那一刻的话，
     她能不能找回自己画过的东西就取决于那次返回还在不在上下文里）
   * ``read_a_guide`` / ``run_a_script``  读一份写好的说明 / 照说明把它教她跑的那条
-    命令真的跑一遍（:mod:`app.living.guides`。她自己长什么样就写在其中一份里；四份
+    命令真的跑一遍（guides 插件，:mod:`app.living.guides`。她自己长什么样就写在其中一份里；四份
     说明里三份通篇在教她跑脚本，只接读取的话读完手上没有能跑它的东西）
 
 prompt 在 Langfuse，按顶层小节分成五段（:data:`LIFE_MOMENT_AGENT` 列出顺序，id 是
 ``living_life_moment/<段名>``），变量三个——``persona_name``、``persona_core`` 在「她是谁」那一段
-（persona 插件登记，:mod:`app.living.persona`），``guides_you_can_read`` 在「手边能读的说明」那一段。**每个 moment 都变的东西一律
+（persona 插件登记，:mod:`app.living.persona`），``guides_you_can_read`` 在「手边能读的说明」那一段
+（guides 插件登记，:mod:`app.living.guides`）。**每个 moment 都变的东西一律
 走 USER 消息**：prompt 变量没有编译期校验，改名会静默渲染成字面量，能少一个就少一个。
 第三个是例外，而且只能是变量：她手边有哪些说明可读会变（注册表启动时填、每 30 秒热
 加载），工具 schema 在 import 时就定死了，装不下一份会变的清单。
@@ -128,9 +129,6 @@ from app.data.persist import fetch_one, from_row
 from app.data.schema import CommitOrder, Data, Key, table_name
 from app.infra.cst_time import CST
 from app.living.common import esc, legacy_null_is, require_aware
-
-# 她手边有哪些说明可读那一份清单（只能从 prompt 变量进，见本模块最后一段 docstring）。
-from app.living.guides import GUIDES_VAR, guides_she_can_read
 from app.living.happening import Recorded, note_recorded, record_happening
 from app.living.outgoing import SEND_SECONDS, send_what_she_did
 from app.living.participants import WORLD, residents
@@ -178,13 +176,6 @@ LIFE_MOMENT_PROMPT_ID = "living_life_moment"
 # 一个人的一整天在 langfuse 里读成一条流（session），逐个 moment 翻起来才不用大海捞针。
 # 模型的临时失败不整轮重来（``max_retries`` 1）：重放会把已经执行过的 durable 写再执行一遍，
 # 派生 id 让它无害，但仍是白花的一次钱，下一拍再来就行。
-async def guides_at_hand(round: Round) -> dict[str, str]:
-    """「手边能读的说明」那一段的变量，一轮开始取齐 prompt 时算一次。**只加在这个 moment 上**：只有
-    这个 moment 有读它、跑它的那两只手，塞进「她是谁」那个共用函数就等于把一份写日记时用不上的清单
-    也灌进那个 agent 的 prompt。"""
-    return {GUIDES_VAR: guides_she_can_read()}
-
-
 def _segment(
     name: str, *, variables: tuple[str, ...] = (), values: VarsFn | None = None
 ) -> Segment:
@@ -195,12 +186,12 @@ def _segment(
 
 # 她这一轮 prompt 里由这里登记的段。每段声明的变量就是这一段给的那几个（模板多一个、少一个都是
 # 配置错误，见 :class:`app.agent.prompts.PromptConfigError`）。``<rules>`` 一条规则同时说到好几只手，
-# 整段留在一起。第一段「她是谁」由 persona 插件登记（:mod:`app.living.persona`）。
+# 整段留在一起。第一段「她是谁」由 persona 插件登记（:mod:`app.living.persona`），最后一段「手边能读的
+# 说明」由 guides 插件登记（:mod:`app.living.guides`）。
 LIFE_MOMENT_SEGMENTS = (
     _segment("this-moment"),
     _segment("rules"),
     _segment("voice"),
-    _segment("guides", variables=(GUIDES_VAR,), values=guides_at_hand),
 )
 
 # 她这一轮的 prompt：按顶层小节分的五段，按这个顺序用空行拼成一条 SYSTEM，和分段之前的整份逐字节

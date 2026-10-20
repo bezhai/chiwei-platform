@@ -79,6 +79,7 @@ MANIFEST = App(
         "app.living.persona",
         "app.living.loose_ends",
         "app.living.web",
+        "app.living.guides",
         "app.plugins.living",
     ),
     agents={

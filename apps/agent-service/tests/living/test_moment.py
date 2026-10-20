@@ -878,7 +878,7 @@ async def test_the_guides_she_can_read_are_listed_in_front_of_her(
     清单跟着盘上实际有的那几份走：这里真的写一份到盘上、真的加载进注册表，断言她
     这个 moment 的输入里出现的就是它。
     """
-    from app.living.guides import GUIDES_VAR
+    from app.living.guides.at_hand import GUIDES_VAR
     from app.skills.registry import SkillRegistry
 
     folder = tmp_path / "drawing"

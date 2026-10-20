@@ -109,7 +109,6 @@ from app.domain.safety import Recall
 from app.host import Batch, Coalesce, Context, Plugin, WakeSource
 from app.living import pictures, records  # noqa: F401
 from app.living.day_page import DuePage, LivingDayPage, day_page_due, write_due_page
-from app.living.guides import GUIDE_TOOLS
 from app.living.landing import reconcile_what_she_said
 from app.living.moment import (
     LIFE_MOMENT_SEGMENTS,
@@ -289,7 +288,6 @@ def _her_round(ctx: Context) -> None:
         *TAKEBACK_TOOLS,
         *READING_TOOLS,
         *PICTURE_TOOLS,
-        *GUIDE_TOOLS,
     ):
         ctx.tool(spec.tool, trim=spec.trim, ends_round=spec.ends_round)
     for segment in LIFE_MOMENT_SEGMENTS:
@@ -318,4 +316,4 @@ def _her_round(ctx: Context) -> None:
     ctx.after_commit("outgoing.after", send_her_doings, on_failure=Continue())
 
 
-PLUGIN = Plugin(name="living", setup=setup, requires=("skills", "persona", "loose_ends"))
+PLUGIN = Plugin(name="living", setup=setup, requires=("persona", "loose_ends"))
