@@ -44,9 +44,8 @@ import pytest
 
 from app.capabilities._errors import CapabilityTimeout
 from app.domain.reading_source import decode_pages
-from app.infra.cst_time import CST, now_cst
+from app.infra.cst_time import CST
 from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, lane_queue
-from app.living.moment import run_moment
 from tests.replay import seeds
 from tests.replay.harness import Fail, ProcessKilled, Reply, ToolUse
 
@@ -91,7 +90,7 @@ async def _bezhai_sent_her_a_book(replay) -> None:
 
 
 def _moment(replay):
-    return lambda: run_moment(lane=replay.lane, persona_id="akao", clock=now_cst)
+    return lambda: replay.wake("akao", "regular")
 
 
 def _picks_it_up() -> Reply:

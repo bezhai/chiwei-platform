@@ -25,6 +25,7 @@ print(json.dumps({
     'world': sorted(m for m in sys.modules if m == 'app.world' or m.startswith('app.world.')),
     'plugins': [p.name for p in host.plugins],
     'clocks': [r.name for r in rs if r.kind == 'clock'],
+    'wakes': [r.name for r in rs if r.kind == 'wake'],
     'wired_types': sorted(
         r.detail['data_type'].__module__ + '.' + r.detail['data_type'].__name__
         for r in rs if r.kind == 'outbound'),
@@ -51,6 +52,7 @@ def test_the_world_app_loads_none_of_the_life_code():
     assert loaded["inboxes"] == ["world"]
     assert loaded["inboxes_at_start"] == [], "world 的进程不开三姐妹的收件箱"
     assert loaded["clocks"] == []
+    assert loaded["wakes"] == []
     assert all(t.startswith("app.world.") for t in loaded["wired_types"])
 
 
@@ -67,7 +69,7 @@ def test_the_agent_service_app_loads_its_own_plugins():
 
     assert loaded["plugins"] == ["ops", "operator", "skills", "living"]
     assert "app.living.moment" in loaded["living"]
-    assert "LifeMomentTick" in loaded["clocks"]
+    assert "regular -> akao/round" in loaded["wakes"]
     # 三姐妹的收件箱名字在人设表里，setup 时只声明"开始接收时再开"，所以起完 setup 只看得到
     # ``operator`` 和读书收件箱；开出来的是哪几个名字由 ``tests/living/test_received.py`` 验。
     assert loaded["inboxes"] == ["operator", "reading"]

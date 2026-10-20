@@ -12,13 +12,19 @@ fixtures along the rootdir→test-file path.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 
 from tests.runtime.conftest import test_db, test_db_dsn  # noqa: F401
+
+if TYPE_CHECKING:
+    from app.host import Turns
+    from app.living.moment import LifeMoment
 
 # 三姐妹在世界里的名字（线上取自人设表的显示名）。
 RESIDENT_NAMES = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
@@ -91,12 +97,13 @@ def post(monkeypatch) -> Post:
 
 
 def clock_at(moment: datetime) -> Callable[[], datetime]:
-    """一只停在 ``moment`` 的钟：一轮拿到占用时读它，读几次都是这一刻。"""
+    """一只停在 ``moment`` 的钟：轮到她的时候读它，读几次都是这一刻。"""
     return lambda: moment
 
 
 async def queued_behind(key: str) -> None:
-    """等到有人排在这把占用后面（``asyncio.Lock`` 的等待队列不空）。"""
+    """等到有人排在这把占用后面（``asyncio.Lock`` 的等待队列不空）：日记、回看的占用
+    （:mod:`app.living.serial`）。"""
     import asyncio
 
     from app.living.serial import _lock_for
@@ -107,6 +114,78 @@ async def queued_behind(key: str) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"没有人排在 {key} 后面")
+
+
+def her_queue(
+    persona_id: str = "akao",
+    *,
+    clock: Callable[[], datetime],
+    hold_limit: timedelta | None = None,
+) -> Turns:
+    """她的轮次队列，跟宿主给她登记的那条一样（:mod:`app.plugins.living`）：一条新的就是一个刚
+    起来的进程。钟由用例给，轮到她的那一刻读它。"""
+    from app.host import Turns
+
+    return Turns(persona_id, "round", hold_limit=hold_limit, clock=clock)
+
+
+async def regular_round(lane: str, persona_id: str, at: datetime) -> LifeMoment | None:
+    """钟点上该来的一拍：常规节奏的一个信号，送到一条新的队列上，钟停在 ``at``。"""
+    from app.host import Signal
+    from app.plugins.living import regular
+
+    return await her_queue(persona_id, clock=clock_at(at)).take(regular(lane), Signal(at=at))
+
+
+async def nudged_round(lane: str, persona_id: str, at: datetime) -> LifeMoment | None:
+    """提前叫醒的一拍：送到一条新的队列上，钟停在 ``at``。"""
+    from app.host import Signal
+    from app.plugins.living import nudge
+
+    return await her_queue(persona_id, clock=clock_at(at)).take(nudge(lane), Signal(at=at))
+
+
+@asynccontextmanager
+async def her_round_runs(turns: Turns) -> AsyncIterator[None]:
+    """她的队列上正有一轮在跑（挂住了也一样）：``with`` 里面它一直占着她，出来它才跑完。"""
+    import asyncio
+
+    from app.host import Coalesce, Signal, WakeSource
+
+    inside, finish = asyncio.Event(), asyncio.Event()
+
+    async def due(participant, batch, clock) -> _Running:
+        return _Running()
+
+    async def run(_: _Running) -> None:
+        inside.set()
+        await finish.wait()
+
+    running = asyncio.create_task(
+        turns.take(
+            WakeSource("running", Coalesce.QUEUE_EACH, due, run),
+            Signal(at=datetime.now(UTC)),
+        )
+    )
+    await inside.wait()
+    try:
+        yield
+    finally:
+        finish.set()
+        await running
+
+
+@dataclass(frozen=True)
+class _Running:
+    reason: str = "她正在跑的那一轮"
+
+
+async def settled() -> None:
+    """等刚发出的那几拍走到她的队列门口：排上了的在那儿等，被打发走的已经交回 ``None``。"""
+    import asyncio
+
+    for _ in range(50):
+        await asyncio.sleep(0)
 
 
 def glance_text(shown) -> str:
@@ -154,7 +233,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     除了 living 自己那几张，还包括**手机那条路要读的外部表**（``common_user`` /
     ``common_conversation`` / ``common_message`` + channel-server 那两张裸表）。
     它们建在这里而不是各个用例文件里，是因为**每一轮都会读手机的信封**——任何跑
-    ``run_moment`` 的用例都要用到，各建各的迟早会出现"这个文件建了那个没建"。
+    她一轮的用例都要用到，各建各的迟早会出现"这个文件建了那个没建"。
 
     线上对应的是 T5 的种子：``ensure_business_schema()`` 只建 SQLAlchemy Base 那批，
     channel-server 的 TypeORM 表要人工建。缺了不会静默——信封那步直接炸，跟这里一样。
@@ -179,11 +258,11 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     from tests.runtime.conftest import migrate
 
     # ``LivingDayPage`` 跟手机那几张一样建在这里：**每一轮都读那一页**（``read_snapshot``
-    # 把它当第二段摆给她），任何跑 ``run_moment`` / ``read_snapshot`` 的用例都要用到，
+    # 把它当第二段摆给她），任何跑她一轮或 ``read_snapshot`` 的用例都要用到，
     # 各文件各建各的迟早会出现"这个文件建了那个没建"。``PersonaVersion`` 同一个理由：
     # 一轮、日记、开口三条路都要先问一遍"她是谁"（``persona_prompt_vars`` 读这条链）。
     # ``SessionTranscript`` 也是：每一轮开头读连续上下文、结尾写回下一版
-    # （``app.agent.continuity``），少了它 ``run_moment`` 第一步就炸。收到的消息那两张
+    # （``app.agent.continuity``），少了它她的一轮第一步就炸。收到的消息那两张
     # 也是：每一轮都读她还没看过的收件、收尾时记下看过哪几条（``app.living.received``）。
     # 她往外发的那三张也是：每一轮开始前和结束时都把她做的事发出去（``app.living.outgoing``）。
     for cls in (

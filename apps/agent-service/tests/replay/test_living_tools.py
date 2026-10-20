@@ -1,4 +1,4 @@
-"""Replay: the tools of her regular round (``run_moment``) that no other baseline calls.
+"""Replay: the tools of her regular round (the ``regular`` wake) that no other baseline calls.
 
 Each scenario is one to three of her moments in which she uses one group of tools, in order. What
 the outside services answer is given here (``replay.web``, ``replay.image_model``,
@@ -29,8 +29,7 @@ from datetime import datetime
 
 import pytest
 
-from app.infra.cst_time import CST, now_cst
-from app.living.moment import run_moment
+from app.infra.cst_time import CST
 from app.living.pictures import remember_a_picture
 from tests.replay import seeds
 from tests.replay.harness import Reply, ToolUse
@@ -56,7 +55,7 @@ async def _her_household_is_up(replay) -> None:
 
 
 def _moment(replay):
-    return lambda: run_moment(lane=replay.lane, persona_id="akao", clock=now_cst)
+    return lambda: replay.wake("akao", "regular")
 
 
 def _stop() -> Reply:

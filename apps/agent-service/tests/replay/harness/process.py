@@ -103,6 +103,11 @@ class AppProcess:
                 ):
                     await asyncio.sleep(0.01)
 
+    def registered(self):
+        """What the process's plugins registered (:meth:`app.host.Host.registered`)."""
+        assert self._host is not None, "replay: the process is not running"
+        return self._host.registered()
+
     async def stop(self) -> None:
         host, self._host = self._host, None
         if host is not None:

@@ -11,7 +11,7 @@
 ``cache_read_input_tokens`` 暴露（命中数掉到没有，见 ``tests/agent/
 test_usage_cache_contract.py``）。离线钉得住的是代码这一侧的两条：
 
-  1. 这一轮交给 prompt 的变量既不叫时间、值也不随钟变（:func:`run_moment` 真跑两轮
+  1. 这一轮交给 prompt 的变量既不叫时间、值也不随钟变（她的常规节奏真跑两轮
      比对）；
   2. 时间只以模板变量的形式进入编译，没有被谁直接拼进 SYSTEM 正文。
 """
@@ -32,8 +32,8 @@ from app.infra import cst_time
 from app.living import moment as moment_mod
 from app.living import persona as persona_mod
 from app.living.loose_ends import LooseEnd
-from app.living.moment import _MOMENT_CFG, LifeMoment, run_moment
-from tests.living.conftest import clock_at
+from app.living.moment import _MOMENT_CFG, LifeMoment
+from tests.living.conftest import regular_round
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -100,8 +100,8 @@ async def two_moments(living_db, monkeypatch):
     monkeypatch.setattr(moment_mod, "life_moment_minutes", fixed_minutes)
     monkeypatch.setattr(moment_mod, "build_moment_runner", lambda: runner)
 
-    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 0)))
-    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 10)))
+    await regular_round(LANE, "akao", _at(14, 0))
+    await regular_round(LANE, "akao", _at(14, 10))
 
     assert len(runner.runs) == 2, f"两轮没都跑起来：{len(runner.runs)} 轮"
     return [run["prompt_vars"] for run in runner.runs]

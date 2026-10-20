@@ -29,17 +29,17 @@
 它。那一轮的身份就是它，那一轮落地它就算看过；不然它会一直排在最前，每一拍拿它叫醒她都撞上
 "这一轮跑过了"，收件箱的提前叫醒就卡在那儿。
 
-**判"是什么叫醒了她"和跑那一轮在同一次占用里**（:func:`app.living.moment.life_moment_lock_key`）。
-她正在跑一轮的时候，这条钟排一拍在后面，等那一轮结束才判（一轮最长占锁 15 分钟，见
-:func:`app.living.moment.run_moment`）。判在占用外面的话，判完到轮到她之间隔着的那一轮会把
+**判"是什么叫醒了她"和跑那一轮在同一次轮到她的时候**（她的轮次队列，:mod:`app.plugins.living`）。
+她正在跑一轮的时候，这条钟排一拍在后面，等那一轮结束才判（一轮最长占着她的队列 15 分钟，见
+:data:`app.living.serial.HELD_SECONDS`）。判在轮到她之前的话，判完到轮到她之间隔着的那一轮会把
 判据改掉（看过了、跑过了），判出来的是过期的结论。那一轮跑着时到的消息没摆进去，还没看过，
 也还没叫醒过她，所以一轮结束后的下一拍叫醒她一次。
 
-**排在后面的只有一拍**（:func:`app.living.serial.at_most_one`）。钟一分钟一拍、不等上一拍
-跑完，她那一轮挂住的十五分钟里每一拍都排进去的话，那一轮放开之后它们一个接一个判、一个接一个
-记日志，挂住接连发生时越积越多。已经有一拍在排队（或者正在跑它叫醒的那一轮）时，这一拍直接
-过去：排着的那一拍轮到她时判的是那一刻的样子，后面那几拍要判的它都判得到。判还是在占用里，
-上面那个"判完到轮到她之间被改掉"的问题不会回来。
+**排在后面的只有一拍**（她的队列上，这条钟已经有一拍在排队或者正在跑时，后来的当场丢掉）。
+钟一分钟一拍、不等上一拍跑完，她那一轮挂住的十五分钟里每一拍都排进去的话，那一轮放开之后它们
+一个接一个判、一个接一个记日志，挂住接连发生时越积越多。排着的那一拍轮到她时判的是那一刻的
+样子，后面那几拍要判的它都判得到。判还是在轮到她之后，上面那个"判完到轮到她之间被改掉"的问题不会
+回来。
 
 **开始了却没落地的那一轮，下一拍重跑的还是它自己**（:class:`NudgeBegun`）。她在那一轮里做的
 事、发出去的话，id 都从那一轮的身份派生（见 :class:`app.living.moment.DueMoment`）；那一轮
@@ -60,7 +60,7 @@
 
 **提前只到"她被带到那一刻"为止。** 这里不看她说了什么、不判断她该不该回。「注意到」和
 「开口」离得太近，一不小心 @ 就又变成回复开关——所以这条线在这里被切断：
-:func:`nudge_once` 的返回值只说明"这一轮跑了没有"，跟她开没开口没有任何关系。
+:func:`nudged_moment_due` 只判"要不要把她带到这一刻"，跟她开没开口没有任何关系。
 
 **同一条消息只把她叫来一次。** 她没看手机的话那条一直未读，按"还有没有未读"判就是每
 分钟震一次、一天一千多次模型调用。做法不是加冷却，而是让**那一轮的身份就是那条消息**
@@ -72,59 +72,29 @@
 
 from __future__ import annotations
 
-import asyncio
-import logging
 from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated
 
 from app.data.persist import fetch_value, insert_append
 from app.data.schema import Data, Key, table_name
-from app.infra.cst_time import now_cst
 from app.living.moment import (
     DueMoment,
-    LifeMoment,
-    life_moment_lock_key,
     moment_ran,
     nudged_moment_id,
-    run_due_moment,
 )
-from app.living.persona import LIVING_PERSONAS
 from app.living.phone import newest_unread_summons
 from app.living.received import unread_received
-from app.living.records import living_lane
-from app.living.serial import at_most_one, hold
-from app.runtime.node import node
-
-logger = logging.getLogger(__name__)
-
-# 一分钟一拍。这一拍绝大多数时候只是几次读库 + 比大小，一句模型都不调；拍得密只是让
-# "有人叫她"到"她被带到那一刻"之间的延迟压在一分钟内（常规轮次是十分钟）。
-PHONE_NUDGE_TICK_SECONDS = 60
 
 # 收件箱里的消息叫醒她时，那一轮身份里 id 前面的这一截（见模块说明）。
 _INBOX = "inbox:"
-
-
-class PhoneNudgeTick(Data):
-    """看一眼有没有人在叫她的那一拍。
-
-    单字段 ``ts``——框架源循环固定按 ``data_type(ts=<iso>)`` 造 payload，多一个必填
-    字段就是每一拍 ValidationError **直接杀 Pod**。这条约定顺带也是"chat 没有入口"
-    的物理保证：钟装不下内容，就当不了信箱。
-    """
-
-    ts: Annotated[str, Key]
-
-    class Meta:
-        transient = True
 
 
 class NudgeBegun(Data):
     """被什么叫醒的那一轮开始了：模型还没调、她还什么都没做的那一刻记下。
 
     自然键 ``(lane, persona_id, nudged_by)``：一个身份只开始一次。没落地的那一轮由
-    :func:`nudge_once` 原样重跑，不再开始新的一轮。纯 append：落没落地不记在这一行上，看的是
+    :func:`nudged_moment_due` 原样判出、重跑，不再开始新的一轮。纯 append：落没落地不记在这一行上，看的是
     那一轮的 ``LifeMoment`` 在不在（:func:`app.living.moment.moment_ran`），那一轮落地的那次
     提交就是它的了结，不用回来改这一行。
     """
@@ -139,31 +109,6 @@ class NudgeBegun(Data):
 
 
 _BEGUN_TABLE = table_name(NudgeBegun)
-
-
-async def nudge_once(
-    *, lane: str, persona_id: str, clock: Callable[[], datetime]
-) -> LifeMoment | None:
-    """有人在叫她、或者有传到她这里的消息她还没看过，就把她带到这一刻；都没有、或者都已经
-    叫过了，返回 ``None``。
-
-    判（:func:`nudged_moment_due`）和跑（:func:`app.living.moment.run_due_moment`）都在她的
-    moment 占用里。
-
-    这条钟在她身上只排一拍（:func:`app.living.serial.at_most_one`）：已经有一拍在排队、或者
-    正在跑它叫醒的那一轮，这一拍直接返回 ``None``，不排到后面去。排着的那一拍轮到她时才判，
-    这一拍要判的它都判得到；那一轮跑着时才到、没摆进去的，那一轮之后的下一拍叫醒她。
-
-    返回值只回答"这一轮跑了没有"。**她回不回是她的输出**，不在这里判、也不该有人在
-    这里判。
-    """
-    key = life_moment_lock_key(lane, persona_id)
-    async with at_most_one(f"{key}:nudge") as admitted:
-        if not admitted:
-            return None
-        async with hold(key):
-            due = await nudged_moment_due(lane=lane, persona_id=persona_id, clock=clock)
-            return None if due is None else await run_due_moment(due)
 
 
 async def nudged_moment_due(
@@ -205,7 +150,7 @@ async def nudged_moment_due(
 async def _begun_not_landed(*, lane: str, persona_id: str) -> str | None:
     """最近开始的那一轮要是还没落地，它是被什么叫醒的；没有这样的一轮返回 ``None``。
 
-    只看最近开始的那一轮就够：有一轮开始了而没落地时，:func:`nudge_once` 只重跑它、不开始
+    只看最近开始的那一轮就够：有一轮开始了而没落地时，:func:`nudged_moment_due` 只判出它、不开始
     新的一轮，所以没落地的至多一轮，而且就是最近开始的那一轮。
     """
     sql = (
@@ -254,36 +199,3 @@ async def _woke_her(*, lane: str, persona_id: str, nudged_by: str) -> bool:
     )
 
 
-@node
-async def phone_nudge_tick(tick: PhoneNudgeTick) -> None:
-    """三个人各看一眼有没有人在叫自己。
-
-    **并发跑，一个人炸不拖累另两个**（同 :func:`app.living.moment.life_moment_tick`）。
-    跟固定那条钟并发打到同一个人时，两边在 :func:`app.living.serial.hold` 上排队——
-    后到的等前一个做完，不是被丢掉。
-    """
-    lane = living_lane()
-    outcomes = await asyncio.gather(
-        *(
-            nudge_once(lane=lane, persona_id=persona_id, clock=now_cst)
-            for persona_id in LIVING_PERSONAS
-        ),
-        return_exceptions=True,
-    )
-    for persona_id, outcome in zip(LIVING_PERSONAS, outcomes, strict=True):
-        if isinstance(outcome, BaseException):
-            logger.warning(
-                "living nudge lane=%s persona=%s 这一轮炸了：%r",
-                lane,
-                persona_id,
-                outcome,
-                exc_info=outcome,
-            )
-        elif outcome is not None:
-            logger.info(
-                "living nudge lane=%s persona=%s 被叫来提前一轮（%s），说：%s",
-                lane,
-                persona_id,
-                outcome.moment_id,
-                outcome.said,
-            )

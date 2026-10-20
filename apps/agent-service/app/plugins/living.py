@@ -1,8 +1,11 @@
-"""Living: the three sisters' life engine — five clocks, the reading inbox, the two outbound queues,
-the sisters' inboxes, and a one-off admin route that empties the old reading queue.
+"""Living: the three sisters' life engine — a queue of rounds for each sister with two wakes on it,
+three clocks, the reading inbox, the two outbound queues, the sisters' inboxes, and a one-off admin
+route that empties the old reading queue.
 
-  every  60 s  LifeMomentTick     -> life_moment_tick     her rounds (the node decides who is due)
-  every  60 s  PhoneNudgeTick     -> phone_nudge_tick     wake her early for a call or a message
+  each sister's queue of rounds ("round", ``ctx.turns``), signalled by two wakes (``ctx.wake``):
+  every  60 s  regular  -> regular_moment_due / run_due_moment   her regular rhythm
+  every  60 s  nudge    -> nudged_moment_due / run_due_moment    wake her early for a call or a message
+
   every 300 s  LandingTick        -> landing_tick         match what she said with what landed
   every 300 s  DayPageTick        -> day_page_tick        yesterday's page (04:00-06:00 window)
   every 300 s  PersonaReviewTick  -> persona_review_tick  Monday's "who I am" (06:00-08:00 window)
@@ -15,10 +18,19 @@ the sisters' inboxes, and a one-off admin route that empties the old reading que
 
   POST /admin/reading/carry-over  carry_over_reading  the old reading queue -> the reading inbox
 
+**Her rounds take turns on one queue.** One person cannot think two things at once: her regular
+rhythm and her early wakes share her queue, a turn at a time, first come first served. Each of the
+two drops a tick while it already has one queued or running (``DROP_WHILE_ACTIVE``): one tick
+waiting behind a stuck round is enough, since it decides on what is true when it gets its turn.
+A turn holds her queue for at most :data:`app.living.serial.HELD_SECONDS`; a turn that never ends
+is cut off there and handled as a crash. Each tick reads the database and compares; most run
+nothing. Her diary and her weekly look back do not take turns on this queue.
+
 **Clocks tick denser than the work they drive.** A clock's seconds are fixed when it is
 registered, so the intervals that are business parameters (ten minutes between rounds, the
-diary and review windows) are judged inside the nodes, on every tick; most ticks return before
-reading anything.
+diary and review windows) are judged on every tick, in the wake's ``due`` or in the node; most
+ticks run nothing. Her early wake ticks every minute so that someone calling her waits at most a
+minute.
 
 **A tick builds its payload in the clock loop** (:func:`_ticker`): a tick Data that grew a
 required field fails there, and the clock's watchdog stops the process. The node's run is the
@@ -60,13 +72,14 @@ from datetime import datetime, timedelta
 from app.data.schema import Data
 from app.domain.chat_dataflow import ChatResponseSegment
 from app.domain.safety import Recall
-from app.host import Context, Plugin, Tick
+from app.host import Batch, Coalesce, Context, Plugin, Tick, WakeSource
 from app.living import pictures, records  # noqa: F401
 from app.living.day_page import DAY_PAGE_TICK_SECONDS, DayPageTick, day_page_tick
 from app.living.landing import LANDING_TICK_SECONDS, LandingTick, landing_tick
-from app.living.moment import LIFE_MOMENT_TICK_SECONDS, LifeMomentTick, life_moment_tick
-from app.living.nudge import PHONE_NUDGE_TICK_SECONDS, PhoneNudgeTick, phone_nudge_tick
+from app.living.moment import DueMoment, LifeMoment, regular_moment_due, run_due_moment
+from app.living.nudge import nudged_moment_due
 from app.living.participants import READING
+from app.living.persona import LIVING_PERSONAS
 from app.living.persona_review import (
     PERSONA_REVIEW_TICK_SECONDS,
     PersonaReviewTick,
@@ -74,12 +87,16 @@ from app.living.persona_review import (
 )
 from app.living.reading import read_a_round
 from app.living.received import open_inboxes
+from app.living.records import living_lane
+from app.living.serial import HELD_SECONDS
 from app.nodes.reading_carry_over import ReadingCarryOverRequest, carry_over_reading
+
+# How often her two wakes tick (see "Clocks tick denser than the work they drive").
+REGULAR_EVERY = timedelta(seconds=60)
+NUDGE_EVERY = timedelta(seconds=60)
 
 # (tick Data, seconds, node). The clock is named after its tick Data.
 CLOCKS: tuple[tuple[type[Data], float, Callable[[Data], Awaitable[None]]], ...] = (
-    (LifeMomentTick, LIFE_MOMENT_TICK_SECONDS, life_moment_tick),
-    (PhoneNudgeTick, PHONE_NUDGE_TICK_SECONDS, phone_nudge_tick),
     (LandingTick, LANDING_TICK_SECONDS, landing_tick),
     (DayPageTick, DAY_PAGE_TICK_SECONDS, day_page_tick),
     (PersonaReviewTick, PERSONA_REVIEW_TICK_SECONDS, persona_review_tick),
@@ -95,7 +112,33 @@ def _ticker(data_type: type[Data], node: Callable[[Data], Awaitable[None]]) -> T
     return tick
 
 
+def regular(lane: str) -> WakeSource[DueMoment, LifeMoment]:
+    """Her regular rhythm on ``lane``: a round when her current cell has none
+    (:func:`app.living.moment.regular_moment_due`)."""
+
+    async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DueMoment | None:
+        return await regular_moment_due(lane=lane, persona_id=persona_id, clock=clock)
+
+    return WakeSource("regular", Coalesce.DROP_WHILE_ACTIVE, due, run_due_moment)
+
+
+def nudge(lane: str) -> WakeSource[DueMoment, LifeMoment]:
+    """Her early wakes on ``lane``: a round when someone calls her on her phone or a message for
+    her wants to wake her (:func:`app.living.nudge.nudged_moment_due`)."""
+
+    async def due(persona_id: str, batch: Batch, clock: Callable[[], datetime]) -> DueMoment | None:
+        return await nudged_moment_due(lane=lane, persona_id=persona_id, clock=clock)
+
+    return WakeSource("nudge", Coalesce.DROP_WHILE_ACTIVE, due, run_due_moment)
+
+
 def setup(ctx: Context) -> None:
+    lane = living_lane()
+    regular_rounds, early_wakes = regular(lane), nudge(lane)
+    for persona_id in LIVING_PERSONAS:
+        rounds = ctx.turns(persona_id, "round", hold_limit=timedelta(seconds=HELD_SECONDS))
+        ctx.wake(rounds, regular_rounds, every=REGULAR_EVERY)
+        ctx.wake(rounds, early_wakes, every=NUDGE_EVERY)
     for data_type, seconds, node in CLOCKS:
         ctx.clock(data_type.__name__, seconds, _ticker(data_type, node))
     ctx.inbox(

@@ -7,10 +7,11 @@ task, and the clocks phase with the lane gating.
 
 Neither the surface test (``tests/apps``) nor the replay starts clocks, so this file is where the
 clocks are seen to start through the lifespan: in a coe lane with
-``DATAFLOW_ENABLE_TIME_SOURCES=1`` each of living's five clocks ticks into its node, and without
-it none does. The nodes are replaced by recorders and the intervals shortened; which clocks
-living registers, with which seconds and nodes, is pinned by
-``tests/plugins/test_agent_service_equivalence.py``.
+``DATAFLOW_ENABLE_TIME_SOURCES=1`` each of living's three clocks ticks into its node and each of
+her two wakes signals her queue, and without it none does. The nodes and the wake sources are
+replaced by recorders and the intervals shortened; which clocks and wakes living registers is
+pinned by ``tests/plugins/test_time_source_payload_contract.py`` and
+``tests/living/test_moment.py``.
 """
 from __future__ import annotations
 
@@ -22,12 +23,11 @@ import pytest
 from fastapi import FastAPI
 
 LIVING_CLOCKS = (
-    "LifeMomentTick",
-    "PhoneNudgeTick",
     "LandingTick",
     "DayPageTick",
     "PersonaReviewTick",
 )
+HER_WAKES = ("regular", "nudge")
 
 
 @pytest.fixture
@@ -64,9 +64,13 @@ def pod(monkeypatch, tmp_path) -> list[str]:
 
 @pytest.fixture
 def ticks(monkeypatch) -> dict[str, list[object]]:
-    """living's clocks, each ticking every 20 ms into a recorder instead of its node. Returns
-    what each recorder received, by clock name."""
+    """living's clocks, each ticking every 20 ms into a recorder instead of its node, and her two
+    wakes, each signalling every 20 ms a source that records who it was asked about and runs
+    nothing. Returns what each recorder received, by clock or source name."""
+    from datetime import timedelta
+
     import app.plugins.living as living
+    from app.host import Coalesce, WakeSource
 
     seen: dict[str, list[object]] = {}
 
@@ -76,11 +80,27 @@ def ticks(monkeypatch) -> dict[str, list[object]]:
 
         return node
 
+    def recording(name: str):
+        def source(lane: str) -> WakeSource:
+            async def due(persona_id, batch, clock) -> None:
+                seen.setdefault(name, []).append(persona_id)
+
+            async def run(due) -> None:  # pragma: no cover - due never says yes
+                raise AssertionError
+
+            return WakeSource(name, Coalesce.DROP_WHILE_ACTIVE, due, run)
+
+        return source
+
     monkeypatch.setattr(
         living,
         "CLOCKS",
         tuple((data_type, 0.02, recorder(data_type.__name__)) for data_type, _, _ in living.CLOCKS),
     )
+    monkeypatch.setattr(living, "regular", recording("regular"))
+    monkeypatch.setattr(living, "nudge", recording("nudge"))
+    monkeypatch.setattr(living, "REGULAR_EVERY", timedelta(seconds=0.02))
+    monkeypatch.setattr(living, "NUDGE_EVERY", timedelta(seconds=0.02))
     return seen
 
 
@@ -102,7 +122,7 @@ async def test_startup_builds_the_business_schema_then_migrates_and_shutdown_tak
     assert _admin_paths(app) == set()
 
 
-async def test_with_time_sources_enabled_each_of_the_five_clocks_ticks(
+async def test_with_time_sources_enabled_each_clock_ticks_and_each_wake_signals_her(
     pod, ticks, monkeypatch, caplog
 ):
     from app.main import lifespan
@@ -112,12 +132,15 @@ async def test_with_time_sources_enabled_each_of_the_five_clocks_ticks(
 
     async with lifespan(FastAPI()):
         async with asyncio.timeout(5):
-            while set(ticks) != set(LIVING_CLOCKS):
+            while set(ticks) != {*LIVING_CLOCKS, *HER_WAKES}:
                 await asyncio.sleep(0.01)
 
-    for name, received in ticks.items():
-        assert {type(data).__name__ for data in received} == {name}
-        assert all(data.ts for data in received)
+    for name in LIVING_CLOCKS:
+        assert {type(data).__name__ for data in ticks[name]} == {name}
+        assert all(data.ts for data in ticks[name])
+    for name in HER_WAKES:
+        assert set(ticks[name]) <= {"akao", "ayana", "chinagi"}
+    # Three clocks and one clock for each of her two wakes, shared by the three sisters.
     assert "runtime: app=agent-service started 5 clock(s)" in caplog.messages
 
     # Stopped with the app: no tick after shutdown.

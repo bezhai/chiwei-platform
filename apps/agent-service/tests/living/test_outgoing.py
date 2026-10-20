@@ -16,7 +16,7 @@ from app.data.persist import fetch_all, from_row
 from app.living import moment as moment_mod
 from app.living import outgoing as outgoing_mod
 from app.living.happening import record_happening
-from app.living.moment import act, keep_in_mind, move_to, run_moment, say, switch_to
+from app.living.moment import act, keep_in_mind, move_to, say, switch_to
 from app.living.outgoing import OutgoingResult, OutgoingUpTo, send_what_she_did
 from app.living.records import (
     KIND_ACT,
@@ -25,7 +25,15 @@ from app.living.records import (
     MEDIUM_PHONE,
 )
 from app.living.whereabouts import note_whereabouts
-from tests.living.conftest import RESIDENT_NAMES, clock_at, model_facing_text
+from tests.living.conftest import (
+    RESIDENT_NAMES,
+    clock_at,
+    her_queue,
+    her_round_runs,
+    model_facing_text,
+    nudged_round,
+    settled,
+)
 from tests.living.test_moment import (  # noqa: F401 — 形参名就是 fixture 名
     moment_db,
     stub_moment,
@@ -635,8 +643,19 @@ async def test_what_she_did_before_she_started_telling_is_not_sent(
 # ---------------------------------------------------------------------------
 
 
-async def _round(at: dt.datetime, persona: str = "akao", *, lane: str = LANE):
-    return await run_moment(lane=lane, persona_id=persona, clock=clock_at(at))
+async def _round(
+    at: dt.datetime,
+    persona: str = "akao",
+    *,
+    lane: str = LANE,
+    hold_limit: dt.timedelta | None = None,
+):
+    """她的一拍常规节奏，在一条新的轮次队列上，钟停在 ``at``；``hold_limit`` 是这条队列的占用上限。"""
+    from app.host import Signal
+    from app.plugins.living import regular
+
+    turns = her_queue(persona, clock=clock_at(at), hold_limit=hold_limit)
+    return await turns.take(regular(lane), Signal(at=at))
 
 
 @pytest.mark.integration
@@ -676,23 +695,19 @@ async def test_a_round_that_carries_on_tells_nothing(started, stub_moment):  # n
 
 @pytest.mark.integration
 async def test_a_round_that_waited_behind_a_stuck_one_happens_when_it_gets_her(
-    started, stub_moment, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+    started, stub_moment  # noqa: F811 — 形参名就是 fixture 名
 ):
     """前一轮挂住了（模型调用卡住，最长占着她 15 分钟），21:10 那一拍排在后面，21:26 才轮到。
     这一轮的『现在』是 21:26：她这一轮记下的事、发出去的消息带的都是这一刻，不是那一拍敲响的
     21:10。不然 world 收到一条 21:26 才发出的汇总，上面却盖着 21:10，而她回应的是 21:20 才
     发生的事。"""
-    from app.living import moment as moment_mod
-    from app.living.moment import (
-        LifeMomentTick,
-        latest_moment,
-        life_moment_lock_key,
-        life_moment_tick,
-    )
-    from app.living.serial import hold
+    import asyncio
+
+    from app.host import Signal
+    from app.living.moment import latest_moment
     from app.living.snapshot import recent_own_happenings
     from app.living.whereabouts import current_whereabouts
-    from tests.living.conftest import queued_behind
+    from app.plugins.living import regular
 
     post = started
     stub_moment(
@@ -701,16 +716,10 @@ async def test_a_round_that_waited_behind_a_stuck_one_happens_when_it_gets_her(
         ("act", {"what": "把锅端上桌"}),
     )
     clock = [_at(21, 10)]
-    monkeypatch.setattr(moment_mod, "now_cst", lambda: clock[0])
-    monkeypatch.setattr(moment_mod, "living_lane", lambda: LANE)
-    monkeypatch.setattr(moment_mod, "LIVING_PERSONAS", ("akao",))
-
-    key = life_moment_lock_key(LANE, "akao")
-    async with hold(key):  # 挂住的那一轮
-        tick = asyncio.create_task(
-            life_moment_tick(LifeMomentTick(ts=clock[0].isoformat()))
-        )
-        await queued_behind(key)
+    turns = her_queue("akao", clock=lambda: clock[0])
+    async with her_round_runs(turns):  # 挂住的那一轮
+        tick = asyncio.create_task(turns.take(regular(LANE), Signal(at=clock[0])))
+        await settled()
         clock[0] = _at(21, 26)
     await tick
 
@@ -785,21 +794,17 @@ async def test_what_she_did_in_a_round_that_failed_is_told_before_her_next_round
 
 @pytest.mark.integration
 async def test_what_she_did_in_a_round_cut_off_for_taking_too_long_is_told_next_time(
-    started, stub_moment, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+    started, stub_moment  # noqa: F811 — 形参名就是 fixture 名
 ):
-    """一轮占着她的时间到顶被掐断（:data:`app.living.serial.HELD_SECONDS`），跟失败一样：做了的
-    事下一轮开始前发出去。"""
-    from app.living import serial as serial_mod
-
+    """一轮占着她的时间到顶被掐断（她轮次队列的占用上限，线上是
+    :data:`app.living.serial.HELD_SECONDS`），跟失败一样：做了的事下一轮开始前发出去。"""
     post = started
-    monkeypatch.setattr(serial_mod, "HELD_SECONDS", 3.0)
     runner = stub_moment(("act", {"what": "把锅端上桌"}))
     _fails_after_its_hands(runner, hangs=True)
     with pytest.raises(TimeoutError):
-        await _round(_at(21, 30))
+        await _round(_at(21, 30), hold_limit=dt.timedelta(seconds=3))
     assert post.sent == []
 
-    monkeypatch.setattr(serial_mod, "HELD_SECONDS", 900.0)
     seen = _notes_what_was_sent_before_the_model(stub_moment(said="继续"), post)
     await _round(_at(21, 40))
 
@@ -834,11 +839,9 @@ async def test_a_send_that_hangs_does_not_cut_off_her_rounds(
 ):
     """发给绫奈的那一次挂住。不给一次发送封顶的话，这一轮在占用到顶时被掐断，下一轮开始前又先去
     发同一条、又挂住：她一轮一轮被掐断，千凪和 world 一直轮不到。"""
-    from app.living import serial as serial_mod
-
     post = started
     # 不封顶的那一版红在这里：要等满占用上限。压到 5 秒，红得快一点。
-    monkeypatch.setattr(serial_mod, "HELD_SECONDS", 5.0)
+    cap = dt.timedelta(seconds=5)
     monkeypatch.setattr(outgoing_mod, "SEND_SECONDS", 0.2)
     post.hanging.add("绫奈")
     stub_moment(
@@ -846,9 +849,9 @@ async def test_a_send_that_hangs_does_not_cut_off_her_rounds(
         ("act", {"what": "把锅端上桌"}),
     )
 
-    assert await _round(_at(21, 30)) is not None
+    assert await _round(_at(21, 30), hold_limit=cap) is not None
     stub_moment(said="继续")
-    assert await _round(_at(21, 40)) is not None
+    assert await _round(_at(21, 40), hold_limit=cap) is not None
 
     assert await _delivered_to() == ["world", "千凪"]
     assert [m.recipient for m in await outgoing_mod.unsent(lane=LANE, persona_id="akao")] == [
@@ -920,7 +923,7 @@ async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_othe
 
     她要发的消息一条不多一条不少：那句话、每件事各进一次；讲到哪了只停在她自己的号上；重跑的
     那几次『现在』一次比一次晚，消息上的时间还是她第一次做那件事的时候。"""
-    from app.living.nudge import NudgeBegun, nudge_once
+    from app.living.nudge import NudgeBegun
     from app.living.received import receive
     from app.messaging.message import Kind, new_message
     from tests.runtime.conftest import migrate
@@ -946,7 +949,7 @@ async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_othe
     _fails_after_its_hands(runner, RuntimeError("这一轮在她做完事之后失败了"))
     for minute in (32, 33):
         with pytest.raises(RuntimeError, match="做完事之后失败"):
-            await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, minute)))
+            await nudged_round(LANE, "akao", _at(21, minute))
         await chinagi_does(f"搅了搅锅（{minute}）", _at(21, minute))
         if minute == 32:
             await receive(
@@ -957,9 +960,9 @@ async def test_a_woken_round_that_keeps_failing_tells_each_thing_once_while_othe
             )
 
     stub_moment(said, closed, ("act", {"what": "把晾的衣服收进来了"}))
-    landed = await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 34)))
+    landed = await nudged_round(LANE, "akao", _at(21, 34))
     assert landed is not None and landed.moment_id == f"nudge:inbox:{rain.message_id}"
-    assert await nudge_once(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 35))) is None
+    assert await nudged_round(LANE, "akao", _at(21, 35)) is None
 
     hers = await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor")
     others = await _her_seqs(outgoing_mod._HAPPENING_TABLE, "actor", "chinagi")

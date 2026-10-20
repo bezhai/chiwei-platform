@@ -41,10 +41,9 @@ from app.living.moment import (
     MATERIAL_TOOLS,
     MOMENT_TOOLS,
     MOMENT_TRIM_POLICY,
-    run_moment,
     transcript_key,
 )
-from tests.living.conftest import clock_at
+from tests.living.conftest import regular_round
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
 
 LANE = "coe-living"
@@ -120,7 +119,7 @@ def _round(
 ) -> list[Message]:
     """跑一轮：先按这一刻裁一遍历史，再把这一轮的输入和产出接上去。
 
-    两步的顺序跟 :func:`app.living.moment.run_moment` 一样 —— 裁在模型调用之前，
+    两步的顺序跟 :func:`app.living.moment.run_due_moment` 一样 —— 裁在模型调用之前，
     存下去的就是喂进去的那份加上这一轮。
     """
     kept = trim_for_round(
@@ -657,7 +656,7 @@ def test_no_state_is_laid_down_between_two_cleanups():
 def test_the_first_round_of_a_day_starts_from_her_state():
     """一天的第一轮历史是空的 —— 那一下也要立一根界桩。
 
-    每轮的刺激只送新发生的事（:func:`app.living.moment.run_moment`），全量状态只从界桩
+    每轮的刺激只送新发生的事（:func:`app.living.moment.run_due_moment`），全量状态只从界桩
     来。历史空的时候不立，她这一轮就不知道自己在哪、在做什么、心里挂着什么 —— 跨过
     04:00 的第一轮、以及重启之后的第一轮，都是这个形状。
     """
@@ -1150,7 +1149,7 @@ async def test_her_round_trims_by_her_own_policy(
     used = _spy_on_the_policy(monkeypatch, moment_mod)
 
     stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(13, 50)))
+    await regular_round(LANE, "akao", _at(13, 50))
 
     _assert_read_it_at_both_call_sites(used, hers, whose="她")
 
@@ -1209,13 +1208,13 @@ async def test_a_cleanup_lands_in_the_stored_transcript(moment_db, stub_moment):
     第二个 moment 立起第一根界桩，第三个才有得算年龄 —— 这就是一天头几轮的样子。
     """
     stub_moment(("look_around", {}), said="继续")
-    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(13, 50)))
+    await regular_round(LANE, "akao", _at(13, 50))
 
     stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(14, 0)))
+    await regular_round(LANE, "akao", _at(14, 0))
 
     stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(15, 10)))
+    await regular_round(LANE, "akao", _at(15, 10))
 
     tid = transcript_key(lane=LANE, persona_id="akao")
     stored, _ver = await load_session(tid)
@@ -1258,7 +1257,7 @@ async def test_a_picture_is_gone_before_she_is_fed_again(moment_db, stub_moment)
     )
 
     runner = stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(15, 10)))
+    await regular_round(LANE, "akao", _at(15, 10))
 
     fed = runner.runs[0][0]
     assert _images(fed) == [], "过期地址在模型看到它之前就该没了"

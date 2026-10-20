@@ -13,7 +13,7 @@
   ==================  ====================  ==========================
 
 别人做了什么不从这里读：传到她这里的那一段在 :mod:`app.living.received`，由
-``run_moment`` 另摆进这一轮（``tests/living/test_received.py``）。"她刚做过、说过"那层
+``run_due_moment`` 另摆进这一轮（``tests/living/test_received.py``）。"她刚做过、说过"那层
 单独存在的理由：她的上下文会被裁剪，传到她这里的消息也只摆一次。少了这一层，她上一轮
 答应姐姐的话下一轮就凭空消失，"接得上昨天"永远无从谈起。
 
@@ -563,7 +563,7 @@ async def test_todays_own_lines_stay_undated(snap_db):
 async def test_the_now_line_says_which_calendar_day_it_is(snap_db):
     """带日期的行只有在「今天是几号」也说了的时候才读得懂。
 
-    这一轮喂给她的全部输入就是快照 + 信封（见 ``app.living.moment.run_moment``），
+    这一轮喂给她的全部输入就是快照 + 信封（见 ``app.living.moment.run_due_moment``），
     没有别的地方告诉她今天几号、星期几。只给 ``07-24`` 而不说今天是 ``07-25``，她算
     不出那是昨天还是上个月；日程 / 提醒要填绝对日期时更是只能瞎填。
     """

@@ -47,8 +47,6 @@ import pytest
 import app.living as living_pkg
 from app.living.day_page import DayPageTick
 from app.living.landing import LandingTick
-from app.living.moment import LifeMomentTick
-from app.living.nudge import PhoneNudgeTick
 from app.living.persona_review import PersonaReviewTick
 from tests.hosting import in_a_fresh_process
 
@@ -84,14 +82,18 @@ print(json.dumps({
     'inboxes': sorted([r.name, _id(r.detail['on_message'])] for r in rs if r.kind == 'inbox'),
     'at_start': sorted(_id(r.detail['open']) for r in rs if r.kind == 'inboxes_at_start'),
     'clocks': sorted([r.plugin, r.name] for r in rs if r.kind == 'clock'),
+    'wakes': sorted([r.plugin, r.name] for r in rs if r.kind == 'wake'),
 }))
 """
 
 # 宿主能登记的每一种东西，按"能不能把外面的东西送进这个进程"分。能的那几种下面逐种查；钟不能：
-# 每一拍只造一个只装得下 ``ts`` 的 Data（最后两条）。宿主多出一种登记，这里先红，要重新判断它算
-# 哪一边。
+# 每一拍只造一个只装得下 ``ts`` 的 Data（最后两条）。轮次队列（``turns``）和给它发信号的钟
+# （``wake``）也不能：每一拍交给她队列的只有钟响的时刻（宿主造的 ``app.host.Signal``），判不判、
+# 判出哪一轮由来源读库决定。宿主多出一种登记，这里先红，要重新判断它算哪一边。
 _INBOUND_KINDS = frozenset({"route", "inbox", "inboxes_at_start"})
-_NOT_INBOUND_KINDS = frozenset({"clock", "task", "outbound", "service", "on_stop"})
+_NOT_INBOUND_KINDS = frozenset(
+    {"clock", "task", "outbound", "service", "on_stop", "turns", "wake"}
+)
 
 _LIVING_ROOT = "app.living"
 
@@ -346,7 +348,7 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
 
     monkeypatch.setattr(AgentRunner, "run", no_model)
     monkeypatch.setattr(moment_mod, "build_moment_runner", no_model)
-    monkeypatch.setattr(moment_mod, "run_moment", no_model)
+    monkeypatch.setattr(moment_mod, "run_due_moment", no_model)
 
     await open_inboxes(inbox)
     for name in names.values():
@@ -384,8 +386,6 @@ def test_no_living_module_ever_mentions_the_old_inbound_chain():
 @pytest.mark.parametrize(
     "cls",
     [
-        LifeMomentTick,
-        PhoneNudgeTick,
         LandingTick,
         DayPageTick,
         PersonaReviewTick,
@@ -403,12 +403,17 @@ def test_a_clock_cannot_be_turned_into_a_mailbox(cls):
     )
 
 
-def test_the_only_clocks_are_livings_five():
-    """宿主上的钟只有 living 那五条，名字就是上面那五个只装得下 ``ts`` 的 tick。"""
-    assert _registered(LANE)["clocks"] == [
+def test_the_only_clocks_are_livings_three_and_her_two_wakes():
+    """宿主上的钟只有 living 那三条，名字就是上面那三个只装得下 ``ts`` 的 tick；她的轮次只由
+    常规节奏和提前叫醒这两个来源的钟叫醒，每人一条队列。"""
+    registered = _registered(LANE)
+    assert registered["clocks"] == [
         ["living", "DayPageTick"],
         ["living", "LandingTick"],
-        ["living", "LifeMomentTick"],
         ["living", "PersonaReviewTick"],
-        ["living", "PhoneNudgeTick"],
+    ]
+    assert registered["wakes"] == [
+        ["living", f"{source} -> {persona}/round"]
+        for source in ("nudge", "regular")
+        for persona in ("akao", "ayana", "chinagi")
     ]

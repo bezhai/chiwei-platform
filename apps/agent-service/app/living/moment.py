@@ -42,9 +42,9 @@
 只摆一次，上下文里那一段 4 小时就裁掉，状态里「你刚做过、说过」那一段只有她**自己**说做
 的，别人说的话不在里面，谁也救不回来。而"跨 moment 因果延续"恰好是整个实验最想验证的东西。
 
-**每个 moment 串行。** 一个人不能同时想两件事——这是物理事实，不是给她加冷却。用 T1 的
-:func:`app.living.serial.hold`，后到的排队等前一次做完（两条路：固定的钟，和
-:mod:`app.living.nudge` 那条被叫醒提前来的）。
+**每个 moment 串行。** 一个人不能同时想两件事——这是物理事实，不是给她加冷却。她的每一轮都在
+她自己的一条轮次队列上跑，一次一轮，后到的排队等前一次做完（两条路：钟点上该来的，和
+:mod:`app.living.nudge` 那条被叫醒提前来的；队列由宿主建，登记在 :mod:`app.plugins.living`）。
 
 **moment 的身份是格子，不是钟表上那一瞬**（:func:`regular_moment_due`）。
 副作用先落库、``LifeMoment`` 后落库，中间崩掉的话下一拍会重跑；身份落在格上，重试拿到
@@ -55,7 +55,7 @@
 理由见 :class:`DueMoment`：撞不上常规 moment 的 id，而且同一条消息只能把她叫来一次。
 
 **身份是格子，她这个 moment 的『现在』却是拿到占用那一刻的钟**（:class:`DueMoment`）。排队是
-正常的（``hold`` 让后到的等，不丢），前一轮挂住时后面那一拍要过一阵才轮到她；她这一轮看到的、
+正常的（队列让后到的等，不丢），前一轮挂住时后面那一拍要过一阵才轮到她；她这一轮看到的、
 做的、发出去的都在轮到她之后，钟点也就是那一刻。
 
 **"她这个 moment 的钟点"和"这个 moment 第几个落地"是两个问题，各有各的列**（见
@@ -133,7 +133,7 @@ from app.data.persist import fetch_one, from_row
 from app.data.schema import CommitOrder, Data, Key, table_name
 from app.data.tx import tx
 from app.domain.thinking_cost import record_round_cost
-from app.infra.cst_time import CST, now_cst
+from app.infra.cst_time import CST
 
 # 她手边那几份写好的说明：两只手，外加"有哪些可读"那一份清单（清单只能从 prompt
 # 变量进，见本模块最后一段 docstring）。
@@ -152,7 +152,7 @@ from app.living.participants import WORLD, residents
 # 因为日记那一页（``app.living.day_page``）也要用，而它在 ``snapshot`` 之下、本模块
 # 在 ``snapshot`` 之上，反向 import 会成环。**这个 moment 不自己查 bot_persona**：正文来自
 # 版本链还是主表由那个模块一处说了算，三条注入路各查一遍就会各漂各的。
-from app.living.persona import LIVING_PERSONAS, persona_prompt_vars
+from app.living.persona import persona_prompt_vars
 from app.living.phone import (
     PHONE_TOOLS,
     commit_glances,
@@ -171,7 +171,6 @@ from app.living.records import (
     _require_aware,
     esc,
     legacy_null_is,
-    living_lane,
 )
 
 # 一个 moment 里每个工具都要读的那四样 ambient 事实，定义在 scope 里（手机和嘴的工具用的
@@ -187,13 +186,11 @@ from app.living.scope import (
     moment_scope,
     note_recorded,
 )
-from app.living.serial import at_most_one, hold
 from app.living.snapshot import read_snapshot
 from app.living.takeback import TAKEBACK_TOOLS
 from app.living.web import WEB_TOOLS
 from app.living.whereabouts import current_whereabouts, note_whereabouts
 from app.messaging.sending import ask
-from app.runtime.node import node
 
 logger = logging.getLogger(__name__)
 
@@ -225,11 +222,6 @@ _MOMENT_CFG = AgentConfig(
 # Dynamic Config key：两个 moment 之间至少隔多少分钟。改它不用重新部署。
 LIVING_LIFE_MOMENT_MINUTES_KEY = "living_life_moment_minutes"
 DEFAULT_LIFE_MOMENT_MINUTES = 10
-
-# 钟拍得比最密的 moment 还密，间隔判在节点里 —— 钟的秒数在登记时
-# 就固定了，想让间隔可调只能这么做（理由写在 :mod:`app.plugins.living`）。
-# 一分钟一拍的代价只有一次读库 + 比大小。
-LIFE_MOMENT_TICK_SECONDS = 60
 
 # 派生 id 的命名空间，随手换会让历史记录全部对不上。
 _ID_NS = uuid.UUID("9c1e4f70-3b28-4a56-8d0f-1e7a2c5b6934")
@@ -328,22 +320,7 @@ class LifeMoment(Data):
         return _require_aware("began_at", v)
 
 
-class LifeMomentTick(Data):
-    """life 那一拍。单字段 ``ts``——框架源循环固定按 ``data_type(ts=<iso>)`` 造
-    payload，多一个必填字段就是每一拍 ValidationError **直接杀 Pod**。"""
-
-    ts: Annotated[str, Key]
-
-    class Meta:
-        transient = True
-
-
 _MOMENT_TABLE = table_name(LifeMoment)
-
-
-def life_moment_lock_key(lane: str, persona_id: str) -> str:
-    """这个人在这个 lane 上 moment 的排他占用 key（每人一条轴，互不阻塞）。"""
-    return f"living:moment:{lane}:{persona_id}"
 
 
 def transcript_key(*, lane: str, persona_id: str) -> str:
@@ -741,8 +718,8 @@ async def stop_for_now() -> str:
 # 这个数只管一次环顾四周，管不住她这一轮。一次最多 55 秒（加上下面问出去那一步的上限），可一轮里
 # 环顾几次不由它定：recursion_limit（``_MOMENT_CFG``）数的是模型调用，一次模型调用可以连着要几只手，
 # 这些手一只接一只跑，模型调用本身也要花时间，所以一轮能花多久没有一个从这里乘得出来的上限。
-# 兜住一轮的是她的 moment 占用（:data:`app.living.serial.HELD_SECONDS`，900 秒）：等回答时撞上
-# 它，这一轮照常被掐断、占用放开、下一拍重来。环顾四周不绕过它，掐断传进来的取消原样往上走，
+# 兜住一轮的是她轮次队列的占用上限（:data:`app.living.serial.HELD_SECONDS`，900 秒）：等回答时
+# 撞上它，这一轮照常被掐断、队列放开、下一拍重来。环顾四周不绕过它，掐断传进来的取消原样往上走，
 # 不当成"没人回答"。
 # 不做成配置：这是"不让她干等"的上限，不是她生活里的一个参数。
 LOOK_AROUND_ANSWER_SECONDS = 45.0
@@ -795,7 +772,7 @@ async def look_around() -> str:
             )
     except Exception:
         # 提问不重试（通信机制的约定）。什么原因没问成，都是这一眼没看到：问之前查她在哪、查她
-        # 叫什么出的错也算。只接 Exception：她这一轮被取消（moment 占用到点掐断、进程收尾）不是
+        # 叫什么出的错也算。只接 Exception：她这一轮被取消（队列的占用上限到点掐断、进程收尾）不是
         # 没问成，取消原样往上走，这一轮该停就停。
         logger.warning(
             "living look_around lane=%s persona=%s 问 world 没问成",
@@ -1110,8 +1087,8 @@ class DueMoment:
 
     两条路判它：钟点上该来的（:func:`regular_moment_due`）和被人叫来提前的
     （:func:`app.living.nudge.nudged_moment_due`）；跑它的是同一个 :func:`run_due_moment`。
-    判和跑在她的同一次占用里：判在占用外面的话，判完到轮到她之间可能隔着一整轮，那一轮会把判据
-    改掉（看过了、跑过了），判出来的就是过期的结论。
+    判和跑在同一次轮到她的时候（她的轮次队列，:mod:`app.plugins.living`）：判在轮到她之前的话，
+    判完到轮到她之间可能隔着一整轮，那一轮会把判据改掉（看过了、跑过了），判出来的就是过期的结论。
 
     **两种 moment，身份不一样。**
 
@@ -1200,33 +1177,9 @@ async def regular_moment_due(
     )
 
 
-async def run_moment(
-    *,
-    lane: str,
-    persona_id: str,
-    clock: Callable[[], datetime],
-) -> LifeMoment | None:
-    """推进这个人钟点上该来的那一个 moment；这一格不该跑就一句模型都不调，返回 ``None``。
-
-    判和跑都在她的排他占用里：一个人不能同时想两件事。判在里面，不然两条路会各自读到"还没
-    跑过"、双双跑一个 moment。
-
-    **这条钟在她身上只排一拍**（:func:`app.living.serial.at_most_one`）：已经有一拍在排队或者
-    正在跑，这一拍直接返回 ``None``。排着的那一拍轮到她时按那一刻判这一格跑没跑过，后面那几拍
-    要判的它都判得到。被叫来提前的那条钟另排一拍（:mod:`app.living.nudge`），两条钟之间照样排队。
-    """
-    key = life_moment_lock_key(lane, persona_id)
-    async with at_most_one(f"{key}:regular") as admitted:
-        if not admitted:
-            return None
-        async with hold(key):
-            due = await regular_moment_due(lane=lane, persona_id=persona_id, clock=clock)
-            return None if due is None else await run_due_moment(due)
-
-
 async def run_due_moment(due: DueMoment) -> LifeMoment:
-    """跑判出来的这一轮（:class:`DueMoment`），交回落了地的那一行。**调用方必须已经占着她**：判它
-    和跑它在同一次占用里。
+    """跑判出来的这一轮（:class:`DueMoment`），交回落了地的那一行。它在她的轮次队列上跑，判它和
+    跑它在同一次轮到她的时候（:mod:`app.plugins.living`）。
 
     **她被带到那一刻，回不回是她的输出。** 这里只负责把她带到，不看她说了什么、也没有
     任何"她该不该回"的判断——那是替她做决定。
@@ -1445,43 +1398,14 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
     # 之后：她做了的事不随这一轮落不落地而改变，读的是她存下的经历；这一步没做完的，下一轮
     # 开始前那一次接着做。
     await send_what_she_did(lane=lane, persona_id=persona_id)
+    logger.info(
+        "living moment lane=%s persona=%s %s %s、说：%s",
+        lane,
+        persona_id,
+        moment.moment_id,
+        f"改去 {moment.doing}（{moment.pulled_by}）" if moment.switched else "继续",
+        moment.said,
+    )
     return moment
 
 
-@node
-async def life_moment_tick(tick: LifeMomentTick) -> None:
-    """把三个人各自推进一个 moment。
-
-    **并发跑，一个人炸不拖累另两个。** 三个人各有自己的占用（每人一条轴），所以
-    并发没有竞争；串行的话一个 moment 几十秒的模型调用会让第三个人永远排在拍与拍的边界上。
-    异常不往上抛——源循环那一拍失败会连累另外两个人，而下一拍一分钟后就来了。
-
-    这里不读钟：每个人的『现在』是轮到她那一刻的钟（:func:`run_moment`）。
-    """
-    lane = living_lane()
-    outcomes = await asyncio.gather(
-        *(
-            run_moment(lane=lane, persona_id=persona_id, clock=now_cst)
-            for persona_id in LIVING_PERSONAS
-        ),
-        return_exceptions=True,
-    )
-    for persona_id, outcome in zip(LIVING_PERSONAS, outcomes, strict=True):
-        if isinstance(outcome, BaseException):
-            logger.warning(
-                "living moment lane=%s persona=%s 这个 moment 炸了：%r",
-                lane,
-                persona_id,
-                outcome,
-                exc_info=outcome,
-            )
-        elif outcome is not None:
-            logger.info(
-                "living moment lane=%s persona=%s %s、说：%s",
-                lane,
-                persona_id,
-                f"改去 {outcome.doing}（{outcome.pulled_by}）"
-                if outcome.switched
-                else "继续",
-                outcome.said,
-            )

@@ -1,4 +1,4 @@
-"""Replay: pictures reaching her model, in her regular round (``run_moment``).
+"""Replay: pictures reaching her model, in her regular round (the ``regular`` wake).
 
 Both ways a picture gets in front of her end as an OpenAI-style ``image_url`` block in a tool
 result, carrying an address tool-service signed a moment ago (the picture itself is never stored
@@ -20,8 +20,7 @@ from datetime import datetime
 
 import pytest
 
-from app.infra.cst_time import CST, now_cst
-from app.living.moment import run_moment
+from app.infra.cst_time import CST
 from app.living.pictures import remember_a_picture
 from tests.replay import seeds
 from tests.replay.harness import Reply, ToolUse
@@ -36,7 +35,7 @@ def _at(hour: int, minute: int = 0) -> datetime:
 
 
 def _moment(replay):
-    return lambda: run_moment(lane=replay.lane, persona_id="akao", clock=now_cst)
+    return lambda: replay.wake("akao", "regular")
 
 
 async def test_pictures_reach_her(replay):

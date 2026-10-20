@@ -274,8 +274,8 @@ class PhoneRead(Data):
     无版本链**：这条记的不是"游标现在是多少"这个可变状态，而是"她读到了这条为止"
     这件发生过的事。当前游标 = 这条轴上 ``read_through_ms`` 的最大值。
 
-    选 append 而不是版本链 CAS，是因为同一个 persona 的 moment 本来就串行（
-    :func:`app.living.serial.hold`），不存在并发推同一条游标的写者；而 append 白送
+    选 append 而不是版本链 CAS，是因为同一个 persona 的 moment 本来就串行（她的轮次队列，
+    :mod:`app.plugins.living`），不存在并发推同一条游标的写者；而 append 白送
     一份可查的历史——"哪一轮读了哪条会话、读到哪条消息为止"事后能逐条查出来，版本链
     只留得下最后一版。
 
@@ -1536,7 +1536,7 @@ async def look_at_phone(
     #
     # **但不在这儿落库。** 工具返回不等于她看见了——结果还要进模型的上下文，这一轮才
     # 算真的把内容送到她眼前。当场提交的话，崩在中间就是"已读了但内容从没进过她的
-    # 上下文"，那几条永久消失且一句报错都没有。所以攒进本轮状态，由 ``run_moment``
+    # 上下文"，那几条永久消失且一句报错都没有。所以攒进本轮状态，由 ``run_due_moment``
     # 的收尾跟 ``LifeMoment`` 一个事务落库（:func:`commit_glances`）。
     newest_shown_unread = next((r for r in rows if r["is_unread"]), None)
     if newest_shown_unread is not None:

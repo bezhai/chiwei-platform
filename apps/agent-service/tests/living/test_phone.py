@@ -781,7 +781,7 @@ async def test_the_window_and_the_unread_set_come_from_one_query(
 
     async with in_a_moment("akao", now=_at(20, 20)):
         # 先把这一轮的名单定下来 —— 真链路里这一步发生在信封那一眼（见
-        # ``run_moment``）。白名单那次统计也读 ``common_message``，不先定下来的话它
+        # ``run_due_moment``）。白名单那次统计也读 ``common_message``，不先定下来的话它
         # 会混进下面这个数里，而这里要数的是"打开会话那一眼"发了几条。
         await reachable_conversations(persona_id="akao", now=_at(20, 20))
         event.listen(living_db.sync_engine, "before_cursor_execute", record)

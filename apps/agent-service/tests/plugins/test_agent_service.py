@@ -2,8 +2,9 @@
 
 The plugins are the only definition of what the agent-service process runs. The kinds are pinned
 here per plugin; the routes and their checks are pinned by ``tests/apps/test_surface.py``, the
-clocks by ``test_time_source_payload_contract.py``, the outbound edges by ``test_outbound.py``,
-what reaches living from outside by ``tests/living/test_no_inbound.py``.
+clocks by ``test_time_source_payload_contract.py``, her queues of rounds and their wakes by
+``tests/living/test_moment.py``, the outbound edges by ``test_outbound.py``, what reaches living
+from outside by ``tests/living/test_no_inbound.py``.
 """
 from __future__ import annotations
 
@@ -26,7 +27,9 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("operator", "inbox"): 1,
         ("skills", "service"): 1,
         ("skills", "task"): 1,
-        ("living", "clock"): 5,
+        ("living", "turns"): 3,
+        ("living", "wake"): 6,
+        ("living", "clock"): 3,
         ("living", "route"): 1,
         ("living", "inbox"): 1,
         ("living", "outbound"): 2,

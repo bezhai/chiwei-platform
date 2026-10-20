@@ -1,5 +1,5 @@
-"""Replay: her regular round (the living moment), driven the way the life clock drives it
-(``run_moment`` with the clock read when the round gets its turn).
+"""Replay: her regular round (the living moment), driven the way the host's clock drives it
+(one signal of the ``regular`` wake to her queue; the clock is read when the round gets its turn).
 
 * ``continuation`` — two rounds ten minutes apart. The first starts cold (no history) and uses
   most of what a round touches: a thought with a provider signature, switching and keeping in
@@ -29,8 +29,7 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from app.capabilities._errors import CapabilityTimeout
-from app.infra.cst_time import CST, now_cst
-from app.living.moment import run_moment
+from app.infra.cst_time import CST
 from tests.replay import seeds
 from tests.replay.harness import Fail, ProcessKilled, Reply, Request, ToolUse
 
@@ -55,7 +54,7 @@ async def _her_household_is_up(replay) -> None:
 
 
 def _moment(replay):
-    return lambda: run_moment(lane=replay.lane, persona_id="akao", clock=now_cst)
+    return lambda: replay.wake("akao", "regular")
 
 
 def _take_back_what_she_sent(request: Request) -> Reply:

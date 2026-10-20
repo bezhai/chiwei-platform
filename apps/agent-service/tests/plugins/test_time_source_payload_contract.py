@@ -2,8 +2,9 @@
 
 钟每拍在循环里调一次登记时给的 ``tick(ts)``（:mod:`app.host.clock`）：living 的钟在那里
 **只用 ``data_type(ts=<iso>)`` 构造** payload（:func:`app.plugins.living._ticker`）——
-钟上的 Data 必须是带 ``ts: str`` 字段的单字段 tick（正例见 ``app/living/moment.py`` 的
-``LifeMomentTick(ts: Annotated[str, Key])``）。
+钟上的 Data 必须是带 ``ts: str`` 字段的单字段 tick（正例见 ``app/living/landing.py`` 的
+``LandingTick(ts: Annotated[str, Key])``）。她的轮次不在这里：它们由宿主的钟给她的轮次队列发信号
+（``ctx.wake``），信号是宿主造的，不经过任何 Data（``tests/living/test_moment.py`` 钉住登记）。
 
 宿主起来时不跑钟，所以一条钟的 Data 形态不对（缺 ts / 有其他必填字段）启动时检测不到——
 照样起得来、集成测试照样过，但第一拍 ``tick(ts)`` 就 raise → 钟的循环记下这个错 → watchdog
@@ -13,7 +14,7 @@
 里就发生，交回的节点协程不跑、直接关掉。它能抓住这一整类 bug，不针对某一条具体的钟。
 
 同一次调用还钉住每条钟交给哪个 handler：``CLOCKS`` 里一行接错 handler（比如
-``PhoneNudgeTick`` 接到 ``life_moment_tick``），payload 照样造得出来、宿主照样起得来，生产里
+``DayPageTick`` 接到 ``persona_review_tick``），payload 照样造得出来、宿主照样起得来，生产里
 那条钟驱动的功能就悄悄没了。期望的对应关系写死在 :data:`_HANDLER_OF_CLOCK`，不从 ``CLOCKS`` 读。
 """
 
@@ -26,8 +27,6 @@ import pytest
 
 from app.living.day_page import day_page_tick
 from app.living.landing import landing_tick
-from app.living.moment import life_moment_tick
-from app.living.nudge import phone_nudge_tick
 from app.living.persona_review import persona_review_tick
 from app.plugins.living import CLOCKS
 
@@ -36,8 +35,6 @@ _CLOCK_NAMES = [data_type.__name__ for data_type, _seconds, _node in CLOCKS]
 
 # 每条钟（按名字）该调的 handler。故意不从 CLOCKS 推出来：这张表就是被测的东西。
 _HANDLER_OF_CLOCK = {
-    "LifeMomentTick": life_moment_tick,
-    "PhoneNudgeTick": phone_nudge_tick,
     "LandingTick": landing_tick,
     "DayPageTick": day_page_tick,
     "PersonaReviewTick": persona_review_tick,

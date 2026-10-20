@@ -52,8 +52,9 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
   * **每个人只读她自己的记录。** 她做过的事、她在哪，只给她自己读；别人做了什么由 world
     判断谁会察觉后告诉她，或者姐妹直接对她说，都进她的收件箱。life 里没有一条按位置把别人
     的经历分给她的路（``tests/living/test_only_her_own_records.py`` 守着）。
-  * **占用是进程内的**，前提是 agent-service 单副本；这个前提本来就压在 framework
-    的 interval time source 上，见 :mod:`app.living.serial`。
+  * **占用是进程内的**：她的轮次队列（:mod:`app.plugins.living`）和日记、回看的占用
+    （:mod:`app.living.serial`）都只在一个进程里互斥，前提是 agent-service 单副本；滚动发布时
+    新旧两个进程会重叠一段，这段时间里同一格可能被跑两次。
   * **游标按提交序。** 她的经历按提交序 ``seq`` 往外讲（:mod:`app.living.outgoing`）；按发生
     时刻开窗会漏掉晚提交的记录。
 

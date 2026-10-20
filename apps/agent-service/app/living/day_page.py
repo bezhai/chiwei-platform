@@ -430,8 +430,7 @@ class DayPageTick(Data):
 async def day_page_tick(tick: DayPageTick) -> None:
     """到点了让三个人各自把昨天写成一页；不在窗口里的拍什么都不做。
 
-    **并发跑，一个人炸不拖累另两个**（同 :func:`app.living.moment.life_moment_tick`）：
-    三条轴各有自己的占用，并发没有竞争。异常不往上抛——源循环那一拍失败会连累另外两
+    **并发跑，一个人炸不拖累另两个**：三条轴各有自己的占用，并发没有竞争。异常不往上抛——源循环那一拍失败会连累另外两
     个人，而下一拍五分钟后就来了，窗口里还有的是机会。
     """
     lane = living_lane()

@@ -28,7 +28,7 @@ from app.living.received import (
 )
 from app.messaging.message import Kind, Message, new_message
 from app.messaging.receiving import INBOX_REGISTRY, inbox
-from tests.living.conftest import clock_at
+from tests.living.conftest import regular_round
 
 # 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
 from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture 名
@@ -284,7 +284,7 @@ class _Round:
 
 @pytest.fixture
 async def her_round(inboxes, monkeypatch):
-    """绫奈的一轮：真的 ``run_moment``，只有模型那一步是替身。"""
+    """绫奈的一轮：真的常规节奏那一轮，只有模型那一步是替身。"""
     from app.living import moment as moment_mod
     from app.living import persona as persona_mod
     from app.living.loose_ends import LooseEnd
@@ -308,9 +308,7 @@ async def her_round(inboxes, monkeypatch):
 
 
 async def _her_round(at: dt.datetime):
-    from app.living.moment import run_moment
-
-    return await run_moment(lane=LANE, persona_id="ayana", clock=clock_at(at))
+    return await regular_round(LANE, "ayana", at)
 
 
 @pytest.mark.integration

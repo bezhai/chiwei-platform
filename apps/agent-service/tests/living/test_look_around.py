@@ -19,7 +19,7 @@ import pytest
 
 from app.living import moment as moment_mod
 from app.living import participants as participants_mod
-from app.living.moment import look_around, run_moment
+from app.living.moment import look_around
 from app.living.participants import WORLD
 from app.living.records import esc
 from app.living.whereabouts import note_whereabouts
@@ -27,9 +27,12 @@ from app.messaging.message import Answer, SendFailed
 from tests.living.conftest import (
     RESIDENT_NAMES,
     clock_at,
+    her_queue,
+    her_round_runs,
     model_facing_text,
     names_of_places_in,
     path_samples,
+    regular_round,
 )
 from tests.living.test_moment import (  # noqa: F401 — 形参名就是 fixture 名
     moment_db,
@@ -185,7 +188,7 @@ async def test_after_switching_in_this_round_she_asks_about_where_she_is_now(
         ("look_around", {}),
     )
 
-    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    await regular_round(LANE, "akao", _at(21, 30))
 
     (asked,) = world.asked
     assert "家/厨房" in asked["body"] and "煮乌冬" in asked["body"], asked["body"]
@@ -200,7 +203,7 @@ async def test_after_moving_in_this_round_she_asks_about_the_new_place_still_doi
     await _stand("akao", "家/客厅", "看书", _at(21))
     stub_moment(("move_to", {"place": "家/阳台"}), ("look_around", {}))
 
-    await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+    await regular_round(LANE, "akao", _at(21, 30))
 
     (asked,) = world.asked
     assert "家/阳台" in asked["body"] and "看书" in asked["body"], asked["body"]
@@ -327,26 +330,27 @@ async def test_cancelling_her_round_while_she_looks_around_is_not_nobody_answeri
 
 @pytest.mark.integration
 async def test_her_round_cut_off_at_its_cap_while_she_waits_is_cut_and_let_go(
-    moment_db, stub_moment, world, monkeypatch  # noqa: F811
+    moment_db, stub_moment, world  # noqa: F811
 ):
-    """等回答的时候她这一轮撞上了占用的上限（:data:`app.living.serial.HELD_SECONDS`）：这一轮照常被
-    掐断、占用放开，下一拍重来。环顾四周要是把这次掐断吞成"没人回答"，这一轮就会接着往下跑，上限
-    等于没有。"""
-    from app.living import serial as serial_mod
+    """等回答的时候她这一轮撞上了她轮次队列的占用上限（线上是
+    :data:`app.living.serial.HELD_SECONDS`）：这一轮照常被掐断、队列放开，下一拍重来。环顾四周要是
+    把这次掐断吞成"没人回答"，这一轮就会接着往下跑，上限等于没有。"""
+    from app.host import Signal
+    from app.plugins.living import regular
 
-    monkeypatch.setattr(serial_mod, "HELD_SECONDS", 2.0)
     await _stand("akao", "家/客厅", "看书", _at(21))
     world.hangs = True
     runner = stub_moment(("look_around", {}))
+    turns = her_queue("akao", clock=clock_at(_at(21, 30)), hold_limit=dt.timedelta(seconds=2))
 
     async with asyncio.timeout(10):
         with pytest.raises(TimeoutError):
-            await run_moment(lane=LANE, persona_id="akao", clock=clock_at(_at(21, 30)))
+            await turns.take(regular(LANE), Signal(at=_at(21, 30)))
 
     assert world.asked, "前提不成立：掐断时她不是在等 world 的回答"
     assert runner.results == [], f"掐断被吞成了一句话交给她：{runner.results}"
     async with asyncio.timeout(1):
-        async with serial_mod.hold(moment_mod.life_moment_lock_key(LANE, "akao")):
+        async with her_round_runs(turns):
             pass
 
 

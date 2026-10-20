@@ -1,8 +1,9 @@
-"""Replay: her rounds that something wakes early, driven the way the nudge clock drives one
-person (``nudge_once`` with the clock read when the round gets its turn).
+"""Replay: her rounds that something wakes early, driven the way the host's clock drives one
+person (one signal of the ``nudge`` wake to her queue; the clock is read when the round gets its
+turn).
 
-The clock itself (``phone_nudge_tick``) runs the three sisters concurrently, so the order of
-their effects would differ from run to run; one person is what a baseline can pin.
+The clock itself signals the three sisters concurrently, so the order of their effects would
+differ from run to run; one person is what a baseline can pin.
 
 Inbox (``inbox_wake``): a message passed to her that the sender says should wake her.
 
@@ -38,8 +39,7 @@ from sqlalchemy import text
 
 from app.capabilities._errors import CapabilityTimeout
 from app.data.tx import current_session, tx
-from app.infra.cst_time import CST, now_cst
-from app.living.nudge import nudge_once
+from app.infra.cst_time import CST
 from tests.replay import seeds
 from tests.replay.harness import Fail, Reply, ToolUse
 
@@ -57,7 +57,7 @@ def _at(hour: int, minute: int = 0) -> datetime:
 
 
 def _nudge(replay):
-    return lambda: nudge_once(lane=replay.lane, persona_id="akao", clock=now_cst)
+    return lambda: replay.wake("akao", "nudge")
 
 
 async def _her_household_is_up(replay) -> None:

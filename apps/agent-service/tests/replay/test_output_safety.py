@@ -1,4 +1,4 @@
-"""Replay: the output check on what she sends, inside her regular round (``run_moment``), which
+"""Replay: the output check on what she sends, inside her regular round (the ``regular`` wake), which
 is where production runs it (``send_message`` checks before it claims and hands off).
 
 Each scenario is one round in which bezhai has written to her and she sends to his private chat.
@@ -20,8 +20,7 @@ from datetime import datetime
 import pytest
 
 from app.capabilities._errors import CapabilityCallFailed
-from app.infra.cst_time import CST, now_cst
-from app.living.moment import run_moment
+from app.infra.cst_time import CST
 from tests.replay import seeds
 from tests.replay.harness import Fail, Reply, ToolUse
 
@@ -46,7 +45,7 @@ async def _bezhai_has_written(replay) -> None:
 
 
 def _moment(replay):
-    return lambda: run_moment(lane=replay.lane, persona_id="akao", clock=now_cst)
+    return lambda: replay.wake("akao", "regular")
 
 
 def _sends(what: str) -> Reply:

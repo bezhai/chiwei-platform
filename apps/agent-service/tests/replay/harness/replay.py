@@ -5,7 +5,7 @@ steps, and checks the result against its baseline::
 
     await replay.start("agent-service")
     replay.model.script("living_life_moment", Reply(...), ...)
-    await replay.step("first moment", lambda: run_moment(...), at=datetime(...))
+    await replay.step("first moment", lambda: replay.wake("akao", "regular"), at=datetime(...))
     replay.check("living_moment/continuation")
 
 Everything a step does is recorded (see :mod:`tests.replay.harness.baseline` for the layout);
@@ -241,6 +241,22 @@ class Replay:
             self.broker,
             worker=f"{app_name}#{self._started}",
         )
+
+    async def wake(self, participant: str, source: str) -> Any:
+        """One tick of the wake ``source`` for ``participant``, the way the host's clock gives it:
+        a signal at the frozen clock's time to the queue and source the running process registered
+        (``ctx.wake``). Returns what the turn's ``run`` returned, ``None`` when no round was due."""
+        from app.host import Signal
+
+        assert self.process is not None, "replay: no process is running"
+        (wake,) = [
+            r
+            for r in self.process.registered()
+            if r.kind == "wake"
+            and r.detail["turns"].participant == participant
+            and r.detail["source"].name == source
+        ]
+        return await wake.detail["turns"].take(wake.detail["source"], Signal(at=now_cst()))
 
     def guide(self, name: str, text: str) -> None:
         """A guide on hand: ``SKILLS_DIR/<name>/SKILL.md``. The skills plugin loads the directory

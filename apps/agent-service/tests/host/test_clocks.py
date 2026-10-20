@@ -107,7 +107,7 @@ async def test_a_tick_that_cannot_build_its_work_stops_the_process(exits):
     field, say) reaches the watchdog, which exits the process for PaaS to restart it."""
 
     def cannot_build(ts):
-        raise TypeError("LifeMomentTick requires a 'ts: str' field")
+        raise TypeError("LandingTick requires a 'ts: str' field")
 
     host = _clock_host(cannot_build)
     await _start(host)

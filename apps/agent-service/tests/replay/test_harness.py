@@ -26,8 +26,7 @@ import httpx
 import pytest
 
 from app.capabilities import banned_words
-from app.infra.cst_time import CST, now_cst
-from app.living.moment import run_moment
+from app.infra.cst_time import CST
 from tests.replay import seeds
 from tests.replay.conftest import DEFAULT_START, LANE
 from tests.replay.harness import Replay, Reply, ToolUse
@@ -69,7 +68,7 @@ async def test_script_runs_out(replay, monkeypatch):
     # No reply for the output check: its model call finds the script empty.
     await replay.step(
         "she sends; the output check's model call has no scripted reply",
-        lambda: run_moment(lane=replay.lane, persona_id="akao", clock=now_cst),
+        lambda: replay.wake("akao", "regular"),
         at=_at(14, 0),
     )
 
@@ -96,13 +95,13 @@ async def test_answer_missing(replay, monkeypatch):
     ):
         await replay.step(
             "she searches the web; the scenario gave the search no answer",
-            lambda: run_moment(lane=replay.lane, persona_id="akao", clock=now_cst),
+            lambda: replay.wake("akao", "regular"),
             at=_at(14, 0),
         )
     # Even a step that expected the failure does not make the replay pass.
     await replay.step(
         "the same search, expected to fail",
-        lambda: run_moment(lane=replay.lane, persona_id="akao", clock=now_cst),
+        lambda: replay.wake("akao", "regular"),
         raises=UnservedRequest,
     )
 

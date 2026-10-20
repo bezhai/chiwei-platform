@@ -131,7 +131,7 @@ await seeds.seed_household()                        # rows the round reads
 replay.broker.declare_inbox("world", answers=...)  # another process's inbox
 await replay.start("agent-service")                 # recorded as a step
 replay.model.script("living_life_moment", Reply(tools=(ToolUse("switch_to", {...}),)), ...)
-await replay.step("first moment", lambda: run_moment(...), at=datetime(...))
+await replay.step("first moment", lambda: replay.wake("akao", "regular"), at=datetime(...))
 replay.check("living_moment/continuation")
 ```
 
@@ -177,8 +177,9 @@ replay.check("living_moment/continuation")
 
 ## Adding a round kind
 
-1. Find how production triggers it and call that from a step: a clock-driven function
-   (`run_moment`, the nudge tick, `day_page_tick`, `persona_review_tick`) or a delivery to a
+1. Find how production triggers it and call that from a step: a wake the process registered
+   (`replay.wake("akao", "regular")`, `replay.wake("akao", "nudge")`), a clock-driven function
+   (`day_page_tick`, `persona_review_tick`) or a delivery to a
    consumer (an inbox such as `inbox_reading_<lane>`, a question queue, the scheduled queue).
    Prefer the outermost entry that production calls, so a refactor of what is underneath stays
    covered.
