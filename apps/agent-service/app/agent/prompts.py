@@ -15,8 +15,11 @@ segment of its own and compiles into its messages by role. Values known only at 
 output check judges) are given there; they must be exactly the variables of the segments that do
 not work theirs out from the round.
 
-``get_prompt`` fetches one prompt by id with the same label rule, for the callers that still
-render one prompt per call.
+**Where a set is resolved.** A participant's round resolves its main agent's and its sub-agents'
+segments once, after its input is put together and before its first model call (the round keeps
+them, ``Round.prompts``); a call made outside any round (a diary page, a look back, a stretch of
+reading, an answer) resolves its own when it starts. A prompt released while a round runs is
+rendered from the next round on.
 """
 
 from __future__ import annotations
@@ -81,12 +84,6 @@ def _fetch(prompt_id: str) -> tuple[PromptClient, str]:
         prompt_id, label=None, cache_ttl_seconds=_PROMPT_CACHE_TTL_SECONDS
     )
     return prompt, PRODUCTION
-
-
-def get_prompt(prompt_id: str) -> Any:
-    """Fetch a Langfuse prompt with SDK-level caching and lane routing (see :func:`_fetch`)."""
-    prompt, _label = _fetch(prompt_id)
-    return prompt
 
 
 _ROLE_MAP: dict[str, Role] = {

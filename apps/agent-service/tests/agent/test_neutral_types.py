@@ -30,7 +30,6 @@ from app.agent.neutral import (
     normalize_content_to_text,
 )
 
-
 # ---------------------------------------------------------------------------
 # Message: roles + plain string content
 # ---------------------------------------------------------------------------

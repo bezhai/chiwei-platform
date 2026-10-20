@@ -3,11 +3,12 @@
 
 走真的那条路（在 world 的一轮里）：:func:`app.world.perception.judge_who_notices` →
 :func:`app.world.agents.run_agent` → ``AgentRunner`` → ``Agent.run``，根 span 是真的，导出到内存（conftest 的 ``exported_spans``）。模型
-换成一直返回 500 的替身，prompt 跳过按泳道取那一步，Dynamic Config 用默认值。
+换成一直返回 500 的替身，Langfuse 换成一个本地 prompt 的替身，Dynamic Config 用默认值。
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -19,10 +20,12 @@ from openai import InternalServerError
 
 from app.agent.client import ModelClient
 from app.agent.neutral import Message, ToolDef
+from app.agent.prompts import PromptSet
 from app.agent.round import Round, in_round
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, new_message
 from app.world import perception
+from app.world.agents import world_segments
 from app.world.rounds import InboxRound
 
 LEVEL = LangfuseOtelSpanAttributes.OBSERVATION_LEVEL
@@ -76,7 +79,9 @@ async def test_an_exhausted_perception_retry_leaves_one_error_trace_per_attempt(
         return model
 
     monkeypatch.setattr("app.agent.core.build_model_client", build_model_client)
-    monkeypatch.setattr("app.agent.core.get_prompt", _prompt)
+    langfuse = SimpleNamespace(get_prompt=lambda name, **_: _prompt(name))
+    monkeypatch.setattr("app.agent.prompts._get_client", lambda: langfuse)
+    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: None)
     monkeypatch.setattr(dynamic_config, "get", lambda k, default="": default)
     monkeypatch.setattr(dynamic_config, "get_int", lambda k, default=0: default)
     monkeypatch.setattr(perception, "RETRY_BASE_SECONDS", 0.0)
@@ -90,6 +95,11 @@ async def test_an_exhausted_perception_retry_leaves_one_error_trace_per_attempt(
         now=now_cst(),
         reason="test",
         due=InboxRound(reason="test", messages=(woke,)),
+    )
+    world_round.prompts = await PromptSet.resolve(
+        {perception.PERCEPTION: perception.PERCEPTION_AGENT},
+        world_segments(perception.PERCEPTION),
+        world_round,
     )
 
     with in_round(world_round), pytest.raises(InternalServerError):

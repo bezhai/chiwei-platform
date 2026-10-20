@@ -32,8 +32,8 @@ class _FakeGuard:
         self.asked: list[str] = []
         self.calls: list = []
 
-    async def extract(self, schema, *, messages, call, prompt_vars):
-        self.asked.append(prompt_vars["response"])
+    async def extract(self, schema, *, messages, call, prompts, values):
+        self.asked.append(values["response"])
         self.calls.append(call)
         if self.hang:
             await asyncio.sleep(3600)

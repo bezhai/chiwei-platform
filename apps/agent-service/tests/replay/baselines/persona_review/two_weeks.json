@@ -53,8 +53,6 @@
             "name": "living_persona_review",
             "version": 1,
             "variables": {
-              "currDate": "2026-07-27",
-              "currTime": "06:00:00",
               "persona_name": "赤尾",
               "persona_core": "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。"
             }
@@ -225,8 +223,6 @@
             "name": "living_persona_review",
             "version": 1,
             "variables": {
-              "currDate": "2026-08-03",
-              "currTime": "06:00:00",
               "persona_name": "赤尾",
               "persona_core": "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。"
             }

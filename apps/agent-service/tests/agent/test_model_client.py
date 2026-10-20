@@ -30,7 +30,6 @@ from app.agent.client import (
 )
 from app.agent.neutral import Message, Role, StreamChunk, ToolDef, TurnPart
 
-
 # ---------------------------------------------------------------------------
 # Interface shape: the three consumptions run/stream/extract require
 # ---------------------------------------------------------------------------

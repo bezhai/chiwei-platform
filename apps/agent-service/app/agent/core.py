@@ -30,21 +30,27 @@ is retried like the provider's own timeouts.
 
 Usage::
 
-    from app.agent.contracts import AgentSpec
+    from app.agent.contracts import AgentSpec, Segment
     from app.agent.core import Agent
     from app.agent.neutral import Message, Role
+    from app.agent.prompts import PromptSet
     from app.agent.round import open_call
 
     SPEC = AgentSpec(segments=("world_engine",), model="offline-model", trace_name="world-engine")
 
+    prompts = await PromptSet.resolve(
+        {"world_engine": SPEC}, {"world_engine": Segment("world_engine", "world_engine")}, None
+    )
     call = open_call("world_engine", SPEC, lane="prod")
-    result = await Agent(SPEC).run([Message(role=Role.USER, content="hi")], call=call)
+    result = await Agent(SPEC).run(
+        [Message(role=Role.USER, content="hi")], call=call, prompts=prompts
+    )
     text = result.text()
 
-    data = await Agent(SPEC).extract(Model, [...], call=open_call("world_engine", SPEC, lane="prod"))
-
 The caller opens the call and keeps it (:mod:`app.agent.round`): the agent binds it while it
-runs, and what the call's tools noted is read from it afterwards.
+runs, and what the call's tools noted is read from it afterwards. The prompt comes from the
+set the caller resolved (:class:`app.agent.prompts.PromptSet`): a participant's round resolves
+it once for itself and the sub-agents it may call; a call outside any round resolves its own.
 """
 
 from __future__ import annotations
@@ -53,7 +59,7 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from typing import Any
 
@@ -80,7 +86,7 @@ from app.agent.neutral import (
     TurnPart,
     TurnPartKind,
 )
-from app.agent.prompts import compile_to_messages, get_prompt
+from app.agent.prompts import PromptSet
 from app.agent.round import Call, in_call
 from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
@@ -95,7 +101,6 @@ from app.api.middleware import get_lane
 from app.capabilities._errors import CapabilityTimeout
 from app.capabilities.retry import retry as _retry_decorator
 from app.deployment import DEFAULT_APP
-from app.infra import cst_time
 from app.infra.config import settings
 from app.infra.lane_policy import (
     classify_deployment_lane,
@@ -345,6 +350,23 @@ def _tool_span(*, name: str, input: Any):
     """
     with under_last_generation(), _safe_current_span(f"tool.{name}", input) as span:
         yield span
+
+
+def _record_segments(span: Any, prompts: PromptSet, agent: str) -> None:
+    """Record on the call's root span which segments it rendered, at which label and version
+    (best-effort). An agent rendered from several segments links no one prompt on its model
+    calls, so this is where its versions are read back."""
+    try:
+        span.update(
+            metadata={
+                "prompt_segments": [
+                    {"prompt_id": prompt_id, "label": label, "version": version}
+                    for prompt_id, label, version in prompts.versions(agent)
+                ]
+            }
+        )
+    except Exception as exc:  # pragma: no cover - tracing must not break the call
+        logger.warning("langfuse span metadata update failed: %s", exc)
 
 
 def _record_output(span: Any, output: Any) -> None:
@@ -821,7 +843,10 @@ class Agent:
 
     Every entry takes the :class:`~app.agent.round.Call` its caller opened and binds it as the
     current call for as long as it runs; the call's own state is emptied at the start of each
-    attempt. The model and the budget of model calls are read when the call starts (they may come
+    attempt. Its prompt comes from the :class:`~app.agent.prompts.PromptSet` resolved for the
+    round (or for the call) under the call's name; ``values`` are the variables known only at the
+    call. The root span records the segments rendered (``prompt_segments``); the model calls
+    link the prompt when the agent has a single one. The model and the budget of model calls are read when the call starts (they may come
     from Dynamic Config); a whole call is tried ``spec.max_retries`` times on a temporary model
     failure. ``spec.separate_trace`` puts every call in a Langfuse trace of its own.
     """
@@ -837,28 +862,10 @@ class Agent:
     def _trace_scope(self):
         return separate_trace() if self._spec.separate_trace else nullcontext()
 
-    async def _prepare(
-        self, call: Call, prompt_vars: dict[str, Any]
-    ) -> tuple[ModelClient, PromptClient, list[Message]]:
-        """Resolve the model client, fetch the prompt and compile its messages.
-
-        The prompt is the one named after the call (an agent's name is its prompt id). The prompt
-        object comes back with what it compiled to: the call's root span carries it, so every
-        model call links the version actually rendered.
-        """
-        langfuse_prompt = get_prompt(call.agent)
+    async def _model(self) -> tuple[ModelClient, int]:
+        """The model client and the budget of model calls, read when the call starts."""
         model = await build_model_client(await _configured(self._spec.model))
-        # 全局注入的"现在"显式取 CST（北京时间），不依赖容器时区——naive
-        # ``datetime.now()`` 在 TZ 不确定的容器里可能是 UTC，喂给每条 prompt 的
-        # currTime 就跟 world/life 的 CST 时刻差 8 小时。这一处修正整条 chat 线。
-        now = cst_time.now_cst()
-        prompt_messages = compile_to_messages(
-            langfuse_prompt,
-            currDate=now.strftime("%Y-%m-%d"),
-            currTime=now.strftime("%H:%M:%S"),
-            **prompt_vars,
-        )
-        return model, langfuse_prompt, prompt_messages
+        return model, await _configured(self._spec.recursion_limit)
 
     def _retry(self):
         return _retry_decorator(
@@ -877,7 +884,8 @@ class Agent:
         messages: list[Message],
         *,
         call: Call,
-        prompt_vars: dict[str, Any] | None = None,
+        prompts: PromptSet,
+        values: Mapping[str, str] | None = None,
         transcript_sink: list[Message] | None = None,
     ) -> Message:
         """Execute the ReAct loop and return the final assistant ``Message``.
@@ -897,9 +905,8 @@ class Agent:
         """
         spec = self._spec
         with in_call(call), self._trace_scope():
-            model, prompt, prompt_messages = await self._prepare(call, prompt_vars or {})
-            recursion_limit = await _configured(spec.recursion_limit)
-            full_messages = [*prompt_messages, *messages]
+            model, recursion_limit = await self._model()
+            full_messages = [*prompts.messages(call.agent, values), *messages]
 
             @self._retry()
             async def _invoke() -> tuple[Message, list[Message]]:
@@ -910,8 +917,9 @@ class Agent:
                     input=[m.to_dict() for m in full_messages],
                     update_trace=spec.update_trace,
                     session_id=call.session,
-                    prompt=prompt,
+                    prompt=prompts.single_prompt(call.agent),
                 ) as span:
+                    _record_segments(span, prompts, call.agent)
                     result = await _run_loop(
                         model,
                         messages=full_messages,
@@ -934,7 +942,8 @@ class Agent:
         messages: list[Message],
         *,
         call: Call,
-        prompt_vars: dict[str, Any] | None = None,
+        prompts: PromptSet,
+        values: Mapping[str, str] | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream neutral ``StreamChunk``s through the ReAct loop.
 
@@ -949,9 +958,8 @@ class Agent:
         """
         spec = self._spec
         max_retries = spec.max_retries
-        model, prompt, prompt_messages = await self._prepare(call, prompt_vars or {})
-        recursion_limit = await _configured(spec.recursion_limit)
-        full_messages = [*prompt_messages, *messages]
+        model, recursion_limit = await self._model()
+        full_messages = [*prompts.messages(call.agent, values), *messages]
 
         for attempt in range(1, max_retries + 1):
             tokens_yielded = False
@@ -961,8 +969,9 @@ class Agent:
                     input=[m.to_dict() for m in full_messages],
                     update_trace=spec.update_trace,
                     session_id=call.session,
-                    prompt=prompt,
+                    prompt=prompts.single_prompt(call.agent),
                 ) as span:
+                    _record_segments(span, prompts, call.agent)
                     streamed: list[str] = []
                     try:
                         async for chunk in _stream_loop(
@@ -1003,7 +1012,8 @@ class Agent:
         messages: list[Message],
         *,
         call: Call,
-        prompt_vars: dict[str, Any] | None = None,
+        prompts: PromptSet,
+        values: Mapping[str, str] | None = None,
     ) -> BaseModel:
         """Structured output — return a validated Pydantic model instance.
 
@@ -1018,9 +1028,7 @@ class Agent:
         with in_call(call), self._trace_scope():
             model = await build_model_client(await _configured(spec.model))
             schema = response_model.model_json_schema()
-            prompt = get_prompt(call.agent)
-            prompt_messages = compile_to_messages(prompt, **(prompt_vars or {}))
-            full_messages = [*prompt_messages, *messages]
+            full_messages = [*prompts.messages(call.agent, values), *messages]
 
             @self._retry()
             async def _invoke() -> BaseModel:
@@ -1030,8 +1038,9 @@ class Agent:
                     input=[m.to_dict() for m in full_messages],
                     update_trace=spec.update_trace,
                     session_id=call.session,
-                    prompt=prompt,
+                    prompt=prompts.single_prompt(call.agent),
                 ) as span:
+                    _record_segments(span, prompts, call.agent)
                     data = await model.structured(
                         full_messages, schema=schema, **dict(spec.model_kwargs)
                     )

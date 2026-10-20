@@ -856,7 +856,7 @@ async def test_her_hobbies_are_in_front_of_her_every_moment(moment_db, stub_mome
 
     await regular_round(LANE, "akao", _at(14))
 
-    prompt_vars = runner.runs[0][1]["prompt_vars"]
+    prompt_vars = runner.runs[0][1]["values"]
     assert prompt_vars["persona_core"] == stub_moment.persona.persona_core
     assert prompt_vars["persona_name"] == "赤尾"
 
@@ -875,7 +875,7 @@ async def test_a_blank_core_says_so_instead_of_rendering_a_hole(
 
     await regular_round(LANE, "akao", _at(14))
 
-    core = runner.runs[0][1]["prompt_vars"]["persona_core"]
+    core = runner.runs[0][1]["values"]["persona_core"]
     assert core.strip() != ""
 
 
@@ -890,7 +890,7 @@ async def test_the_prompt_variables_are_exactly_three(moment_db, stub_moment):
 
     await regular_round(LANE, "akao", _at(14))
 
-    assert set(runner.runs[0][1]["prompt_vars"]) == {
+    assert set(runner.runs[0][1]["values"]) == {
         "persona_name",
         "persona_core",
         "guides_you_can_read",
@@ -923,7 +923,7 @@ async def test_the_guides_she_can_read_are_listed_in_front_of_her(
         # 注册表是 class-level 全局状态，留着会漏进别的用例。
         SkillRegistry.load_all(tmp_path / "这个目录不存在")
 
-    listed = runner.runs[0][1]["prompt_vars"][GUIDES_VAR]
+    listed = runner.runs[0][1]["values"][GUIDES_VAR]
     assert "drawing" in listed and "人物画图指南" in listed
 
 

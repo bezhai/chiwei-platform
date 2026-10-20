@@ -53,14 +53,29 @@ from app.agent.continuity import (
 )
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
+from app.agent.prompts import PromptSet
 from app.agent.round import Round, in_round, open_call
 from app.agent.session import load_session
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, Message
 from app.world import records, unfinished
 from app.world.actions import ACTIONS, RoundScope
-from app.world.agents import lane, run_agent, session_key, when, world_agent
-from app.world.perception import Told, render_told, tell
+from app.world.agents import (
+    lane,
+    run_agent,
+    session_key,
+    when,
+    world_agent,
+    world_segments,
+)
+from app.world.npc import NPC, NPC_AGENT
+from app.world.perception import (
+    PERCEPTION,
+    PERCEPTION_AGENT,
+    Told,
+    render_told,
+    tell,
+)
 from app.world.rounds import InboxRound
 from app.world.sources import material_tools, query_tools
 from app.world.wake import WORLD, NextWake, is_own_wake, read_next_wake, set_next_wake
@@ -72,7 +87,7 @@ APP = "world"
 PROFILE = "world"
 
 # 主 agent 这一类：名字就是它的 Langfuse prompt（泳道 label 取不到时退回 production，见
-# :func:`app.agent.prompts.get_prompt`），模型用主 agent 的键。
+# :class:`app.agent.prompts.PromptSet`），模型用主 agent 的键。
 ROUND = "world_round"
 ROUND_AGENT = world_agent(ROUND, "world-round")
 
@@ -216,13 +231,22 @@ async def run_round(due: InboxRound) -> None:
         reason=due.reason,
         due=due,
     )
+    tools = [*await query_tools(), *ACTIONS]
+    # 这一轮要用的 prompt 在第一次调模型之前一起取齐：主 agent 的，和这一轮里它可能调的感知判断、
+    # NPC 的。之后这一轮里每一次调用都用这一版。
+    world_round.prompts = await PromptSet.resolve(
+        {ROUND: ROUND_AGENT, PERCEPTION: PERCEPTION_AGENT, NPC: NPC_AGENT},
+        world_segments(ROUND, PERCEPTION, NPC),
+        world_round,
+    )
     produced: list[Turn] = []
     with in_round(world_round):
         reply = await run_agent(
             open_call(ROUND, ROUND_AGENT, lane=world_round.lane, round=world_round),
             ROUND_AGENT,
             [*history, round_input],
-            tools=[*await query_tools(), *ACTIONS],
+            prompts=world_round.prompts,
+            tools=tools,
             call_id=round_id,
             transcript_sink=produced,
         )

@@ -132,7 +132,7 @@ class FakeReview:
     @property
     def prompt_vars(self) -> dict[str, str]:
         """最后一轮真的传进去的那几个 prompt 变量。"""
-        return self.runs[-1][1]["prompt_vars"]
+        return self.runs[-1][1]["values"]
 
 
 @pytest.fixture

@@ -266,3 +266,18 @@ def exported_spans(_in_memory_langfuse, monkeypatch):
     monkeypatch.setattr("app.agent.trace._get_client", lambda: client)
     monkeypatch.setattr("app.agent.core._get_trace_client", lambda: client)
     return exporter
+
+
+# ---------------------------------------------------------------------------
+# Langfuse prompts from the replay's fixtures
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def prompts_from_fixtures(monkeypatch):
+    """Langfuse 换成回放用的那份 prompt 快照（``tests/replay/prompts``）：一轮在第一次调模型之前
+    取齐它要用的 prompt，并严格核对模板声明的变量（:class:`app.agent.prompts.PromptSet`），所以
+    跑一整轮的用例要一份声明对了变量的 prompt，而不是去连 Langfuse。"""
+    from tests.replay.harness.prompts import FixtureLangfuse
+
+    fixtures = FixtureLangfuse()
+    monkeypatch.setattr("app.agent.prompts._get_client", lambda: fixtures)
+    return fixtures

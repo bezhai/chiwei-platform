@@ -429,3 +429,9 @@ def model_facing_text(tool) -> dict[str, str]:
         if described:
             texts[f"参数 {name}"] = described
     return texts
+
+
+@pytest.fixture(autouse=True)
+def _prompts(prompts_from_fixtures):
+    """一轮取齐的 prompt 来自回放的 prompt 快照（根 conftest 的 ``prompts_from_fixtures``）。"""
+    return prompts_from_fixtures

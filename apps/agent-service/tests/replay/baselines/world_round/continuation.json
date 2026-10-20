@@ -117,10 +117,7 @@
           "prompt": {
             "name": "world_round",
             "version": 1,
-            "variables": {
-              "currDate": "2026-07-25",
-              "currTime": "14:01:00"
-            }
+            "variables": {}
           },
           "options": {
             "session_id": "world:coe-replay"
@@ -299,10 +296,7 @@
           "prompt": {
             "name": "world_round",
             "version": 1,
-            "variables": {
-              "currDate": "2026-07-25",
-              "currTime": "14:01:00"
-            }
+            "variables": {}
           },
           "options": {
             "session_id": "world:coe-replay"
@@ -392,10 +386,7 @@
           "prompt": {
             "name": "world_round",
             "version": 1,
-            "variables": {
-              "currDate": "2026-07-25",
-              "currTime": "14:01:00"
-            }
+            "variables": {}
           },
           "options": {
             "session_id": "world:coe-replay"
@@ -470,10 +461,7 @@
           "prompt": {
             "name": "world_perception",
             "version": 1,
-            "variables": {
-              "currDate": "2026-07-25",
-              "currTime": "14:01:00"
-            }
+            "variables": {}
           },
           "options": {
             "session_id": "world:coe-replay"
@@ -602,10 +590,7 @@
           "prompt": {
             "name": "world_perception",
             "version": 1,
-            "variables": {
-              "currDate": "2026-07-25",
-              "currTime": "14:01:00"
-            }
+            "variables": {}
           },
           "options": {
             "session_id": "world:coe-replay"
@@ -669,10 +654,7 @@
           "prompt": {
             "name": "world_round",
             "version": 1,
-            "variables": {
-              "currDate": "2026-07-25",
-              "currTime": "14:01:00"
-            }
+            "variables": {}
           },
           "options": {
             "session_id": "world:coe-replay"
@@ -750,10 +732,7 @@
           "prompt": {
             "name": "world_round",
             "version": 1,
-            "variables": {
-              "currDate": "2026-07-25",
-              "currTime": "14:01:00"
-            }
+            "variables": {}
           },
           "options": {
             "session_id": "world:coe-replay"
@@ -1567,10 +1546,7 @@
           "prompt": {
             "name": "world_round",
             "version": 1,
-            "variables": {
-              "currDate": "2026-07-25",
-              "currTime": "16:00:00"
-            }
+            "variables": {}
           },
           "options": {
             "session_id": "world:coe-replay"
@@ -1882,10 +1858,7 @@
           "prompt": {
             "name": "world_round",
             "version": 1,
-            "variables": {
-              "currDate": "2026-07-25",
-              "currTime": "16:00:00"
-            }
+            "variables": {}
           },
           "options": {
             "session_id": "world:coe-replay"
@@ -1964,10 +1937,7 @@
           "prompt": {
             "name": "world_round",
             "version": 1,
-            "variables": {
-              "currDate": "2026-07-25",
-              "currTime": "16:00:00"
-            }
+            "variables": {}
           },
           "options": {
             "session_id": "world:coe-replay"

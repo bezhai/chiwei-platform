@@ -55,23 +55,38 @@ def _call_in(session: str, spec: AgentSpec = _CFG) -> Call:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def mock_prompt():
-    """Mock Langfuse prompt (text prompt)."""
-    prompt = MagicMock()
-    prompt.type = "text"
-    prompt.compile.return_value = "You are a helpful assistant."
-    return prompt
+class _Prompts:
+    """Stands in for a resolved ``PromptSet``: renders ``system`` for any agent and records each
+    render (the agent, the values given at the call)."""
+
+    def __init__(self) -> None:
+        self.system = [Message(role=Role.SYSTEM, content="You are a helpful assistant.")]
+        self.rendered: list[tuple[str, dict | None]] = []
+
+    def messages(self, agent, values=None):
+        self.rendered.append((agent, None if values is None else dict(values)))
+        return list(self.system)
+
+    def versions(self, agent):
+        return [(agent, "production", 1)]
+
+    def single_prompt(self, agent):
+        return None
+
+
+# What every call in this module renders from; mock_deps empties it per test.
+_PROMPTS = _Prompts()
 
 
 @pytest.fixture()
-def mock_deps(mock_prompt):
-    """Patch build_model_client, get_prompt, compile_to_messages, and the root span.
+def mock_deps():
+    """Patch build_model_client and the root span; the prompt set is :data:`_PROMPTS`.
 
     The root span is patched to a no-op so tracing/langfuse never reaches the
-    network in unit tests. ``compile_to_messages`` returns a neutral SYSTEM
-    message by default.
+    network in unit tests. The prompt set renders a neutral SYSTEM message by
+    default.
     """
+    _PROMPTS.__init__()
     model = AsyncMock()
     model.complete = AsyncMock(
         return_value=Message(role=Role.ASSISTANT, content="hello")
@@ -90,22 +105,12 @@ def mock_deps(mock_prompt):
             new_callable=AsyncMock,
             return_value=model,
         ) as mock_build,
-        patch(
-            "app.agent.core.get_prompt",
-            return_value=mock_prompt,
-        ) as mock_get_prompt,
-        patch(
-            "app.agent.core.compile_to_messages",
-            return_value=[Message(role=Role.SYSTEM, content="You are a helpful assistant.")],
-        ) as mock_compile,
         patch("app.agent.core._root_span", _noop_span),
     ):
         yield {
             "build_model_client": mock_build,
-            "get_prompt": mock_get_prompt,
-            "compile_to_messages": mock_compile,
+            "prompts": _PROMPTS,
             "model": model,
-            "prompt": mock_prompt,
         }
 
 
@@ -518,7 +523,7 @@ class TestRunSessionPlumbing:
         with patch("app.agent.core._root_span", _spy_span):
             await Agent(_CFG).run(
                 messages=[Message(role=Role.USER, content="hi")],
-                call=_call_in("prod:luna:2026-06-04"),
+                call=_call_in("prod:luna:2026-06-04"), prompts=_PROMPTS,
             )
         assert captured["session_id"] == "prod:luna:2026-06-04"
 
@@ -533,7 +538,7 @@ class TestRunSessionPlumbing:
 
         with patch("app.agent.core._root_span", _spy_span):
             await Agent(_CFG).run(
-                messages=[Message(role=Role.USER, content="hi")], call=_call()
+                messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS
             )
         assert captured["session_id"] is None
 
@@ -554,7 +559,7 @@ class TestRunSessionPlumbing:
         with patch("app.agent.core._root_span", _spy_span):
             async for _ in Agent(_CFG).stream(
                 messages=[Message(role=Role.USER, content="hi")],
-                call=_call_in("prod:world:2026-06-04"),
+                call=_call_in("prod:world:2026-06-04"), prompts=_PROMPTS,
             ):
                 pass
         assert captured["session_id"] == "prod:world:2026-06-04"
@@ -568,13 +573,13 @@ class TestModelCacheSessionId:
     async def test_run_forwards_the_calls_session_to_model(self, mock_deps):
         await Agent(_CFG).run(
             [Message(role=Role.USER, content="hi")],
-            call=_call_in("prod:world:2026-06-04"),
+            call=_call_in("prod:world:2026-06-04"), prompts=_PROMPTS,
         )
         kw = mock_deps["model"].complete.call_args.kwargs
         assert kw.get("session_id") == "prod:world:2026-06-04"
 
     async def test_run_without_session_forwards_none(self, mock_deps):
-        await Agent(_CFG).run([Message(role=Role.USER, content="hi")], call=_call())
+        await Agent(_CFG).run([Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS)
         kw = mock_deps["model"].complete.call_args.kwargs
         assert kw.get("session_id") is None
 
@@ -589,7 +594,7 @@ class TestModelCacheSessionId:
         mock_deps["model"].stream = fake_stream
         async for _ in Agent(_CFG).stream(
             [Message(role=Role.USER, content="hi")],
-            call=_call_in("prod:world:2026-06-04"),
+            call=_call_in("prod:world:2026-06-04"), prompts=_PROMPTS,
         ):
             pass
         assert captured.get("session_id") == "prod:world:2026-06-04"
@@ -604,13 +609,13 @@ class TestRun:
     async def test_returns_final_message(self, mock_deps):
         result = await Agent(_CFG).run(
             messages=[Message(role=Role.USER, content="hi")],
-            prompt_vars={"name": "test"}, call=_call(),
+            values={"name": "test"}, call=_call(), prompts=_PROMPTS,
         )
         assert isinstance(result, Message)
         assert result.text() == "hello"
 
     async def test_builds_model_client_from_config_model_id(self, mock_deps):
-        await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")], call=_call())
+        await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS)
         mock_deps["build_model_client"].assert_awaited_once_with("test-model")
 
     async def test_tooldefs_passed_to_model(self, mock_deps):
@@ -626,7 +631,7 @@ class TestRun:
             return ""
 
         await Agent(_CFG, tools=[my_tool]).run(
-            messages=[Message(role=Role.USER, content="hi")], call=_call()
+            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS
         )
         # the model saw the tool's neutral ToolDef
         tools = mock_deps["model"].complete.await_args.kwargs["tools"]
@@ -634,7 +639,7 @@ class TestRun:
         assert tools[0].name == "my_tool"
 
     async def test_no_tools_passes_none(self, mock_deps):
-        await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")], call=_call())
+        await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS)
         tools = mock_deps["model"].complete.await_args.kwargs["tools"]
         assert tools is None
 
@@ -643,22 +648,17 @@ class TestRun:
         # reach the model call — dropping them is a silent behaviour regression.
         spec = replace(_CFG, model_kwargs={"reasoning_effort": "low"})
         await Agent(spec).run(
-            messages=[Message(role=Role.USER, content="hi")], call=_call(spec)
+            messages=[Message(role=Role.USER, content="hi")], call=_call(spec), prompts=_PROMPTS
         )
         kwargs = mock_deps["model"].complete.await_args.kwargs
         assert kwargs["reasoning_effort"] == "low"
 
-    async def test_compiles_prompt_via_langfuse(self, mock_deps):
+    async def test_renders_the_calls_agent_from_its_prompt_set(self, mock_deps):
         await Agent(_CFG).run(
             messages=[Message(role=Role.USER, content="hi")],
-            prompt_vars={"key": "val"}, call=_call(),
+            values={"key": "val"}, call=_call(), prompts=_PROMPTS,
         )
-        mock_deps["get_prompt"].assert_called_once_with("test_prompt")
-        mock_deps["compile_to_messages"].assert_called_once()
-        call_kwargs = mock_deps["compile_to_messages"].call_args.kwargs
-        assert call_kwargs["key"] == "val"
-        assert "currDate" in call_kwargs
-        assert "currTime" in call_kwargs
+        assert mock_deps["prompts"].rendered == [("test_prompt", {"key": "val"})]
 
     async def test_model_and_budget_from_dynamic_config_are_read_at_the_call(
         self, mock_deps, monkeypatch
@@ -691,46 +691,25 @@ class TestRun:
             )
         )
         await Agent(spec, tools=[loop_tool]).run(
-            messages=[Message(role=Role.USER, content="go")], call=_call(spec)
+            messages=[Message(role=Role.USER, content="go")], call=_call(spec), prompts=_PROMPTS
         )
         mock_deps["build_model_client"].assert_awaited_once_with("main-model")
         assert mock_deps["model"].complete.call_count == 3
 
-    async def test_curr_time_injected_in_cst(self, mock_deps):
-        """全局注入的 currTime / currDate 是 CST（不再 naive 系统时间）。
-
-        旧 bug：``datetime.now().strftime(...)`` 是 naive，容器 TZ 不确定（可能
-        UTC），喂给每条 prompt 的"现在"跟 world/life 的 CST 时刻差 8 小时。改成
-        显式 CST。钉死 now：真实 UTC 12:30 → CST 20:30、CST 日期 2026-06-03。
-        """
-        import datetime as _dt
-
-        from app.infra import cst_time
-
-        class _FixedDateTime(_dt.datetime):
-            @classmethod
-            def now(cls, tz=None):
-                base = cls(2026, 6, 3, 12, 30, 45, tzinfo=_dt.timezone.utc)
-                return (
-                    base.astimezone(tz) if tz is not None
-                    else base.replace(tzinfo=None)
-                )
-
-        with patch.object(cst_time, "datetime", _FixedDateTime):
-            await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")], call=_call())
-
-        call_kwargs = mock_deps["compile_to_messages"].call_args.kwargs
-        assert call_kwargs["currTime"] == "20:30:45", (
-            f"currTime 该是 CST（UTC 12:30:45 → CST 20:30:45），实际 {call_kwargs['currTime']!r}"
+    async def test_no_time_is_put_into_the_prompt(self, mock_deps):
+        """The prompt gets the values its caller gives and nothing else: no ``currDate`` /
+        ``currTime`` (no template declares them, and the strict check would refuse them)."""
+        await Agent(_CFG).run(
+            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS
         )
-        assert call_kwargs["currDate"] == "2026-06-03"
+        assert mock_deps["prompts"].rendered == [("test_prompt", None)]
 
     async def test_prompt_messages_prepended(self, mock_deps):
-        mock_deps["compile_to_messages"].return_value = [
+        mock_deps["prompts"].system = [
             Message(role=Role.SYSTEM, content="sys prompt"),
         ]
         user_msg = Message(role=Role.USER, content="hi")
-        await Agent(_CFG).run(messages=[user_msg], call=_call())
+        await Agent(_CFG).run(messages=[user_msg], call=_call(), prompts=_PROMPTS)
 
         sent = mock_deps["model"].complete.await_args.args[0]
         assert sent[0].role == Role.SYSTEM
@@ -745,7 +724,7 @@ class TestRun:
             ]
         )
         result = await Agent(_CFG).run(
-            messages=[Message(role=Role.USER, content="hi")], call=_call(),
+            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS,
         )
         assert result.text() == "retry ok"
         assert mock_deps["model"].complete.call_count == 2
@@ -756,7 +735,7 @@ class TestRun:
         )
         with pytest.raises(APITimeoutError):
             await Agent(_CFG).run(
-                messages=[Message(role=Role.USER, content="hi")], call=_call(),
+                messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS,
             )
         assert mock_deps["model"].complete.call_count == 2
 
@@ -790,7 +769,7 @@ class TestRun:
         )
         call = _call()
         await Agent(_CFG, tools=[ctx_tool]).run(
-            messages=[Message(role=Role.USER, content="go")], call=call
+            messages=[Message(role=Role.USER, content="go")], call=call, prompts=_PROMPTS
         )
         assert seen["call"] is call
 
@@ -811,7 +790,7 @@ class TestStream:
 
         collected = []
         async for chunk in Agent(_CFG).stream(
-            messages=[Message(role=Role.USER, content="hi")], call=_call(),
+            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS,
         ):
             collected.append(chunk)
 
@@ -831,7 +810,7 @@ class TestStream:
 
         with pytest.raises(APITimeoutError):
             async for _ in Agent(_CFG).stream(
-                messages=[Message(role=Role.USER, content="hi")], call=_call(),
+                messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS,
             ):
                 pass
 
@@ -853,7 +832,7 @@ class TestStream:
 
         collected = []
         async for chunk in Agent(_CFG).stream(
-            messages=[Message(role=Role.USER, content="hi")], call=_call(),
+            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS,
         ):
             collected.append(chunk)
 
@@ -890,7 +869,7 @@ class TestRecursionLimit:
             )
         )
         await Agent(_CFG, tools=[loop_tool]).run(
-            messages=[Message(role=Role.USER, content="go")], call=_call()
+            messages=[Message(role=Role.USER, content="go")], call=_call(), prompts=_PROMPTS
         )
         # 6 turns with tools, then one toolless call so the run ends on what the
         # assistant says instead of on a tool-call turn with no text.
@@ -919,7 +898,7 @@ class TestRecursionLimit:
             )
         )
         await Agent(cfg, tools=[loop_tool]).run(
-            messages=[Message(role=Role.USER, content="go")], call=_call(cfg)
+            messages=[Message(role=Role.USER, content="go")], call=_call(cfg), prompts=_PROMPTS
         )
         assert mock_deps["model"].complete.call_count == 5
         assert mock_deps["model"].complete.call_args.kwargs["tools"] is None
@@ -943,7 +922,7 @@ class TestExtract:
         result = await Agent(_EXTRACT_CFG).extract(
             Score,
             messages=[Message(role=Role.USER, content="rate this")],
-            prompt_vars={"key": "val"}, call=_call(_EXTRACT_CFG),
+            values={"key": "val"}, call=_call(_EXTRACT_CFG), prompts=_PROMPTS,
         )
 
         assert isinstance(result, Score)
@@ -957,7 +936,7 @@ class TestExtract:
         mock_deps["model"].structured = AsyncMock(return_value={"name": "x"})
 
         await Agent(_EXTRACT_CFG).extract(
-            Score, messages=[Message(role=Role.USER, content="t")], call=_call(_EXTRACT_CFG)
+            Score, messages=[Message(role=Role.USER, content="t")], call=_call(_EXTRACT_CFG), prompts=_PROMPTS
         )
         schema = mock_deps["model"].structured.await_args.kwargs["schema"]
         assert "properties" in schema
@@ -973,7 +952,7 @@ class TestExtract:
 
         spec = replace(_EXTRACT_CFG, model_kwargs={"reasoning_effort": "low"})
         await Agent(spec).extract(
-            Out, messages=[Message(role=Role.USER, content="t")], call=_call(spec)
+            Out, messages=[Message(role=Role.USER, content="t")], call=_call(spec), prompts=_PROMPTS
         )
         kwargs = mock_deps["model"].structured.await_args.kwargs
         assert kwargs["reasoning_effort"] == "low"
@@ -991,7 +970,7 @@ class TestExtract:
 
         result = await Agent(_EXTRACT_CFG).extract(
             Result,
-            messages=[Message(role=Role.USER, content="test")], call=_call(_EXTRACT_CFG),
+            messages=[Message(role=Role.USER, content="test")], call=_call(_EXTRACT_CFG), prompts=_PROMPTS,
         )
         assert result.ok is True
         assert mock_deps["model"].structured.call_count == 2
@@ -1002,14 +981,14 @@ class TestExtract:
         class Out(BaseModel):
             v: str
 
-        mock_deps["compile_to_messages"].return_value = [
+        mock_deps["prompts"].system = [
             Message(role=Role.SYSTEM, content="You are a guard."),
             Message(role=Role.USER, content="Check: test input"),
         ]
         mock_deps["model"].structured = AsyncMock(return_value={"v": "ok"})
 
         await Agent(_EXTRACT_CFG).extract(
-            Out, messages=[Message(role=Role.USER, content="more")], call=_call(_EXTRACT_CFG)
+            Out, messages=[Message(role=Role.USER, content="more")], call=_call(_EXTRACT_CFG), prompts=_PROMPTS
         )
 
         sent = mock_deps["model"].structured.await_args.args[0]
@@ -1037,7 +1016,7 @@ class TestExtract:
             await Agent(_EXTRACT_CFG).extract(
                 Out,
                 messages=[Message(role=Role.USER, content="t")],
-                call=_call_in("coe-t2:world:2026-06-16", _EXTRACT_CFG),
+                call=_call_in("coe-t2:world:2026-06-16", _EXTRACT_CFG), prompts=_PROMPTS,
             )
 
         assert captured.get("session_id") == "coe-t2:world:2026-06-16"
@@ -1088,7 +1067,7 @@ class TestTranscriptSink:
         produced: list[Message] = []
         result = await Agent(_CFG, tools=[world_tool]).run(
             messages=[Message(role=Role.USER, content="醒了")],
-            transcript_sink=produced, call=_call(),
+            transcript_sink=produced, call=_call(), prompts=_PROMPTS,
         )
 
         assert result.text() == "这一轮做完了"
@@ -1103,7 +1082,7 @@ class TestTranscriptSink:
         assert produced[1].tool_call_id == "c1"
 
     async def test_prior_messages_are_fed_to_the_model_in_order(self, mock_deps):
-        mock_deps["compile_to_messages"].return_value = [
+        mock_deps["prompts"].system = [
             Message(role=Role.SYSTEM, content="sys"),
         ]
         await Agent(_CFG).run(
@@ -1111,7 +1090,7 @@ class TestTranscriptSink:
                 Message(role=Role.USER, content="上一轮醒"),
                 Message(role=Role.ASSISTANT, content="上一轮说的"),
                 Message(role=Role.USER, content="这一轮醒"),
-            ], call=_call()
+            ], call=_call(), prompts=_PROMPTS
         )
         sent = mock_deps["model"].complete.await_args.args[0]
         assert [m.text() for m in sent] == [
@@ -1123,7 +1102,7 @@ class TestTranscriptSink:
 
     async def test_without_a_sink_the_run_is_unchanged(self, mock_deps):
         result = await Agent(_CFG).run(
-            messages=[Message(role=Role.USER, content="hi")], call=_call()
+            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS
         )
         assert result.text() == "hello"
 
@@ -1144,6 +1123,6 @@ class TestTranscriptSink:
         with patch("asyncio.sleep", new_callable=AsyncMock):
             await Agent(_CFG).run(
                 messages=[Message(role=Role.USER, content="醒了")],
-                transcript_sink=produced, call=_call(),
+                transcript_sink=produced, call=_call(), prompts=_PROMPTS,
             )
         assert [m.text() for m in produced] == ["第二次成了"]

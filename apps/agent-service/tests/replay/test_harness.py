@@ -32,9 +32,10 @@ from datetime import datetime
 import httpx
 import pytest
 
-from app.agent.contracts import AgentSpec
+from app.agent.contracts import AgentSpec, Segment
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role
+from app.agent.prompts import PromptSet
 from app.agent.round import Call, in_call, open_call
 from app.agent.tooling import tool
 from app.agent.trace import rendered_from
@@ -211,11 +212,19 @@ async def test_agents_interleave(replay):
     outer = AgentSpec(segments=("world_round",), model="m", trace_name="world-round")
     inner = AgentSpec(segments=("world_npc",), model="m", trace_name="world-npc")
 
+    prompts = await PromptSet.resolve(
+        {"world_round": outer, "world_npc": inner},
+        {name: Segment(name, name) for name in ("world_round", "world_npc")},
+        None,
+    )
+
     @tool
     async def ask() -> str:
         """问一下 NPC。"""
         call = open_call("world_npc", inner, lane=LANE)
-        reply = await Agent(inner).run([Message(role=Role.USER, content="说吧")], call=call)
+        reply = await Agent(inner).run(
+            [Message(role=Role.USER, content="说吧")], call=call, prompts=prompts
+        )
         return reply.text()
 
     replay.model.script(
@@ -226,6 +235,7 @@ async def test_agents_interleave(replay):
     reply = await Agent(outer, tools=[ask]).run(
         [Message(role=Role.USER, content="醒了")],
         call=open_call("world_round", outer, lane=LANE),
+        prompts=prompts,
     )
 
     assert reply.text() == "这一轮完了。"

@@ -119,14 +119,20 @@ from app.agent.continuity import (
     next_transcript,
     trim_for_round,
 )
-from app.agent.contracts import AgentSpec
+from app.agent.contracts import AgentSpec, Segment
 from app.agent.neutral import Message, Role
+from app.agent.prompts import PromptSet
 from app.agent.round import Round, current_round, in_round, open_call
 from app.agent.session import load_session
 from app.agent.tooling import tool
 from app.agent.tools._common import get_or_create_counter, tool_error
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
+from app.capabilities.output_safety import (
+    GUARD_OUTPUT,
+    GUARD_OUTPUT_AGENT,
+    GUARD_OUTPUT_SEGMENT,
+)
 from app.data.ordered import insert_in_commit_order
 from app.data.persist import fetch_one, from_row
 from app.data.schema import CommitOrder, Data, Key, table_name
@@ -208,6 +214,13 @@ LIFE_MOMENT_AGENT = AgentSpec(
     trace_name="living-life-moment",
     recursion_limit=12,
     session="living-life:{lane}:{participant}",
+)
+# 她这一轮的 prompt 整份一段；它声明的三个变量就是这一轮给的那三个（模板多一个、少一个都是配置
+# 错误，见 :class:`app.agent.prompts.PromptConfigError`）。
+LIFE_MOMENT_SEGMENT = Segment(
+    LIFE_MOMENT_PROMPT_ID,
+    LIFE_MOMENT_PROMPT_ID,
+    variables=("persona_name", "persona_core", GUIDES_VAR),
 )
 
 # 她的一轮属于哪个 App、按哪份 profile 组成（清单里的名字）。
@@ -1336,6 +1349,13 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
     # 结论：langfuse 会系统性丢 trace（这一版实测整夜 225 个 moment 只到 125 条，丢
     # 44%），所以"这一晚花了多少"只能从 PG 数。usage 来自 LLM response 本身，
     # 跟 langfuse 死活无关。
+    # 这一轮要用的 prompt 在第一次调模型之前一起取齐：她这一轮的，和这一轮里她发消息之前那道检查
+    # 的。之后这一轮里每一次调用都用这一版，这一轮跑着时发布的新版本从下一轮起才用上。
+    this_round.prompts = await PromptSet.resolve(
+        {LIFE_MOMENT_PROMPT_ID: LIFE_MOMENT_AGENT, GUARD_OUTPUT: GUARD_OUTPUT_AGENT},
+        {LIFE_MOMENT_PROMPT_ID: LIFE_MOMENT_SEGMENT, GUARD_OUTPUT: GUARD_OUTPUT_SEGMENT},
+        this_round,
+    )
     call = open_call(
         LIFE_MOMENT_PROMPT_ID, LIFE_MOMENT_AGENT, lane=lane, participant=persona_id
     )
@@ -1343,7 +1363,8 @@ async def run_due_moment(due: DueMoment) -> LifeMoment:
         reply = await build_moment_runner().run(
             [*history, stimulus],
             call=call,
-            prompt_vars=prompt_vars,
+            prompts=this_round.prompts,
+            values=prompt_vars,
             transcript_sink=produced,
         )
     this_round.reply = reply

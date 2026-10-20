@@ -51,9 +51,10 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from app.agent.contracts import AgentSpec
+from app.agent.contracts import AgentSpec, Segment
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role
+from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.agent.tooling import Tool
 from app.agent.tools._common import tool_error
@@ -90,6 +91,7 @@ READING_AGENT = AgentSpec(
     recursion_limit=MAX_READ_CALLS + 4,
     session="{lane}:{participant}:{date}",
 )
+READING_SEGMENT = Segment(READING, READING, variables=("persona_name", "persona_lite"))
 
 
 @dataclass(slots=True)
@@ -253,19 +255,21 @@ async def run_reading_round(
     )
     call = open_call(READING, READING_AGENT, lane=lane, participant=persona_id, at=now)
 
+    async def read_on() -> Message:
+        # prompt 在这一程开始时取齐，跟这一程一起受时限和"失败就不算这一程"管着。
+        prompts = await PromptSet.resolve(
+            {READING: READING_AGENT}, {READING: READING_SEGMENT}, None
+        )
+        return await Agent(READING_AGENT, tools=tools).run(
+            [Message(role=Role.USER, content=user_content)],
+            call=call,
+            prompts=prompts,
+            values={"persona_name": pc.display_name, "persona_lite": pc.persona_lite},
+        )
+
     try:
         with collect_usage() as usage:
-            result = await asyncio.wait_for(
-                Agent(READING_AGENT, tools=tools).run(
-                    [Message(role=Role.USER, content=user_content)],
-                    call=call,
-                    prompt_vars={
-                        "persona_name": pc.display_name,
-                        "persona_lite": pc.persona_lite,
-                    },
-                ),
-                timeout=READING_TIMEOUT_SECONDS,
-            )
+            result = await asyncio.wait_for(read_on(), timeout=READING_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001 — fail-soft：超时 / 抛错都印象 / 页号不动
         logger.warning(
             "[reading] %s/%s attachment=%s round=%s failed (impression/progress "

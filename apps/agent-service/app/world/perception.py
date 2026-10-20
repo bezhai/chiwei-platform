@@ -215,6 +215,7 @@ async def judge_who_notices(
             call,
             PERCEPTION_AGENT,
             [Turn(role=Role.USER, content=perception_input)],
+            prompts=world_round.prompts,
             tools=tools,
             call_id=call_id,
         )

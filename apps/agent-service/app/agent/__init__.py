@@ -3,16 +3,15 @@
 Public surface:
     Agent       — the unified Agent class (run / stream / extract), built from an
                   :class:`~app.agent.contracts.AgentSpec`
-
-    get_prompt         — fetch a Langfuse prompt (with lane routing)
+    PromptSet   — the prompts some agents render, resolved together and checked strictly
 """
 
 from app.agent.core import Agent
 from app.agent.image_gen import generate_image
-from app.agent.prompts import get_prompt
+from app.agent.prompts import PromptSet
 
 __all__ = [
     "Agent",
+    "PromptSet",
     "generate_image",
-    "get_prompt",
 ]

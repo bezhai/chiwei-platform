@@ -264,3 +264,9 @@ def self_message(message_id: str, body: str = "醒来。"):
     return new_message(
         sender="world", recipient="world", body=body, kind=Kind.MESSAGE, message_id=message_id
     )
+
+
+@pytest.fixture(autouse=True)
+def _prompts(prompts_from_fixtures):
+    """一轮取齐的 prompt 来自回放的 prompt 快照（根 conftest 的 ``prompts_from_fixtures``）。"""
+    return prompts_from_fixtures

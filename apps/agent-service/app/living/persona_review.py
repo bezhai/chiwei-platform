@@ -45,8 +45,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
-from app.agent.contracts import AgentSpec
+from app.agent.contracts import AgentSpec, Segment
 from app.agent.neutral import Message, Role
+from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
@@ -95,6 +96,11 @@ PERSONA_REVIEW_AGENT = AgentSpec(
     trace_name="living-persona-review",
     recursion_limit=1,
     session="living-persona-review:{lane}:{participant}",
+)
+PERSONA_REVIEW_SEGMENT = Segment(
+    PERSONA_REVIEW_PROMPT_ID,
+    PERSONA_REVIEW_PROMPT_ID,
+    variables=("persona_name", "persona_core"),
 )
 
 
@@ -284,6 +290,11 @@ async def write_due_review(due: DueReview) -> PersonaVersion | None:
     call = open_call(
         PERSONA_REVIEW_PROMPT_ID, PERSONA_REVIEW_AGENT, lane=lane, participant=persona_id
     )
+    prompts = await PromptSet.resolve(
+        {PERSONA_REVIEW_PROMPT_ID: PERSONA_REVIEW_AGENT},
+        {PERSONA_REVIEW_PROMPT_ID: PERSONA_REVIEW_SEGMENT},
+        None,
+    )
     # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
     # 会系统性丢 trace，"这一周花了多少"只能从 PG 数。
     with collect_usage() as usage:
@@ -300,7 +311,8 @@ async def write_due_review(due: DueReview) -> PersonaVersion | None:
                 )
             ],
             call=call,
-            prompt_vars=prompt_vars,
+            prompts=prompts,
+            values=prompt_vars,
         )
 
     await record_round_cost(

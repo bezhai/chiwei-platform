@@ -1,10 +1,10 @@
 """她这一轮的 SYSTEM 前缀不许跟着钟走。
 
 前缀缓存（Gemini 的隐式缓存、字节网关的 prompt cache）只对"请求开头逐字节相同的那
-一段"生效。编译 prompt 时 :meth:`app.agent.core.Agent._prepare` 给**每条** prompt 注
-入精确到秒的 ``currTime`` / ``currDate``：SYSTEM 模板一旦引用它们，这一段每次调用都
-不同，命中恒为 0。``living_life_moment`` 当前的模板变量是 ``persona_name`` /
-``persona_core`` / ``guides_you_can_read`` 三个，都不是时间，所以前缀是稳的。
+一段"生效。SYSTEM 模板一旦引用一个跟着钟走的变量，这一段每次调用都不同，命中恒为 0。
+``living_life_moment`` 的模板变量是 ``persona_name`` / ``persona_core`` /
+``guides_you_can_read`` 三个，都不是时间，所以前缀是稳的；编译时也不再注入任何时间变量
+（原来每条 prompt 都会收到精确到秒的 ``currTime`` / ``currDate``）。
 
 **这个文件钉得住什么、钉不住什么**：模板正文在 Langfuse 上、不在仓库里，所以"有人在
 模板正文里写上 ``{{currTime}}``"这种破坏离线测不出来——它在运行时由
@@ -13,34 +13,39 @@ test_usage_cache_contract.py``）。离线钉得住的是代码这一侧的两�
 
   1. 这一轮交给 prompt 的变量既不叫时间、值也不随钟变（她的常规节奏真跑两轮
      比对）；
-  2. 时间只以模板变量的形式进入编译，没有被谁直接拼进 SYSTEM 正文。
+  2. 编译这一步不把钟拼进 SYSTEM 正文；模板要是声明了一个时间变量，这一轮不会悄悄给它一个
+     值，而是按配置错误失败（:class:`app.agent.prompts.PromptConfigError`）。
 """
 
 from __future__ import annotations
 
 import datetime as dt
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from langfuse.api.resources.prompts import Prompt_Text
 from langfuse.model import TextPromptClient
 
-from app.agent.core import Agent
 from app.agent.neutral import Message, Role
-from app.agent.round import open_call
+from app.agent.prompts import PromptConfigError, PromptSet
 from app.infra import cst_time
 from app.living import moment as moment_mod
 from app.living import persona as persona_mod
 from app.living.loose_ends import LooseEnd
-from app.living.moment import LIFE_MOMENT_AGENT, LIFE_MOMENT_PROMPT_ID, LifeMoment
+from app.living.moment import (
+    LIFE_MOMENT_AGENT,
+    LIFE_MOMENT_PROMPT_ID,
+    LIFE_MOMENT_SEGMENT,
+    LifeMoment,
+)
 from tests.living.conftest import regular_round
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
 
-# 名字里带这些词的变量，值几乎必然跟着钟走。``currTime`` / ``currDate`` 是
-# ``Agent._prepare`` 无条件注入的那两个，首当其冲。
+# 名字里带这些词的变量，值几乎必然跟着钟走。``currTime`` / ``currDate`` 是原来每条 prompt
+# 都会被注入的那两个，首当其冲。
 _CLOCK_WORDS = frozenset(
     {
         "currtime",
@@ -105,7 +110,7 @@ async def two_moments(living_db, monkeypatch):
     await regular_round(LANE, "akao", _at(14, 10))
 
     assert len(runner.runs) == 2, f"两轮没都跑起来：{len(runner.runs)} 轮"
-    return [run["prompt_vars"] for run in runner.runs]
+    return [run["values"] for run in runner.runs]
 
 
 def _at(hour: int, minute: int = 0) -> dt.datetime:
@@ -140,7 +145,7 @@ async def test_the_life_moment_prompt_variables_are_not_named_after_the_clock(
 
 
 # ---------------------------------------------------------------------------
-# 时间只从模板变量进 —— 编译这一步不许把钟拼进 SYSTEM 正文
+# 编译这一步不许把钟拼进 SYSTEM 正文
 # ---------------------------------------------------------------------------
 
 
@@ -160,29 +165,28 @@ def _life_moment_prompt(template: str) -> TextPromptClient:
 
 
 async def _system_at(template: str, clock: dt.datetime) -> str:
-    """按 ``clock`` 这个时刻编译她这一轮的 prompt，交回 SYSTEM 正文。"""
+    """按 ``clock`` 这个时刻取齐、编译她这一轮的 prompt，交回 SYSTEM 正文。"""
     prompt = _life_moment_prompt(template)
+    langfuse = SimpleNamespace(get_prompt=lambda *_a, **_k: prompt)
     with (
-        patch("app.agent.core.get_prompt", return_value=prompt),
-        patch(
-            "app.agent.core.build_model_client",
-            new_callable=AsyncMock,
-            return_value=AsyncMock(),
-        ),
+        patch("app.agent.prompts._get_client", return_value=langfuse),
+        patch("app.agent.prompts.get_lane", return_value=None),
         patch.object(cst_time, "now_cst", lambda: clock),
     ):
-        call = open_call(
-            LIFE_MOMENT_PROMPT_ID, LIFE_MOMENT_AGENT, lane=LANE, participant="akao"
+        prompts = await PromptSet.resolve(
+            {LIFE_MOMENT_PROMPT_ID: LIFE_MOMENT_AGENT},
+            {LIFE_MOMENT_PROMPT_ID: LIFE_MOMENT_SEGMENT},
+            None,
         )
-        _, _, messages = await Agent(LIFE_MOMENT_AGENT)._prepare(
-            call,
+        [system] = prompts.messages(
+            LIFE_MOMENT_PROMPT_ID,
             {
                 "persona_name": "赤尾",
                 "persona_core": "她拍胶片、写角色分析、逛论坛。",
                 "guides_you_can_read": "drawing：人物画图指南",
-            }
+            },
         )
-    return messages[0].content
+    return system.content
 
 
 _STABLE_TEMPLATE = (
@@ -193,8 +197,8 @@ _STABLE_TEMPLATE = (
 async def test_the_system_text_does_not_move_with_the_clock():
     """模板不引用时间时，隔一小时编译两次的 SYSTEM 必须逐字节相同。
 
-    钉的是编译这一步：``currTime`` / ``currDate`` 只作为模板变量传进去，谁也不许把
-    "现在几点"直接拼进 SYSTEM 正文——那样模板写得再干净前缀也是每次都变。
+    钉的是编译这一步：谁也不许把"现在几点"直接拼进 SYSTEM 正文——那样模板写得再干净前缀也是
+    每次都变。
     """
     early = await _system_at(_STABLE_TEMPLATE, _at(14, 0))
     later = await _system_at(_STABLE_TEMPLATE, _at(15, 30))
@@ -203,16 +207,13 @@ async def test_the_system_text_does_not_move_with_the_clock():
     assert "14:00" not in early and "15:30" not in later
 
 
-async def test_a_template_that_reads_the_clock_moves_every_call():
-    """反过来验一遍上面那条不是空的：模板一旦用上 ``currTime``，两次就不一样了。
-
-    没有这条，上面那个"两次相同"在注入被整个删掉时也照样绿——它证明的就只是
-    "SYSTEM 里没有时间"，而不是"时间确实在手边、只是模板没用"。
-    """
+async def test_a_template_that_reads_the_clock_is_a_configuration_error():
+    """反过来：模板一旦用上 ``currTime`` / ``currDate``，这一轮不会悄悄给它们一个值（那样前缀
+    就跟着钟走了），也不会把字面的 ``{{currTime}}`` 发给模型，而是在取齐时按配置错误失败。"""
     template = _STABLE_TEMPLATE + "\n现在是 {{currDate}} {{currTime}}"
 
-    early = await _system_at(template, _at(14, 0))
-    later = await _system_at(template, _at(15, 30))
+    with pytest.raises(PromptConfigError) as raised:
+        await _system_at(template, _at(14, 0))
 
-    assert early != later
-    assert "14:00:00" in early and "15:30:00" in later
+    assert raised.value.unexpected == frozenset({"currDate", "currTime"})
+    assert raised.value.missing == frozenset()

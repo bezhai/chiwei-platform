@@ -29,9 +29,10 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 from app.agent.adapters.gemini import GeminiAdapter
 from app.agent.adapters.openai import OpenAIAdapter
 from app.agent.client import ModelClient
-from app.agent.contracts import AgentSpec
+from app.agent.contracts import AgentSpec, Segment
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role, StreamChunk
+from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.capabilities._errors import CapabilityTimeout
 
@@ -50,6 +51,14 @@ LIFE_MOMENT = AgentSpec(
 
 def _her_call(spec: AgentSpec = LIFE_MOMENT):
     return open_call("living_life_moment", spec, lane="coe-living")
+
+
+async def _her_prompts(spec: AgentSpec = LIFE_MOMENT) -> PromptSet:
+    return await PromptSet.resolve(
+        {"living_life_moment": spec},
+        {"living_life_moment": Segment("living_life_moment", "living_life_moment")},
+        None,
+    )
 SCHEMA = {"title": "verdict", "type": "object", "properties": {}}
 
 
@@ -359,7 +368,9 @@ def _prompt() -> TextPromptClient:
 def life_round(monkeypatch) -> list[dict[str, Any]]:
     """她的一轮怎么调模型就怎么调：prompt 跳过 Langfuse，model_id 解析到真的 GeminiAdapter。"""
     requests = _gemini(monkeypatch)
-    monkeypatch.setattr("app.agent.core.get_prompt", lambda _prompt_id: _prompt())
+    langfuse = SimpleNamespace(get_prompt=lambda *_a, **_k: _prompt())
+    monkeypatch.setattr("app.agent.prompts._get_client", lambda: langfuse)
+    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: None)
 
     async def _build(_model_id: str) -> ModelClient:
         return _gemini_adapter()
@@ -375,7 +386,11 @@ async def test_her_round_fails_at_the_deadline_with_the_reason_on_the_trace(
 ):
     """她那一轮 ``max_retries`` 是 1：卡住的那次调用到期限就让这一轮失败，交给下一拍重来。"""
     with pytest.raises(CapabilityTimeout):
-        await _guarded(Agent(LIFE_MOMENT).run([_user("醒了")], call=_her_call()))
+        await _guarded(
+            Agent(LIFE_MOMENT).run(
+                [_user("醒了")], call=_her_call(), prompts=await _her_prompts()
+            )
+        )
 
     assert len(life_round) == 1
     [root] = _named(exported_spans, "living-life-moment")
@@ -391,7 +406,11 @@ async def test_a_caller_that_allows_a_retry_gets_one_after_the_deadline(
     """到期限算可重试的失败，跟 provider 自己的超时一样：允许重试的调用方照它的次数再来。"""
     twice = replace(LIFE_MOMENT, max_retries=2)
     with pytest.raises(CapabilityTimeout):
-        await _guarded(Agent(twice).run([_user("醒了")], call=_her_call(twice)))
+        await _guarded(
+            Agent(twice).run(
+                [_user("醒了")], call=_her_call(twice), prompts=await _her_prompts(twice)
+            )
+        )
 
     assert len(life_round) == 2
     roots = _named(exported_spans, "living-life-moment")

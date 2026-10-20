@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
-from app.agent.contracts import AgentSpec
+from app.agent.contracts import AgentSpec, Segment
 from app.agent.core import Agent
 from app.agent.round import current_round, open_call
 from app.capabilities import banned_words
@@ -39,6 +39,8 @@ GUARD_OUTPUT_AGENT = AgentSpec(
     model_kwargs={"reasoning_effort": "low"},
     update_trace=False,
 )
+# 它的 prompt 是整份一段（chat prompt），要判的那段话在调用时给。
+GUARD_OUTPUT_SEGMENT = Segment(GUARD_OUTPUT, GUARD_OUTPUT, variables=("response",))
 
 # 模型说"不安全"、但它自己有多确定才算数。
 #
@@ -83,13 +85,17 @@ def build_guard() -> Agent:
 
 
 async def _ask_guard(text: str) -> _OutputSafetyResult:
-    # 判的是她这一轮要发出去的话：这次调用在她这一轮里。
+    # 判的是她这一轮要发出去的话：这次调用在她这一轮里，prompt 用这一轮开头定下的那个版本。
     her_round = current_round()
     call = open_call(
         GUARD_OUTPUT, GUARD_OUTPUT_AGENT, lane=her_round.lane, round=her_round
     )
     return await build_guard().extract(
-        _OutputSafetyResult, messages=[], call=call, prompt_vars={"response": text}
+        _OutputSafetyResult,
+        messages=[],
+        call=call,
+        prompts=her_round.prompts,
+        values={"response": text},
     )
 
 

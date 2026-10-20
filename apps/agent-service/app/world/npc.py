@@ -43,12 +43,14 @@ async def play_npc(npc: str, situation: str) -> str:
     模型调用失败原样往外抛。
     """
     call_id = uuid.uuid4().hex
-    # 扮演是在主 agent 这一轮里做的。
-    call = open_call(NPC, NPC_AGENT, lane=lane(), round=current_round())
+    # 扮演是在主 agent 这一轮里做的，prompt 用这一轮开头定下的那个版本。
+    world_round = current_round()
+    call = open_call(NPC, NPC_AGENT, lane=lane(), round=world_round)
     reply = await run_agent(
         call,
         NPC_AGENT,
         [Turn(role=Role.USER, content=_npc_input(npc, situation))],
+        prompts=world_round.prompts,
         tools=await query_tools(),
         call_id=call_id,
     )

@@ -23,8 +23,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from app.agent.contracts import AgentSpec, FromConfig
+from app.agent.contracts import AgentSpec, FromConfig, Segment
 from app.agent.neutral import Message as Turn
+from app.agent.prompts import PromptSet
 from app.agent.round import Call
 from app.agent.tooling import Tool
 from app.agent.trace import collect_usage
@@ -80,6 +81,11 @@ def world_agent(name: str, trace_name: str, model_key: str | None = None) -> Age
     )
 
 
+def world_segments(*names: str) -> dict[str, Segment]:
+    """world 这几类的 prompt：各是整份一段，id 就是名字，正文不引用任何变量。"""
+    return {name: Segment(name, name) for name in names}
+
+
 def build_runner(spec: AgentSpec, tools: list[Tool]) -> AgentRunner:
     """一次调用的 agent。模块级函数，测试替身从这里换掉，不碰真模型。"""
     return AgentRunner(spec, tools=tools)
@@ -90,19 +96,23 @@ async def run_agent(
     spec: AgentSpec,
     messages: list[Turn],
     *,
+    prompts: PromptSet,
     tools: list[Tool],
     call_id: str,
     transcript_sink: list[Turn] | None = None,
 ) -> Turn:
     """以 ``spec`` 这一类、调用方开好的 ``call`` 调一次模型，交回它最后说的那条消息。
 
-    ``messages`` 是接在 prompt 后面的全部输入；``transcript_sink`` 给了就收下这次调用产生的
-    每一条（主 agent 用它存连续上下文）。模型调用失败原样往外抛。
+    ``prompts`` 是调用方取齐的（一轮里的调用用这一轮的，应答用它开始时取的）；``messages`` 是
+    接在 prompt 后面的全部输入；``transcript_sink`` 给了就收下这次调用产生的每一条（主 agent
+    用它存连续上下文）。模型调用失败原样往外抛。
     """
     started = now_cst()
     runner = build_runner(spec, tools)
     with collect_usage() as usage:
-        reply = await runner.run(messages, call=call, transcript_sink=transcript_sink)
+        reply = await runner.run(
+            messages, call=call, prompts=prompts, transcript_sink=transcript_sink
+        )
     await record_round_cost(
         lane=lane(),
         actor=WORLD,

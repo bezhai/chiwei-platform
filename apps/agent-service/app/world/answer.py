@@ -20,10 +20,11 @@ import uuid
 
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
+from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.infra.cst_time import now_cst
 from app.messaging.message import Message
-from app.world.agents import lane, run_agent, when, world_agent
+from app.world.agents import lane, run_agent, when, world_agent, world_segments
 from app.world.sources import query_tools
 
 logger = logging.getLogger(__name__)
@@ -48,11 +49,17 @@ async def answer_question(question: Message) -> str | None:
     模型调用失败原样往外抛，通信机制告诉提问方"没有回答"，不重试。
     """
     call_id = uuid.uuid4().hex
+    tools = await query_tools()
+    # 应答不在主 agent 的哪一轮里：prompt 在这次调用开始时取。
+    prompts = await PromptSet.resolve(
+        {ANSWER: ANSWER_AGENT}, world_segments(ANSWER), None
+    )
     reply = await run_agent(
         open_call(ANSWER, ANSWER_AGENT, lane=lane()),
         ANSWER_AGENT,
         [Turn(role=Role.USER, content=_answer_input(question))],
-        tools=await query_tools(),
+        prompts=prompts,
+        tools=tools,
         call_id=call_id,
     )
     text = reply.text().strip()

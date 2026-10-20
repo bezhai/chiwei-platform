@@ -44,8 +44,9 @@ from typing import Annotated
 
 from pydantic import field_validator
 
-from app.agent.contracts import AgentSpec
+from app.agent.contracts import AgentSpec, Segment
 from app.agent.neutral import Message, Role
+from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.agent.trace import collect_usage
 from app.capabilities.agent import AgentRunner
@@ -87,6 +88,9 @@ DAY_PAGE_AGENT = AgentSpec(
     trace_name="living-day-page",
     recursion_limit=1,
     session="living-day-page:{lane}:{participant}",
+)
+DAY_PAGE_SEGMENT = Segment(
+    DAY_PAGE_PROMPT_ID, DAY_PAGE_PROMPT_ID, variables=("persona_name", "persona_core")
 )
 
 
@@ -381,6 +385,9 @@ async def write_due_page(due: DuePage) -> LivingDayPage | None:
     previous = await read_day_page_before(lane=lane, persona_id=persona_id, day=day)
     prompt_vars = await persona_prompt_vars(lane=lane, persona_id=persona_id)
     call = open_call(DAY_PAGE_PROMPT_ID, DAY_PAGE_AGENT, lane=lane, participant=persona_id)
+    prompts = await PromptSet.resolve(
+        {DAY_PAGE_PROMPT_ID: DAY_PAGE_AGENT}, {DAY_PAGE_PROMPT_ID: DAY_PAGE_SEGMENT}, None
+    )
     # 用量落 durable PG，理由同 moment（见 app.agent.trace）：langfuse
     # 会系统性丢 trace，"这一天花了多少"只能从 PG 数。
     with collect_usage() as usage:
@@ -394,7 +401,8 @@ async def write_due_page(due: DuePage) -> LivingDayPage | None:
                 )
             ],
             call=call,
-            prompt_vars=prompt_vars,
+            prompts=prompts,
+            values=prompt_vars,
         )
 
     await record_round_cost(

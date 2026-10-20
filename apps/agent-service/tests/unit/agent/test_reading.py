@@ -101,6 +101,12 @@ def stub_persona(monkeypatch):
     monkeypatch.setattr(reading_mod, "load_persona", fake_load_persona)
 
 
+@pytest.fixture(autouse=True)
+def _prompts(prompts_from_fixtures):
+    """读一程开始时取齐的 prompt 来自回放的 prompt 快照。"""
+    return prompts_from_fixtures
+
+
 def _install_agent(
     monkeypatch,
     *,
@@ -118,9 +124,10 @@ def _install_agent(
             captured["cfg"] = cfg
             captured["tools"] = tools
 
-        async def run(self, messages, *, call, prompt_vars=None):
+        async def run(self, messages, *, call, prompts, values=None):
             captured["runs"] += 1
-            captured["prompt_vars"] = prompt_vars
+            captured["prompt_vars"] = values
+            captured["prompts"] = prompts
             captured["call"] = call
             if delay:
                 await asyncio.sleep(delay)

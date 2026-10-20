@@ -25,9 +25,10 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 from pydantic import BaseModel
 
 from app.agent.client import ModelClient
-from app.agent.contracts import AgentSpec
+from app.agent.contracts import AgentSpec, Segment
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role, StreamChunk, ToolCall, ToolDef
+from app.agent.prompts import PromptSet
 from app.agent.round import Call, open_call
 from app.agent.tooling import tool
 from app.agent.trace import generation_span, rendered_from, separate_trace
@@ -147,17 +148,23 @@ def models(monkeypatch) -> dict[str, ModelClient]:
 
 @pytest.fixture
 def prompts(monkeypatch) -> dict[str, TextPromptClient]:
-    """一次调用的名字（它的 prompt id）取到哪个 prompt 对象（跳过按泳道取的那一步）。"""
+    """一个 prompt id 取到哪个 prompt 对象（不管 label）。"""
     by_id: dict[str, TextPromptClient] = {}
-    monkeypatch.setattr("app.agent.core.get_prompt", lambda prompt_id: by_id[prompt_id])
+
+    class _Langfuse:
+        def get_prompt(self, name: str, **_: Any) -> TextPromptClient:
+            return by_id[name]
+
+    monkeypatch.setattr("app.agent.prompts._get_client", lambda: _Langfuse())
+    monkeypatch.setattr("app.agent.prompts.get_lane", lambda: None)
     return by_id
 
 
 @pytest.fixture
 def labelled(monkeypatch) -> dict[str, TextPromptClient]:
-    """Langfuse 上每个 label 指着哪个版本；``get_prompt`` 照它真实的逻辑按泳道 coe-world 取。
+    """Langfuse 上每个 label 指着哪个版本；``PromptSet`` 照它真实的逻辑按泳道 coe-world 取。
 
-    泳道 label 没有的时候 SDK 报错，``get_prompt`` 回落到 production —— 替身照这个样子报错。
+    泳道 label 没有的时候 SDK 报错，取的时候回落到 production —— 替身照这个样子报错。
     """
     by_label: dict[str, TextPromptClient] = {}
 
@@ -223,6 +230,12 @@ def _call(spec: AgentSpec) -> Call:
     return open_call(spec.segments[0], spec, lane="coe-world")
 
 
+async def _set(spec: AgentSpec) -> PromptSet:
+    """``spec``'s one prompt (no variables), resolved the way a call resolves it."""
+    name = spec.segments[0]
+    return await PromptSet.resolve({name: spec}, {name: Segment(name, name)}, None)
+
+
 # ---------------------------------------------------------------------------
 # 读导出的 span
 # ---------------------------------------------------------------------------
@@ -274,7 +287,7 @@ async def test_a_tool_span_in_run_hangs_under_the_generation_that_asked_for_it(
     prompts["world_round"] = _prompt("world_round", 3)
     models["world-model"] = _ScriptedModel(turns=[_calls("look"), _says("看完了")])
 
-    await Agent(WORLD_ROUND, tools=[look]).run([_user("醒了")], call=_call(WORLD_ROUND))
+    await Agent(WORLD_ROUND, tools=[look]).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     root = _one(exported_spans, "world-round")
     asked, _answered = _generations(exported_spans)
@@ -300,7 +313,7 @@ async def test_a_tool_span_in_stream_hangs_under_the_generation_that_asked_for_i
         ]
     )
 
-    async for _ in Agent(WORLD_ROUND, tools=[look]).stream([_user("醒了")], call=_call(WORLD_ROUND)):
+    async for _ in Agent(WORLD_ROUND, tools=[look]).stream([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND)):
         pass
 
     root = _one(exported_spans, "world-round")
@@ -324,7 +337,7 @@ async def test_run_records_the_message_it_hands_back_on_the_root_span(
     prompts["world_round"] = _prompt("world_round", 3)
     models["world-model"] = _ScriptedModel(turns=[_calls("look"), _says("看完了")])
 
-    reply = await Agent(WORLD_ROUND, tools=[look]).run([_user("醒了")], call=_call(WORLD_ROUND))
+    reply = await Agent(WORLD_ROUND, tools=[look]).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     root = _one(exported_spans, "world-round")
     assert json.loads(root.attributes[OUTPUT]) == reply.to_dict()
@@ -344,7 +357,7 @@ async def test_stream_records_the_whole_text_on_the_root_span(
         ]
     )
 
-    async for _ in Agent(WORLD_ROUND, tools=[look]).stream([_user("醒了")], call=_call(WORLD_ROUND)):
+    async for _ in Agent(WORLD_ROUND, tools=[look]).stream([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND)):
         pass
 
     assert _one(exported_spans, "world-round").attributes[OUTPUT] == "先看看好了"
@@ -360,7 +373,7 @@ async def test_a_stream_closed_early_records_what_it_had_handed_back_by_then(
         ]
     )
 
-    stream = Agent(WORLD_ROUND).stream([_user("醒了")], call=_call(WORLD_ROUND))
+    stream = Agent(WORLD_ROUND).stream([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
     await anext(stream)
     await anext(stream)
     await stream.aclose()
@@ -375,7 +388,7 @@ async def test_extract_records_the_model_it_hands_back_on_the_root_span(
     models["guard-model"] = _ScriptedModel(structured=[{"ok": False, "reason": "太长"}])
 
     verdict = await Agent(OUTPUT_GUARD).extract(
-        _Verdict, messages=[_user("这句话能发吗")], call=_call(OUTPUT_GUARD)
+        _Verdict, messages=[_user("这句话能发吗")], call=_call(OUTPUT_GUARD), prompts=await _set(OUTPUT_GUARD)
     )
 
     root = _one(exported_spans, "post-safety-check")
@@ -396,7 +409,7 @@ async def test_a_failed_model_call_is_an_error_on_the_generation_and_the_root(
     )
 
     with pytest.raises(RuntimeError):
-        await Agent(LIFE_MOMENT).run([_user("醒了")], call=_call(LIFE_MOMENT))
+        await Agent(LIFE_MOMENT).run([_user("醒了")], call=_call(LIFE_MOMENT), prompts=await _set(LIFE_MOMENT))
 
     for span in [
         _one(exported_spans, "living-life-moment"),
@@ -419,7 +432,7 @@ async def test_a_run_cut_off_from_outside_is_an_error_on_the_generation_and_the_
 
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.05):
-            await Agent(LIFE_MOMENT).run([_user("醒了")], call=_call(LIFE_MOMENT))
+            await Agent(LIFE_MOMENT).run([_user("醒了")], call=_call(LIFE_MOMENT), prompts=await _set(LIFE_MOMENT))
 
     for span in [
         _one(exported_spans, "living-life-moment"),
@@ -438,7 +451,7 @@ async def test_a_stream_its_consumer_stops_pulling_is_not_an_error(
         streams=[[StreamChunk(text="先"), StreamChunk(text="看看")]]
     )
 
-    stream = Agent(WORLD_ROUND).stream([_user("醒了")], call=_call(WORLD_ROUND))
+    stream = Agent(WORLD_ROUND).stream([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
     await anext(stream)
     await stream.aclose()
 
@@ -470,7 +483,7 @@ async def test_every_generation_of_a_run_links_the_prompt_it_compiled(
     prompts["world_round"] = _prompt("world_round", 3)
     models["world-model"] = _ScriptedModel(turns=[_calls("look"), _says("看完了")])
 
-    await Agent(WORLD_ROUND, tools=[look]).run([_user("醒了")], call=_call(WORLD_ROUND))
+    await Agent(WORLD_ROUND, tools=[look]).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     assert _links(exported_spans) == [("scripted", ("world_round", 3))] * 2
 
@@ -486,7 +499,7 @@ async def test_every_generation_of_a_stream_links_the_prompt_it_compiled(
         ]
     )
 
-    async for _ in Agent(WORLD_ROUND, tools=[look]).stream([_user("醒了")], call=_call(WORLD_ROUND)):
+    async for _ in Agent(WORLD_ROUND, tools=[look]).stream([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND)):
         pass
 
     assert _links(exported_spans) == [("scripted", ("world_round", 3))] * 2
@@ -498,7 +511,7 @@ async def test_the_generation_of_an_extract_links_the_prompt_it_compiled(
     prompts["guard_output_safety"] = _prompt("guard_output_safety", 5)
     models["guard-model"] = _ScriptedModel(structured=[{"ok": True}])
 
-    await Agent(OUTPUT_GUARD).extract(_Verdict, messages=[_user("这句话能发吗")], call=_call(OUTPUT_GUARD))
+    await Agent(OUTPUT_GUARD).extract(_Verdict, messages=[_user("这句话能发吗")], call=_call(OUTPUT_GUARD), prompts=await _set(OUTPUT_GUARD))
 
     assert _links(exported_spans) == [("scripted", ("guard_output_safety", 5))]
 
@@ -515,7 +528,7 @@ async def test_a_generation_links_the_version_its_lane_resolved_to(
         labelled[label] = _prompt("world_round", version, labels=[label])
     models["world-model"] = _ScriptedModel(turns=[_says("醒了")])
 
-    await Agent(WORLD_ROUND).run([_user("醒了")], call=_call(WORLD_ROUND))
+    await Agent(WORLD_ROUND).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     assert _links(exported_spans) == [("scripted", ("world_round", linked_version))]
 
@@ -524,7 +537,7 @@ async def test_the_sdk_fallback_prompt_is_not_linked(exported_spans, models, pro
     prompts["world_round"] = _prompt("world_round", 1, is_fallback=True)
     models["world-model"] = _ScriptedModel(turns=[_says("醒了")])
 
-    await Agent(WORLD_ROUND).run([_user("醒了")], call=_call(WORLD_ROUND))
+    await Agent(WORLD_ROUND).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     assert _links(exported_spans) == [("scripted", None)]
 
@@ -552,12 +565,12 @@ async def test_a_world_round_links_its_own_prompt_again_after_perception_and_npc
     async def happen() -> str:
         """让一件事发生。"""
         with separate_trace():
-            noticed = await Agent(PERCEPTION).run([_user("她会注意到吗")], call=_call(PERCEPTION))
+            noticed = await Agent(PERCEPTION).run([_user("她会注意到吗")], call=_call(PERCEPTION), prompts=await _set(PERCEPTION))
         with separate_trace():
-            said = await Agent(NPC).run([_user("老板说什么")], call=_call(NPC))
+            said = await Agent(NPC).run([_user("老板说什么")], call=_call(NPC), prompts=await _set(NPC))
         return noticed.text() + said.text()
 
-    await Agent(WORLD_ROUND, tools=[happen]).run([_user("醒了")], call=_call(WORLD_ROUND))
+    await Agent(WORLD_ROUND, tools=[happen]).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     assert _links(exported_spans) == [
         ("world-model", ("world_round", 3)),
@@ -583,13 +596,13 @@ async def test_the_output_guard_links_its_own_prompt_and_leaves_the_life_trace_a
         """说一句话。"""
         verdict = await asyncio.wait_for(
             Agent(OUTPUT_GUARD).extract(
-                _Verdict, messages=[], prompt_vars={"response": "早"}, call=_call(OUTPUT_GUARD)
+                _Verdict, messages=[], call=_call(OUTPUT_GUARD), prompts=await _set(OUTPUT_GUARD)
             ),
             timeout=5,
         )
         return "发出去了" if verdict.ok else "拦下了"
 
-    await Agent(LIFE_MOMENT, tools=[send_message]).run([_user("醒了")], call=_call(LIFE_MOMENT))
+    await Agent(LIFE_MOMENT, tools=[send_message]).run([_user("醒了")], call=_call(LIFE_MOMENT), prompts=await _set(LIFE_MOMENT))
 
     assert _links(exported_spans) == [
         ("life-model", ("living_life_moment", 8)),
@@ -620,7 +633,7 @@ async def test_a_call_not_rendered_from_a_prompt_links_none_inside_one_that_is(
             verdict = await models["judge-model"].structured([_user("行吗")], schema={})
         return str(verdict["ok"])
 
-    await Agent(WORLD_ROUND, tools=[judge]).run([_user("醒了")], call=_call(WORLD_ROUND))
+    await Agent(WORLD_ROUND, tools=[judge]).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     assert _links(exported_spans) == [
         ("world-model", ("world_round", 3)),
@@ -643,12 +656,12 @@ async def test_the_outer_prompt_is_linked_again_after_a_nested_call_fails(
     async def ask_npc() -> str:
         """问 NPC。"""
         try:
-            await Agent(NPC).run([_user("老板说什么")], call=_call(NPC))
+            await Agent(NPC).run([_user("老板说什么")], call=_call(NPC), prompts=await _set(NPC))
         except RuntimeError:
             return "没问成"
         return "问到了"
 
-    await Agent(WORLD_ROUND, tools=[ask_npc]).run([_user("醒了")], call=_call(WORLD_ROUND))
+    await Agent(WORLD_ROUND, tools=[ask_npc]).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     assert _links(exported_spans) == [
         ("world-model", ("world_round", 3)),
@@ -672,12 +685,12 @@ async def test_the_outer_prompt_is_linked_again_after_a_nested_call_is_cancelled
         """问 NPC，等不到就算了。"""
         try:
             async with asyncio.timeout(0.05):
-                await Agent(NPC).run([_user("老板说什么")], call=_call(NPC))
+                await Agent(NPC).run([_user("老板说什么")], call=_call(NPC), prompts=await _set(NPC))
         except TimeoutError:
             return "没等到"
         return "问到了"
 
-    await Agent(WORLD_ROUND, tools=[ask_npc]).run([_user("醒了")], call=_call(WORLD_ROUND))
+    await Agent(WORLD_ROUND, tools=[ask_npc]).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     assert _links(exported_spans) == [
         ("world-model", ("world_round", 3)),
@@ -701,12 +714,12 @@ async def test_the_outer_prompt_is_linked_again_after_a_nested_stream_is_closed_
     @tool
     async def ask_npc() -> str:
         """问 NPC，听到第一句就够了。"""
-        stream = Agent(NPC).stream([_user("老板说什么")], call=_call(NPC))
+        stream = Agent(NPC).stream([_user("老板说什么")], call=_call(NPC), prompts=await _set(NPC))
         first = await anext(stream)
         await stream.aclose()
         return first.text or ""
 
-    await Agent(WORLD_ROUND, tools=[ask_npc]).run([_user("醒了")], call=_call(WORLD_ROUND))
+    await Agent(WORLD_ROUND, tools=[ask_npc]).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     # 被丢下的那次 NPC 模型调用什么时候收尾由垃圾回收决定，这里只看外层的两次。
     assert [link for name, link in _links(exported_spans) if name == "world-model"] == [
@@ -728,8 +741,8 @@ async def test_concurrent_calls_each_link_their_own_prompt(
     )
 
     await asyncio.gather(
-        Agent(WORLD_ROUND, tools=[look]).run([_user("醒了")], call=_call(WORLD_ROUND)),
-        Agent(LIFE_MOMENT, tools=[look]).run([_user("醒了")], call=_call(LIFE_MOMENT)),
+        Agent(WORLD_ROUND, tools=[look]).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND)),
+        Agent(LIFE_MOMENT, tools=[look]).run([_user("醒了")], call=_call(LIFE_MOMENT), prompts=await _set(LIFE_MOMENT)),
     )
 
     assert sorted(_links(exported_spans)) == [
@@ -756,10 +769,10 @@ async def test_an_agent_whose_spec_asks_for_its_own_trace_starts_one_inside_a_to
     @tool
     async def ask_npc() -> str:
         """问 NPC。"""
-        reply = await Agent(own_trace).run([_user("老板说什么")], call=_call(own_trace))
+        reply = await Agent(own_trace).run([_user("老板说什么")], call=_call(own_trace), prompts=await _set(own_trace))
         return reply.text()
 
-    await Agent(WORLD_ROUND, tools=[ask_npc]).run([_user("醒了")], call=_call(WORLD_ROUND))
+    await Agent(WORLD_ROUND, tools=[ask_npc]).run([_user("醒了")], call=_call(WORLD_ROUND), prompts=await _set(WORLD_ROUND))
 
     npc_root = _one(exported_spans, "world-npc")
     round_root = _one(exported_spans, "world-round")
