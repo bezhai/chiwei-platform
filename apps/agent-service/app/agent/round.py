@@ -36,9 +36,12 @@ failure fails the round (:class:`~app.agent.contracts.FailRound`) or is logged a
 
 **Switches.** A profile may name plugins its rounds can leave out
 (:class:`~app.agent.contracts.Switches`): the loop reads the Dynamic Config key once, before
-anything else in the round, and leaves every tool, section and step of a plugin that is switched
-off out of that round. Trimming still counts the tools of a plugin that is switched off as
-material: what they returned earlier is still in the history.
+anything else in the round (:func:`switched_off`), keeps what it read on the round
+(``Round.switched_off``, so the sub-agents a tool calls leave out the same plugins), and leaves
+every tool, section and step of a plugin that is switched off out of that round. Trimming still
+counts the tools of a plugin that is switched off as material: what they returned earlier is
+still in the history. Code that runs outside a round reads the switches with the same
+:func:`switched_off`.
 """
 
 from __future__ import annotations
@@ -91,6 +94,7 @@ class Round:
     """One round of one participant. ``round_id`` and ``now`` are decided by the wake source
     (hers when her queue gives her the turn; world's when its round starts); ``due`` is what the
     source decided, with its own fields (the message that woke her, the messages world takes).
+    ``switched_off`` are the plugins its profile's switches leave out of it, read when it starts.
     ``previous_at``, ``history``, ``prompts`` (the segments of the main agent and of the sub-agents
     it may call, at the versions fixed for this round) and ``reply`` are filled in as the round gets
     to them."""
@@ -103,6 +107,7 @@ class Round:
     now: datetime
     reason: str
     due: Due
+    switched_off: frozenset[str] = frozenset()
     previous_at: datetime | None = None
     history: HistoryView | None = None
     prompts: PromptSet | None = None
@@ -345,22 +350,26 @@ async def run_round(
         now=now,
         reason=reason,
         due=due,
+        switched_off=await switched_off(profile.profile.switches),
     )
     call = open_call(profile.profile.agent, spec, lane=round.lane, round=round)
     history = profile.profile.history
-    off = await _switched_off(profile.profile.switches)
     with in_round(round):
-        for step in _on(profile.round_start, off):
+        for step in _on(profile.round_start, round.switched_off):
             await step.value(round)
         if profile.round_log is not None:
             round.previous_at = await profile.round_log.previous_at(round)
         if history is not None:
             key = history.key.format(lane=round.lane, participant=participant)
             await _read_history(profile, round, key)
-        state = await _joined(profile.profile.join, _on(profile.state, off), round)
+        state = await _joined(
+            profile.profile.join, _on(profile.state, round.switched_off), round
+        )
         stimulus = Message(
             role=Role.USER,
-            content=await _joined(profile.profile.join, _on(profile.input, off), round),
+            content=await _joined(
+                profile.profile.join, _on(profile.input, round.switched_off), round
+            ),
         )
         if history is not None:
             read = round.history
@@ -396,7 +405,7 @@ async def run_round(
         with collect_usage() as usage:
             reply = await Agent(
                 spec,
-                tools=[t.value for t in _on(profile.tools, off)],
+                tools=[t.value for t in _on(profile.tools, round.switched_off)],
                 never_ran=history.texts.never_ran if history is not None else None,
             ).run(
                 [*earlier, stimulus],
@@ -415,7 +424,7 @@ async def run_round(
                 observed_at=round.now.isoformat(),
             )
         round.reply = reply
-        for check in _on(profile.checks, off):
+        for check in _on(profile.checks, round.switched_off):
             await check.value(round)
         if history is not None:
             # Worked out before the commit: it is pure, but anything that fails between the commit
@@ -425,12 +434,12 @@ async def run_round(
             pending.messages = next_transcript(
                 earlier, [stimulus, *produced], policy=history.policy
             )
-        commit = _on(profile.commit, off)
+        commit = _on(profile.commit, round.switched_off)
         if commit:
             async with tx():
                 for step in commit:
                     await step.value(round)
-        for step in _on(profile.after_commit, off):
+        for step in _on(profile.after_commit, round.switched_off):
             await _after_commit(step, round)
     return RoundResult(round=round, reply=reply)
 
@@ -449,10 +458,11 @@ async def store_history(round: Round) -> None:
     await commit_transcript(pending.key, pending.messages, expected_ver=pending.version)
 
 
-async def _switched_off(switches: Switches | None) -> frozenset[str]:
-    """The plugins ``switches`` leaves out of this round: the ones it lists that its Dynamic Config
-    key does not name. A blank key leaves every plugin on; a name it does not list is logged and
-    skipped."""
+async def switched_off(switches: Switches | None) -> frozenset[str]:
+    """The plugins ``switches`` leaves out right now: the ones it lists that its Dynamic Config key
+    does not name. A blank key leaves every plugin on; a name it does not list is logged and
+    skipped. A round reads it once when it starts (``Round.switched_off``); code outside a round
+    reads it each time it decides what to include."""
     if switches is None:
         return frozenset()
     raw = await asyncio.to_thread(dynamic_config.get, switches.key, default="")

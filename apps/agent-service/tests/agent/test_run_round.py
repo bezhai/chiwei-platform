@@ -45,6 +45,7 @@ from app.agent.round import (
     current_round,
     run_round,
     store_history,
+    switched_off,
 )
 from app.agent.tooling import tool
 from app.infra.cst_time import CST
@@ -665,6 +666,47 @@ async def test_a_profile_without_switches_reads_no_switch(model, transactions, c
 
     assert not [entry for entry in config.log if entry.startswith("config:")]
     assert model.requests[0][0][-1].content == "晴。\n涨潮。\n14:03。"
+
+
+async def test_the_round_knows_which_plugins_are_switched_off_from_its_first_step(
+    model, transactions, config
+):
+    config.values["round_sources"] = "tides"
+    seen: list[frozenset[str]] = []
+
+    async def note(_round: Round) -> None:
+        seen.append(current_round().switched_off)
+
+    result = await _run(
+        _profile(
+            profile=Profile(agent="main", switches=SWITCHES),
+            round_start=(_placed("life.before", note),),
+        )
+    )
+
+    assert seen == [frozenset({"weather"})]
+    assert result.round.switched_off == frozenset({"weather"})
+
+
+async def test_a_round_whose_profile_has_no_switches_has_nothing_switched_off(
+    model, transactions, config
+):
+    result = await _run(_profile())
+
+    assert result.round.switched_off == frozenset()
+
+
+async def test_the_switches_are_read_the_same_way_where_no_round_runs(config, caplog):
+    config.values["round_sources"] = "weather, surf"
+
+    with caplog.at_level(logging.WARNING, logger="app.agent.round"):
+        off = await switched_off(SWITCHES)
+
+    assert off == frozenset({"tides"})
+    assert "surf" in caplog.text
+    config.values["round_sources"] = " "
+    assert await switched_off(SWITCHES) == frozenset()
+    assert await switched_off(None) == frozenset()
 
 
 async def test_trimming_counts_a_switched_off_plugins_tools_as_material(
