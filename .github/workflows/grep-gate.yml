@@ -13,7 +13,7 @@ name: dataflow grep gate
 #
 # **业务目录清单**（每个 step 里那份 BUSINESS）是 app/ 下真实存在的业务包：
 #
-#     agent  living  memory  nodes  skills  world
+#     agent  living  nodes  skills  world
 #
 # 不在里面的是框架和基建：host / plugins / manifests / data / infra / api / capabilities /
 # messaging / domain。plugins 和 manifests 是各 App 的组装（插件把业务登记到宿主上，相当于
@@ -39,8 +39,8 @@ jobs:
         run: |
           set -e
           BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
-                    apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
-                    apps/agent-service/app/skills/ apps/agent-service/app/world/)
+                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+                    apps/agent-service/app/world/)
           # business code must not implement its own retry / sleep loops
           c=$(grep -rn -E "while.*retry|for.*range.*retry" "${BUSINESS[@]}" \
               2>/dev/null | grep -v "__pycache__\|/test_" | wc -l || true)
@@ -78,8 +78,8 @@ jobs:
           # 加一处新的就要更新这个数，否则 gate 抓回归。
           c=$(grep -rn '\bpublish(' \
               apps/agent-service/app/agent/ apps/agent-service/app/living/ \
-              apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
-              apps/agent-service/app/skills/ apps/agent-service/app/world/ \
+              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+              apps/agent-service/app/world/ \
               --include='*.py' 2>/dev/null | wc -l || true)
           [ "$c" -eq 2 ] || { echo "Gap 8 violation: business publish( count=$c, expected 2"; exit 1; }
 
@@ -120,8 +120,8 @@ jobs:
           # No more "不要 catch" / "don't catch" warnings in business code.
           c=$(grep -rn "# 不要 catch\|# 不要 try/except\|# don't catch" \
               apps/agent-service/app/agent/ apps/agent-service/app/living/ \
-              apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
-              apps/agent-service/app/skills/ apps/agent-service/app/world/ \
+              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+              apps/agent-service/app/world/ \
               2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c don't-catch comments in business code"; exit 1; }
           # Manual ack/nack/requeue=False belongs to the framework
@@ -134,8 +134,8 @@ jobs:
           # Scan business dirs only.
           c=$(grep -rn "requeue=False\|\.nack(" \
               apps/agent-service/app/agent/ apps/agent-service/app/living/ \
-              apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
-              apps/agent-service/app/skills/ apps/agent-service/app/world/ \
+              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+              apps/agent-service/app/world/ \
               2>/dev/null \
               | grep -v "nodes/dlq_admin.py\|nodes/reading_carry_over.py\|__pycache__\|/test_" \
               | wc -l || true)
@@ -161,8 +161,8 @@ jobs:
           # 在 tx() 里跑任意语句，绕开 persist 的那几个函数。``from app.data import tx`` 拿到的是
           # 整个模块，同样够得着它。
           BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
-                    apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
-                    apps/agent-service/app/skills/ apps/agent-service/app/world/)
+                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+                    apps/agent-service/app/world/)
           c=$(grep -rnE "from app\.data\.tx import.*current_session|from app\.data import.*\btx\b|current_session\(" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c current_session uses in business"; exit 1; }
@@ -171,8 +171,8 @@ jobs:
         run: |
           set -e
           BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
-                    apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
-                    apps/agent-service/app/skills/ apps/agent-service/app/world/)
+                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+                    apps/agent-service/app/world/)
           c=$(grep -rnE "from app\.infra\.redis import|from app\.infra import redis" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 14 violation: $c infra.redis imports in business"; exit 1; }
@@ -184,8 +184,8 @@ jobs:
         run: |
           set -e
           BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
-                    apps/agent-service/app/memory/ apps/agent-service/app/nodes/ \
-                    apps/agent-service/app/skills/ apps/agent-service/app/world/)
+                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+                    apps/agent-service/app/world/)
           # app/agent/adapters/ 排除在外，永久：它们**就是**跟外部 HTTP 讲话的
           # 那一层（openai / gemini 的 ModelClient 实现），跟 app/capabilities/
           # 同级。Gap 11 已经按同样理由豁免了 capabilities/。要求适配层不碰
@@ -212,8 +212,8 @@ jobs:
           baselines = json.load(open(".github/grep-baselines.json"))
           BUSINESS = [
               "apps/agent-service/app/agent/", "apps/agent-service/app/living/",
-              "apps/agent-service/app/memory/", "apps/agent-service/app/nodes/",
-              "apps/agent-service/app/skills/", "apps/agent-service/app/world/",
+              "apps/agent-service/app/nodes/", "apps/agent-service/app/skills/",
+              "apps/agent-service/app/world/",
           ]
           # BUSINESS 里列一个不存在的目录会让 grep 以 2 退出、整条计数读成 0。
           patterns = {
