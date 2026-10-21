@@ -12,9 +12,13 @@
 共享模块和这一边的包本身（``__init__.py``）只许 import 共享模块：共享模块 import 了哪个插件，
 用它的每个插件就都连上了那个插件；包本身在任何一个插件之前执行，它 import 的插件会被带进每个插件。
 living 和 world 的目录下除了插件目录只有共享模块：目录外多出来的模块是几个插件绕开服务共用的
-私下通道，也报出来。边以外的包（宿主、一轮、存储、消息……）不在这条规则里：插件能 import 它们的
-哪些部分由 ``scripts/check_framework_private.py`` 管；living 和 world 互不 import 由
-``scripts/check_world_life_imports.py`` 管。
+私下通道，也报出来。
+
+另一边的插件同样不许 import：``app/plugins`` 的插件不 import 她的插件，她的插件、world 的插件也不
+import ``app/plugins`` 的插件，三边的任何代码（插件、共享模块、包本身）都一样。另一边的包本身和
+共享模块不是插件，这条规则不管；living 和 world 之间互不 import（共享模块也不行）由
+``scripts/check_world_life_imports.py`` 管。三边以外的包（宿主、一轮、存储、消息……）不在这条规则
+里：插件能 import 它们的哪些部分由 ``scripts/check_framework_private.py`` 管。
 
 认 import 的方式和 ``scripts/check_world_life_imports.py`` 是同一套语法树扫描（函数里面的 import、
 相对 import、``importlib.import_module`` / ``__import__`` 的字符串字面量都算，docstring 和注释
@@ -64,24 +68,27 @@ def plugins_of(root: Path, side: str) -> list[str]:
     return sorted(names)
 
 
-def _part_of(target: str, root_name: str, side: str) -> str | None:
-    """``app.<side>.<这一段>...`` 里的那一段；不在这一边、或者就是这一边的包本身时为 ``None``。"""
+def _plugin_of(target: str, root_name: str) -> tuple[str, str] | None:
+    """``target`` 落在哪一边的哪一段：``app.<边>.<这一段>...`` 的 ``(边, 这一段)``。不在任何一边、
+    是一边的包本身、或者是那一边的共享模块时为 ``None``。"""
     parts = target.split(".")
-    if parts[:2] != [root_name, side] or len(parts) < 3:
+    if len(parts) < 3 or parts[0] != root_name or parts[1] not in SIDES:
         return None
-    return parts[2]
+    side, part = parts[1], parts[2]
+    if part in SIDES[side].shared:
+        return None
+    return side, part
 
 
-def _check(
-    root: Path, side: str, path: Path, own: str | None, allowed: frozenset[str], who: str
-) -> list[str]:
+def _check(root: Path, side: str, path: Path, own: str | None, who: str) -> list[str]:
+    """``side`` 这一边的 ``path``（插件 ``own`` 里的，共享模块和包本身是 ``None``）越过插件边界的每一处。"""
     parts, is_package = module_name(root, path)
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     found = []
     for lineno, candidates in imported_names(tree, parts, is_package):
         for target in candidates:
-            part = _part_of(target, root.name, side)
-            if part is not None and part != own and part not in allowed:
+            hit = _plugin_of(target, root.name)
+            if hit is not None and hit != (side, own):
                 found.append(
                     f"{path.relative_to(root.parent)}:{lineno}: {who} imports {target} "
                     f"(plugins only talk through services; see scripts/check_plugin_boundaries.py)"
@@ -112,9 +119,9 @@ def find_violations(root: Path) -> list[str]:
         for path in sorted(directory.glob("*.py")):
             name = path.stem
             if rule.modules_are_plugins and name != "__init__":
-                problems += _check(root, side, path, name, rule.shared, f"plugin {name}")
+                problems += _check(root, side, path, name, f"plugin {name}")
             elif name == "__init__" or name in rule.shared:
-                problems += _check(root, side, path, None, rule.shared, name)
+                problems += _check(root, side, path, None, name)
             else:
                 problems.append(
                     f"{path.relative_to(root.parent)}: not in a plugin directory and not a shared "
@@ -125,7 +132,7 @@ def find_violations(root: Path) -> list[str]:
             if not plugin_dir.is_dir():
                 continue
             for path in sorted(plugin_dir.rglob("*.py")):
-                problems += _check(root, side, path, plugin, rule.shared, f"plugin {plugin}")
+                problems += _check(root, side, path, plugin, f"plugin {plugin}")
     return problems
 
 

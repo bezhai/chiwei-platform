@@ -100,6 +100,68 @@ def test_one_plugin_module_importing_another_in_app_plugins_is_reported(tmp_path
     assert "plugin ops imports app.plugins.skills" in problems[0]
 
 
+# 一边的代码伸进另一边的插件：(文件, 写法, 报出的说明里那一段)。
+REACHING_ACROSS_SIDES = [
+    ("living/a/__init__.py", "from app.plugins.ops import setup", "plugin a imports app.plugins.ops"),
+    ("living/a/tools.py", "import app.plugins.skills", "plugin a imports app.plugins.skills"),
+    ("living/a/tools.py", "from app.plugins import ops", "plugin a imports app.plugins.ops"),
+    ("living/a/tools.py", "from ...plugins import ops", "plugin a imports app.plugins.ops"),
+    (
+        "living/a/tools.py",
+        "import importlib\nimportlib.import_module('app.plugins.ops')",
+        "plugin a imports app.plugins.ops",
+    ),
+    ("living/a/tools.py", "from app.world.b import store", "plugin a imports app.world.b"),
+    ("world/a/tools.py", "from app.plugins.skills import setup", "plugin a imports app.plugins.skills"),
+    ("world/a/tools.py", "from app.living.b.store import thing", "plugin a imports app.living.b"),
+    ("plugins/ops.py", "from app.living.a import store", "plugin ops imports app.living.a"),
+    ("plugins/ops.py", "from app.world.b.store import thing", "plugin ops imports app.world.b"),
+    ("plugins/ops.py", "from ..living import a", "plugin ops imports app.living.a"),
+    ("living/services.py", "from app.plugins.ops import setup", "services imports app.plugins.ops"),
+    ("world/agents.py", "from app.living.a import store", "agents imports app.living.a"),
+    ("world/__init__.py", "from app.plugins import skills", "__init__ imports app.plugins.skills"),
+    ("plugins/__init__.py", "from app.world.a import store", "__init__ imports app.world.a"),
+]
+
+
+@pytest.mark.parametrize(("where", "source", "said"), REACHING_ACROSS_SIDES)
+def test_reaching_into_a_plugin_on_another_side_is_reported(tmp_path, where, source, said):
+    """插件在三个地方，哪一边的代码伸进另一边的插件都是绕开服务：``app/plugins`` 的插件不 import
+    她的插件，她的插件也不 import ``app/plugins`` 的插件。"""
+    root = _tree(tmp_path, {where: "\n\n" + source + "\n"})
+
+    problems = find_violations(root)
+
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(f"app/{where}:")
+    assert int(_sites(problems)[0].rsplit(":", 1)[1]) in range(3, 3 + len(source.split("\n")))
+    assert said in problems[0]
+
+
+def test_another_sides_package_and_shared_modules_are_not_a_plugin(tmp_path):
+    """另一边的包本身和它的共享模块不是插件，这条规则不管；living 和 world 之间互不 import 由
+    ``scripts/check_world_life_imports.py`` 管。"""
+    root = _tree(
+        tmp_path,
+        {
+            "plugins/ops.py": "\n".join(
+                [
+                    "import app.living",
+                    "from app import world",
+                    "from app.living.services import X",
+                    "from app.living import common",
+                    "from app.world.agents import Y",
+                    "from app.world import services, volume",
+                    "from ..living.services import Z",
+                ]
+            ),
+            "living/a/tools.py": "import app.plugins\nfrom app import plugins\n",
+        },
+    )
+
+    assert find_violations(root) == []
+
+
 @pytest.mark.parametrize(
     ("side", "shared", "plugin"),
     [("living", "services", "a"), ("living", "common", "b"), ("world", "agents", "a")],
