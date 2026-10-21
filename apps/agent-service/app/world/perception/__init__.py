@@ -29,7 +29,7 @@
 写下的那段话。
 
 **判断和发送分开，中间先记下来。** 调用方（报告变化、让 NPC 出场）拿到判断之后，交给
-:meth:`Perceiving.tell`：先把告知连同 id、要不要叫醒记进 :mod:`app.world.unfinished`，再调
+:meth:`Perceiving.tell`：先把告知连同 id、要不要叫醒记进 :mod:`app.world.perception.unfinished`，再调
 :func:`send_notices`。发到一半进程死了、被取消、或者发送出错，
 下一轮开始时按原 id 再发一遍：投递至少一次，接收方按消息 id 去重，已经收到的人不会收到第二遍。
 所以发送出错（记录写不进去、broker 没确认）不在这里收住，原样往外抛，这一轮按失败重来。
@@ -61,18 +61,25 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.agent.contracts import FailRound
 from app.agent.core import RETRYABLE_EXCEPTIONS
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
-from app.agent.round import AssembledAgent, current_call, current_round, open_call
+from app.agent.round import (
+    AssembledAgent,
+    Round,
+    current_call,
+    current_round,
+    open_call,
+)
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
 from app.capabilities._errors import CapabilityInvalidArg
 from app.capabilities.retry import retry
+from app.host import Context, Plugin
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, Message, message_body, participant
 from app.messaging.sending import send
-from app.world import unfinished
 from app.world.agents import (
     WORLD,
     is_own_wake,
@@ -81,13 +88,19 @@ from app.world.agents import (
     run_agent,
     when,
     world_agent,
+    world_segments,
 )
+from app.world.perception import unfinished
 from app.world.services import Notice
 
 logger = logging.getLogger(__name__)
 
 PERCEPTION = "world_perception"
 PERCEPTION_AGENT = world_agent(PERCEPTION, "world-perception", "world_perception_model")
+
+# 主 agent 的 prompt 里归这个插件的两段（Langfuse id）：怎么报告变化，没跑完的一轮里发生的事。
+REPORT_CHANGE_SEGMENT = "world_round/report-change"
+UNFINISHED_SEGMENT = "world_round/unfinished"
 
 @dataclass
 class Judgments:
@@ -262,7 +275,7 @@ class Perceiving:
 
     async def tell(self, what: str, notices: Sequence[Notice]) -> str:
         """先把这件事（``what``，给主 agent 看的那段话）连同要发的告知记进
-        :mod:`app.world.unfinished`，再按各自的消息 id 发出去（:func:`send_notices`），交回给主
+        :mod:`app.world.perception.unfinished`，再按各自的消息 id 发出去（:func:`send_notices`），交回给主
         agent 看的结果。记下来之后的失败原样往外抛：这一轮按失败重来，下一轮开始时按原 id 补发。"""
         happening = unfinished.note(what, list(notices))
         return render_told(await send_notices(happening.notices))
@@ -327,3 +340,73 @@ def render_told(told: list[Told]) -> str:
         status = "送达了" if t.delivered else f"没有送达（{t.reason}）"
         lines.append(f"- {t.notice.who}：「{t.notice.what}」——{status}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 没跑完的一轮：一轮开始前补发、摆到主 agent 眼前，上下文存下之后清空（:mod:`.unfinished`）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LeftOver:
+    """这一轮的状态：没跑完的那一轮里已经发生的事，每件连同这一轮开始前补发它的告知的结果。"""
+
+    happenings: list[tuple[unfinished.Happening, list[Told]]] = field(
+        default_factory=list
+    )
+
+
+async def resend_left_over(round: Round) -> None:
+    """一轮开始前（``unfinished.resend``）：按原 id 把还没进上下文的那几件事要发的告知全部再发
+    一遍，结果留给 :func:`left_over`。
+
+    发送出错原样往外抛：这一轮在模型开始之前就算失败，记着的东西一样不动，下一轮再补。
+    """
+    left_over = [(h, await send_notices(h.notices)) for h in unfinished.read()]
+    if left_over:
+        logger.info(
+            "world: resent %d notice(s) of %d happening(s) left by an unfinished round",
+            sum(len(told) for _, told in left_over),
+            len(left_over),
+        )
+    round.state(LeftOver).happenings = left_over
+
+
+async def left_over(round: Round) -> str | None:
+    """输入段（``unfinished.happenings``）：没跑完的那一轮里已经发生的事和补发告知的结果
+    （:func:`resend_left_over`）。没有时不摆。"""
+    happenings = round.state(LeftOver).happenings
+    if not happenings:
+        return None
+    lines = [
+        "【之前没跑完的一轮里已经发生的事】之前有一轮没有正常收尾。那一轮的经过你可能记得，"
+        "也可能不记得；不管记不记得，下面这些在那一轮里已经发生了，记录里可能还没写。那一轮"
+        "要发的告知，这一轮开始前已经按原样补发了一遍（收到过的人不会再收到一遍），下面是"
+        "补发的结果："
+    ]
+    lines += [
+        f"- {when(h.at)}\n{h.what}\n{render_told(told)}" for h, told in happenings
+    ]
+    return "\n".join(lines)
+
+
+async def clear_unfinished(round: Round) -> None:
+    """``unfinished.clear``：这一轮存进上下文了，没跑完的那一轮里发生的事不用再记着。"""
+    unfinished.clear()
+
+
+def setup(ctx: Context) -> None:
+    perceiving = Perceiving(ctx.agent(PERCEPTION))
+    ctx.provide("perception", perceiving)
+    for segment in world_segments(
+        PERCEPTION, REPORT_CHANGE_SEGMENT, UNFINISHED_SEGMENT
+    ).values():
+        ctx.segment(segment)
+    for action in (tool(perceiving.report_change), someone_notices):
+        ctx.tool(action, trim="kept")
+    ctx.round_start("unfinished.resend", resend_left_over)
+    ctx.section("unfinished.happenings", left_over)
+    ctx.after_commit("unfinished.clear", clear_unfinished, on_failure=FailRound())
+
+
+PLUGIN = Plugin(name="perception", setup=setup, provides=("perception",))

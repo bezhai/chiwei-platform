@@ -6,8 +6,9 @@
 开始跑这一轮时定的。这里是一轮由什么组成：固定循环（:func:`app.agent.round.run_round`）按清单
 ``world`` 排的位置跑它们（:func:`run_inbox_round`），world 插件（:mod:`app.plugins.world`）登记。
 
-**一轮开始前**（``unfinished.resend``，:func:`resend_left_over`）：之前有一轮没跑完时，按原 id
-把那一轮里要发的告知全部补发一遍。发送出错这一轮在模型开始之前就算失败。
+**一轮开始前**（``unfinished.resend``，感知判断插件的 :func:`app.world.perception.resend_left_over`）：
+之前有一轮没跑完时，按原 id 把那一轮里要发的告知全部补发一遍。发送出错这一轮在模型开始之前就算
+失败。
 
 **一轮怎样才算跑完。** 模型那一段结束之后，依次：
 
@@ -15,14 +16,15 @@
    :class:`NoNextWake`，这一轮算没跑完。工具预算用完时框架给的那一次不带工具的收尾定不了
    时刻，同样按没定处理；
 2. 把这一轮存进它的连续上下文（``history``，:mod:`app.agent.continuity`，按版本做 CAS），然后
-   清空 :mod:`app.world.unfinished`（``unfinished.clear``）——这一轮发生过的事已经在上下文里了；
+   清空 :mod:`app.world.perception.unfinished`（``unfinished.clear``，感知判断插件）——这一轮发生过的
+   事已经在上下文里了；
 3. 定下次醒来（``wake.next``，:func:`app.world.wake.set_next_wake`：先排出自定消息，broker 确认之后
    才记成私有状态里的最新唤醒；跟已经排着、还没送到的那一条是同一个时刻，就不再排）。
 
 没有落地事务。任何一步失败都往外抛，这一轮算没跑完，带着的消息都留给之后的一轮，等它们的投递
 按通信机制重试（:mod:`app.world.rounds`）。再跑是安全的：它改过的记录留在盘上，下一次读得到；
 已经发出去的告知收不回来：报告过的变化、出过场的 NPC 和要发的告知（带预先定好的消息 id）在发之前
-就记在 :mod:`app.world.unfinished`，下一轮模型跑之前按原 id 补发一遍（接收方按 id 去重），再摆到它
+就记在 :mod:`app.world.perception.unfinished`，下一轮模型跑之前按原 id 补发一遍（接收方按 id 去重），再摆到它
 眼前，它不会把同一件事再报告一遍；上下文和下次醒来都只在最后才写下。这一轮带着的自定消息在
 第 3 步记下新唤醒之前一直是状态里的最新唤醒，所以重投时不会被当成旧消息，失败了也不限次数
 重试、不进死信；哪一处失败、进程死在哪里，各自怎么接上见 :mod:`app.world.wake`。先存上下文、
@@ -32,7 +34,7 @@
 **它眼前摆着什么。** 一条 USER 消息，三个输入段用一个换行拼起来：现在几点和这一轮带着的消息
 （``wake.woken_by``，按到达的先后，每条是谁的、什么时候的、原文）；里面没有它给自己排的醒来时，
 它原来定的下次醒来，提醒它这一轮结束前要重新定（``wake.planned``）；之前有一轮没跑完时，那一轮
-里已经发生的事和补发告知的结果（``unfinished.happenings``）。它的记录目录是状态段
+里已经发生的事和补发告知的结果（``unfinished.happenings``，感知判断插件登记）。它的记录目录是状态段
 （``records.listing``，插件 ``record_keeping`` 登记），只在上下文清理时写进那条带时刻的标记消息
 （:mod:`app.agent.continuity`；每轮都一样的东西不每轮重发）。prompt 在 Langfuse（:data:`ROUND`），正文不引用任何变量。
 
@@ -47,16 +49,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from app.agent.continuity import TrimPolicy
 from app.agent.round import AssembledProfile, Round, run_round
 from app.messaging.message import Kind, Message
-from app.world import unfinished
 from app.world.actions import RoundScope
 from app.world.agents import WORLD, is_own_wake, when, world_agent
-from app.world.perception import Told, render_told, send_notices
 from app.world.rounds import InboxRound
 from app.world.wake import NextWake, read_next_wake, set_next_wake
 
@@ -122,35 +122,10 @@ class NoNextWake(RuntimeError):
 
 
 @dataclass
-class LeftOver:
-    """这一轮的状态：没跑完的那一轮里已经发生的事，每件连同这一轮开始前补发它的告知的结果。"""
-
-    happenings: list[tuple[unfinished.Happening, list[Told]]] = field(
-        default_factory=list
-    )
-
-
-@dataclass
 class Scheduled:
     """这一轮的状态：最后定下的下次醒来（:func:`set_the_next_wake`），写进收尾那行日志。"""
 
     wake: NextWake | None = None
-
-
-async def resend_left_over(round: Round) -> None:
-    """一轮开始前（``unfinished.resend``）：按原 id 把还没进上下文的那几件事要发的告知全部再发
-    一遍，结果留给 :func:`left_over`。
-
-    发送出错原样往外抛：这一轮在模型开始之前就算失败，记着的东西一样不动，下一轮再补。
-    """
-    left_over = [(h, await send_notices(h.notices)) for h in unfinished.read()]
-    if left_over:
-        logger.info(
-            "world: resent %d notice(s) of %d happening(s) left by an unfinished round",
-            sum(len(told) for _, told in left_over),
-            len(left_over),
-        )
-    round.state(LeftOver).happenings = left_over
 
 
 def _render_message(message: Message) -> str:
@@ -189,24 +164,6 @@ async def planned_wake(round: Round) -> str | None:
     )
 
 
-async def left_over(round: Round) -> str | None:
-    """输入段（``unfinished.happenings``）：没跑完的那一轮里已经发生的事和补发告知的结果
-    （:func:`resend_left_over`）。没有时不摆。"""
-    happenings = round.state(LeftOver).happenings
-    if not happenings:
-        return None
-    lines = [
-        "【之前没跑完的一轮里已经发生的事】之前有一轮没有正常收尾。那一轮的经过你可能记得，"
-        "也可能不记得；不管记不记得，下面这些在那一轮里已经发生了，记录里可能还没写。那一轮"
-        "要发的告知，这一轮开始前已经按原样补发了一遍（收到过的人不会再收到一遍），下面是"
-        "补发的结果："
-    ]
-    lines += [
-        f"- {when(h.at)}\n{h.what}\n{render_told(told)}" for h, told in happenings
-    ]
-    return "\n".join(lines)
-
-
 async def next_wake_chosen(round: Round) -> None:
     """检查（``wake.chosen``）：这一轮定了下次醒来的时刻，没定抛 :class:`NoNextWake`。"""
     if round.state(RoundScope).next_wake is None:
@@ -214,11 +171,6 @@ async def next_wake_chosen(round: Round) -> None:
             f"world round {round.round_id} (taking {_listed(round.due.messages)}) ended "
             f"without setting its next wake"
         )
-
-
-async def clear_unfinished(round: Round) -> None:
-    """``unfinished.clear``：这一轮存进上下文了，没跑完的那一轮里发生的事不用再记着。"""
-    unfinished.clear()
 
 
 async def set_the_next_wake(round: Round) -> None:

@@ -15,7 +15,8 @@ import json
 import pytest
 
 from app.messaging.message import Kind, SendFailed, new_message
-from app.world import main_agent, npc, perception, unfinished, wake
+from app.world import main_agent, npc, perception, wake
+from app.world.perception import unfinished
 
 from .conftest import LANE, ScriptedAgent, sets_wake, use_tool
 
@@ -502,7 +503,7 @@ async def test_an_unreadable_file_is_set_aside_logged_and_the_round_goes_on(
     world.agents[perception.PERCEPTION] = judges(("akao", "起风了。"))
     world.runner.plan = reports("起风了。")
 
-    with caplog.at_level("ERROR", logger="app.world.unfinished"):
+    with caplog.at_level("ERROR", logger="app.world.perception.unfinished"):
         await world.deliver(_message())
 
     # 这一轮照常跑完：存下了上下文，自己报告的那条照常发，记着的那条没有被当成"没有"补发。

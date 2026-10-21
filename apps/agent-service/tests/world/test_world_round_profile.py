@@ -17,8 +17,9 @@ from app.agent.contracts import CostSpec, FailRound, Switches
 from app.agent.round import current_round
 from app.infra.cst_time import CST, now_cst
 from app.messaging.message import Kind, new_message
-from app.world import main_agent, records, unfinished, wake
+from app.world import main_agent, records, wake
 from app.world.agents import when
+from app.world.perception import unfinished
 from app.world.services import Notice
 
 from .conftest import (
@@ -57,7 +58,7 @@ async def test_the_world_profile_places_what_world_and_its_three_sources_registe
         ("read_messages_from", "told", "material"),
         ("write_record", "record_keeping", "kept"),
         ("wake_me_at", "world", "kept"),
-        ("report_change", "world", "kept"),
+        ("report_change", "perception", "kept"),
         ("let_npc_appear", "world", "kept"),
     ]
     assert not any(t.value.ends_round for t in p.tools)
@@ -68,6 +69,22 @@ async def test_the_world_profile_places_what_world_and_its_three_sources_registe
     assert [(s.name, s.plugin) for s in p.state] == [("records.listing", "record_keeping")]
     assert p.segments["world_round/write-record"].plugin == "record_keeping"
     assert p.segments["world_round/reality"].plugin == "reality"
+    assert {
+        name: p.segments[f"world_round/{name}"].plugin
+        for name in ("report-change", "unfinished")
+    } == {"report-change": "perception", "unfinished": "perception"}
+    assert p.segments["world_perception"].plugin == "perception"
+    assert [(s.name, s.plugin) for s in p.round_start] == [("unfinished.resend", "perception")]
+    assert [(s.name, s.plugin) for s in p.input] == [
+        ("wake.woken_by", "world"),
+        ("wake.planned", "world"),
+        ("unfinished.happenings", "perception"),
+    ]
+    assert [(s.name, s.plugin) for s in p.after_commit] == [
+        ("history", "world"),
+        ("unfinished.clear", "perception"),
+        ("wake.next", "world"),
+    ]
     assert [s.name for s in p.input] == [
         "wake.woken_by",
         "wake.planned",

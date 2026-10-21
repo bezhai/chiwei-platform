@@ -41,7 +41,7 @@ def _rounds_now() -> Rounds:
 # ---------------------------------------------------------------------------
 
 
-def test_the_world_app_runs_the_world_plugin_the_record_plugins_reality_and_told_in_order():
+def test_the_world_app_runs_the_world_plugin_and_its_feature_plugins_in_order():
     """插件按这个顺序起来：收件处理按插件登记的先后跑（told 是其中唯一有收件处理的）。"""
     from app.manifests.world import MANIFEST
 
@@ -51,6 +51,7 @@ def test_the_world_app_runs_the_world_plugin_the_record_plugins_reality_and_told
         "app.world.records.keeping",
         "app.world.reality",
         "app.world.told",
+        "app.world.perception",
     )
 
 

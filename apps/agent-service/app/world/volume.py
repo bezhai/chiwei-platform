@@ -6,7 +6,7 @@
 
 目录里放这几样：``records/``（记录，:mod:`app.world.records`）、``sources/told/``（别人
 告诉世界的事，:func:`app.world.told.stored_dir`）、私有状态文件（下次醒来，
-:mod:`app.world.wake`；没跑完的一轮里已经发生的事，:mod:`app.world.unfinished`；收件箱里的消息
+:mod:`app.world.wake`；没跑完的一轮里已经发生的事，:mod:`app.world.perception.unfinished`；收件箱里的消息
 走到了哪一步，:mod:`app.world.pending`）和写锁文件。
 人工读写接口只够得到 ``records/``。
 

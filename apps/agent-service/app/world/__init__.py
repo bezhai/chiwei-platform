@@ -18,10 +18,10 @@
 * :mod:`app.world.pending` —— 收件箱里的消息走到了哪一步：还没经过一轮、处理完了、放弃了；
 * :mod:`app.world.main_agent` —— 主 agent 的一轮；
 * :mod:`app.world.actions` —— 只有主 agent 才有的动作；
-* :mod:`app.world.perception` —— 感知判断 agent：谁会察觉、察觉到什么，以及告知他们；
+* :mod:`app.world.perception` —— 感知判断的插件：谁会察觉、察觉到什么，以及告知他们；没跑完的
+  一轮里已经发生、收不回来的事（:mod:`app.world.perception.unfinished`）；
 * :mod:`app.world.npc` —— NPC agent：扮演一个 NPC 完成一次互动；
-* :mod:`app.world.answer` —— 应答 agent：回答问 world 的问题，只读；
-* :mod:`app.world.unfinished` —— 没跑完的一轮里已经发生、收不回来的事。
+* :mod:`app.world.answer` —— 应答 agent：回答问 world 的问题，只读。
 
 主 agent 的一轮和收件箱由 world 的插件（:mod:`app.plugins.world`）登记，记录、来源和它们的
 查询工具、人工接口由各自的插件登记。

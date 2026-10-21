@@ -1,18 +1,18 @@
 """world App 的核心插件：主 agent 的一轮、``world`` 收件箱。world 的清单（:mod:`app.manifests.world`）
 只有它、记录的两个插件（:mod:`app.world.records`：查询工具一个，写记录、记录目录和人工读写接口一个）、
-现实的插件（:mod:`app.world.reality`）和知识来源 told 的插件（:mod:`app.world.told`），所以 world
-的进程不加载 life 的任何代码。
+现实的插件（:mod:`app.world.reality`）、知识来源 told 的插件（:mod:`app.world.told`）和感知判断的
+插件（:mod:`app.world.perception`），所以 world 的进程不加载 life 的任何代码。
 
 **主 agent 的一轮**（:mod:`app.world.main_agent`），清单 ``world`` 排它们的位置：
 
-  segments (``ctx.segment``)   world_round，和一轮里调的 world_perception、world_npc，以及
-                               一轮之外调的 world_answer
-  tools (``ctx.tool``)         wake_me_at、report_change、let_npc_appear，以及
-                               感知判断记判断的 someone_notices（都 kept）
-  before the round             unfinished.resend        按原 id 补发没跑完的一轮的告知
-  input sections               wake.woken_by、wake.planned、unfinished.happenings
+  segments (``ctx.segment``)   world_round 的几段，一轮里调的 world_npc，以及一轮之外调的
+                               world_answer
+  tools (``ctx.tool``)         wake_me_at、let_npc_appear（都 kept）
+  input sections               wake.woken_by、wake.planned
   check                        wake.chosen              没定下次醒来，这一轮失败
-  after the commit             history、unfinished.clear、wake.next（都 FailRound）
+  after the commit             history、wake.next（都 FailRound）
+
+报告变化、没跑完的一轮的补发和清空是感知判断插件的（``perception`` 服务，NPC 出场之后也经它告知）。
 
 插件起来时向宿主要组好的 ``world``（``ctx.profile``），收件箱来源跑一轮时交给
 :func:`app.world.main_agent.run_inbox_round`。
@@ -48,26 +48,21 @@ from app.world.intake import Intakes
 from app.world.main_agent import (
     ROUND,
     ROUND_TIMEOUT,
-    clear_unfinished,
-    left_over,
     next_wake_chosen,
     planned_wake,
-    resend_left_over,
     run_inbox_round,
     set_the_next_wake,
     woken_by,
 )
 from app.world.npc import NPC, Npcs
-from app.world.perception import PERCEPTION, Perceiving, someone_notices
 from app.world.rounds import Rounds
+from app.world.services import Perception
 from app.world.volume import writer_lock
 from app.world.wake import retry_latest_wake_without_limit, wake_on_start
 
-# 主 agent 的 prompt 里由这个插件登记的那几段；别的段（写记录、现实）由各自的插件登记。
-_ROUND_SEGMENTS = tuple(
-    f"{ROUND}/{name}"
-    for name in ("core", "report-change", "npc", "wake", "unfinished", "order")
-)
+# 主 agent 的 prompt 里由这个插件登记的那几段；别的段（写记录、现实、报告变化、没跑完的一轮）
+# 由各自的插件登记。
+_ROUND_SEGMENTS = tuple(f"{ROUND}/{name}" for name in ("core", "npc", "wake", "order"))
 
 
 def setup(ctx: Context) -> None:
@@ -99,25 +94,19 @@ def setup(ctx: Context) -> None:
 
 def _the_round(ctx: Context) -> None:
     """主 agent 的一轮由什么组成；清单 ``world`` 排它们的位置。"""
-    for segment in world_segments(*_ROUND_SEGMENTS, PERCEPTION, NPC, ANSWER).values():
+    for segment in world_segments(*_ROUND_SEGMENTS, NPC, ANSWER).values():
         ctx.segment(segment)
-    perceiving = Perceiving(ctx.agent(PERCEPTION))
-    npcs = Npcs(ctx.agent(NPC), perceiving)
-    for action in (
-        wake_me_at,
-        tool(perceiving.report_change),
-        tool(npcs.let_npc_appear),
-        someone_notices,
-    ):
+    perception: Perception = ctx.service("perception")
+    npcs = Npcs(ctx.agent(NPC), perception)
+    for action in (wake_me_at, tool(npcs.let_npc_appear)):
         ctx.tool(action, trim="kept")
-    ctx.round_start("unfinished.resend", resend_left_over)
     ctx.section("wake.woken_by", woken_by)
     ctx.section("wake.planned", planned_wake)
-    ctx.section("unfinished.happenings", left_over)
     ctx.check("wake.chosen", next_wake_chosen)
     ctx.after_commit("history", store_history, on_failure=FailRound())
-    ctx.after_commit("unfinished.clear", clear_unfinished, on_failure=FailRound())
     ctx.after_commit("wake.next", set_the_next_wake, on_failure=FailRound())
 
 
-PLUGIN = Plugin(name="world", setup=setup, provides=("world_intake",))
+PLUGIN = Plugin(
+    name="world", setup=setup, requires=("perception",), provides=("world_intake",)
+)

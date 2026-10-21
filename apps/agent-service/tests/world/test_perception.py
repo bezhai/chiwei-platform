@@ -73,6 +73,28 @@ async def _a_round(world, plan):
 # ---------------------------------------------------------------------------
 
 
+async def test_perception_registers_its_agent_its_actions_and_the_unfinished_round_steps(
+    app_host,
+):
+    """插件 ``perception``：感知判断 agent 的 prompt 和主 agent 的 prompt 里归它的两段，报告变化和记判断
+    的那只手，没跑完的一轮的补发、摆出、清空；它提供 ``perception`` 服务（NPC 出场之后经它告知）。"""
+    host = await app_host("world")
+    registered = [(r.kind, r.name) for r in host.registered() if r.plugin == "perception"]
+
+    assert registered == [
+        ("service", "perception"),
+        ("segment", "world_perception"),
+        ("segment", "world_round/report-change"),
+        ("segment", "world_round/unfinished"),
+        ("tool", "report_change"),
+        ("tool", "someone_notices"),
+        ("round_start", "unfinished.resend"),
+        ("section", "unfinished.happenings"),
+        ("after_commit", "unfinished.clear"),
+    ]
+    assert perception.PLUGIN.provides == ("perception",)
+
+
 async def test_a_reported_change_is_judged_once_and_each_judged_recipient_is_told_once(world):
     judge = judges(("ayana", "你听见楼下的门响了一声。"), ("akao", "厨房的灯闪了一下。"))
     world.agents[perception.PERCEPTION] = judge
@@ -505,4 +527,4 @@ def test_in_worlds_code_only_perception_sends_to_others_and_only_wake_schedules(
                     a.name for a in node.names
                 )
 
-    assert senders == {"perception.py": {"send"}, "wake.py": {"send_at"}}
+    assert senders == {"perception/__init__.py": {"send"}, "wake.py": {"send_at"}}
