@@ -69,7 +69,7 @@ from pydantic import BaseModel, Field, field_validator
 
 # module-level 引入，测试从这里换替身（一程真跑起来要取字节 + 几轮模型调用）
 from app.agent.round import current_round
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 from app.data.persist import fetch_all, from_row, insert_append, select_latest
 from app.data.queries.messages import find_file_items_in_conversations
 from app.data.schema import Data, Key, Version, table_name

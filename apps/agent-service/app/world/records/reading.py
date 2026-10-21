@@ -19,7 +19,7 @@ from pydantic import Field
 
 from app.agent.round import current_call
 from app.agent.tooling import tool
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 from app.capabilities.errors import CapabilityInvalidArg, CapabilityNotFound
 from app.host import Context, Plugin
 from app.world import records

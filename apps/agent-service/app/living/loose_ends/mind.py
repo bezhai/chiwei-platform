@@ -27,7 +27,7 @@ from typing import Annotated
 from pydantic import Field
 
 from app.agent.round import Round, current_round
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 from app.living.loose_ends.threads import (
     LooseEnd,
     format_entry,

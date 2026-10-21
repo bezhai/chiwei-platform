@@ -96,7 +96,7 @@ from typing import Annotated
 from pydantic import Field, field_validator
 
 from app.agent.round import current_round
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 from app.data.persist import (
     fetch_all,
     fetch_one,

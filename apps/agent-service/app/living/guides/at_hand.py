@@ -82,7 +82,7 @@ from pydantic import Field
 from app.agent.contracts import ToolSpec
 from app.agent.round import Round, current_round
 from app.agent.tooling import tool
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 
 # 模块级引用，测试从这里换替身（真跑起来是一次打到 sandbox-worker 的 HTTP）。
 # 同 :mod:`app.skills.renderer` 的写法。

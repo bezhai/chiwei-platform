@@ -57,8 +57,7 @@ from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
 from app.agent.round import open_call
 from app.agent.tooling import Tool
-from app.agent.tools._common import tool_error
-from app.agent.tools.outcome import BAD_ARGUMENTS
+from app.agent.tools.outcome import BAD_ARGUMENTS, tool_error
 from app.agent.trace import collect_usage
 from app.domain.reading_source import (  # module-level so tests can monkeypatch
     BookParseError,

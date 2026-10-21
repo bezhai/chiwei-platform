@@ -87,7 +87,7 @@ from typing import Annotated
 from pydantic import Field
 
 from app.agent.round import current_round
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 from app.data.persist import fetch_one, from_row, insert_append, select_latest
 from app.data.schema import table_name
 from app.domain.safety import Recall

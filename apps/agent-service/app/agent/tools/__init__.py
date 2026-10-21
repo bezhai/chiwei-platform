@@ -5,8 +5,8 @@
 都不用成套的清单——每个插件（``app/living/<插件>/``、``app/world/<插件>/``）在 setup 里向宿主登记
 自己的工具（``ctx.tool``），清单（``app/manifests/``）按名字列出一轮给模型哪些、按什么顺序。
 
-包本身留着：``_common`` / ``outcome`` / ``search`` 三个模块是 ``app.living`` 和 world 直接
-在用的（``tool_error``、``ToolOutcomeError``、``search_web``）。
+包本身留着：``outcome`` / ``search`` 两个模块是 ``app.living`` 和 world 直接在用的
+（``tool_error``、``ToolOutcomeError``、``search_web``）。
 
 原先那两个具名工具（转派给调研 agent / 不回复）**已经删掉**：它们只经上面那两份清单进旧 chat
 的主 agent，旧 chat 删掉之后一直没有调用方。

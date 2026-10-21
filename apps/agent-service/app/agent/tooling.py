@@ -29,7 +29,7 @@ with the *same* ``pydantic.create_model`` machinery langchain uses, so per-type
 output (int constraints, ``Optional`` -> ``anyOf[type, null]``, ``list[str]``
 -> array of string) matches by construction.
 
-``@tool`` stacks **above** the project's ``@tool_error`` (``_common.py``): the
+``@tool`` stacks **above** the project's ``@tool_error`` (:mod:`app.agent.tools.outcome`): the
 wrapped callable already returns a ``ToolOutcomeError`` dict on failure instead
 of raising, and reflection sees through ``functools.wraps`` to the original
 signature/docstring.

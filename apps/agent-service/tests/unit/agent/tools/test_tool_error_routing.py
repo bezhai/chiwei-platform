@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.agent.tools._common import tool_error
-from app.agent.tools.outcome import ToolOutcomeError
+from app.agent.tools.outcome import ToolOutcomeError, tool_error
 from app.capabilities.errors import (
     CapabilityCallFailed,
     CapabilityInvalidArg,

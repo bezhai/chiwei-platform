@@ -3,7 +3,7 @@
 Five typed exception classes plus a common base. Capability and infra
 modules raise these instead of returning ``False`` / ``None`` /
 stringifying upstream failures; business nodes propagate them to their
-caller, and tool wrappers (see ``agent/tools/_common.py``, C3 territory)
+caller, and tool wrappers (``tool_error`` in :mod:`app.agent.tools.outcome`)
 map a subset to LLM-visible typed outcomes.
 
 Routing table (contract §4.7 + §4.8):

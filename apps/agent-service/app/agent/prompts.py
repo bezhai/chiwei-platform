@@ -43,8 +43,8 @@ from langfuse.model import ChatPromptClient, PromptClient, TextPromptClient
 
 from app.agent.contracts import AgentSpec, Segment
 from app.agent.neutral import Message, Role
-from app.agent.tools._common import get_or_create_counter
 from app.infra.config import settings
+from app.infra.metrics import get_or_create_counter
 from app.infra.propagation import current_context
 
 if TYPE_CHECKING:

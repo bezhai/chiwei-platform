@@ -35,7 +35,7 @@ from typing import Annotated
 from pydantic import Field
 
 from app.agent.tooling import tool
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 from app.host import Context, Plugin
 from app.messaging.message import Message
 from app.world.agents import WORLD, when

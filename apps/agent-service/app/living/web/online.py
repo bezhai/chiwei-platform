@@ -72,7 +72,7 @@ from pydantic import Field
 from app.agent.contracts import ToolSpec
 from app.agent.round import current_round
 from app.agent.tooling import tool
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 
 # 带着问题查那只手复用现成的 ``search_web``（命中 → 抓正文 → 按问题重排）。
 from app.agent.tools.search import search_web

@@ -194,7 +194,7 @@ from typing import Annotated, Any
 from pydantic import Field, field_validator
 
 from app.agent.round import Round, current_round
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 from app.capabilities.concurrency import fan_out_wait
 from app.data.persist import fetch_one, insert_idempotent
 from app.data.queries.messages import (

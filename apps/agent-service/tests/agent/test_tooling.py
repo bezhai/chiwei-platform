@@ -37,7 +37,7 @@ from pydantic import Field
 
 from app.agent.neutral import ToolCall, ToolResult
 from app.agent.tooling import dispatch, tool
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 
 # ---------------------------------------------------------------------------
 # Reflection: per-type JSON schema (no docstring Args injection)

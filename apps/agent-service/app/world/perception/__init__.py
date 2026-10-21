@@ -73,7 +73,7 @@ from app.agent.round import (
     open_call,
 )
 from app.agent.tooling import tool
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 from app.capabilities.errors import CapabilityInvalidArg
 from app.capabilities.retry import retry
 from app.host import Context, Plugin

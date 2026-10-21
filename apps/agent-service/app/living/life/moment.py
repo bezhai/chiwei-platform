@@ -121,12 +121,12 @@ from app.agent.round import (
     run_round,
     store_history,
 )
-from app.agent.tools._common import get_or_create_counter, tool_error
-from app.agent.tools.outcome import BAD_ARGUMENTS
+from app.agent.tools.outcome import BAD_ARGUMENTS, tool_error
 from app.data.ordered import insert_in_commit_order
 from app.data.persist import fetch_one, from_row
 from app.data.schema import CommitOrder, Data, Key, table_name
 from app.infra.cst_time import CST
+from app.infra.metrics import get_or_create_counter
 from app.living.common import SEND_SECONDS, esc, legacy_null_is, require_aware
 from app.living.services import (
     KIND_ACT,

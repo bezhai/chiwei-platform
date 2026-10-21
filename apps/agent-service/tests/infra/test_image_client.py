@@ -205,7 +205,7 @@ async def test_the_tool_upload_helper_hands_the_permanent_handle_to_its_caller(
     monkeypatch,
 ):
     """工具那侧的上传辅助交出的也是永久句柄，不是会死的地址。"""
-    from app.agent.tools import _common
+    from app.infra import image as image_mod
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -221,7 +221,7 @@ async def test_the_tool_upload_helper_hands_the_permanent_handle_to_its_caller(
         )
 
     _on_the_wire(monkeypatch, handler)
-    stored = await _common.upload_image("base64", "AAAA")
+    stored = await image_mod.upload_image("base64", "AAAA")
     assert stored is not None
     assert stored.file_name == "temp/tos_cd_34.jpg"
 
@@ -235,13 +235,13 @@ async def test_the_tool_upload_helper_never_hands_back_the_bytes_it_was_given(
     旧契约在失败时把**入参原样回递**（``return data, None``），于是一串 base64
     会顺着"句柄"那条路走下去 —— 存进她的记录、当成 TOS 键去重签。失败就说失败。
     """
-    from app.agent.tools import _common
+    from app.infra import image as image_mod
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(502, json={"detail": "upstream down"})
 
     _on_the_wire(monkeypatch, handler)
-    assert await _common.upload_image("base64", "AAAA") is None
+    assert await image_mod.upload_image("base64", "AAAA") is None
 
 
 # ---------------------------------------------------------------------------

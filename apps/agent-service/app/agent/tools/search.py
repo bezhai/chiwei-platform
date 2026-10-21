@@ -11,11 +11,7 @@ from bs4 import BeautifulSoup
 from pydantic import Field
 
 from app.agent.tooling import tool
-from app.agent.tools._common import (
-    get_or_create_counter,
-    get_or_create_histogram,
-    tool_error,
-)
+from app.agent.tools.outcome import tool_error
 from app.capabilities.web_search import (
     read_webpage as _read_webpage_capability,
 )
@@ -25,6 +21,7 @@ from app.capabilities.web_search import (
 from app.capabilities.web_search import (
     web_search as _web_search_capability,
 )
+from app.infra.metrics import get_or_create_counter, get_or_create_histogram
 
 logger = logging.getLogger(__name__)
 

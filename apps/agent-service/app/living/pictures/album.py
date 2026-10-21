@@ -71,12 +71,12 @@ from pydantic import Field, field_validator
 # module-level 引入，测试从这里换替身（真跑起来要调生图模型、搜图服务和对象存储）。
 from app.agent.image_gen import generate_image
 from app.agent.round import current_round
-from app.agent.tools._common import tool_error, upload_image
+from app.agent.tools.outcome import tool_error
 from app.capabilities.image_search import image_search
 from app.data.persist import fetch_all, from_row, insert_idempotent, select_latest
 from app.data.schema import Data, Key, table_name
 from app.infra.cst_time import to_cst_dated
-from app.infra.image import image_client
+from app.infra.image import image_client, upload_image
 from app.living.common import esc, require_aware
 
 logger = logging.getLogger(__name__)

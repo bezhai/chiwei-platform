@@ -77,11 +77,11 @@ from app.agent.contracts import (
 from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
 from app.agent.session import load_session
-from app.agent.tools._common import get_or_create_counter
 from app.agent.trace import collect_usage
 from app.data.tx import tx
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST
+from app.infra.metrics import get_or_create_counter
 
 logger = logging.getLogger(__name__)
 
