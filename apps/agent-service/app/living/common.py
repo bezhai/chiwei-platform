@@ -10,7 +10,7 @@
   * :func:`message_handle` / :func:`printed_handle`  她发出去的那条消息的撤回编号，和它印在她眼前的
     样子：她的经历摆到她眼前时、发送回执上印的都是它，她照抄去撤回的也是它
 
-插件之间不互相 import（``tests/living/test_plugin_boundaries.py``），共用的纯函数只能放在这里；
+插件之间不互相 import（CI 规则 ``scripts/check_plugin_boundaries.py``），共用的纯函数只能放在这里；
 要读库、要别人数据的东西走 :mod:`app.living.services` 里的服务。
 """
 

@@ -295,6 +295,23 @@ jobs:
           # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_package_cycles.py
           python3 -m scripts.check_package_cycles app
 
+  plugin-boundaries:
+    name: A plugin never imports another plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Plugins in app/living, app/world and app/plugins only talk through services
+        shell: bash
+        working-directory: apps/agent-service
+        run: |
+          # 她的插件是 app/living/<插件>/，world 的是 app/world/<插件>/，app/plugins/ 里一个模块
+          # 一个插件。一个插件只 import 自己目录里的模块和这一边的共享模块（living：services、
+          # common；world：services、agents、volume），别的插件的东西经服务拿（ctx.service）。
+          # 共享模块和包本身不 import 插件；living、world 目录下插件目录之外只有共享模块。
+          # 名单上的目录或共享模块不在了也算失败。
+          # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_plugin_boundaries.py
+          python3 -m scripts.check_plugin_boundaries app
+
   world-life-isolation:
     name: World and life never import each other
     runs-on: ubuntu-latest

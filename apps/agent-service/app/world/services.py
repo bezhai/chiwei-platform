@@ -4,7 +4,7 @@
 提供它的插件在 setup 里交出（``ctx.provide``，名字列在插件的 ``provides`` 里）；用它的插件在
 ``requires`` 里列上名字、setup 里取到（``ctx.service``），作为构造参数交给自己的插件对象，测试时
 直接换成替身。world 的插件目录之间不互相 import，只 import 这里、共享模块和框架公开的东西
-（``tests/world/test_plugin_boundaries.py``）。
+（CI 规则 ``scripts/check_plugin_boundaries.py``）。
 
 * ``world_intake``（world 核心提供，told 和 answer 用）：:class:`WorldIntake`。
 * ``perception``（perception 提供，npc 用）：:class:`Perception`。

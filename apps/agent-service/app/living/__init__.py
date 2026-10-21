@@ -4,7 +4,7 @@ world 不在这个包里。world 与 life 是两个独立的引擎，互不 impo
 唯一的连接是通信机制（:mod:`app.messaging`）。
 
 她的功能分成插件，每个插件一个目录 ``app/living/<插件>/``。插件之间不互相 import，
-只经服务交互（``tests/living/test_plugin_boundaries.py`` 守着）：
+只经服务交互（CI 规则 ``scripts/check_plugin_boundaries.py`` 守着）：
 
   * :mod:`app.living.services`    插件之间的服务：接口（Protocol）和接口里出现的数据类型
   * :mod:`app.living.common`      各插件共用的纯函数：转义、时刻必须带时区、旧行的 NULL、周界

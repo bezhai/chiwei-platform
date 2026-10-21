@@ -5,7 +5,7 @@
 也不加载 life 的代码：它是同一个镜像上的另一个 App，进程只起 world 的插件（清单是
 :mod:`app.manifests.world`）。它和别的参与者之间唯一的连接是通信机制（:mod:`app.messaging`）。
 
-**每个插件一个目录**，目录之间不互相 import（``tests/world/test_plugin_boundaries.py``）：
+**每个插件一个目录**，目录之间不互相 import（CI 规则 ``scripts/check_plugin_boundaries.py``）：
 
 * :mod:`app.world.core` —— 插件 ``world``，world 的核心：主 agent 的一轮（``main_agent``）和它自己
   才有的动作（``actions``）、收件箱的处理（``rounds``、``pending``）、自己定的醒来（``wake``），以及
