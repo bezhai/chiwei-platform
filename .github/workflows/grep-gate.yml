@@ -295,6 +295,25 @@ jobs:
           # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_business_tasks_and_sessions.py
           python3 -m scripts.check_business_tasks_and_sessions app
 
+  manifests-resolve:
+    name: Both apps' manifests resolve without any external service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install agent-service's locked dependencies
+        working-directory: apps/agent-service
+        run: uv sync --frozen --python 3.12
+      - name: Start each app's host with no IO and check its manifest
+        working-directory: apps/agent-service
+        run: |
+          # 每个 App 的宿主按它的清单起来：每个插件的 setup 跑一遍，然后拿清单对插件登记的东西
+          # （工具、段落、段、步骤）：清单列了没人登记的、登记了清单没放的、重名的，都在这里失败，
+          # 而不是等到下一次部署。runner 上没有数据库、broker、Langfuse、泳道注册表，测试里每一次
+          # 连接也都被拒绝，所以 setup 要是开始依赖进程外的东西，这里同样失败。
+          # 只跑这一个文件，不是整套测试（整套要 docker 起 Postgres 和 RabbitMQ）。
+          uv run --frozen pytest tests/plugins/test_manifests_resolve.py
+
   plugin-boundaries:
     name: A plugin never imports another plugin
     runs-on: ubuntu-latest
