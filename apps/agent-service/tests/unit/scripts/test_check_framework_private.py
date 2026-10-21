@@ -107,7 +107,7 @@ PRIVATE_NAMES_OF_ANOTHER_PACKAGE = [
 
 
 @pytest.mark.parametrize("source", PRIVATE_NAMES_OF_ANOTHER_PACKAGE)
-@pytest.mark.parametrize("importer", ["living/a/tools.py", "nodes/admin.py", "host/assembly.py"])
+@pytest.mark.parametrize("importer", ["living/a/tools.py", "skills/loader.py", "host/assembly.py"])
 def test_a_private_name_of_another_package_is_reported_anywhere(tmp_path, source, importer):
     """Framework code included: the underscore is the other package saying the name is its own."""
     root = _tree(tmp_path, {importer: source + "\n"})

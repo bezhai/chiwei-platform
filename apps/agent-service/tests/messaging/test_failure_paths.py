@@ -540,24 +540,6 @@ async def _dead_letter_one(broker, monkeypatch, lane: str) -> str:
     return delivery.message_id
 
 
-async def test_the_open_dlq_requeue_route_cannot_move_messaging_dead_letters(
-    broker, monkeypatch
-):
-    """``/admin/dlq/requeue`` 没有凭据、也不看泳道：它不能碰通信机制的死信。在 ppe 部署上
-    点名 prod 的死信队列，prod 的死信原地不动，prod 的收件箱什么都收不到。"""
-    from app.nodes.dlq_admin import dlq_requeue_impl
-
-    world = Inbox(fail_times=99)
-    inbox("world", on_message=world.on_message)
-    await _dead_letter_one(broker, monkeypatch, "prod")
-
-    monkeypatch.setenv("LANE", "ppe-review")
-    await dlq_requeue_impl({"queue": ISOLATED_DEAD_LETTERS, "limit": 10}, operator="t")
-
-    assert await broker.depth(ISOLATED_DEAD_LETTERS) == 1
-    assert await broker.depth("inbox_world") == 0
-
-
 async def test_replay_takes_only_this_lanes_dead_letters_back_to_this_lanes_inboxes(
     broker, monkeypatch
 ):

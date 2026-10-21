@@ -1,12 +1,10 @@
-"""The ``runtime_dlq_audit`` table: the audit trail of dead letters an operator sends back or clears.
+"""The ``runtime_dlq_audit`` table: the audit trail of dead letters an operator sends back.
 
-Two writers, both dead-letter operations: messaging's replay of its own dead letters
-(:mod:`app.messaging.dead_letters`) and the ops DLQ tools (:mod:`app.capabilities.dlq`). The
-table is not a Data class; the host passes :data:`RUNTIME_DLQ_AUDIT_DDL` to the migrator. It
+The one writer is messaging's replay of its own dead letters (:mod:`app.messaging.dead_letters`).
+The table is not a Data class; the host passes :data:`RUNTIME_DLQ_AUDIT_DDL` to the migrator. It
 keeps the name it had when the dataflow runtime owned it.
 
-Status state machine (see spec §3.2 6-step protocol):
-  cleared -> requeued | publish_failed | zombie_acked | already_succeeded
+Status: a row opens as ``cleared`` and becomes ``requeued`` or ``publish_failed``.
 """
 from __future__ import annotations
 
@@ -20,15 +18,12 @@ from app.data.tx import auto_tx, current_session
 
 class AuditAction(StrEnum):
     REQUEUE = "requeue"
-    CLEAR_IDEMPOTENT = "clear-idempotent"
 
 
 class AuditStatus(StrEnum):
     CLEARED = "cleared"
     REQUEUED = "requeued"
     PUBLISH_FAILED = "publish_failed"
-    ZOMBIE_ACKED = "zombie_acked"
-    ALREADY_SUCCEEDED = "already_succeeded"
 
 
 RUNTIME_DLQ_AUDIT_DDL: list[str] = [

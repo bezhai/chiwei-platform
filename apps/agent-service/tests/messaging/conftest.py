@@ -160,8 +160,8 @@ async def inflight_db(test_db: object) -> AsyncGenerator[object, None]:  # noqa:
 async def dlq_audit_db(test_db: object) -> AsyncGenerator[object, None]:  # noqa: F811
     """Create the runtime_dlq_audit schema on the test DB and yield the engine.
 
-    Phase 7b Gap 12: mirrors inflight_db; applies RUNTIME_DLQ_AUDIT_DDL so
-    audit helper tests get a clean table every test.
+    Mirrors inflight_db; applies RUNTIME_DLQ_AUDIT_DDL so audit helper
+    tests get a clean table every test.
     """
     from sqlalchemy import text
 

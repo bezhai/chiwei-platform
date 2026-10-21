@@ -1,4 +1,4 @@
-"""Phase 7b Gap 12: runtime_dlq_audit DDL + helpers."""
+"""runtime_dlq_audit DDL + helpers."""
 from __future__ import annotations
 
 import pytest
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 async def test_insert_and_update_status_round_trip(dlq_audit_db: object) -> None:
     audit_id = await insert_audit_row(
         action=AuditAction.REQUEUE, status=AuditStatus.CLEARED,
-        queue="durable_some_dlx", queue_kind="dlq",
+        queue="isolated_dead_letters", queue_kind="dlq",
         message_ids=["m1"], recovery_token="m1",
         recovery_hint=None, cleared_inflight_count=1,
         requeued_count=0, operator="alice", trace_id="t-x",

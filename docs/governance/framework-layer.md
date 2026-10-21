@@ -53,9 +53,9 @@ database sessions.
 ### [C] Business Layer
 
 Her features (`apps/agent-service/app/living/<plugin>/`), world's features
-(`apps/agent-service/app/world/<plugin>/`, the world core included), and the modules they call
-(`apps/agent-service/app/nodes/**`, `apps/agent-service/app/skills/**`). For the import rules
-below, `app/plugins/` and the two manifests count as business code too.
+(`apps/agent-service/app/world/<plugin>/`, the world core included), and the module they call
+(`apps/agent-service/app/skills/**`). For the import rules below, `app/plugins/` and the two
+manifests count as business code too.
 
 Business code registers what it needs through the `ctx` a plugin's setup is given. When it needs
 something the host does not offer, the host is extended first (a spec, a new registration on

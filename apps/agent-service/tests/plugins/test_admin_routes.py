@@ -1,5 +1,6 @@
-"""``app/api/routes.py`` 只挂 ``/health``：运维路由都由插件宿主挂（``app.plugins.ops``、通信机制的人工
-入口），完整的路由集合和各自的检查由 ``tests/apps/test_surface.py`` 按进程钉住。
+"""``app/api/routes.py`` 只挂 ``/health``：运维路由都由插件宿主挂（通信机制的人工入口
+``app.plugins.operator``、读书队列的一次性搬运），完整的路由集合和各自的检查由
+``tests/apps/test_surface.py`` 按进程钉住。
 """
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 
 插件在三个地方（:data:`SIDES`）：她的功能在 ``app/living/<插件>/``，world 的在 ``app/world/<插件>/``
 （world 核心也是一个，``core/``），各边一个目录一个插件；``app/plugins/`` 里一个模块一个插件
-（ops、operator、skills）。一个插件要另一个插件的东西，就在 setup 里 ``ctx.service`` 取它的服务；
+（operator、skills）。一个插件要另一个插件的东西，就在 setup 里 ``ctx.service`` 取它的服务；
 工具、段落、步骤由清单按名字排，谁也不用 import 谁。所以在同一边里面，一个插件只许 import：
 
 * 它自己目录里的模块；

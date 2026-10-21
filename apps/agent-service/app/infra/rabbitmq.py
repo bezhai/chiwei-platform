@@ -137,9 +137,8 @@ def channel_route_for(base_queue: str, channel: str) -> Route:
 def channel_route_for_payload(base_queue: str, payload: Any) -> Route:
     """Resolve the partitioned Route for ``base_queue`` off the payload's channel.
 
-    分区队列的 rk 只有消息自己知道，所以一律现算。出站（app.infra.outbound.publish）和 DLQ 重放
-    共用这一条规则 —— 重放要是照着 base 名发，消息会落在一条没有消费者的队列上静默
-    滞留，而审计写着 published 成功。
+    分区队列的 rk 只有消息自己知道，所以一律现算（出站 app.infra.outbound.publish 用它）：
+    照着 base 名发，消息会落在一条没有消费者的队列上静默滞留。
 
     缺 channel / 未注册的 channel 一律抛，不挑默认值：猜错的下场是回复从另一个渠道
     发出去，比明确失败糟得多。
@@ -157,7 +156,7 @@ def channel_route_for_payload(base_queue: str, payload: Any) -> Route:
 #
 #   声明面   declare_topology 遍历它建队列 + 绑定
 #   注册面   ctx.outbound(T, name) 的合法队列名从它来
-#            （app.infra.outbound.register 的查表、dlq_admin 的重放目标查表）
+#            （app.infra.outbound.register 的查表）
 #
 # base 的 chat_response / recall 在声明面上已经是死的：出站早就按 channel 分区，
 # 生产者只发 chat.response.{channel} / action.recall.{channel}，消费者也只订
@@ -447,8 +446,7 @@ class _RabbitMQ:
     ) -> bool:
         """Publish with broker publish-confirm; return True iff broker ack-ed.
 
-        Used by messaging (:func:`app.messaging.broker.publish`) and the DLQ
-        requeue tool (:mod:`app.nodes.dlq_admin`). Caller decides on False.
+        Used by messaging (:func:`app.messaging.broker.publish`). Caller decides on False.
 
         aio-pika channels default to ``publisher_confirms=True`` so the
         underlying ``exchange.publish`` already awaits broker confirm. We
@@ -569,19 +567,3 @@ class _RabbitMQ:
 
 # Module-level instance
 mq = _RabbitMQ()
-
-
-async def basic_get(queue: str, *, no_ack: bool = False):
-    """Phase 7b Gap 12: blocking basic.get for DLQ replay.
-
-    Returns aio_pika.IncomingMessage or None if queue is empty. Caller is
-    responsible for ack()/nack(requeue=...) on the returned message.
-
-    Uses the shared ``mq._channel`` — caller must ensure ``mq.connect()``
-    has been called before invoking this helper (same precondition as all
-    other ``mq`` operations).
-    """
-    if mq._channel is None:
-        raise RuntimeError("must call mq.connect() first")
-    queue_obj = await mq._channel.declare_queue(queue, passive=True)
-    return await queue_obj.get(timeout=5, fail=False, no_ack=no_ack)

@@ -2,7 +2,7 @@ name: dataflow grep gate
 
 # Phase 7a/7b/7c/7d CI gate: closed-gap exact-zero + open-gap baseline.
 #
-# Closed gaps (Gap 7 / 9 / 11 from Phase 7a + Gap 8 / 12 / 18 from
+# Closed gaps (Gap 7 / 9 / 11 from Phase 7a + Gap 8 / 18 from
 # Phase 7b + Gap 15 from Phase 7c + Gap 13 / 14 / 16 from Phase 7d)
 # must stay at zero occurrences in business code; new violations
 # block the PR.
@@ -13,10 +13,10 @@ name: dataflow grep gate
 #
 # **业务目录清单**（每个 step 里那份 BUSINESS）是 app/ 下真实存在的业务包：
 #
-#     living  plugins  nodes  skills  world
+#     living  plugins  skills  world
 #
-# living 和 world 下每个目录是一个插件，plugins 下每个模块是一个插件（ops、operator、skills），
-# nodes 和 skills 是插件调用的业务模块。不在里面的是框架和基建：host / agent / manifests / data /
+# living 和 world 下每个目录是一个插件，plugins 下每个模块是一个插件（operator、skills），
+# skills 是插件调用的业务模块。不在里面的是框架和基建：host / agent / manifests / data /
 # infra / api / capabilities / messaging / domain。agent 是固定的 agent 循环和单次模型调用，替插件
 # 跑一轮，跟 host 一样归框架层；manifests 只写一个 App 由哪些插件、agent、profile 组成。分层见
 # docs/guides/plugin-host.md。加一个业务包就要把它加进每一处清单 —— 漏一处等于那个包不受任何一条 gap 管，这正是
@@ -31,7 +31,7 @@ on:
 
 jobs:
   closed-gap-zero:
-    name: Closed-gap exact-zero (Gap 7/8/9/11/12/13/14/15/16/18)
+    name: Closed-gap exact-zero (Gap 7/8/9/11/13/14/15/16/18)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
         run: |
           set -e
           BUSINESS=(apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+                    apps/agent-service/app/skills/ \
                     apps/agent-service/app/world/)
           # business code must not implement its own retry / sleep loops
           c=$(grep -rn -E "while.*retry|for.*range.*retry" "${BUSINESS[@]}" \
@@ -78,7 +78,7 @@ jobs:
           # 加一处新的就要更新这个数，否则 gate 抓回归。
           c=$(grep -rn '\bpublish(' \
               apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
-              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+              apps/agent-service/app/skills/ \
               apps/agent-service/app/world/ \
               --include='*.py' 2>/dev/null | wc -l || true)
           [ "$c" -eq 2 ] || { echo "Gap 8 violation: business publish( count=$c, expected 2"; exit 1; }
@@ -105,14 +105,6 @@ jobs:
           c=$(grep -rn "# emit AFTER commit\|# commit-then-emit" \
               apps/agent-service/app/ 2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 8 violation: $c commit-then-emit comments"; exit 1; }
-      - name: Gap 12 — Makefile DLQ targets and runbook present
-        shell: bash
-        run: |
-          set -e
-          grep -q "^dlq-inspect:" Makefile || { echo "Gap 12 violation: Makefile missing dlq-inspect target"; exit 1; }
-          grep -q "^dlq-replay:" Makefile  || { echo "Gap 12 violation: Makefile missing dlq-replay target"; exit 1; }
-          grep -q "^dlq-dry-run:" Makefile || { echo "Gap 12 violation: Makefile missing dlq-dry-run target"; exit 1; }
-          test -f docs/runbooks/dlq-replay.md || { echo "Gap 12 violation: docs/runbooks/dlq-replay.md missing"; exit 1; }
       - name: Gap 18 — no don't-catch comments / requeue=False / business nack
         shell: bash
         run: |
@@ -120,24 +112,23 @@ jobs:
           # No more "不要 catch" / "don't catch" warnings in business code.
           c=$(grep -rn "# 不要 catch\|# 不要 try/except\|# don't catch" \
               apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
-              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+              apps/agent-service/app/skills/ \
               apps/agent-service/app/world/ \
               2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c don't-catch comments in business code"; exit 1; }
           # Manual ack/nack/requeue=False belongs to the framework
-          # (messaging/*). The DLQ admin tooling at
-          # nodes/dlq_admin.py is the business-facing exception
-          # (the 6-step requeue protocol). living/reading/carry_over.py is a
-          # one-off second one: it takes the old reading queue's messages and
-          # puts back (nack, requeue) the ones it does not carry over; it is
-          # removed once prod has switched over and the old queue is deleted.
+          # (messaging/*). living/reading/carry_over.py is the one exception
+          # in business code, and a one-off: it takes the old reading queue's
+          # messages and puts back (nack, requeue) the ones it does not carry
+          # over; it is removed once prod has switched over and the old queue
+          # is deleted.
           # Scan business dirs only.
           c=$(grep -rn "requeue=False\|\.nack(" \
               apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
-              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+              apps/agent-service/app/skills/ \
               apps/agent-service/app/world/ \
               2>/dev/null \
-              | grep -v "nodes/dlq_admin.py\|living/reading/carry_over.py\|__pycache__\|/test_" \
+              | grep -v "living/reading/carry_over.py\|__pycache__\|/test_" \
               | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c nack/requeue=False call sites in business code"; exit 1; }
       - name: Gap 13 — nothing outside app/data opens a database session
@@ -164,7 +155,7 @@ jobs:
         run: |
           set -e
           BUSINESS=(apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+                    apps/agent-service/app/skills/ \
                     apps/agent-service/app/world/)
           c=$(grep -rnE "from app\.infra\.redis import|from app\.infra import redis" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
@@ -177,7 +168,7 @@ jobs:
         run: |
           set -e
           BUSINESS=(apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+                    apps/agent-service/app/skills/ \
                     apps/agent-service/app/world/)
           # 模型的适配层（app/agent/adapters/）跟外部 HTTP 讲话，它在框架层的 app/agent 里，
           # 不在这份清单上。
@@ -202,7 +193,7 @@ jobs:
           baselines = json.load(open(".github/grep-baselines.json"))
           BUSINESS = [
               "apps/agent-service/app/living/", "apps/agent-service/app/plugins/",
-              "apps/agent-service/app/nodes/", "apps/agent-service/app/skills/",
+              "apps/agent-service/app/skills/",
               "apps/agent-service/app/world/",
           ]
           # BUSINESS 里列一个不存在的目录会让 grep 以 2 退出、整条计数读成 0。
@@ -283,7 +274,7 @@ jobs:
         shell: bash
         working-directory: apps/agent-service
         run: |
-          # 业务代码（app/living、app/world、app/plugins、app/nodes、app/skills）要在后台跑的
+          # 业务代码（app/living、app/world、app/plugins、app/skills）要在后台跑的
           # 东西交给宿主（ctx.task、ctx.clock），宿主停下时取消、等它们收尾；等着的 gather、
           # to_thread 照常。数据库会话只有存储碰：业务不碰 current_session，不 import 整个
           # app.data.tx 模块。原来的 Gap 13 业务那一半和 open-gap 的 gap_19 并进了这一条。
@@ -318,7 +309,7 @@ jobs:
         shell: bash
         working-directory: apps/agent-service
         run: |
-          # 业务代码（app/living、app/world、app/plugins、app/nodes、app/skills、两个 App 的
+          # 业务代码（app/living、app/world、app/plugins、app/skills、两个 App 的
           # 清单）从宿主只 import app.host 包导出的名字，不 import app/host/ 下的模块，也不
           # import app.agent.continuity、app.messaging.receiving、app.data.session：要的东西由
           # 包导出（app.host、app.agent）或者由宿主交给插件（ctx）。app/ 下任何代码不从另一个

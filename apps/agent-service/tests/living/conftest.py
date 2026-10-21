@@ -179,7 +179,7 @@ def her_residents() -> tuple[str, ...]:
 
 def her_plugins() -> list:
     """agent-service 清单里她那几个插件（guides 用的 skills，和她自己的全部插件），按清单的顺序，跟
-    线上起的是同一份；运维接口和通信机制的人工入口不在里面。"""
+    线上起的是同一份；通信机制的人工入口不在里面。"""
     import importlib
 
     from app.manifests.agent_service import MANIFEST
@@ -187,7 +187,7 @@ def her_plugins() -> list:
     return [
         importlib.import_module(module).PLUGIN
         for module in MANIFEST.plugins
-        if module not in ("app.plugins.ops", "app.plugins.operator")
+        if module != "app.plugins.operator"
     ]
 
 

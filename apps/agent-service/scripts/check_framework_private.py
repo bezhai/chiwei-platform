@@ -1,7 +1,7 @@
 """CI 规则：业务代码只用框架公开的东西；跨包不 import 下划线开头的名字。
 
 **框架的私有模块。** 业务代码（:data:`SCOPE`：她的插件、world 的插件、``app/plugins`` 的插件，它们调的
-``nodes``、``skills``，和两个 App 的清单）从宿主只 import ``app.host`` 这个包导出的名字，不 import
+``skills``，和两个 App 的清单）从宿主只 import ``app.host`` 这个包导出的名字，不 import
 ``app/host/`` 下的任何一个模块；另外不 import :data:`PRIVATE_MODULES` 里那几个模块：一轮的历史怎么存、
 怎么裁（``app.agent.continuity``，契约类型在 ``app.agent.contracts``），通信机制怎么收（
 ``app.messaging.receiving``，插件经宿主开收件箱），数据库会话（``app.data.session``）。这些模块的
@@ -28,8 +28,8 @@ from pathlib import Path
 
 from scripts.check_world_life_imports import imported_names, module_name
 
-# 业务代码：插件、插件调的 nodes 和 skills，两个 App 的清单。
-SCOPE: tuple[str, ...] = ("living", "world", "plugins", "nodes", "skills", "manifests")
+# 业务代码：插件、插件调的 skills，两个 App 的清单。
+SCOPE: tuple[str, ...] = ("living", "world", "plugins", "skills", "manifests")
 
 # 宿主之外，业务不 import 的框架模块。宿主的模块（``app/host/`` 下每一个）另外算，见 :func:`private_modules`。
 PRIVATE_MODULES: tuple[str, ...] = (

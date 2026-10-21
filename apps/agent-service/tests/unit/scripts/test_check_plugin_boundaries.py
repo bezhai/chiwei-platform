@@ -313,7 +313,7 @@ def test_the_real_plugins_are_the_ones_the_rule_sees():
     )
     assert "life" in plugins_of(root, "living")
     assert {"core", "records", "told"} <= set(plugins_of(root, "world"))
-    assert plugins_of(root, "plugins") == ["operator", "ops", "skills"]
+    assert plugins_of(root, "plugins") == ["operator", "skills"]
 
 
 def test_the_command_fails_with_the_file_and_line_and_passes_when_clean(tmp_path):

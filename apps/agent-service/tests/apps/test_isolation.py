@@ -78,7 +78,6 @@ def test_the_agent_service_app_loads_its_own_plugins():
     loaded = _loaded_by("agent-service")
 
     assert loaded["plugins"] == [
-        "ops",
         "operator",
         "skills",
         "persona",

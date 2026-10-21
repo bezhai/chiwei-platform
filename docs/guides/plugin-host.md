@@ -15,7 +15,7 @@
 | 宿主 | `app/host/` | 插件生命周期、服务注册、轮次队列和钟、管理路由、收件箱和出站队列的登记，以及按清单组装一轮 |
 | 插件和清单 | `app/living/<插件>/`、`app/world/<插件>/`、`app/plugins/`；`app/manifests/` | 业务功能；一个 App 由哪些插件、agent、参与者组成 |
 
-`app/nodes/`（运维接口的处理函数）和 `app/skills/`（说明文档的加载和渲染）是插件调用的业务模块，按插件的规则管。
+`app/skills/`（说明文档的加载和渲染）是插件调用的业务模块，按插件的规则管。
 
 方向这样定，是因为每一层只该知道它下面的东西。agent 层要用的类型（一轮由什么组成、一个 agent 怎么调）都放在 `app/agent/contracts.py`，宿主 import 它们来组装，所以 agent 层不需要知道宿主。宿主不 import 任何插件：清单里写的是插件的模块名，宿主到启动时才按名字 import（`Host.for_app`），所以一个进程只加载它自己清单里的插件，world 的进程里不出现她的任何代码，反过来也一样。存储和消息机制在最下面，宿主启停消息机制、插件经宿主开设收件箱，它们不依赖宿主和 agent 层。这些方向由 CI 检查固定（第 9 节），写反一条 import 就失败。
 
@@ -120,6 +120,6 @@ prompt 是段落拼出来的，每个插件提供的段落是一个单独的 Lan
 | `scripts/check_package_cycles.py` | 包之间没有环；下层不 import 上层（存储和消息 < agent 层 < 宿主 < 插件），宿主和 agent 层不 import 任何插件 | 第 1 节的依赖方向 |
 | `scripts/check_business_tasks_and_sessions.py` | 业务代码不起任务和线程，不碰事务里的会话 | 后台工作交给宿主，宿主停下时才能收拾；数据库只经存储的读写函数 |
 | `manifests-resolve` 任务 | 两个 App 的宿主在连不上任何外部服务的情况下完成 setup 和清单校验 | 清单写错在 PR 上就失败，而不是等到下一次部署 |
-| Gap 7 / 8 / 11 / 13 / 14 / 16 / 18 | 业务目录（`app/living`、`app/world`、`app/plugins`、`app/nodes`、`app/skills`）不自己写重试循环、不直接读上下文变量和 Redis、不直接用 httpx、不手动 nack；`publish` 的调用点数目固定 | 这些事由框架和能力层做，业务各写一份就会各有各的毛病 |
+| Gap 7 / 8 / 11 / 13 / 14 / 16 / 18 | 业务目录（`app/living`、`app/world`、`app/plugins`、`app/skills`）不自己写重试循环、不直接读上下文变量和 Redis、不直接用 httpx、不手动 nack；`publish` 的调用点数目固定 | 这些事由框架和能力层做，业务各写一份就会各有各的毛病 |
 
 改宿主、agent 层的契约类型和固定循环、存储的核心模块、清单、这些检查本身或这份文档，按 `docs/governance/framework-layer.md` 在 PR 正文里引用 spec。

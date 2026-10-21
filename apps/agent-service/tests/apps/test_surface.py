@@ -47,11 +47,6 @@ _COMMON_ROUTES = {
 EXPECTED_ROUTES: dict[str, dict[str, list[str]]] = {
     "agent-service": {
         **_COMMON_ROUTES,
-        # Ops routes: no auth.
-        "POST /admin/dlq/inspect": OPEN,
-        "POST /admin/dlq/clear-idempotent": OPEN,
-        "POST /admin/dlq/dry-run": OPEN,
-        "POST /admin/dlq/requeue": OPEN,
         # The messaging mechanism's operator routes.
         "POST /admin/messaging/send": GUARDED,
         "POST /admin/messaging/ask": GUARDED,
@@ -81,14 +76,6 @@ EXPECTED_TABLES: dict[str, list[str]] = {
         "common_conversation",
         "common_message",
         "common_user",
-        "data_dlq_clear_idempotent_request",
-        "data_dlq_clear_idempotent_response",
-        "data_dlq_dry_run_request",
-        "data_dlq_dry_run_response",
-        "data_dlq_inspect_request",
-        "data_dlq_inspect_response",
-        "data_dlq_requeue_request",
-        "data_dlq_requeue_response",
         "data_file_read",
         "data_happening",
         "data_life_moment",

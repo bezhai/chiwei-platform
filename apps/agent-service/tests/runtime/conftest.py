@@ -169,26 +169,6 @@ def test_db_dsn() -> object:
 
 
 @pytest.fixture
-async def dlq_admin_db(test_db: object) -> AsyncGenerator[object, None]:
-    """Create runtime_inflight + runtime_dlq_audit schemas for admin node tests.
-
-    Phase 7b Gap 12: admin tests need both tables — inflight for
-    clear_idempotent operations and dlq_audit for audit trail writes.
-    """
-    from sqlalchemy import text
-
-    from app.messaging.claims import RUNTIME_INFLIGHT_DDL
-    from app.messaging.dead_letter_audit import RUNTIME_DLQ_AUDIT_DDL
-
-    async with test_db.begin() as conn:
-        for ddl in RUNTIME_INFLIGHT_DDL:
-            await conn.execute(text(ddl))
-        for ddl in RUNTIME_DLQ_AUDIT_DDL:
-            await conn.execute(text(ddl))
-    yield test_db
-
-
-@pytest.fixture
 async def test_db(
     test_db_dsn: str,
     monkeypatch: pytest.MonkeyPatch,

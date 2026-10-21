@@ -114,7 +114,6 @@ async def test_startup_builds_the_business_schema_then_migrates_and_shutdown_tak
     async with lifespan(app):
         assert pod == ["ensure_business_schema", "migrate_schema"]
         assert "/admin/messaging/send" in _admin_paths(app)
-        assert "/admin/dlq/inspect" in _admin_paths(app)
 
     assert _admin_paths(app) == set()
 

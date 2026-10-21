@@ -80,7 +80,6 @@ RESIDENT = Profile(
 
 MANIFEST = App(
     plugins=(
-        "app.plugins.ops",
         "app.plugins.operator",
         "app.plugins.skills",
         "app.living.persona",

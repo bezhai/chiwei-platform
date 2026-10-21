@@ -21,7 +21,6 @@ async def test_each_plugin_registers_its_own_part(app_host):
     host = await app_host("agent-service")
 
     assert [p.name for p in host.plugins] == [
-        "ops",
         "operator",
         "skills",
         "persona",
@@ -40,7 +39,6 @@ async def test_each_plugin_registers_its_own_part(app_host):
         "life",
     ]
     assert Counter((r.plugin, r.kind) for r in host.registered()) == {
-        ("ops", "route"): 4,
         ("operator", "route"): 6,
         ("operator", "inbox"): 1,
         ("skills", "service"): 1,
@@ -115,12 +113,12 @@ async def test_living_declares_each_tool_her_profile_lists(app_host):
 
 def test_her_guides_without_skills_are_refused_naming_both():
     manifest = importlib.import_module(APPS["agent-service"]).MANIFEST
-    ops, operator, _skills, *hers = (
+    operator, _skills, *hers = (
         importlib.import_module(m).PLUGIN for m in manifest.plugins
     )
 
     with pytest.raises(MissingService) as refused:
-        Host("agent-service", [ops, operator, *hers])
+        Host("agent-service", [operator, *hers])
 
     message = str(refused.value)
     assert "'guides'" in message

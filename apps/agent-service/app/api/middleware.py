@@ -129,8 +129,6 @@ for _header_name, _cfg in HEADER_CONFIG.items():
 # directly (e.g. ``app.infra.propagation`` carries these across RabbitMQ).
 trace_id_var = header_vars["trace_id"]
 lane_var = header_vars["lane"]
-# Phase 7b Gap 12: operator identity for DLQ admin audit trail.
-operator_var = header_vars["operator"]
 
 
 class HeaderContextMiddleware(BaseHTTPMiddleware):

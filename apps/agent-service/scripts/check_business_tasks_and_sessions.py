@@ -1,6 +1,6 @@
 """CI 规则：业务代码不自己起任务、不起线程，也够不着事务里的数据库会话。
 
-业务代码（:data:`BUSINESS`：她的插件、world 的插件、``app/plugins`` 的插件，和它们调的 ``nodes``、
+业务代码（:data:`BUSINESS`：她的插件、world 的插件、``app/plugins`` 的插件，和它们调的
 ``skills``）要在后台跑的东西交给宿主：周期性的登记成钟（``ctx.clock``、``ctx.wake``），一直跑的
 登记成任务（``ctx.task``）。宿主知道它们，停下时取消、等它们收尾；业务自己起的任务宿主不知道，停的
 时候没人取消，出错了也没人看见。所以业务代码里不许：
@@ -46,7 +46,7 @@ from scripts.check_world_life_imports import (
     resolve_from,
 )
 
-BUSINESS: tuple[str, ...] = ("living", "world", "plugins", "nodes", "skills")
+BUSINESS: tuple[str, ...] = ("living", "world", "plugins", "skills")
 
 # 起一个后台任务的名字（调用的函数名或方法名、import 进来的名字）。
 _TASK_STARTERS = frozenset({"create_task", "ensure_future", "TaskGroup"})
