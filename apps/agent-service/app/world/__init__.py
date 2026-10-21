@@ -21,7 +21,7 @@
 * :mod:`app.world.perception` —— 感知判断的插件：谁会察觉、察觉到什么，以及告知他们；没跑完的
   一轮里已经发生、收不回来的事（:mod:`app.world.perception.unfinished`）；
 * :mod:`app.world.npc` —— NPC 的插件：让 NPC 出场，一个临时 agent 扮演他完成一次互动；
-* :mod:`app.world.answer` —— 应答 agent：回答问 world 的问题，只读。
+* :mod:`app.world.answer` —— 应答的插件：回答问 world 的问题，只读，登记在 ``world_intake`` 上。
 
 主 agent 的一轮和收件箱由 world 的插件（:mod:`app.plugins.world`）登记，记录、来源和它们的
 查询工具、人工接口由各自的插件登记。

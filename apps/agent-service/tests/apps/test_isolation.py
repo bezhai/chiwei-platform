@@ -57,6 +57,7 @@ def test_the_world_app_loads_none_of_the_life_code():
         "told",
         "perception",
         "npc",
+        "answer",
     ]
     assert loaded["inboxes"] == ["world"]
     assert loaded["inboxes_at_start"] == [], "world 的进程不开三姐妹的收件箱"

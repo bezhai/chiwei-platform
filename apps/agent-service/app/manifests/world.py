@@ -75,6 +75,7 @@ MANIFEST = App(
         "app.world.told",
         "app.world.perception",
         "app.world.npc",
+        "app.world.answer",
     ),
     agents={
         "world_round": ROUND_AGENT,

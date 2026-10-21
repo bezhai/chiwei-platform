@@ -53,6 +53,7 @@ def test_the_world_app_runs_the_world_plugin_and_its_feature_plugins_in_order():
         "app.world.told",
         "app.world.perception",
         "app.world.npc",
+        "app.world.answer",
     )
 
 

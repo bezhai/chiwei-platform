@@ -1,7 +1,7 @@
-"""应答 agent：回答别人问 world 的问题——某处现在什么样、谁在哪。
+"""插件 ``answer``：应答 agent，回答别人问 world 的问题——某处现在什么样、谁在哪。
 
-world 的收件箱声明了 ``on_question``（:mod:`app.plugins.world`），每个问题起一个应答 agent
-（:meth:`Answering.answer_question`）：它拿到清单给它列的工具（宿主组好的 ``world_answer``，
+world 的收件箱声明了 ``on_question``（:mod:`app.plugins.world`），把提问交给在 ``world_intake`` 上
+登记的应答；这个插件登记的就是它。每个问题起一个应答 agent（:meth:`Answering.answer_question`）：它拿到清单给它列的工具（宿主组好的 ``world_answer``，
 ``ctx.agent``）：知识来源的查询工具，跟另外三类拿的是同一份；它不在哪一轮里，关掉的来源按每个问题
 来时读的开关拿掉，prompt 里关掉的插件的段落也一样。它依据这些工具回答。能当场推出来的东西（按现在的时间、天气和记录）由它当场推，主 agent 不为此提前
 写下，也不为此醒。
@@ -24,9 +24,11 @@ from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
 from app.agent.prompts import PromptSet
 from app.agent.round import AssembledAgent, open_call, switched_off
+from app.host import Context, Plugin
 from app.infra.cst_time import now_cst
 from app.messaging.message import Message
-from app.world.agents import WORLD, lane, run_agent, when, world_agent
+from app.world.agents import WORLD, lane, run_agent, when, world_agent, world_segments
+from app.world.services import WorldIntake
 
 logger = logging.getLogger(__name__)
 
@@ -86,3 +88,14 @@ class Answering:
             text[:200] or "(no answer)",
         )
         return text or None
+
+
+def setup(ctx: Context) -> None:
+    intake: WorldIntake = ctx.service("world_intake")
+    answering = Answering(ctx.agent(ANSWER), ctx.profile("world").profile.switches)
+    ctx.on_stop(intake.answer_with("answer", answering.answer_question))
+    for segment in world_segments(ANSWER).values():
+        ctx.segment(segment)
+
+
+PLUGIN = Plugin(name="answer", setup=setup, requires=("world_intake",))

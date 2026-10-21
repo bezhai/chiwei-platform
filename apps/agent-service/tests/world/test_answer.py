@@ -24,6 +24,71 @@ def _volume_state(volume) -> dict[str, tuple[str, int]]:
     }
 
 
+class _Setup:
+    """answer 的 setup 拿到的东西的替身：``world_intake`` 服务记下登记的应答，宿主给出组好的应答 agent
+    和 world 一轮的开关。"""
+
+    def __init__(self) -> None:
+        self.answers: list[tuple[str, object]] = []
+        self.segments: list[str] = []
+        self.on_stops: list[object] = []
+
+    # world_intake
+    def answer_with(self, plugin, answer):
+        self.answers.append((plugin, answer))
+
+        async def dispose() -> None:
+            self.answers.remove((plugin, answer))
+
+        return dispose
+
+    # the plugin's context
+    def service(self, name):
+        assert name == "world_intake"
+        return self
+
+    def agent(self, name):
+        from app.agent.round import AssembledAgent
+
+        return AssembledAgent(app="world", name=name, spec=answer.ANSWER_AGENT)
+
+    def profile(self, name):
+        from app.agent.contracts import Profile, Switches
+        from app.agent.round import AssembledProfile
+
+        switches = Switches("world_sources", ("records",))
+        return AssembledProfile(
+            app="world", name=name, profile=Profile(agent="world_round", switches=switches)
+        )
+
+    def segment(self, segment):
+        self.segments.append(segment.name)
+
+    def on_stop(self, undo):
+        self.on_stops.append(undo)
+
+
+async def test_answer_registers_its_answer_with_world_intake_and_its_prompt():
+    setup = _Setup()
+
+    answer.PLUGIN.setup(setup)
+
+    assert answer.PLUGIN.requires == ("world_intake",)
+    [(plugin, answered_by)] = setup.answers
+    assert plugin == "answer"
+    assert answered_by.__func__ is answer.Answering.answer_question
+    assert setup.segments == ["world_answer"]
+    for undo in setup.on_stops:
+        await undo()
+    assert setup.answers == []
+
+
+def test_the_world_core_does_not_require_the_answer_plugin():
+    from app.plugins.world import PLUGIN as WORLD_CORE
+
+    assert WORLD_CORE.requires == ()
+
+
 def looks_up_the_kitchen():
     async def plan(_input):
         shown = await reading.read_record.invoke({"path": "地方/厨房.md"})
