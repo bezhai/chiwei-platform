@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from app.agent.contracts import CostSpec, HistorySpec, Profile, Switches
-from app.host.manifest import App, Participant
+from app.host import App, Participant
 from app.manifests.history import HISTORY_TEXTS
 from app.world.agents import HISTORY_KEY
 from app.world.answer import ANSWER_AGENT

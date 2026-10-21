@@ -15,7 +15,7 @@
 对照每条消息判断。
 
 **模型的临时失败重试，失败那一次的判断作废。** 感知判断那次模型调用遇到 5xx、超时这类临时失败
-（:data:`app.agent.core.RETRYABLE_EXCEPTIONS`），整次判断重来，最多 :data:`PERCEPTION_ATTEMPTS`
+（:data:`app.agent.RETRYABLE_EXCEPTIONS`），整次判断重来，最多 :data:`PERCEPTION_ATTEMPTS`
 次。:func:`someone_notices` 只把判断记在这一次调用自己的状态里（:class:`Judgments`），不发任何
 东西，所以失败那一次判断过谁、写了什么，都随那次调用丢掉；重来的那一次是一次新的调用，从空的
 开始，发出去的只有成功那一次的判断。重来不交给 Agent 层（``max_retries``）：每一次尝试在这里
@@ -61,8 +61,8 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.agent import RETRYABLE_EXCEPTIONS
 from app.agent.contracts import FailRound
-from app.agent.core import RETRYABLE_EXCEPTIONS
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
 from app.agent.round import (
@@ -111,7 +111,7 @@ class Judgments:
 
 
 # 感知判断那次模型调用遇到临时失败（5xx、超时、连不上、限流，跟 Agent 层自己重试的是同一组：
-# :data:`app.agent.core.RETRYABLE_EXCEPTIONS`）时最多试几次，两次之间等多久（翻倍，有上限）。
+# :data:`app.agent.RETRYABLE_EXCEPTIONS`）时最多试几次，两次之间等多久（翻倍，有上限）。
 # 2026-10-06 在 coe-world 上，模型两次返回 500，那两个变化没有报告出去。一次调用最长等
 # 180 秒（:data:`app.agent.client.MODEL_ANSWER_SECONDS`），三次加上等待不到十分钟，在一轮的
 # 时限之内。
