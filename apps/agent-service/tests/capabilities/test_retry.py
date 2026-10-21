@@ -24,14 +24,13 @@ from typing import Any
 
 import pytest
 
-from app.capabilities._errors import (
+from app.capabilities.errors import (
     CapabilityCallFailed,
     CapabilityInvalidArg,
     CapabilityRateLimited,
     CapabilityTimeout,
 )
 from app.capabilities.retry import retry
-
 
 # ---------------------------------------------------------------------------
 # Helpers

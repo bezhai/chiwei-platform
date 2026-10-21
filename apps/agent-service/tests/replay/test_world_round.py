@@ -38,7 +38,7 @@ from datetime import datetime
 
 import pytest
 
-from app.capabilities._errors import CapabilityTimeout
+from app.capabilities.errors import CapabilityTimeout
 from app.infra.cst_time import CST
 from tests.replay.harness import Fail, Reply, ToolUse
 from tests.replay.harness.prompts import config_errors

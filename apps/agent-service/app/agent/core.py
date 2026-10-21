@@ -89,7 +89,7 @@ from app.agent.trace import (
     separate_trace,
     under_last_generation,
 )
-from app.capabilities._errors import CapabilityTimeout
+from app.capabilities.errors import CapabilityTimeout
 from app.capabilities.retry import retry as _retry_decorator
 from app.infra.config import current_app, settings
 from app.infra.lane_policy import (

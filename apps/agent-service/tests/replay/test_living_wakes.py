@@ -42,7 +42,7 @@ import pytest
 from sqlalchemy import text
 
 from app.agent.prompts import PromptConfigError
-from app.capabilities._errors import CapabilityTimeout
+from app.capabilities.errors import CapabilityTimeout
 from app.data.tx import current_session, tx
 from app.infra.cst_time import CST
 from tests.replay import seeds

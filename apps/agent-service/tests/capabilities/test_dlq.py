@@ -16,14 +16,13 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from app.capabilities._errors import CapabilityCallFailed, CapabilityInvalidArg
 from app.capabilities.dlq import (
     AuditAction,
     AuditStatus,
     ClearInflightResult,
     DLQAdminCapability,
 )
-
+from app.capabilities.errors import CapabilityCallFailed, CapabilityInvalidArg
 
 # ---------------------------------------------------------------------------
 # peek — wraps RabbitMQManagementClient.peek_messages

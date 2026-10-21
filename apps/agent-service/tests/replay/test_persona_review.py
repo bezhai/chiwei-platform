@@ -27,7 +27,7 @@ from datetime import date, datetime, time, timedelta
 
 import pytest
 
-from app.capabilities._errors import CapabilityTimeout
+from app.capabilities.errors import CapabilityTimeout
 from app.data.persist import insert_idempotent
 from app.infra.cst_time import CST
 from app.living.day_page.pages import LivingDayPage

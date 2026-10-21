@@ -51,7 +51,7 @@ from typing import Any
 
 import httpx
 
-from app.capabilities._errors import CapabilityInvalidArg
+from app.capabilities.errors import CapabilityInvalidArg
 from app.capabilities.http import HTTPClient
 from app.infra import config
 

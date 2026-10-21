@@ -13,7 +13,7 @@ from app.agent.tools.outcome import (
     ToolNotFound,
     ToolOutcomeError,
 )
-from app.capabilities._errors import (
+from app.capabilities.errors import (
     CapabilityInvalidArg,
     CapabilityNotFound,
 )

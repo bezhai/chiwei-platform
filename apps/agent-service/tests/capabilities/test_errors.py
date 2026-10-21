@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.capabilities._errors import (
+from app.capabilities.errors import (
     CapabilityCallFailed,
     CapabilityError,
     CapabilityInvalidArg,
@@ -21,7 +21,6 @@ from app.capabilities._errors import (
     CapabilityRateLimited,
     CapabilityTimeout,
 )
-
 
 # ---------------------------------------------------------------------------
 # Base class behaviour

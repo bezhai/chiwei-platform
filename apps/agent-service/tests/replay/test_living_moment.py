@@ -38,7 +38,7 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from app.agent.prompts import PromptConfigError
-from app.capabilities._errors import CapabilityTimeout
+from app.capabilities.errors import CapabilityTimeout
 from app.infra.cst_time import CST
 from tests.replay import seeds
 from tests.replay.harness import Fail, ProcessKilled, Reply, Request, ToolUse

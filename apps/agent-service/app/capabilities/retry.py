@@ -32,7 +32,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import ParamSpec, TypeVar
 
-from app.capabilities._errors import (
+from app.capabilities.errors import (
     CapabilityCallFailed,
     CapabilityRateLimited,
     CapabilityTimeout,

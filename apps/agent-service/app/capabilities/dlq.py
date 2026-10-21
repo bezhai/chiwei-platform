@@ -30,7 +30,7 @@ from typing import Any, Literal
 
 import httpx
 
-from app.capabilities._errors import CapabilityCallFailed, CapabilityInvalidArg
+from app.capabilities.errors import CapabilityCallFailed, CapabilityInvalidArg
 from app.infra.rabbitmq_management import RabbitMQManagementClient
 from app.messaging.claims import AlreadySucceededError, delete_inflight
 from app.messaging.dead_letter_audit import (

@@ -28,7 +28,7 @@ from typing import Any
 import redis.exceptions
 from redis.asyncio import Redis
 
-from app.capabilities._errors import CapabilityCallFailed, CapabilityTimeout
+from app.capabilities.errors import CapabilityCallFailed, CapabilityTimeout
 
 logger = logging.getLogger(__name__)
 

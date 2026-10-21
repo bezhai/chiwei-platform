@@ -30,7 +30,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from app.agent.models import resolve_model_info
 from app.agent.neutral import Message, ToolDef
-from app.capabilities._errors import CapabilityTimeout
+from app.capabilities.errors import CapabilityTimeout
 
 # ---------------------------------------------------------------------------
 # How long one model call waits for the provider

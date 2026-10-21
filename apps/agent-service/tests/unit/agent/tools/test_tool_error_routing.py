@@ -17,7 +17,7 @@ import pytest
 
 from app.agent.tools._common import tool_error
 from app.agent.tools.outcome import ToolOutcomeError
-from app.capabilities._errors import (
+from app.capabilities.errors import (
     CapabilityCallFailed,
     CapabilityInvalidArg,
     CapabilityNotFound,

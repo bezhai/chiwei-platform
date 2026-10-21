@@ -34,7 +34,7 @@ from app.agent.core import Agent
 from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
 from app.agent.round import open_call
-from app.capabilities._errors import CapabilityTimeout
+from app.capabilities.errors import CapabilityTimeout
 from app.infra.propagation import Context
 
 LEVEL = LangfuseOtelSpanAttributes.OBSERVATION_LEVEL

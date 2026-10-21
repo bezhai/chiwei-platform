@@ -25,7 +25,7 @@ from pydantic import Field
 from app.agent.round import current_round
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
-from app.capabilities._errors import CapabilityInvalidArg
+from app.capabilities.errors import CapabilityInvalidArg
 from app.infra.cst_time import CST, now_cst
 from app.world.agents import when
 

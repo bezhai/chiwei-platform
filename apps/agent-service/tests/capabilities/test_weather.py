@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from app.capabilities import weather
-from app.capabilities._errors import CapabilityInvalidArg
+from app.capabilities.errors import CapabilityInvalidArg
 from app.infra import config
 
 from .qweather import (

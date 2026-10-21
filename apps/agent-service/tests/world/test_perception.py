@@ -15,7 +15,7 @@ import pytest
 from openai import InternalServerError
 
 import app.world
-from app.capabilities._errors import CapabilityTimeout
+from app.capabilities.errors import CapabilityTimeout
 from app.infra.cst_time import now_cst
 from app.manifests.world import QUERY_TOOLS
 from app.messaging.message import Kind, new_message

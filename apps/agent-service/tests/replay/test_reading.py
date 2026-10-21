@@ -46,7 +46,7 @@ from datetime import datetime
 
 import pytest
 
-from app.capabilities._errors import CapabilityTimeout
+from app.capabilities.errors import CapabilityTimeout
 from app.domain.reading_source import decode_pages
 from app.infra.cst_time import CST
 from app.infra.rabbitmq import ISOLATED_DEAD_LETTERS, lane_queue

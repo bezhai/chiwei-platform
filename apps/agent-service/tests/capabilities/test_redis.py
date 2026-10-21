@@ -20,12 +20,11 @@ import pytest
 import redis.exceptions
 
 from app.api.middleware import lane_var
-from app.capabilities._errors import (
+from app.capabilities.errors import (
     CapabilityCallFailed,
     CapabilityTimeout,
 )
 from app.capabilities.redis import RedisCapability
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

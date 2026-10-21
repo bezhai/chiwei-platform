@@ -290,7 +290,7 @@ async def test_tool_stacks_above_tool_error_swallows_failure():
 
 
 async def test_tool_error_invalid_args_routing_through_stack():
-    from app.capabilities._errors import CapabilityInvalidArg
+    from app.capabilities.errors import CapabilityInvalidArg
 
     @tool
     @tool_error("bad")

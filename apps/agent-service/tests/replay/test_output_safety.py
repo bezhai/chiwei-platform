@@ -19,7 +19,7 @@ from datetime import datetime
 
 import pytest
 
-from app.capabilities._errors import CapabilityCallFailed
+from app.capabilities.errors import CapabilityCallFailed
 from app.infra.cst_time import CST
 from tests.replay import seeds
 from tests.replay.harness import Fail, Reply, ToolUse
