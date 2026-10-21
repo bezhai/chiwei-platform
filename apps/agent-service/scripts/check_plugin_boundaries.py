@@ -12,8 +12,9 @@
 共享模块和这一边的包本身（``__init__.py``）只许 import 共享模块：共享模块 import 了哪个插件，
 用它的每个插件就都连上了那个插件；包本身在任何一个插件之前执行，它 import 的插件会被带进每个插件。
 living 和 world 的目录下除了插件目录只有共享模块：目录外多出来的模块是几个插件绕开服务共用的
-私下通道，也报出来。边以外的包（宿主、一轮、存储、消息……）不在这条规则里；living 和 world 互不
-import 由 ``scripts/check_world_life_imports.py`` 管。
+私下通道，也报出来。边以外的包（宿主、一轮、存储、消息……）不在这条规则里：插件能 import 它们的
+哪些部分由 ``scripts/check_framework_private.py`` 管；living 和 world 互不 import 由
+``scripts/check_world_life_imports.py`` 管。
 
 认 import 的方式和 ``scripts/check_world_life_imports.py`` 是同一套语法树扫描（函数里面的 import、
 相对 import、``importlib.import_module`` / ``__import__`` 的字符串字面量都算，docstring 和注释

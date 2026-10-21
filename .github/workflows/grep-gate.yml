@@ -314,6 +314,23 @@ jobs:
           # 只跑这一个文件，不是整套测试（整套要 docker 起 Postgres 和 RabbitMQ）。
           uv run --frozen pytest tests/plugins/test_manifests_resolve.py
 
+  framework-private:
+    name: Business code uses only what the framework exports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No framework-private module in business code, no private name across packages
+        shell: bash
+        working-directory: apps/agent-service
+        run: |
+          # 业务代码（app/living、app/world、app/plugins、app/nodes、app/skills、两个 App 的
+          # 清单）从宿主只 import app.host 包导出的名字，不 import app/host/ 下的模块，也不
+          # import app.agent.continuity、app.messaging.receiving、app.data.session：要的东西由
+          # 包导出（app.host、app.agent）或者由宿主交给插件（ctx）。app/ 下任何代码不从另一个
+          # 包 import 下划线开头的名字或模块。
+          # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_framework_private.py
+          python3 -m scripts.check_framework_private app
+
   plugin-boundaries:
     name: A plugin never imports another plugin
     runs-on: ubuntu-latest
