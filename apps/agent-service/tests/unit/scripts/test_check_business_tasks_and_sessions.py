@@ -46,6 +46,24 @@ STARTING_A_TASK = [
     ("from threading import Thread\nThread(target=print)", 1),
     ("import threading\nthreading.Timer(1, print).start()", 2),
     ("def later():\n    import asyncio\n    asyncio.create_task(work())", 3),
+    # 换了名字的模块和名字：import ... as、from ... import ... as、asyncio 的子模块、import *。
+    ("import threading as th\nth.Thread(target=print).start()", 2),
+    ("import threading as th\nth.Timer(1, print).start()", 2),
+    ("from threading import Thread as T\nT(target=print)", 1),
+    ("from threading import Timer as T\nT(1, print)", 1),
+    ("from threading import *\nThread(target=print)", 2),
+    ("import asyncio as aio\naio.create_task(work())", 2),
+    ("import asyncio as aio\naio.ensure_future(work())", 2),
+    ("import asyncio as aio\nasync def f():\n    async with aio.TaskGroup() as tg:\n        pass", 3),
+    ("import asyncio as aio\nloop = aio.get_running_loop()\nloop.create_task(work())", 3),
+    ("from asyncio import create_task as spawn\nspawn(work())", 1),
+    ("from asyncio import ensure_future as later\nlater(work())", 1),
+    ("from asyncio import TaskGroup as Group", 1),
+    ("from asyncio.tasks import create_task as spawn\nspawn(work())", 1),
+    ("from asyncio.tasks import ensure_future as later\nlater(work())", 1),
+    ("from asyncio.taskgroups import TaskGroup as Group", 1),
+    ("import asyncio.tasks as t\nt.create_task(work())", 2),
+    ("from asyncio import *\nasync def f():\n    async with TaskGroup() as tg:\n        pass", 3),
 ]
 
 
@@ -67,6 +85,13 @@ REACHING_THE_SESSION = [
     ("from app.data import tx", 1),
     ("import app.data.tx", 1),
     ("from ...data import tx", 1),
+    # 换了名字的。
+    ("from app.data.tx import current_session as cs\ncs()", 1),
+    ("from app.data import tx as t", 1),
+    ("from app import data\ndata.tx.current_session()", 2),
+    ("from app import data as d\nd.tx.current_session()", 2),
+    ("from ...data.tx import current_session as cs", 1),
+    ("from app.data.tx import *\ncurrent_session()", 2),
 ]
 
 
@@ -102,12 +127,19 @@ def test_waiting_on_work_and_the_transaction_function_are_allowed(tmp_path):
                     "import threading",
                     "from app.data.tx import tx",
                     "from app.data.persist import fetch_all",
+                    "import threading as th",
+                    "import asyncio as aio",
+                    "from threading import Event as Flag",
+                    "from app.data.tx import tx as transaction",
                     "lock = threading.Lock()",
+                    "other = th.Lock()",
+                    "flag = Flag()",
                     "# asyncio.ensure_future(x)",
                     "async def f():",
                     "    await asyncio.gather(a(), b())",
                     "    await asyncio.to_thread(print)",
                     "    await asyncio.wait_for(a(), 1)",
+                    "    await aio.gather(a(), b())",
                     "    async with tx():",
                     "        await fetch_all('SELECT 1')",
                 ]

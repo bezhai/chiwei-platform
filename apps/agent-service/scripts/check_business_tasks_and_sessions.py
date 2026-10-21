@@ -9,6 +9,10 @@
   ``ensure_future``、``asyncio.TaskGroup``；
 * ``threading.Thread``、``threading.Timer``。
 
+换了名字也一样：``import threading as th`` 之后的 ``th.Thread``、``from threading import Thread as T``、
+``from threading import *`` 之后的 ``Thread``，从 asyncio 的子模块（``asyncio.tasks``、
+``asyncio.taskgroups``）import 的，都按 import 解析回完整名字再判。
+
 等着的并发照常：``await asyncio.gather(...)``、``await asyncio.to_thread(...)``、``asyncio.wait_for``
 在这一轮里等到结束，不留下后台的东西。
 
@@ -40,8 +44,11 @@ BUSINESS: tuple[str, ...] = ("living", "world", "plugins", "nodes", "skills")
 
 # 起一个后台任务的名字（调用的函数名或方法名、import 进来的名字）。
 _TASK_STARTERS = frozenset({"create_task", "ensure_future", "TaskGroup"})
-# ``threading`` 里起一个线程的名字。
-_THREAD_STARTERS = frozenset({"Thread", "Timer"})
+# 起任务或线程的模块（连同子模块，``asyncio.tasks`` 算 ``asyncio``）和其中起任务、线程的名字。
+_STARTERS: dict[str, frozenset[str]] = {
+    "asyncio": _TASK_STARTERS,
+    "threading": frozenset({"Thread", "Timer"}),
+}
 
 _TASKS = "starts a task or a thread; hand background work to the host (ctx.task, ctx.clock)"
 _SESSION = (
@@ -50,14 +57,56 @@ _SESSION = (
 )
 
 
+def _starters_in(module: str) -> frozenset[str]:
+    """``module``（或它所在的顶层包）里起任务、线程的名字；不是这样的模块时为空。"""
+    return _STARTERS.get(module.split(".")[0], frozenset())
+
+
+def _bindings(tree: ast.AST, parts: list[str], is_package: bool) -> dict[str, str]:
+    """文件里 import 绑定的名字指向的完整名字：``import a.b`` 绑定 ``a``，``import a.b as x`` 把
+    ``x`` 绑到 ``a.b``，``from m import n as k`` 把 ``k`` 绑到 ``m.n``，``from m import *`` 绑定 ``m``
+    里起任务、线程的那几个名字。不分作用域：同一个文件里一个名字指两样东西的情况不管。"""
+    bound: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    bound[alias.asname] = alias.name
+                else:
+                    top = alias.name.split(".")[0]
+                    bound[top] = top
+        elif isinstance(node, ast.ImportFrom):
+            base = resolve_from(parts, is_package, node)
+            for alias in node.names:
+                if alias.name == "*":
+                    bound.update({name: f"{base}.{name}" for name in _starters_in(base)})
+                else:
+                    bound[alias.asname or alias.name] = f"{base}.{alias.name}"
+    return bound
+
+
+def _qualified(node: ast.expr, bound: dict[str, str]) -> str | None:
+    """``x.y.z`` 这样的表达式按 import 解析出的完整名字；开头的名字不是 import 来的时为 ``None``。"""
+    if isinstance(node, ast.Name):
+        return bound.get(node.id)
+    if isinstance(node, ast.Attribute):
+        base = _qualified(node.value, bound)
+        return f"{base}.{node.attr}" if base is not None else None
+    return None
+
+
+def _starts_something(qualified: str) -> bool:
+    module, _, name = qualified.rpartition(".")
+    return name in _starters_in(module)
+
+
 def _problems(tree: ast.AST, parts: list[str], is_package: bool) -> Iterator[tuple[int, str]]:
+    bound = _bindings(tree, parts, is_package)
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             base = resolve_from(parts, is_package, node)
             names = {alias.name for alias in node.names}
-            if base == "asyncio" and names & _TASK_STARTERS:
-                yield node.lineno, _TASKS
-            elif base == "threading" and names & _THREAD_STARTERS:
+            if names & _starters_in(base):
                 yield node.lineno, _TASKS
             elif base == "app.data.tx" and "current_session" in names:
                 yield node.lineno, _SESSION
@@ -67,20 +116,19 @@ def _problems(tree: ast.AST, parts: list[str], is_package: bool) -> Iterator[tup
             if any(alias.name == "app.data.tx" for alias in node.names):
                 yield node.lineno, _SESSION
         elif isinstance(node, ast.Attribute):
-            if node.attr in _TASK_STARTERS:
-                yield node.lineno, _TASKS
-            elif (
-                node.attr in _THREAD_STARTERS
-                and isinstance(node.value, ast.Name)
-                and node.value.id == "threading"
-            ):
+            qualified = _qualified(node, bound)
+            # 任何东西上的 create_task（loop、TaskGroup 实例）都算；Thread、Timer 只算 threading 的。
+            if node.attr in _TASK_STARTERS or (qualified and _starts_something(qualified)):
                 yield node.lineno, _TASKS
             elif node.attr == "current_session":
                 yield node.lineno, _SESSION
-        elif isinstance(node, ast.Name):
-            if node.id in {"create_task", "ensure_future"} and isinstance(node.ctx, ast.Load):
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            qualified = _qualified(node, bound)
+            if node.id in {"create_task", "ensure_future"} or (
+                qualified and _starts_something(qualified)
+            ):
                 yield node.lineno, _TASKS
-            elif node.id == "current_session" and isinstance(node.ctx, ast.Load):
+            elif node.id == "current_session":
                 yield node.lineno, _SESSION
 
 
