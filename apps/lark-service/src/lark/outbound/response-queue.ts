@@ -11,8 +11,8 @@
 // 静默写脏另一个服务的台账。
 //
 // 拒绝用 `nack(requeue=false)`：requeue 只是把消息原样退回这条队列，下一轮还是本
-// 进程拿到，同一条消息在这里转圈；prod 队列挂着 DLX，丢进 dead_letters 还能查、
-// 能重放。
+// 进程拿到，同一条消息在这里转圈；prod 队列挂着 DLX，拒绝的消息进 dead_letters 并
+// 一直留在那里（仓库里没有查看或重放它的工具）。
 //
 // **没写 channel 的 payload 一样拒绝，不兜底成飞书**：这里的"没有 channel"不可能是
 // 历史遗留。这条队列唯一的生产者是 agent-service 的 sink_dispatch，它算 rk 走
@@ -119,7 +119,8 @@ export function larkChatResponseBinding(deps: LarkResponseConsumerDeps): Outboun
                 await deps.deliver(response, laneFromMessage(msg));
             } catch (error) {
                 // deliver 只在**还没调过飞书 API** 时才往外抛（分界线见 deliver.ts
-                // 文件头）。此时消息没发出去，丢进 DLQ 可查可重放。
+                // 文件头）。此时消息没发出去，拒绝后进 dead_letters 并一直留在那里
+                // （仓库里没有查看或重放它的工具）。
                 console.error(`[lark-outbound] ${queue} failed before any side effect:`, error);
                 deps.amqp.nack(msg, false);
                 return;

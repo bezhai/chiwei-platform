@@ -247,7 +247,7 @@ describe('fail-closed — 不是飞书的撤回一律拒绝', () => {
             await c.push(message('m1', payload({ channel })));
 
             // requeue 只是把消息原样退回这条队列，下一轮还是本进程拿到，在这里转圈；
-            // prod 队列挂着 DLX，丢过去还能查、能重放。
+            // prod 队列挂着 DLX，拒绝的消息进 dead_letters 并一直留在那里。
             expect(c.amqp.nacked).toEqual([{ id: 'm1', requeue: false }]);
             expect(c.amqp.acked).toEqual([]);
             expect(traced.touched).toEqual([]);

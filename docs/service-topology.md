@@ -244,7 +244,7 @@ flowchart LR
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark`,发飞书回复与撤回 |
 | channel-server | **channel-server** | HTTP,QQ 入站(`POST /api/internal/qq/inbound`) |
 | channel-server | **chat-response-worker** | 消费 `chat_response_qq`,经 qq-gateway 发 QQ 回复 |
-| agent-service | **agent-service** | HTTP(健康检查 + admin/DLQ + 通信机制人工入口)+ 插件宿主上的 life 引擎(五条钟 + 三姐妹和读书的收件箱);不挂 world 的卷 |
+| agent-service | **agent-service** | HTTP(健康检查 + 通信机制人工入口 + 读书队列的一次性搬运)+ 插件宿主上的 life 引擎(五条钟 + 三姐妹和读书的收件箱);不挂 world 的卷 |
 | agent-service | **world** | world 引擎:只通过通信机制跟其他参与者交流(收件箱 `world` 收消息、答提问 + 定时送达 + 发给参与者的告知),私有记录放在只挂给它的卷上;HTTP 上是健康检查和记录的人工读写接口 `/admin/world/records*`。不是 sibling,单独发布(`make deploy APP=world`) |
 | 其余 10 个 | 各自 1 个同名 Deployment | — |
 
@@ -303,7 +303,7 @@ flowchart LR
 
 ### 1. agent-service 主进程承担过多
 
-一个 Deployment 里同时跑着 admin/DLQ 管理 HTTP、五条钟、三个角色各自的一轮,以及读书收件箱上的「读一程」。后面几件都是模型重活,共享同一份 CPU 和同一个进程生命周期——部署一次就把所有正在跑的轮次和读书一起杀掉。
+一个 Deployment 里同时跑着运维 HTTP(通信机制人工入口)、五条钟、三个角色各自的一轮,以及读书收件箱上的「读一程」。后面几件都是模型重活,共享同一份 CPU 和同一个进程生命周期——部署一次就把所有正在跑的轮次和读书一起杀掉。
 
 ### 2. paas-engine 是个「全能控制面」
 

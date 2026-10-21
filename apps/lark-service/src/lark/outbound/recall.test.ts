@@ -790,8 +790,8 @@ describe('撤主动消息 — 删掉了但没记下撤回时刻', () => {
         expect(outcome).toEqual({ kind: 'settled', status: 'recalled', recalled: 1, failed: 0 });
     });
 
-    it('重投到顶还是写不下去：交给死信 —— 留一条能把它补上的路', async () => {
-        // 死信里那条能查、能重放；一行日志不能。
+    it('重投到顶还是写不下去：交给死信，消息连同正文留下来', async () => {
+        // 消息连同正文留在 dead_letters 里；一行日志留不下正文。
         const h = harness();
         h.store.spokenRows.set(OUTBOUND_UUID, [spoken('cm_p')]);
         h.mapping.set('cm_p', 'om_p');
@@ -844,7 +844,7 @@ describe('撤主动消息 — 删掉了但没记下撤回时刻', () => {
     });
 
     it('每一段都已经记过撤回时刻：一个飞书接口都不调，直接算撤完了', async () => {
-        // 同一条撤回被投递两次（并发消费、或者死信重放）时的样子。照会话那条链的
+        // 同一条撤回被投递两次（并发消费，或者 ack 之前连接断了、broker 重新投递）时的样子。照会话那条链的
         // 终态短路来 —— 主动消息没有台账行，这一列就是它唯一的终态。
         const h = harness();
         h.store.spokenRows.set(OUTBOUND_UUID, [

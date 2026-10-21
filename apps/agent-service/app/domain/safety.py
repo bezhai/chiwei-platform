@@ -16,7 +16,7 @@ from app.data.schema import Data, Key
 class PreSafetyRequest(Data):
     """Pre-safety check 请求（chat pipeline 内部触发）。
 
-    pre_request_id 每次 pre-check 独立 uuid4，避免并发 / DLQ replay 时
+    pre_request_id 每次 pre-check 独立 uuid4，避免并发时
     waiter Future 互相覆盖。跟 session_id 完全解耦。
     """
     pre_request_id: Annotated[str, Key]

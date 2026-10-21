@@ -13,7 +13,8 @@
 // 暴露，而不是静默写脏另一个服务的台账。
 //
 // 拒绝用 `nack(requeue=false)`：requeue 只是把消息原样退回这条队列，下一轮还是本进程
-// 拿到，同一条消息在这里转圈；prod 队列挂着 DLX，丢进 dead_letters 还能查、能重放。
+// 拿到，同一条消息在这里转圈；prod 队列挂着 DLX，拒绝的消息进 dead_letters 并一直留在
+// 那里（仓库里没有查看或重放它的工具）。
 //
 // **没写 channel 的 payload 一样拒绝，不兜底成飞书**：撤回也是 channel 分区的队列，
 // agent-service 那侧同样用 `channel_route_for_payload` 算 rk，payload 缺 channel 时

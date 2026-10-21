@@ -25,7 +25,7 @@ apps/
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark`，发飞书消息和撤回 |
 | channel-server | **channel-server** | QQ 入站 HTTP（`POST /api/internal/qq/inbound`，由 qq-gateway 投递） |
 | channel-server | **chat-response-worker** | 消费 QQ 回复队列，经 qq-gateway 发出 |
-| agent-service | **agent-service** | 生活引擎，不消费任何入站队列；另有运维 HTTP（health、admin DLQ） |
+| agent-service | **agent-service** | 生活引擎，不消费任何入站队列；另有运维 HTTP：health；`/admin/messaging/*`，以运维身份给参与者发消息、查通信记录和死信；`/admin/reading/carry-over`，把旧读书队列里的消息一次性搬进读书收件箱 |
 | agent-service | **world** | world 引擎，独立 App：只通过通信机制（具名收件箱 + 定时送达）和其他参与者交流。不是 sibling，单独部署 `make deploy APP=world`；日志用 `make logs APP=world`，不在 `APP=agent-service` 里 |
 
 飞书消息发送失败查 `make logs APP=lark-outbound`，QQ 查 `APP=chat-response-worker`，不是查 `lark-service` / `channel-server`。
