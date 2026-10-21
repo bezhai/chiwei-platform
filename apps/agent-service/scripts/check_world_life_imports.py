@@ -1,10 +1,10 @@
-"""CI 规则：``app/world/`` 与 ``app/living/`` 互不 import，两个方向都不行；两边各自的插件
-（``app/plugins/world.py``、``app/plugins/living.py``）也一样。
+"""CI 规则：``app/world/`` 与 ``app/living/`` 互不 import，两个方向都不行；两个 App 各自的清单
+（``app/manifests/world.py``、``app/manifests/agent_service.py``）也一样。
 
 world 和三姐妹的 life 是两个独立的引擎，唯一的连接是通信机制（``app.messaging``）。一个 App
-的进程只起它清单里的插件（``app.deployment.APPS``），所以 world 的插件带进 life 的代码，world
-的进程就背上了 life，反过来也一样。这条规则扫这些文件每一个 ``.py`` 的语法树，找出指向另一边的
-import：
+的进程只起它清单里的插件（``app.deployment.APPS`` 指向清单模块），清单模块又 import 插件模块里的
+agent 定义，所以 world 的插件或清单带进 life 的代码，world 的进程就背上了 life，反过来也一样。
+这条规则扫这些文件每一个 ``.py`` 的语法树，找出指向另一边的 import：
 
 * ``import app.living...`` / ``from app.living... import ...`` / ``from app import living``；
 * 相对 import（按文件所在的包解析成绝对模块名再判）；
@@ -12,7 +12,8 @@ import：
   里写成字符串字面量的模块名。
 
 判的是 import，不是文字：docstring 和注释里提到另一边的路径不算。规则之外的代码（基础层、
-别的插件）不在这条规则里。
+``app/plugins/`` 下两边都不属于的插件、两份清单共用的 ``app/manifests/history.py``）不在这条规则里。
+规则列的目录或文件不存在也算违规：它们搬走以后规则什么也扫不到、一直通过，这种情况要改规则。
 
 用法：``python3 scripts/check_world_life_imports.py [app 目录]``，默认是本脚本旁边的
 ``app/``。有违规时逐条打印 ``文件:行号`` 并以 1 退出。只用标准库，CI 上不装依赖直接跑。
@@ -25,8 +26,8 @@ from pathlib import Path
 
 # 哪一边的代码（``app`` 目录下的目录或文件）不许 import 哪一边。
 FORBIDDEN: tuple[tuple[str, tuple[str, ...], str], ...] = (
-    ("world", ("world", "plugins/world.py"), "app.living"),
-    ("life", ("living", "plugins/living.py"), "app.world"),
+    ("world", ("world", "manifests/world.py"), "app.living"),
+    ("life", ("living", "manifests/agent_service.py"), "app.world"),
 )
 
 _DYNAMIC_IMPORTERS = {"import_module", "__import__"}
@@ -82,6 +83,12 @@ def find_violations(root: Path) -> list[str]:
     root = root.resolve()
     violations: list[str] = []
     for side, places, forbidden in FORBIDDEN:
+        for place in places:
+            if not (root / place).exists():
+                violations.append(
+                    f"{root.name}/{place}: {side} code is listed here but it does not exist "
+                    f"(update FORBIDDEN in scripts/check_world_life_imports.py)"
+                )
         for path in _python_files(root, places):
             module_parts, is_package = module_name(root, path)
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -97,7 +104,7 @@ def find_violations(root: Path) -> list[str]:
 
 
 def _python_files(root: Path, places: tuple[str, ...]) -> list[Path]:
-    """``places`` 下的 ``.py``：目录取其中每一个，文件取它自己；不存在的跳过。"""
+    """``places`` 下的 ``.py``：目录取其中每一个，文件取它自己（不存在的由调用方报出）。"""
     files: list[Path] = []
     for place in places:
         path = root / place

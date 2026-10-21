@@ -1,9 +1,9 @@
-"""CI 规则：``app/world/`` 与 ``app/living/`` 互不 import（双向），两边的插件也一样：
-``app/plugins/world.py`` 不 import life，``app/plugins/living.py`` 不 import world。
+"""CI 规则：``app/world/`` 与 ``app/living/`` 互不 import（双向），两个 App 的清单也一样：
+``app/manifests/world.py`` 不 import life，``app/manifests/agent_service.py`` 不 import world。
 
 规则本身在 ``scripts/check_world_life_imports.py``，CI（``.github/workflows/grep-gate.yml``）
-直接跑它。这里用临时目录造出每一种写法的违规，证明它真的会拦；再对真实代码树跑一遍，
-证明现在是干净的。
+直接跑它。这里用临时目录造出每一种写法的违规，证明它真的会拦；规则里列的目录或文件不在了也
+报出来，不静默跳过；再对真实代码树跑一遍，证明现在是干净的。
 """
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ def _tree(tmp_path: Path, files: dict[str, str]) -> Path:
         "__init__.py": "",
         "world/__init__.py": "",
         "living/__init__.py": "",
+        "manifests/__init__.py": "",
+        "manifests/world.py": "",
+        "manifests/agent_service.py": "",
         **files,
     }.items():
         path = root / rel
@@ -118,24 +121,45 @@ def test_look_alike_names_are_not_the_other_side(tmp_path):
 
 
 @pytest.mark.parametrize("source", WORLD_REACHING_INTO_LIFE)
-def test_the_world_plugin_importing_life_is_caught(tmp_path, source):
-    """world 的进程只起 world 的插件：插件带进 life 的代码，world 的进程就背上了 life。"""
-    root = _tree(tmp_path, {"plugins/__init__.py": "", "plugins/world.py": source})
+def test_the_world_manifest_importing_life_is_caught(tmp_path, source):
+    """world 的进程按 world 的清单起插件：清单带进 life 的代码，world 的进程就背上了 life。"""
+    root = _tree(tmp_path, {"manifests/world.py": source})
 
     violations = find_violations(root)
 
     assert len(violations) == 1, violations
-    assert "plugins/world.py" in violations[0]
+    assert "manifests/world.py" in violations[0]
 
 
 @pytest.mark.parametrize("source", LIFE_REACHING_INTO_WORLD)
-def test_the_living_plugin_importing_world_is_caught(tmp_path, source):
-    root = _tree(tmp_path, {"plugins/__init__.py": "", "plugins/living.py": source})
+def test_the_agent_service_manifest_importing_world_is_caught(tmp_path, source):
+    root = _tree(tmp_path, {"manifests/agent_service.py": source})
 
     violations = find_violations(root)
 
     assert len(violations) == 1, violations
-    assert "plugins/living.py" in violations[0]
+    assert "manifests/agent_service.py" in violations[0]
+
+
+@pytest.mark.parametrize(
+    "gone", ["world", "living", "manifests/world.py", "manifests/agent_service.py"]
+)
+def test_a_listed_place_that_no_longer_exists_is_reported(tmp_path, gone):
+    """规则列的目录或文件搬走了，规则就什么也不扫、一直通过；所以列了而不存在的也算违规。"""
+    root = _tree(tmp_path, {})
+    target = root / gone
+    if target.is_dir():
+        for path in sorted(target.rglob("*"), reverse=True):
+            path.unlink() if path.is_file() else path.rmdir()
+        target.rmdir()
+    else:
+        target.unlink()
+
+    violations = find_violations(root)
+
+    assert len(violations) == 1, violations
+    assert f"app/{gone}" in violations[0]
+    assert "does not exist" in violations[0]
 
 
 def test_everyone_else_may_import_both(tmp_path):
