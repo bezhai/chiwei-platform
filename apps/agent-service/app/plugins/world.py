@@ -1,18 +1,19 @@
 """world App 的核心插件：主 agent 的一轮、``world`` 收件箱。world 的清单（:mod:`app.manifests.world`）
 只有它、记录的两个插件（:mod:`app.world.records`：查询工具一个，写记录、记录目录和人工读写接口一个）、
-现实的插件（:mod:`app.world.reality`）、知识来源 told 的插件（:mod:`app.world.told`）和感知判断的
-插件（:mod:`app.world.perception`），所以 world 的进程不加载 life 的任何代码。
+现实的插件（:mod:`app.world.reality`）、知识来源 told 的插件（:mod:`app.world.told`）、感知判断的
+插件（:mod:`app.world.perception`）和 NPC 的插件（:mod:`app.world.npc`），所以 world 的进程不加载
+life 的任何代码。
 
 **主 agent 的一轮**（:mod:`app.world.main_agent`），清单 ``world`` 排它们的位置：
 
-  segments (``ctx.segment``)   world_round 的几段，一轮里调的 world_npc，以及一轮之外调的
-                               world_answer
-  tools (``ctx.tool``)         wake_me_at、let_npc_appear（都 kept）
+  segments (``ctx.segment``)   world_round 的几段，以及一轮之外调的 world_answer
+  tools (``ctx.tool``)         wake_me_at（kept）
   input sections               wake.woken_by、wake.planned
   check                        wake.chosen              没定下次醒来，这一轮失败
   after the commit             history、wake.next（都 FailRound）
 
-报告变化、没跑完的一轮的补发和清空是感知判断插件的（``perception`` 服务，NPC 出场之后也经它告知）。
+报告变化、没跑完的一轮的补发和清空是感知判断插件的，让 NPC 出场是 NPC 插件的（它经感知判断插件的
+``perception`` 服务告知）。
 
 插件起来时向宿主要组好的 ``world``（``ctx.profile``），收件箱来源跑一轮时交给
 :func:`app.world.main_agent.run_inbox_round`。
@@ -39,7 +40,6 @@ from functools import partial
 
 from app.agent.contracts import FailRound
 from app.agent.round import store_history
-from app.agent.tooling import tool
 from app.host import Context, Plugin
 from app.world.actions import wake_me_at
 from app.world.agents import WORLD, world_segments
@@ -54,15 +54,13 @@ from app.world.main_agent import (
     set_the_next_wake,
     woken_by,
 )
-from app.world.npc import NPC, Npcs
 from app.world.rounds import Rounds
-from app.world.services import Perception
 from app.world.volume import writer_lock
 from app.world.wake import retry_latest_wake_without_limit, wake_on_start
 
-# 主 agent 的 prompt 里由这个插件登记的那几段；别的段（写记录、现实、报告变化、没跑完的一轮）
+# 主 agent 的 prompt 里由这个插件登记的那几段；别的段（写记录、现实、报告变化、NPC、没跑完的一轮）
 # 由各自的插件登记。
-_ROUND_SEGMENTS = tuple(f"{ROUND}/{name}" for name in ("core", "npc", "wake", "order"))
+_ROUND_SEGMENTS = tuple(f"{ROUND}/{name}" for name in ("core", "wake", "order"))
 
 
 def setup(ctx: Context) -> None:
@@ -94,12 +92,9 @@ def setup(ctx: Context) -> None:
 
 def _the_round(ctx: Context) -> None:
     """主 agent 的一轮由什么组成；清单 ``world`` 排它们的位置。"""
-    for segment in world_segments(*_ROUND_SEGMENTS, NPC, ANSWER).values():
+    for segment in world_segments(*_ROUND_SEGMENTS, ANSWER).values():
         ctx.segment(segment)
-    perception: Perception = ctx.service("perception")
-    npcs = Npcs(ctx.agent(NPC), perception)
-    for action in (wake_me_at, tool(npcs.let_npc_appear)):
-        ctx.tool(action, trim="kept")
+    ctx.tool(wake_me_at, trim="kept")
     ctx.section("wake.woken_by", woken_by)
     ctx.section("wake.planned", planned_wake)
     ctx.check("wake.chosen", next_wake_chosen)
@@ -107,6 +102,4 @@ def _the_round(ctx: Context) -> None:
     ctx.after_commit("wake.next", set_the_next_wake, on_failure=FailRound())
 
 
-PLUGIN = Plugin(
-    name="world", setup=setup, requires=("perception",), provides=("world_intake",)
-)
+PLUGIN = Plugin(name="world", setup=setup, provides=("world_intake",))

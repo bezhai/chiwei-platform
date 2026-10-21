@@ -1,4 +1,6 @@
-"""NPC agent：主 agent 让某个 NPC 在一次互动里出场，一个临时 agent 扮演他，给出他说的话、做的事。
+"""插件 ``npc``：主 agent 让某个 NPC 在一次互动里出场，一个临时 agent 扮演他，给出他说的话、做的事。
+它登记让 NPC 出场的动作（:meth:`Npcs.let_npc_appear`）、NPC agent 的 prompt 和主 agent 的 prompt 里
+讲 NPC 的那一段（``world_round/npc``），用 ``perception`` 服务判断谁会察觉、记下并告知。
 
 **NPC 的言行不经主 agent 转述。** 主 agent 只说让谁出场、在什么情境下
 （:meth:`Npcs.let_npc_appear`）；扮演他的 agent 依据各知识来源（他是谁、他在的
@@ -25,15 +27,27 @@ from pydantic import Field
 from app.agent.neutral import Message as Turn
 from app.agent.neutral import Role
 from app.agent.round import AssembledAgent, current_round, open_call
+from app.agent.tooling import tool
+from app.host import Context, Plugin
 from app.infra.cst_time import now_cst
 from app.messaging.message import message_body
-from app.world.agents import lane, not_done, run_agent, when, world_agent
+from app.world.agents import (
+    lane,
+    not_done,
+    run_agent,
+    when,
+    world_agent,
+    world_segments,
+)
 from app.world.services import Perception
 
 logger = logging.getLogger(__name__)
 
 NPC = "world_npc"
 NPC_AGENT = world_agent(NPC, "world-npc", "world_npc_model")
+
+# 主 agent 的 prompt 里讲 NPC 的那一段（Langfuse id）。
+NPC_SEGMENT = "world_round/npc"
 
 
 def _npc_input(npc: str, situation: str) -> str:
@@ -112,3 +126,14 @@ class Npcs:
             f"你让 {name} 出场，情境：{situation}\n{words}", notices
         )
         return f"{words}\n\n{told}"
+
+
+def setup(ctx: Context) -> None:
+    perception: Perception = ctx.service("perception")
+    npcs = Npcs(ctx.agent(NPC), perception)
+    for segment in world_segments(NPC, NPC_SEGMENT).values():
+        ctx.segment(segment)
+    ctx.tool(tool(npcs.let_npc_appear), trim="kept")
+
+
+PLUGIN = Plugin(name="npc", setup=setup, requires=("perception",))

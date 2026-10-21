@@ -5,14 +5,17 @@
 """
 from __future__ import annotations
 
+from app.agent.round import AssembledAgent
 from app.manifests.world import QUERY_TOOLS
 from app.messaging.message import Kind, new_message
 from app.world import npc, perception
 from app.world.agents import when
+from app.world.services import Notice
 
 from .conftest import (
     LANE,
     ScriptedAgent,
+    in_world_round,
     sets_wake,
     spec_called,
     tools_built_for,
@@ -64,6 +67,58 @@ async def _a_round(world, plan):
     world.runner.plan = plan
     await world.deliver(TRIGGER)
     return plan.results
+
+
+# ---------------------------------------------------------------------------
+# 插件
+# ---------------------------------------------------------------------------
+
+
+async def test_npc_registers_its_agent_its_segment_and_let_npc_appear(app_host):
+    """插件 ``npc``：NPC agent 的 prompt、主 agent 的 prompt 里讲 NPC 的那一段、让 NPC 出场的动作；
+    它用 ``perception`` 服务判断谁会察觉、记下并告知。"""
+    host = await app_host("world")
+    registered = [(r.kind, r.name) for r in host.registered() if r.plugin == "npc"]
+
+    assert registered == [
+        ("segment", "world_npc"),
+        ("segment", "world_round/npc"),
+        ("tool", "let_npc_appear"),
+    ]
+    assert npc.PLUGIN.requires == ("perception",)
+
+
+class _Perception:
+    """``perception`` 服务的替身：判断一个人会察觉，记下判断了什么、告知了什么。"""
+
+    def __init__(self) -> None:
+        self.judged: list[tuple[str, tuple]] = []
+        self.told: list[tuple[str, list[Notice]]] = []
+
+    async def judge_who_notices(self, change, *, round_messages):
+        self.judged.append((change, tuple(round_messages)))
+        return [Notice(who="ayana", what=change, wakes_recipient=True, message_id="n-1")]
+
+    async def tell(self, what, notices):
+        self.told.append((what, list(notices)))
+        return "告知了 ayana。"
+
+
+async def test_an_appearance_is_judged_and_told_through_the_perception_service(world):
+    world.agents[npc.NPC] = plays(LINES)
+    stand_in = _Perception()
+    npcs = npc.Npcs(
+        AssembledAgent(app="world", name=npc.NPC, spec=npc.NPC_AGENT, assembled=True), stand_in
+    )
+
+    with in_world_round([TRIGGER]):
+        result = await npcs.let_npc_appear(npc="美术老师", situation=SITUATION)
+
+    assert stand_in.judged == [(LINES, (TRIGGER,))]
+    [(what, notices)] = stand_in.told
+    assert what == f"你让 美术老师 出场，情境：{SITUATION}\n【美术老师 这一次的言行】\n{LINES}"
+    assert [n.message_id for n in notices] == ["n-1"]
+    assert result == f"【美术老师 这一次的言行】\n{LINES}\n\n告知了 ayana。"
 
 
 async def test_what_the_resident_is_told_comes_from_the_npc_agent_not_the_main_agent(world):

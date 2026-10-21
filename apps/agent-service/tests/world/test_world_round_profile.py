@@ -59,7 +59,7 @@ async def test_the_world_profile_places_what_world_and_its_three_sources_registe
         ("write_record", "record_keeping", "kept"),
         ("wake_me_at", "world", "kept"),
         ("report_change", "perception", "kept"),
-        ("let_npc_appear", "world", "kept"),
+        ("let_npc_appear", "npc", "kept"),
     ]
     assert not any(t.value.ends_round for t in p.tools)
     assert sorted(p.segments) == sorted(
@@ -74,6 +74,7 @@ async def test_the_world_profile_places_what_world_and_its_three_sources_registe
         for name in ("report-change", "unfinished")
     } == {"report-change": "perception", "unfinished": "perception"}
     assert p.segments["world_perception"].plugin == "perception"
+    assert p.segments["world_npc"].plugin == p.segments["world_round/npc"].plugin == "npc"
     assert [(s.name, s.plugin) for s in p.round_start] == [("unfinished.resend", "perception")]
     assert [(s.name, s.plugin) for s in p.input] == [
         ("wake.woken_by", "world"),
