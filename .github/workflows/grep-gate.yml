@@ -157,15 +157,8 @@ jobs:
             grep -nE "app\.data\.session|from app\.data import (.*[ ,])?session\b|get_session|AsyncSession" \
               $OUTSIDE_DATA || true
             echo "Gap 13 violation: $c session uses outside app/data"; exit 1; }
-          # ``current_session`` 是 app/data 和框架（messaging）自己用的：业务包拿到它就能
-          # 在 tx() 里跑任意语句，绕开 persist 的那几个函数。``from app.data import tx`` 拿到的是
-          # 整个模块，同样够得着它。
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
-                    apps/agent-service/app/world/)
-          c=$(grep -rnE "from app\.data\.tx import.*current_session|from app\.data import.*\btx\b|current_session\(" \
-              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c current_session uses in business"; exit 1; }
+          # 业务代码也够不着事务里的会话（current_session、整个 app.data.tx 模块）：由
+          # business-tasks-and-sessions 那个 job 按语法树查，报出文件和行。
       - name: Gap 14 — no Redis primitives in business code
         shell: bash
         run: |
@@ -199,7 +192,7 @@ jobs:
           [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c HTTPClient direct imports in business"; exit 1; }
 
   open-gap-baseline:
-    name: Open-gap baseline no-new (Gap 7 insert_idempotent / 16 / 19)
+    name: Open-gap baseline no-new (Gap 7 insert_idempotent / 16)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -239,15 +232,6 @@ jobs:
                   r"import httpx|from httpx",
                   BUSINESS,
                   ["agent/adapters/"],
-              ),
-              # 现在是 0，但留在 baseline 里而不是升成 exact-zero：归零是上一版
-              # 实现被删掉的副产物，没有人做过迁移。app/agent/ 那批工具重新接
-              # 回来时它可能又不是 0，那时候该是一次显式的判断，不是一次"CI 突然
-              # 红了"。
-              "gap_19_create_task_business": (
-                  r"asyncio\.create_task|asyncio\.ensure_future",
-                  BUSINESS,
-                  [],
               ),
           }
           fail = False
@@ -294,6 +278,22 @@ jobs:
           # 上层（存储和消息 < agent 层 < 宿主 < 插件），宿主和 agent 层不 import 任何插件。
           # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_package_cycles.py
           python3 -m scripts.check_package_cycles app
+
+  business-tasks-and-sessions:
+    name: Business code starts no task and reaches no session
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No create_task / ensure_future / TaskGroup / threads, no current_session in business code
+        shell: bash
+        working-directory: apps/agent-service
+        run: |
+          # 业务代码（app/living、app/world、app/plugins、app/nodes、app/skills）要在后台跑的
+          # 东西交给宿主（ctx.task、ctx.clock），宿主停下时取消、等它们收尾；等着的 gather、
+          # to_thread 照常。数据库会话只有存储碰：业务不碰 current_session，不 import 整个
+          # app.data.tx 模块。原来的 Gap 13 业务那一半和 open-gap 的 gap_19 并进了这一条。
+          # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_business_tasks_and_sessions.py
+          python3 -m scripts.check_business_tasks_and_sessions app
 
   plugin-boundaries:
     name: A plugin never imports another plugin

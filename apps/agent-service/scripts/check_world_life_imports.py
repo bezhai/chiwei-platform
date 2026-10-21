@@ -42,7 +42,8 @@ def module_name(root: Path, path: Path) -> tuple[list[str], bool]:
     return parts, False
 
 
-def _resolve_from(module_parts: list[str], is_package: bool, node: ast.ImportFrom) -> str:
+def resolve_from(module_parts: list[str], is_package: bool, node: ast.ImportFrom) -> str:
+    """``from ... import`` 的那个模块的完整名字：相对 import 按文件所在的包解析。"""
     if node.level == 0:
         return node.module or ""
     package = module_parts if is_package else module_parts[:-1]
@@ -61,7 +62,7 @@ def imported_names(tree: ast.AST, module_parts: list[str], is_package: bool):
             for alias in node.names:
                 yield node.lineno, [alias.name]
         elif isinstance(node, ast.ImportFrom):
-            base = _resolve_from(module_parts, is_package, node)
+            base = resolve_from(module_parts, is_package, node)
             yield node.lineno, [base, *(f"{base}.{a.name}" for a in node.names)]
         elif isinstance(node, ast.Call):
             func = node.func
