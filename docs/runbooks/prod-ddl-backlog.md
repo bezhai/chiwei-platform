@@ -219,6 +219,12 @@ only so a schema diff does not read as a discrepancy.
 `data_life_state`, `data_notebook_entry`, `data_reading_triggered`,
 `data_relationship_page`.
 
+The eight request/response tables of the deleted `/admin/dlq/*` routes are on the same
+footing: `data_dlq_inspect_request`, `data_dlq_inspect_response`,
+`data_dlq_dry_run_request`, `data_dlq_dry_run_response`, `data_dlq_requeue_request`,
+`data_dlq_requeue_response`, `data_dlq_clear_idempotent_request`,
+`data_dlq_clear_idempotent_response`.
+
 The old world's tables used to be on this list; they are now scheduled for a drop
 under Pending.
 
