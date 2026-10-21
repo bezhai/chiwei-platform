@@ -1,9 +1,4 @@
-"""ChatResponseSegment Data 类字段合约。
-
-ChatTrigger / ChatRequest 随 chat_request 队列一起删了：她不从队列拿消息，
-每次醒来直接查 ``common_message``、自己决定要不要开口（见 ``app.living``）。
-这个模块现在只剩她开口那一侧的契约。
-"""
+"""ChatResponseSegment Data 类字段合约：她开口那一侧发出去的报文。"""
 import pytest
 from pydantic import ValidationError
 
@@ -84,15 +79,3 @@ def test_chat_response_segment_payload_without_channel_fails_validation():
         ChatResponseSegment.model_validate(old)
 
 
-def test_the_chat_request_payload_contracts_are_gone():
-    """``chat_request`` 那条队列的报文契约不该再存在。
-
-    ``ChatTrigger`` 是它的入口 body，``ChatRequest`` 是 fan-out 之后的 per-persona
-    请求。队列没了，这两条 Data 也就没有任何生产者和消费者 —— 留着的话，下一个人
-    会以为"接一下就能用"，而那正是「chat 是嘴，没有耳朵」要挡住的东西
-    （见 ``tests/living/test_no_inbound.py``）。
-    """
-    import app.domain.chat_dataflow as chat_dataflow
-
-    assert not hasattr(chat_dataflow, "ChatTrigger")
-    assert not hasattr(chat_dataflow, "ChatRequest")

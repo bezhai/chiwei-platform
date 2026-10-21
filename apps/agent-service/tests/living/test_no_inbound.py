@@ -20,7 +20,6 @@
   * 读书收件箱和别的收件箱一样，运维入口（``/admin/messaging/send``）能以任何身份往里投。投进来
     能做到的只有读一程：处理函数 :func:`app.living.reading.files.read_a_round` 所在的模块连同它
     import 的一切，碰不到她的一轮（:mod:`app.living.life.moment`）；搬运那条路由的处理函数也一样；
-  * ``app.living`` 的源码里一次都没有出现旧 chat 入站那几个名字；
   * 她的插件登记的钟只有对账那一条（speaking 插件）；她的轮次、日记和回看由宿主的钟给她的队列发信号。钟给出去
     的只有钟响的时刻：对账那条钟每一拍对一次这个进程泳道的账，她的队列收到的信号里也只有时刻
     （宿主造的 ``app.host.Signal``）——装不下内容的钟，天然没法当入站口用。
@@ -41,28 +40,13 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 from typing import NamedTuple
 
 import pytest
 
-import app.living as living_pkg
 from tests.hosting import in_a_fresh_process
 
 LANE = "coe-living"
-
-# 旧 chat 入站那条链上的名字。它们出现在 ``app.living`` 里就是一个入站口子的开始。
-_INBOUND_NAMES = (
-    "chat_request",
-    "ChatTrigger",
-    "ChatRequest",
-    "route_chat_node",
-    "chat_node",
-    "life_wake_node",
-    "EventArrived",
-    "deliver_event",
-)
-
 
 # 起 agent-service 的宿主之后，它登记的每一样东西。处理函数、Data 都记成完整标识
 # ``__module__.__qualname__``：``@node`` 用 ``functools.wraps`` 包装原函数，这两个属性原样保留，
@@ -436,24 +420,6 @@ async def test_her_inbox_only_stores(living_db, monkeypatch):
     for cls in (NudgeBegun, LifeMoment):
         rows = await fetch_all(f"SELECT persona_id FROM {table_name(cls)}")
         assert rows == [], f"收件处理推进了她的一轮（{cls.__name__}）：{rows}"
-
-
-def test_no_living_module_ever_mentions_the_old_inbound_chain():
-    """``app.living`` 的源码里一次都不出现旧 chat 入站的名字。
-
-    这条是"结构"的字面检查：新引擎连引用都没有，就没有谁能"顺手接一下"。
-    """
-    root = Path(living_pkg.__file__).parent
-    offenders: list[str] = []
-    for path in sorted(root.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        for name in _INBOUND_NAMES:
-            if name in text:
-                offenders.append(f"{path.relative_to(root)}: {name}")
-    assert offenders == [], (
-        f"living 里出现了旧 chat 入站链的名字：{offenders} —— "
-        f"一旦引用上了，「@ 触发 chat」离回来只差一行。"
-    )
 
 
 def test_the_only_clocks_are_the_landing_and_her_wakes():

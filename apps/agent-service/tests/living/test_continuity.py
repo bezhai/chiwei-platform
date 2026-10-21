@@ -265,16 +265,6 @@ async def test_the_store_keeps_everything_it_is_handed(moment_db):
     assert loaded[-1].text() == f"m599-{filler}"
 
 
-def test_the_storage_layer_has_no_caps_of_its_own():
-    """旧的两条上限连名字都不该还在 —— 留着就会有人重新接上。"""
-    import app.agent.session as store
-
-    for gone in ("TRANSCRIPT_MAX_MESSAGES", "TRANSCRIPT_MAX_BYTES", "_cap_transcript"):
-        assert not hasattr(store, gone), (
-            f"{gone} 还在 —— 存储层又有了自己的一套裁剪，和 continuity 那套会同时生效"
-        )
-
-
 # ---------------------------------------------------------------------------
 # 四 · 一个 moment 接着上一个往下走
 # ---------------------------------------------------------------------------

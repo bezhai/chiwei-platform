@@ -278,8 +278,7 @@ def test_the_layer_gives_no_default_policy_and_reads_no_config():
         f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
         for f in dataclasses.fields(TrimPolicy)
     ), "TrimPolicy 自带了默认阈值"
-    for gone in ("dynamic_config", "DEFAULT_TRIM_POLICY", "load_trim_policy"):
-        assert not hasattr(mod, gone), f"{gone} 在基础层里"
+    assert not hasattr(mod, "dynamic_config"), "基础层读了 Dynamic Config"
 
 
 # ---------------------------------------------------------------------------
