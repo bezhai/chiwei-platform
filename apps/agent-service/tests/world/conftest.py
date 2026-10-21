@@ -114,6 +114,19 @@ class ScriptedAgent:
         return Turn(role=Role.ASSISTANT, content=said)
 
 
+class FakeInbox:
+    """What :class:`~app.world.core.rounds.Rounds` asks of world's inbox (the handle ``ctx.inbox``
+    returns), without messaging: ``recorded`` is the message ids whose success messaging recorded,
+    ``attempt_limit`` is messaging's default number of times one message is handled."""
+
+    def __init__(self, recorded: Sequence[str] = ()) -> None:
+        self.recorded = set(recorded)
+        self.attempt_limit = receiving.PROCESSING_RETRY.n
+
+    async def succeeded(self, message_ids) -> set[str]:
+        return {m for m in message_ids if m in self.recorded}
+
+
 def sets_wake(hours: float = 2, reason: str = "过一阵再看看。"):
     async def plan():
         at = (now_cst() + timedelta(hours=hours)).replace(microsecond=0)

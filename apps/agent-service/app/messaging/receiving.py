@@ -189,6 +189,16 @@ PROCESSING_RETRY = RetryPolicy(
     lease_ms=900_000,
 )
 
+
+def processing_retry(max_attempts: int | None) -> RetryPolicy:
+    """一个收件箱对一条普通消息的有限次重试：声明了 ``max_attempts`` 就按它的次数，不声明就是
+    :data:`PROCESSING_RETRY`。处理失败之后照它定去向（:func:`_after_owner_failure`），宿主交给拥有者的
+    收件箱也照它回答"一条消息最多处理几次"（``app.host.Inbox.attempt_limit``）。每次调用时读
+    :data:`PROCESSING_RETRY`。"""
+    if max_attempts is None:
+        return PROCESSING_RETRY
+    return replace(PROCESSING_RETRY, n=max_attempts)
+
 # 另一个进程正拿着这条消息（租约没过期）时，这一份隔多久再来看一次（:func:`_held_check_delay_ms`）：
 # 第一次 HELD_CHECK_FIRST_MS，之后每次翻倍，封顶 HELD_CHECK_CAP_MS，并且不晚于那份租约到期之后
 # _LEASE_MARGIN_MS。已经看过几次，记在重新发布的那一份的消息头 HELD_CHECKS_HEADER 里。
@@ -879,10 +889,7 @@ async def _after_owner_failure(
         ).delay_for_attempt(attempt)
         return _Retry(attempt, delay_ms, without_limit=True)
 
-    policy = PROCESSING_RETRY
-    if spec.max_attempts is not None:
-        policy = replace(PROCESSING_RETRY, n=spec.max_attempts)
-    decision = decide_retry(headers=received, policy=policy)
+    decision = decide_retry(headers=received, policy=processing_retry(spec.max_attempts))
     if decision.action == "retry":
         return _Retry(decision.attempt, decision.delay_ms)
     return Verdict.DEAD_LETTER

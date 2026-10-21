@@ -53,7 +53,7 @@
 已经处理完了它，它的重试再来就在第 2 步跳过。
 
 **一直跑不完的消息放弃。** 一轮因为异常没跑完，这一轮带着的每条记一次失败；一条消息失败的轮数跟
-通信机制给一次投递的处理次数（:data:`app.messaging.receiving.PROCESSING_RETRY`）一样多，就从还没
+通信机制给一次投递的处理次数（world 收件箱的 :attr:`~app.host.Inbox.attempt_limit`）一样多，就从还没
 经过一轮的里拿掉，之后的轮不再带它（:func:`app.world.core.pending.failed`，world 自己排的醒来除外）。
 这是防一条每次都让一轮跑不完的消息（比如模型拒收它的内容）把之后的每一轮都拖住；一条消息一轮时，
 它的投递处理四次失败就进死信，world 照常往下跑，这里是同一个上限。放弃只是拿掉：它之后再有投递
@@ -64,7 +64,7 @@
 各自的投递四次失败、进死信是一回事，它们的重试和死信重放照样把它们带回来。一轮超过时限算失败；
 进程在停、一轮被取消，不算失败。
 
-**一次投递最多等多久**（:attr:`Rounds.delivery_timeout`）：前面正在跑的一轮，加上带着它的这一轮。
+**一次投递最多等多久**（:func:`delivery_timeout`）：前面正在跑的一轮，加上带着它的这一轮。
 一轮的时限由这里管（``round_timeout``，超过就取消、算这一轮失败），收件箱的处理时限按这个放长，
 占位租约随之放长，所以等着的投递不会被当成"前一个进程死了"接管。这段时间里投递一直没确认：它
 加上领取和记结果的余量，要放进通信机制给一次投递的期限
@@ -85,11 +85,10 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from app.agent.prompts import PromptConfigError
-from app.host import Batch, Coalesce, JoinedTurnFailed, Signal, Turns, WakeSource
+from app.host import Batch, Coalesce, Inbox, JoinedTurnFailed, Signal, Turns, WakeSource
 from app.infra.cst_time import now_cst
-from app.messaging import receiving
 from app.messaging.message import Message
-from app.world.agents import WORLD, is_own_wake
+from app.world.agents import is_own_wake
 from app.world.core import pending
 from app.world.core.wake import is_stale_wake
 from app.world.services import Intake
@@ -107,6 +106,12 @@ class RunRound(Protocol):
 
 # 一次投递等完两轮之后，把结果交回通信机制还要一点时间（记成处理完、排重试）。
 _SETTLING = timedelta(minutes=1)
+
+def delivery_timeout(round_timeout: timedelta) -> timedelta:
+    """一次投递最多处理多久：前面正在跑的一轮，加上带着它的这一轮，再加上把结果交回通信机制的时间。
+    world 收件箱的处理时限按它声明；``round_timeout`` 是一轮的时限。"""
+    return 2 * round_timeout + _SETTLING
+
 
 # 每一轮开始前问通信机制"哪些处理完的消息已经记下了成功"，最多等多久
 # （:meth:`Rounds._forget_settled`）。正常是一条走索引的查询，几毫秒就回来；库那边卡住时，它占着
@@ -133,7 +138,9 @@ class Rounds:
     一轮，失败就抛异常。
 
     ``turns`` 是 world 的轮次队列，world 插件从宿主拿（``ctx.turns``）；``take_in`` 是收件处理
-    （``world_intake`` 的 :meth:`~app.world.core.intake.Intakes.take_in`），每次投递先交给它。"""
+    （``world_intake`` 的 :meth:`~app.world.core.intake.Intakes.take_in`），每次投递先交给它；
+    ``inbox`` 是 world 的收件箱（``ctx.inbox`` 交回的 :class:`~app.host.Inbox`）：一轮开始前问它哪些
+    处理完的消息已经记下了成功，一条消息失败多少轮放弃也按它的处理次数。"""
 
     def __init__(
         self,
@@ -142,19 +149,16 @@ class Rounds:
         round_timeout: timedelta,
         turns: Turns,
         take_in: Intake,
+        inbox: Inbox,
     ) -> None:
         self._run = run
         self._round_timeout = round_timeout
         self._turns = turns
         self._take_in = take_in
+        self._inbox = inbox
         self.source: WakeSource[InboxRound, None] = WakeSource(
             "world-inbox", Coalesce.JOIN_NEXT, self._due, self._run_round
         )
-
-    @property
-    def delivery_timeout(self) -> timedelta:
-        """一次投递最多处理多久：前面正在跑的一轮，加上带着它的这一轮。"""
-        return 2 * self._round_timeout + _SETTLING
 
     async def receive(self, message: Message) -> None:
         """world 收件箱的处理函数：收下这条消息，要叫醒 world 的就等一轮把它处理完。"""
@@ -217,7 +221,7 @@ class Rounds:
             return
         try:
             async with asyncio.timeout(SETTLED_QUERY_TIMEOUT.total_seconds()):
-                settled = await receiving.succeeded_message_ids(WORLD, recorded)
+                settled = await self._inbox.succeeded(recorded)
         except Exception:
             logger.warning(
                 "world: could not ask messaging which of %d handled message(s) are settled; "
@@ -242,6 +246,6 @@ class Rounds:
             # 问题 3）。投递照样按通信机制重试；每次重试重新取段落，修好之后的下一轮全部带上。
             raise
         except Exception:
-            pending.failed(ids, give_up_at=receiving.PROCESSING_RETRY.n)
+            pending.failed(ids, give_up_at=self._inbox.attempt_limit)
             raise
         pending.handled(taking)

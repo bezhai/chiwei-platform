@@ -27,7 +27,7 @@ from app.world.core import main_agent, pending
 from app.world.core.rounds import RoundFailed
 from tests.messaging.helpers import eventually
 
-from .conftest import LANE, self_message, sets_wake
+from .conftest import LANE, FakeInbox, self_message, sets_wake
 
 
 def _from(sender: str, body: str, *, wakes: bool = True):
@@ -227,8 +227,9 @@ def _no_clock() -> datetime:
     raise AssertionError("world 收件箱的 due 读了钟：这一轮的时刻在一轮开始时读")
 
 
-def _source():
-    """world 收件箱的唤醒来源，跟 world 插件建的一样（一个新的 ``Rounds`` 就是一个新进程）。"""
+def _source(inbox: FakeInbox):
+    """world 收件箱的唤醒来源，跟 world 插件建的一样（一个新的 ``Rounds`` 就是一个新进程）；
+    ``inbox`` 回答"哪些处理完的消息已经记下了成功"。"""
     from app.host import Turns
     from app.world.core.rounds import Rounds
 
@@ -240,7 +241,11 @@ def _source():
         return None
 
     rounds = Rounds(
-        never_runs, round_timeout=main_agent.ROUND_TIMEOUT, turns=turns, take_in=takes_nothing
+        never_runs,
+        round_timeout=main_agent.ROUND_TIMEOUT,
+        turns=turns,
+        take_in=takes_nothing,
+        inbox=inbox,
     )
     return rounds.source
 
@@ -253,15 +258,9 @@ def _batch(message):
 
 
 @pytest.fixture
-def asked(monkeypatch) -> set[str]:
-    """通信机制记下了成功的消息 id；问它的时候照这个回答。"""
-    succeeded: set[str] = set()
-
-    async def succeeded_message_ids(inbox_name, message_ids):
-        return {m for m in message_ids if m in succeeded}
-
-    monkeypatch.setattr(receiving, "succeeded_message_ids", succeeded_message_ids)
-    return succeeded
+def asked() -> FakeInbox:
+    """world 的收件箱：通信机制记下了成功的消息 id 在 ``recorded`` 里，问它的时候照这个回答。"""
+    return FakeInbox()
 
 
 async def test_the_round_takes_every_waiting_message_in_the_order_they_came(volume, asked):
@@ -269,7 +268,7 @@ async def test_the_round_takes_every_waiting_message_in_the_order_they_came(volu
     pending.add(quiet)
     pending.add(waking)
 
-    due = await _source().due("world", _batch(waking), _no_clock)
+    due = await _source(asked).due("world", _batch(waking), _no_clock)
 
     assert due is not None
     assert [m.message_id for m in due.messages] == [quiet.message_id, waking.message_id]
@@ -282,7 +281,7 @@ async def test_no_round_when_none_of_the_batch_is_still_waiting(volume, asked):
     quiet, handled = _from("绫奈", "我在看书。", wakes=False), _from("赤尾", "我出门了。")
     pending.add(quiet)
 
-    assert await _source().due("world", _batch(handled), _no_clock) is None
+    assert await _source(asked).due("world", _batch(handled), _no_clock) is None
     assert [m.message_id for m in pending.read()] == [quiet.message_id]
 
 
@@ -291,7 +290,7 @@ async def test_a_replaced_wake_is_left_out_and_starts_no_round(volume, asked):
     replaced = self_message("wake-old")
     pending.add(replaced)
 
-    assert await _source().due("world", _batch(replaced), _no_clock) is None
+    assert await _source(asked).due("world", _batch(replaced), _no_clock) is None
     assert pending.read() == []
 
 
@@ -299,29 +298,27 @@ async def test_messages_whose_success_messaging_recorded_are_forgotten_first(vol
     earlier = _from("赤尾", "我出门了。")
     pending.add(earlier)
     pending.handled([earlier])
-    asked.add(earlier.message_id)
+    asked.recorded.add(earlier.message_id)
     waking = _from("千凪", "我在做饭。")
     pending.add(waking)
 
-    assert await _source().due("world", _batch(waking), _no_clock) is not None
+    assert await _source(asked).due("world", _batch(waking), _no_clock) is not None
     assert not pending.recorded()
 
 
-async def test_when_messaging_cannot_be_asked_the_records_stay_and_the_round_is_due(
-    volume, monkeypatch
-):
+async def test_when_messaging_cannot_be_asked_the_records_stay_and_the_round_is_due(volume):
     earlier = _from("赤尾", "我出门了。")
     pending.add(earlier)
     pending.handled([earlier])
 
-    async def database_down(inbox_name, message_ids):
-        raise ConnectionError("库连不上")
+    class DatabaseDown(FakeInbox):
+        async def succeeded(self, message_ids):
+            raise ConnectionError("库连不上")
 
-    monkeypatch.setattr(receiving, "succeeded_message_ids", database_down)
     waking = _from("千凪", "我在做饭。")
     pending.add(waking)
 
-    due = await _source().due("world", _batch(waking), _no_clock)
+    due = await _source(DatabaseDown()).due("world", _batch(waking), _no_clock)
 
     assert due is not None and [m.message_id for m in due.messages] == [waking.message_id]
     assert earlier.message_id in _handled_records(volume)

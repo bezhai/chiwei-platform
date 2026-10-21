@@ -780,3 +780,47 @@ def test_the_host_exports_the_function_type_an_opener_declares_through():
     assert "DeclareInbox" in app.host.__all__
     assert app.host.DeclareInbox is receiving.DeclareInbox
     assert receiving.OpenAtStart == Callable[[receiving.DeclareInbox], Awaitable[None]]
+
+
+async def test_an_owned_inbox_answers_for_itself_and_takes_itself_back(monkeypatch):
+    """``ctx.inbox`` gives back the inbox it declared. Called, it takes the registration back like
+    every disposer; ``succeeded`` asks messaging which of the ids have a recorded success on this
+    inbox; ``attempt_limit`` is how many times messaging calls its handler for one message at most
+    (the inbox's ``max_attempts``, or messaging's default), read when asked."""
+    from dataclasses import replace
+
+    import app.host
+
+    asked: list[tuple[str, list[str]]] = []
+
+    async def succeeded_message_ids(inbox_name, message_ids):
+        asked.append((inbox_name, list(message_ids)))
+        return {"m1"}
+
+    monkeypatch.setattr(receiving, "succeeded_message_ids", succeeded_message_ids)
+    inboxes: dict = {}
+
+    def setup(ctx) -> None:
+        inboxes["default"] = ctx.inbox("default", on_message=_ignore)
+        inboxes["once"] = ctx.inbox("once", on_message=_ignore, max_attempts=1)
+
+    host = Host("agent-service", [plugin("p", setup)])
+    await start_without_io(host)
+    try:
+        default, once = inboxes["default"], inboxes["once"]
+        assert isinstance(default, app.host.Inbox)
+        assert await default.succeeded(["m1", "m2"]) == {"m1"}
+        assert asked == [("default", ["m1", "m2"])]
+        assert default.attempt_limit == receiving.PROCESSING_RETRY.n
+        assert once.attempt_limit == 1
+        monkeypatch.setattr(
+            receiving, "PROCESSING_RETRY", replace(receiving.PROCESSING_RETRY, n=7)
+        )
+        assert default.attempt_limit == 7
+
+        await once()
+
+        assert set(receiving.INBOX_REGISTRY) == {"default"}
+        assert {r.name for r in host.registered()} == {"default"}
+    finally:
+        await host.stop()

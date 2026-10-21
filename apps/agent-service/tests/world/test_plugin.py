@@ -14,9 +14,11 @@ from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 from app.messaging.message import Kind, new_message
 from app.messaging.receiving import INBOX_REGISTRY
-from app.world.core.rounds import Rounds
+from app.world.core.rounds import Rounds, delivery_timeout
 from tests.hosting import start_without_io
 from tests.messaging.helpers import eventually
 
@@ -29,11 +31,19 @@ def _from(sender: str, body: str):
     return new_message(sender=sender, recipient="world", body=body, kind=Kind.MESSAGE)
 
 
-def _rounds_now() -> Rounds:
-    """现在 world 收件箱的处理函数背后的那个 :class:`Rounds`。"""
-    handler = INBOX_REGISTRY["world"].on_message
-    assert handler.__func__ is Rounds.receive
-    return handler.__self__
+async def _rounds_now() -> Rounds:
+    """现在 world 收件箱的处理函数把一次投递交给的那个 :class:`Rounds`：投一次，看是哪个
+    ``Rounds`` 的 ``receive`` 收下的（只看这一次，不跑一轮）。"""
+    took: list[Rounds] = []
+
+    async def receive(self, message) -> None:
+        took.append(self)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Rounds, "receive", receive)
+        await INBOX_REGISTRY["world"].on_message(_from("赤尾", "我出门了。"))
+    (rounds,) = took
+    return rounds
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +80,7 @@ async def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_t
 
     assert [r.name for r in host.registered() if r.kind == "inbox"] == ["world"]
     spec = INBOX_REGISTRY["world"]
-    rounds = _rounds_now()
+    await _rounds_now()
     assert spec.on_question.__func__ is Intakes.answer
     assert spec.on_open is wake_on_start
     # 状态里的最新唤醒失败时不限次数重试，永不进死信；别的消息照常有限次重试。
@@ -79,7 +89,7 @@ async def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_t
     assert spec.consume_while is writer_lock
     # 一次投递可能要等前面正在跑的一轮、再等带着它的这一轮：处理时限和租约都要放长到这之上，
     # 超过通信机制默认的 15 分钟租约。
-    assert spec.processing_timeout == rounds.delivery_timeout
+    assert spec.processing_timeout == delivery_timeout(ROUND_TIMEOUT)
     assert spec.processing_timeout >= 2 * ROUND_TIMEOUT
     assert spec.processing_timeout > timedelta(milliseconds=PROCESSING_RETRY.lease_ms)
     assert _lease_ms(spec) > spec.processing_timeout.total_seconds() * 1000
@@ -138,10 +148,10 @@ async def test_the_four_record_routes_carry_all_three_checks(app_host):
 
 async def test_each_start_builds_its_own_rounds(app_host):
     host = await app_host("world")
-    first = _rounds_now()
+    first = await _rounds_now()
     await host.stop()
     await start_without_io(host)
-    second = _rounds_now()
+    second = await _rounds_now()
 
     assert first is not second
 

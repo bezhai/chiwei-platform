@@ -17,7 +17,7 @@ from app.host.errors import (
     UnknownContribution,
     UnplacedContribution,
 )
-from app.host.host import Context, Host
+from app.host.host import Context, Host, Inbox
 from app.host.manifest import App, Participant
 from app.host.plugin import Disposer, Plugin, Registration
 from app.host.turns import Batch, Coalesce, JoinedTurnFailed, Signal, Turns, WakeSource
@@ -34,6 +34,7 @@ __all__ = [
     "DuplicateService",
     "Host",
     "HostError",
+    "Inbox",
     "JoinedTurnFailed",
     "MissingService",
     "Participant",

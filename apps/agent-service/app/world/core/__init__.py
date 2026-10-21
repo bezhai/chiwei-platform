@@ -21,7 +21,7 @@
 :class:`~app.world.core.intake.Intakes`），再交给 :class:`~app.world.core.rounds.Rounds`，一轮处理
 收件箱里所有还没经过一轮的消息，一轮一轮排在宿主给 world 的轮次队列上（``ctx.turns``），同一时刻只有一轮在跑，
 一轮最多 :data:`app.world.core.main_agent.ROUND_TIMEOUT`；处理时限和占位租约放长到一次投递最多要等的
-时间（:attr:`~app.world.core.rounds.Rounds.delivery_timeout`）。
+时间（:func:`~app.world.core.rounds.delivery_timeout`）。
 只在拿着卷的写锁时消费（:func:`app.world.volume.writer_lock`）；开设时按私有状态补醒
 （:func:`app.world.core.wake.wake_on_start`，也在拿到锁之后才跑）；状态里的最新唤醒那一轮失败时不限
 次数重试、永不进死信（:func:`app.world.core.wake.retry_latest_wake_without_limit`）。提问交给在
@@ -52,7 +52,7 @@ from app.world.core.main_agent import (
     set_the_next_wake,
     woken_by,
 )
-from app.world.core.rounds import Rounds
+from app.world.core.rounds import Rounds, delivery_timeout
 from app.world.core.wake import retry_latest_wake_without_limit, wake_on_start
 from app.world.volume import writer_lock
 
@@ -66,20 +66,24 @@ def setup(ctx: Context) -> None:
     profile = ctx.profile("world")
     intakes = Intakes(profile.profile.switches)
     ctx.provide("world_intake", intakes)
-    rounds = Rounds(
-        partial(run_inbox_round, profile),
-        round_timeout=ROUND_TIMEOUT,
-        turns=ctx.turns(WORLD),
-        take_in=intakes.take_in,
-    )
-    ctx.inbox(
+    turns = ctx.turns(WORLD)
+    inbox = ctx.inbox(
         WORLD,
-        on_message=rounds.receive,
+        # ``Rounds`` 要拿到这个收件箱，所以收件箱先开设，处理函数在下面赋值之前就引用了 ``rounds``：
+        # 通信机制要等所有插件的 setup 跑完、开始接收之后才调它，那时 ``rounds`` 已经有了。
+        on_message=lambda message: rounds.receive(message),
         on_question=intakes.answer,
-        processing_timeout=rounds.delivery_timeout,
+        processing_timeout=delivery_timeout(ROUND_TIMEOUT),
         on_open=wake_on_start,
         consume_while=writer_lock,
         retry_without_limit=retry_latest_wake_without_limit,
+    )
+    rounds = Rounds(
+        partial(run_inbox_round, profile),
+        round_timeout=ROUND_TIMEOUT,
+        turns=turns,
+        take_in=intakes.take_in,
+        inbox=inbox,
     )
 
 

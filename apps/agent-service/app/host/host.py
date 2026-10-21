@@ -55,7 +55,7 @@ import asyncio
 import importlib
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -106,6 +106,34 @@ from app.messaging.dead_letter_audit import RUNTIME_DLQ_AUDIT_DDL
 from app.messaging.lifecycle import start_messaging, stop_messaging
 
 logger = logging.getLogger(__name__)
+
+
+class Inbox:
+    """An inbox a plugin owns, as :meth:`Context.inbox` hands it back. Called, it takes the
+    registration back, like every disposer; it also answers what the owner asks messaging about
+    this inbox."""
+
+    def __init__(self, name: str, max_attempts: int | None, dispose: Disposer) -> None:
+        self.name = name
+        self._max_attempts = max_attempts
+        self._dispose = dispose
+
+    async def __call__(self) -> None:
+        await self._dispose()
+
+    async def succeeded(self, message_ids: Iterable[str]) -> set[str]:
+        """Which of ``message_ids`` had a delivery to this inbox handled and its success recorded
+        (:func:`app.messaging.receiving.succeeded_message_ids`): an owner that keeps its own record
+        of what it handled forgets these."""
+        return await receiving.succeeded_message_ids(self.name, message_ids)
+
+    @property
+    def attempt_limit(self) -> int:
+        """How many times messaging hands one message to this inbox's handler at most, the first
+        time included, before it goes to the dead letters (the inbox's ``max_attempts``, or
+        messaging's default; read when asked). A message the inbox's ``retry_without_limit``
+        exempts has no limit."""
+        return receiving.processing_retry(self._max_attempts).n
 
 
 @dataclass(eq=False)
@@ -293,8 +321,9 @@ class Context:
         consume_while: receiving.ConsumeWhile | None = None,
         retry_without_limit: receiving.RetryWithoutLimit | None = None,
         max_attempts: int | None = None,
-    ) -> Disposer:
-        """Own the inbox ``name``; see :func:`app.messaging.receiving.inbox` for the options."""
+    ) -> Inbox:
+        """Own the inbox ``name``; see :func:`app.messaging.receiving.inbox` for the options. The
+        :class:`Inbox` it returns takes the registration back when called."""
         options = {
             "on_message": on_message,
             "on_question": on_question,
@@ -314,7 +343,8 @@ class Context:
             if declared and receiving.INBOX_REGISTRY.get(name) is declared[0]:
                 del receiving.INBOX_REGISTRY[name]
 
-        return self._register("inbox", name, lambda: dict(options), undo, add=add)
+        dispose = self._register("inbox", name, lambda: dict(options), undo, add=add)
+        return Inbox(name, max_attempts, dispose)
 
     def inboxes_at_start(self, open_them: receiving.OpenAtStart) -> Disposer:
         """Inboxes whose names are known only at start; see
