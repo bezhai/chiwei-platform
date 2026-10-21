@@ -217,7 +217,16 @@ def test_the_command_fails_on_a_new_cycle_and_passes_when_clean(tmp_path):
 
 THE_FORBIDDEN_EDGES = [
     ("messaging", "host"),
+    ("messaging", "agent"),
     ("agent", "host"),
+    ("agent", "living"),
+    ("agent", "world"),
+    ("agent", "plugins"),
+    ("host", "living"),
+    ("host", "world"),
+    ("host", "plugins"),
+    ("data", "host"),
+    ("data", "agent"),
 ]
 
 
@@ -231,6 +240,14 @@ def test_the_list_forbids_the_agent_layer_reaching_the_host():
     """The contract types a round is built from live in ``app/agent/contracts.py``: the host
     imports them and does the assembling; the agent layer never imports the host."""
     assert ("agent", "host") in FORBIDDEN_EDGES
+
+
+def test_the_list_forbids_every_lower_layer_reaching_up():
+    """Storage and messaging sit under everything, the agent layer under the host, the host under
+    the plugins: a lower layer never imports a higher one. Plugins (``app/living``, ``app/world``,
+    ``app/plugins``) are imported only when a manifest names them, so neither the host nor the agent
+    layer imports one."""
+    assert set(THE_FORBIDDEN_EDGES) == set(FORBIDDEN_EDGES)
 
 
 @pytest.mark.parametrize(("source", "target"), THE_FORBIDDEN_EDGES)

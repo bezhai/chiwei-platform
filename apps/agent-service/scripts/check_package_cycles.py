@@ -29,12 +29,29 @@ from scripts.check_world_life_imports import imported_names, module_name
 # 以后出现的环都是新环。
 KNOWN_CYCLES: list[frozenset[str]] = []
 
-# 不管成不成环都不许出现的边（从哪个包，到哪个包）。消息机制是宿主下面的一层：宿主启停它，
-# 插件经宿主开设收件箱，所以它不依赖宿主。一轮的契约类型（``app/agent/contracts.py``）放在
-# agent 层，宿主 import 它们、负责组装，所以 agent 层不依赖宿主。
+# 不管成不成环都不许出现的边（从哪个包，到哪个包）：下层不 import 上层。从下往上是存储和消息、
+# 一轮（agent 层）、宿主、插件。
+#
+# * 存储和消息在最下面：宿主启停消息机制，插件经宿主开设收件箱，一轮的历史和用量存进存储；它们
+#   不依赖宿主，也不依赖 agent 层。
+# * 一轮的契约类型（``app/agent/contracts.py``）放在 agent 层，宿主 import 它们、负责组装，所以
+#   agent 层不依赖宿主。
+# * 插件（``app/living``、``app/world``、``app/plugins``）只在清单点名时由宿主按字符串 import
+#   （``Host.for_app``），宿主和 agent 层都不 import 任何一个插件。
+# 其中有几条反方向今天就有边（插件 -> 宿主、宿主 -> 存储……），写反了会先成环、被上面的环检查报出来；
+# 列在这里是让方向本身成为规则，不靠反方向那条边碰巧存在。
 FORBIDDEN_EDGES: list[tuple[str, str]] = [
     ("messaging", "host"),
+    ("messaging", "agent"),
     ("agent", "host"),
+    ("agent", "living"),
+    ("agent", "world"),
+    ("agent", "plugins"),
+    ("host", "living"),
+    ("host", "world"),
+    ("host", "plugins"),
+    ("data", "host"),
+    ("data", "agent"),
 ]
 
 # 一条边：import 它的那一处，``app/<包>/<文件>.py:<行号>``。
@@ -164,7 +181,7 @@ def main(argv: list[str]) -> int:
     groups = strongly_connected_groups(package_graph(root))
     print(
         "package cycles: only the listed ones remain: "
-        + ", ".join(_names(g) for g in groups)
+        + (", ".join(_names(g) for g in groups) or "none")
     )
     print(
         "forbidden edges: none of "

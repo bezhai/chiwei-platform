@@ -290,8 +290,8 @@ jobs:
           # app/ 下每个子包和顶层模块是一个节点，包里任何一处 import 另一个包就是一条边
           # （函数里的 import、import_module 的字符串字面量都算）。互相走得到的几个包
           # 是一组环：不在 KNOWN_CYCLES 里的环失败，名单上的环消失或缩小了也失败，
-          # 所以名单只能缩。FORBIDDEN_EDGES 里的边（messaging -> host、agent -> host）
-          # 不管成不成环，出现就失败。
+          # 所以名单只能缩。FORBIDDEN_EDGES 里的边不管成不成环，出现就失败：下层不 import
+          # 上层（存储和消息 < agent 层 < 宿主 < 插件），宿主和 agent 层不 import 任何插件。
           # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_package_cycles.py
           python3 -m scripts.check_package_cycles app
 
