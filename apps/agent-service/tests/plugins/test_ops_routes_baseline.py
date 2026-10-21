@@ -1,4 +1,4 @@
-"""改前那五条运维口和 ``/health`` 的完整回答，钉成字面量。
+"""改前那四条运维口和 ``/health`` 的完整回答，钉成字面量。
 
 这一份要回答的是一个很窄的问题：**给那四条文档树端点（后来随旧世界层删掉了）装门的
 那次改动，有没有顺手改掉别的路由的行为。** 那次改动动的是所有自动注册路由共用的那一段——路由的声明多了
@@ -18,12 +18,11 @@ content-type、响应体逐字）抄成下面的字面量，再把实现还原�
 失败，请求根本没进到端点自己的活儿里。这一份用的是有效请求，走完整条路：路由 →
 反序列化 → 节点 → 响应序列化。
 
-下游（搜索、DLQ 那几个 impl）是替身，因为这一份验的不是它们，是**通到它们的那条路**：
+下游（DLQ 那几个 impl）是替身，因为这一份验的不是它们，是**通到它们的那条路**：
 替身让回答变成确定的，否则每次跑都不一样，钉不住任何东西。替身在改前改后是同一个。
 """
 from __future__ import annotations
 
-import dataclasses
 import json
 
 import httpx
@@ -31,7 +30,6 @@ import pytest
 from fastapi import FastAPI
 
 from app.api.routes import router as health_router
-from app.infra import config
 
 BASE = "http://ops-routes.test"
 
@@ -42,7 +40,6 @@ BASE = "http://ops-routes.test"
 # 碰过的那一段（detail 要过一遍"回答外壳"）。少了它，一个"给所有路由的拒绝都加上
 # 执行泳道"的改动能从这一份底下溜过去——有效请求根本不产生拒绝。
 CALLS = (
-    ("POST /admin/search", "POST", "/admin/search", {"queries": ["世界底子"], "num": 1}),
     (
         "POST /admin/dlq/inspect",
         "POST",
@@ -91,17 +88,7 @@ CALLS = (
 # 改前那一版给出的完整回答。**从 HEAD 的实现上捕获**，不是照着改后的实现写的：
 # 把那时的 HTTP source 和运维口的接线还原到改前（那时还没有凭据和泳道核对那一层），跑上面
 # 那几个请求，把输出抄下来。
-#
-# ``/admin/search`` 那条的 500 不是这次改动弄坏的：它 import
-# ``app.agent.tools.search._you_search``，而那个函数在 ``app.capabilities.web_search``
-# 里——这条 import 在改前就是坏的，所以这个端点今天答什么都是 500。钉住它是为了说清
-# "改前也是这样"；哪天有人修好它，这条会红，那时是**故意**改期望值。
 BEFORE_THE_DOOR: dict = {
-    "POST /admin/search": {
-        "status": 500,
-        "content_type": "text/plain; charset=utf-8",
-        "text": "Internal Server Error",
-    },
     "POST /admin/dlq/inspect": {
         "status": 200,
         "content_type": "application/json",
@@ -154,23 +141,12 @@ BEFORE_THE_DOOR: dict = {
 
 @pytest.fixture
 def downstream(monkeypatch):
-    """把搜索和 DLQ 那几个 impl 换成替身，让回答变成确定的。
+    """把 DLQ 那几个 impl 换成替身，让回答变成确定的。
 
     ``/health`` 里的 ``version`` 读的是 ``GIT_SHA``，也一起钉住；``timestamp`` 钉不住
     （它本来就每次都不一样），下面单独摘出去。
     """
     from app.nodes import dlq_admin
-
-    # 搜索那条明确按"没配搜索后端"来跑：它自己的分支会答 503，而那是这个端点在这个
-    # 进程里的真实回答。不去替身化再往下走，是因为再往下那一步现在根本走不通——
-    # ``app/nodes/admin.py`` 从 ``app.agent.tools.search`` import ``_you_search``，
-    # 而那个函数在 ``app.capabilities.web_search`` 里，这条 import 是坏的（跟本次改动
-    # 无关，先不动它）。503 这条分支是它今天唯一走得完的一条。
-    monkeypatch.setattr(
-        config,
-        "settings",
-        dataclasses.replace(config.settings, you_search_host=None),
-    )
 
     async def inspected(*, queue, limit=20, queue_kind="dlq"):
         return [{"queue": queue, "limit": limit, "queue_kind": queue_kind}]
@@ -214,9 +190,7 @@ async def api(downstream, app_host) -> FastAPI:
 
 @pytest.fixture
 async def ops(api):
-    """``raise_app_exceptions=False``：节点抛出来的异常按真服务器那样落成 500。
-
-    ``/admin/search`` 今天就是这条路（见上面那条注释里的坏 import）。让它在客户端
+    """``raise_app_exceptions=False``：节点抛出来的异常按真服务器那样落成 500。让它在客户端
     抛出来的话，钉住的就不是"这个端点答什么"而是"测试怎么炸的"。
     """
     async with httpx.AsyncClient(
@@ -227,7 +201,7 @@ async def ops(api):
 
 
 async def test_the_ops_routes_answer_exactly_what_they_answered_before(ops):
-    """五条运维口 + ``/health``，逐字跟改前一样。"""
+    """四条运维口 + ``/health``，逐字跟改前一样。"""
     got: dict = {}
     for label, method, path, body in CALLS:
         answer = await ops.request(method, path, json=body)

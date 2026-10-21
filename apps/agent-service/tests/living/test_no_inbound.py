@@ -132,16 +132,14 @@ _CARRY_OVER = Route(
 )
 _CARRY_OVER_HANDLER = "app.living.reading.carry_over"
 
-# 进程里**唯一**允许存在的路由：运维口（``/admin/*``，搜索 + DLQ 巡检 + 通信机制的人工入口）。
+# 进程里**唯一**允许存在的路由：运维口（``/admin/*``，DLQ 巡检 + 通信机制的人工入口）。
 #
 # 每条按 **方法 + 路径 + 完整类标识 + 处理函数 + 三项检查** 列全，不是按类名、也不是按路径前缀。
 # 理由是这份名单要回答的问题不是"它叫什么"而是"它是不是运维口"，而"是运维口"这件事由"这个方法
 # 这个路径上的这条 Data 交给这个 admin 节点处理"整体成立——换掉其中任何一项（尤其是把处理函数换成
 # ``app.living`` 里的节点），它就不再是当初被放行的那条路由了，必须重新过一遍判断。要不要凭据也
-# 算身份的一部分：搜索和 DLQ 那几条今天就是裸的，把它们悄悄关起来会在下一次运维的时候才被发现。
+# 算身份的一部分：DLQ 那几条今天就是裸的，把它们悄悄关起来会在下一次运维的时候才被发现。
 _OPS_ONLY_ROUTES = frozenset({
-    Route("POST", "/admin/search", "app.domain.admin.AdminSearchRequest",
-          "app.nodes.admin.admin_search_node"),
     Route("POST", "/admin/dlq/inspect", "app.domain.dlq_admin_events.DlqInspectRequest",
           "app.nodes.dlq_admin.dlq_inspect_node"),
     Route("POST", "/admin/dlq/clear-idempotent",

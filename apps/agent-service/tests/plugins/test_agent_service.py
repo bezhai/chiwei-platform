@@ -40,7 +40,7 @@ async def test_each_plugin_registers_its_own_part(app_host):
         "life",
     ]
     assert Counter((r.plugin, r.kind) for r in host.registered()) == {
-        ("ops", "route"): 5,
+        ("ops", "route"): 4,
         ("operator", "route"): 6,
         ("operator", "inbox"): 1,
         ("skills", "service"): 1,

@@ -48,7 +48,6 @@ EXPECTED_ROUTES: dict[str, dict[str, list[str]]] = {
     "agent-service": {
         **_COMMON_ROUTES,
         # Ops routes: no auth.
-        "POST /admin/search": OPEN,
         "POST /admin/dlq/inspect": OPEN,
         "POST /admin/dlq/clear-idempotent": OPEN,
         "POST /admin/dlq/dry-run": OPEN,

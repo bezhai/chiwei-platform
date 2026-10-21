@@ -884,7 +884,7 @@ async def summarize(msg: Message) -> SummaryFragment | None:
 | **读一程** | 图内 durable 边（`FilePickedUp`） | `wiring/living.py` | `read_a_round`（取字节 → 解码 → 几轮模型调用 → 写 `FileRead`） | agent-service |
 | **她开口出图** | 无（Sink） | `wiring/living.py` | `ChatResponseSegment` → `Sink.mq("chat_response")` → `chat_response_lark`（lark-outbound 消费）/ `chat_response_qq`（chat-response-worker 消费） | agent-service |
 | **撤回出图** | 无（Sink） | `wiring/safety.py` | `Recall` → `Sink.mq("recall")` → `recall_{channel}` | agent-service |
-| **admin HTTP（运维触发）** | `Source.http("/admin/*")` | `wiring/admin.py` | `admin_search_node` + DLQ 端点（`/admin/dlq/inspect\|requeue\|dry-run\|clear-idempotent`） | agent-service |
+| **admin HTTP（运维触发）** | `Source.http("/admin/*")` | `wiring/admin.py` | DLQ 端点（`/admin/dlq/inspect\|requeue\|dry-run\|clear-idempotent`） | agent-service |
 
 要看具体 wire / @node，去对应 `wiring/<file>.py` —— 每个文件就 20~110 行，wire 声明顺序 = 数据流顺序，读起来最快。
 

@@ -1,6 +1,5 @@
-"""Ops: search and the dead-letter tools, as admin routes.
+"""Ops: the dead-letter tools, as admin routes.
 
-  POST /admin/search                  admin_search_node
   POST /admin/dlq/inspect             dlq_inspect_node
   POST /admin/dlq/clear-idempotent    dlq_clear_idempotent_node
   POST /admin/dlq/dry-run             dlq_dry_run_node
@@ -11,7 +10,6 @@ None of them asks for the inner credential or checks the lane: they never did, a
 """
 from __future__ import annotations
 
-from app.domain.admin import AdminSearchRequest
 from app.domain.dlq_admin_events import (
     DlqClearIdempotentRequest,
     DlqDryRunRequest,
@@ -19,7 +17,6 @@ from app.domain.dlq_admin_events import (
     DlqRequeueRequest,
 )
 from app.host import Context, Plugin
-from app.nodes.admin import admin_search_node
 from app.nodes.dlq_admin import (
     dlq_clear_idempotent_node,
     dlq_dry_run_node,
@@ -29,7 +26,6 @@ from app.nodes.dlq_admin import (
 
 
 def setup(ctx: Context) -> None:
-    ctx.route("POST", "/admin/search", AdminSearchRequest, admin_search_node)
     ctx.route("POST", "/admin/dlq/inspect", DlqInspectRequest, dlq_inspect_node)
     ctx.route(
         "POST", "/admin/dlq/clear-idempotent", DlqClearIdempotentRequest, dlq_clear_idempotent_node
