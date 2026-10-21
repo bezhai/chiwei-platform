@@ -306,9 +306,11 @@ def inbox(
     )
 
 
-# 交给"启动时再开"的开设函数的那个声明函数，参数和 :func:`inbox` 一样。
-Declare = Callable[..., None]
-OpenAtStart = Callable[[Declare], Awaitable[None]]
+# 交给"启动时再开"的开设函数的那个声明函数，开一个收件箱，参数和 :func:`inbox` 一样。插件经宿主拿到它
+# （``ctx.inboxes_at_start``），所以宿主把这个类型公开出去（``app.host.DeclareInbox``）；定义留在这里，
+# 因为通信机制不 import 宿主。
+DeclareInbox = Callable[..., None]
+OpenAtStart = Callable[[DeclareInbox], Awaitable[None]]
 
 # 还没调成功过的"启动时再开"的声明（:func:`inboxes_at_start`）。开始接收时逐个调，全部成功才清空。
 INBOXES_AT_START: list[OpenAtStart] = []

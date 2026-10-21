@@ -767,3 +767,16 @@ async def test_a_failing_opener_leaves_no_inbox_behind(recorded_phases, monkeypa
     assert receiving.INBOX_REGISTRY == {}
     assert receiving.INBOXES_AT_START == []
     assert host.registered() == ()
+
+
+def test_the_host_exports_the_function_type_an_opener_declares_through():
+    """A plugin's opener (``ctx.inboxes_at_start``) is handed a function that declares one inbox;
+    the plugin types it with a name from :mod:`app.host`, not from messaging's internals. Messaging
+    defines it (it cannot import the host), and that one definition is what the host exports."""
+    from collections.abc import Awaitable, Callable
+
+    import app.host
+
+    assert "DeclareInbox" in app.host.__all__
+    assert app.host.DeclareInbox is receiving.DeclareInbox
+    assert receiving.OpenAtStart == Callable[[receiving.DeclareInbox], Awaitable[None]]

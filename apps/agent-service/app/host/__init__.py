@@ -21,12 +21,14 @@ from app.host.host import Context, Host
 from app.host.manifest import App, Participant
 from app.host.plugin import Disposer, Plugin, Registration
 from app.host.turns import Batch, Coalesce, JoinedTurnFailed, Signal, Turns, WakeSource
+from app.messaging.receiving import DeclareInbox
 
 __all__ = [
     "App",
     "Batch",
     "Coalesce",
     "Context",
+    "DeclareInbox",
     "Disposer",
     "DuplicateContribution",
     "DuplicateService",

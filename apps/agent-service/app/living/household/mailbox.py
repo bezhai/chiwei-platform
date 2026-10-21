@@ -19,6 +19,7 @@ from datetime import datetime
 from functools import partial
 
 from app.agent.round import Round, wake_source
+from app.host import DeclareInbox
 from app.living.household.outgoing import send_what_she_did
 from app.living.household.received import (
     ReceivedMessage,
@@ -30,7 +31,6 @@ from app.living.household.received import (
     unread_received,
 )
 from app.living.services import HerDue, HerRecords, Letter, WhoLivesHere
-from app.messaging.receiving import Declare
 
 
 @dataclass
@@ -52,9 +52,9 @@ class Mailbox:
 
     # -- 开收件箱 ------------------------------------------------------------------
 
-    async def open_inboxes(self, declare: Declare) -> None:
+    async def open_inboxes(self, declare: DeclareInbox) -> None:
         """读三姐妹的名字（``residents`` 服务，读的时候检查），按名字各开一个收件箱：对每个名字调
-        ``declare``（宿主交来的，参数和 :func:`app.messaging.receiving.inbox` 一样）。通信机制开始接收
+        ``declare``（宿主交来的，参数和 :meth:`app.host.Context.inbox` 一样）。通信机制开始接收
         之前调一次。"""
         known = await self.residents.load()
         for name in known.by_persona.values():

@@ -323,7 +323,7 @@ class Context:
         notes every name declared that way, so taking ``open_them`` back takes those back too."""
         declared: list[str] = []
 
-        async def opener(declare: receiving.Declare) -> None:
+        async def opener(declare: receiving.DeclareInbox) -> None:
             def noted(name: str, **options: Any) -> None:
                 declare(name, **options)
                 if name not in declared:
