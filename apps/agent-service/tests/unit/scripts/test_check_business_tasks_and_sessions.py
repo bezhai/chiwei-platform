@@ -92,6 +92,10 @@ REACHING_THE_SESSION = [
     ("from app import data as d\nd.tx.current_session()", 2),
     ("from ...data.tx import current_session as cs", 1),
     ("from app.data.tx import *\ncurrent_session()", 2),
+    # 动态 import 整个 app.data.tx 模块，和 ``import app.data.tx`` 一样。
+    ("import importlib\nimportlib.import_module('app.data.tx')", 2),
+    ("from importlib import import_module as load\nload('.tx', 'app.data')", 2),
+    ("__import__('app.data', fromlist=['tx'])", 1),
 ]
 
 

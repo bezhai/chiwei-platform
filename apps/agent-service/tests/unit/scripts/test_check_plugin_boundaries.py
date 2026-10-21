@@ -70,6 +70,12 @@ A_REACHING_INTO_B = [
     "import importlib\nimportlib.import_module('app.{side}.b.store')",
     "from importlib import import_module\nimport_module('app.{side}.b')",
     "__import__('app.{side}.b')",
+    "import importlib\nimportlib.import_module('.b', 'app.{side}')",
+    "import importlib\nimportlib.import_module('..b.store', __package__)",
+    "from importlib import import_module as load\nload('app.{side}.b')",
+    "import importlib as il\nil.import_module('.b.store', package='app.{side}')",
+    "__import__('b.store', globals(), locals(), [], 2)",
+    "__import__('app.{side}', fromlist=['b'])",
     "def later():\n    from app.{side}.b import store\n    return store",
     "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from app.{side}.b.store import thing",
 ]

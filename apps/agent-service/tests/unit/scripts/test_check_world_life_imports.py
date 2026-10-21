@@ -49,6 +49,13 @@ WORLD_REACHING_INTO_LIFE = [
     "from importlib import import_module\nimport_module('app.living')",
     "__import__('app.living.moment')",
     "def later():\n    from app.living import moment\n    return moment",
+    # 动态 import 的相对名字、换了名字的 import_module，按字面量解析成完整模块名再判。
+    "import importlib\nimportlib.import_module('.living', 'app')",
+    "import importlib\nimportlib.import_module('..living.moment', package=__package__)",
+    "from importlib import import_module as load\nload('app.living')",
+    "import importlib as il\nil.import_module('.living.moment', 'app')",
+    "__import__('living.moment', globals(), locals(), [], 2)",
+    "__import__('app', fromlist=['living'])",
 ]
 
 LIFE_REACHING_INTO_WORLD = [
@@ -106,6 +113,29 @@ def test_words_in_docstrings_and_comments_are_not_imports(tmp_path):
             "world/engine.py": "NOTE = 'see app.living.moment for the old design'\n",
         },
     )
+    assert find_violations(root) == []
+
+
+def test_a_dynamic_import_that_cannot_be_resolved_statically_is_not_an_import(tmp_path):
+    """名字不是字面量、相对名字没有 package、相对得超出顶层包：运行时才知道（或者运行时就报错），
+    规则不猜，也不因此出错退出。"""
+    root = _tree(
+        tmp_path,
+        {
+            "world/engine.py": "\n".join(
+                [
+                    "import importlib",
+                    "importlib.import_module(name)",
+                    "importlib.import_module('.living')",
+                    "importlib.import_module('....living', 'app')",
+                    "importlib.import_module('.living', package=somewhere)",
+                    "__import__('living', globals(), locals(), [], level)",
+                    "__import__('living', level=True)",
+                ]
+            )
+        },
+    )
+
     assert find_violations(root) == []
 
 

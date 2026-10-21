@@ -63,6 +63,12 @@ REACHING_INTO_THE_FRAMEWORK = [
     "from app.messaging import receiving",
     "from app.data.session import get_session",
     "import importlib\nimportlib.import_module('app.messaging.receiving')",
+    "import importlib\nimportlib.import_module('.turns', 'app.host')",
+    "import importlib\nimportlib.import_module('...host.turns', __package__)",
+    "from importlib import import_module as load\nload('app.host.turns')",
+    "import importlib as il\nil.import_module('.receiving', package='app.messaging')",
+    "__import__('host.turns', globals(), locals(), [], 3)",
+    "__import__('app.agent', fromlist=['continuity'])",
     "def later():\n    from app.host.turns import Turns\n    return Turns",
 ]
 
@@ -95,6 +101,8 @@ PRIVATE_NAMES_OF_ANOTHER_PACKAGE = [
     "import app.capabilities._errors",
     "from app.capabilities import _errors",
     "import importlib\nimportlib.import_module('app.agent._private')",
+    "import importlib\nimportlib.import_module('._private', 'app.agent')",
+    "from importlib import import_module as load\nload('app.agent._private')",
 ]
 
 

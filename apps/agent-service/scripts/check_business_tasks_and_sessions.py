@@ -18,8 +18,9 @@
 
 数据库只有存储（``app/data``）开会话、管事务；业务读写走 ``app.data.persist`` 的函数，几条要一起落地
 就包一层 ``async with tx():``。所以业务代码里也不许碰 ``current_session``（拿到它就能在 ``tx()`` 里跑
-任意语句，绕开那几个读写函数），也不 import ``app.data.tx`` 整个模块（同样够得着它）；
-``from app.data.tx import tx`` 照常。``app.data.session``、``get_session``、``AsyncSession`` 由
+任意语句，绕开那几个读写函数），也不 import ``app.data.tx`` 整个模块（同样够得着它；
+``importlib.import_module`` / ``__import__`` 的字符串字面量也算，解析方式和
+``scripts/check_world_life_imports.py`` 同一套）；``from app.data.tx import tx`` 照常。``app.data.session``、``get_session``、``AsyncSession`` 由
 grep-gate 的 Gap 13 管，那一条覆盖 ``app/data`` 之外的全部代码。
 
 ``app/agent``（固定循环和一轮）、宿主、存储、消息机制、能力层是框架，不在这条规则里：替插件起任务、
@@ -38,7 +39,12 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-from scripts.check_world_life_imports import module_name, resolve_from
+from scripts.check_world_life_imports import (
+    dynamic_import,
+    dynamic_importers,
+    module_name,
+    resolve_from,
+)
 
 BUSINESS: tuple[str, ...] = ("living", "world", "plugins", "nodes", "skills")
 
@@ -102,6 +108,7 @@ def _starts_something(qualified: str) -> bool:
 
 def _problems(tree: ast.AST, parts: list[str], is_package: bool) -> Iterator[tuple[int, str]]:
     bound = _bindings(tree, parts, is_package)
+    importers = dynamic_importers(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             base = resolve_from(parts, is_package, node)
@@ -129,6 +136,9 @@ def _problems(tree: ast.AST, parts: list[str], is_package: bool) -> Iterator[tup
             ):
                 yield node.lineno, _TASKS
             elif node.id == "current_session":
+                yield node.lineno, _SESSION
+        elif isinstance(node, ast.Call):
+            if "app.data.tx" in (dynamic_import(node, parts, is_package, importers) or ()):
                 yield node.lineno, _SESSION
 
 
