@@ -37,7 +37,7 @@ class _Runner:
         from app.agent.neutral import Role
         from app.agent.round import in_call
         from app.infra.cst_time import now_cst
-        from app.world.actions import wake_me_at
+        from app.world.core.actions import wake_me_at
 
         _append(ROUNDS, " | ".join(messages[-1].content.splitlines()))
         with in_call(call):

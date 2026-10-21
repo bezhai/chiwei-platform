@@ -1,5 +1,5 @@
 """world 每轮开头问通信机制"哪些处理完的消息已经记下了成功"，这一步有时限
-（:data:`app.world.rounds.SETTLED_QUERY_TIMEOUT`，T9 决定 3）：超过就按这次没查到处理，这一轮照常跑。
+（:data:`app.world.core.rounds.SETTLED_QUERY_TIMEOUT`，T9 决定 3）：超过就按这次没查到处理，这一轮照常跑。
 
 这一步的查询被时限取消之后还要收尾。数据库断开的消息传不回进程时（:mod:`tests.data.db_proxy`），
 收尾要等一件永远等不到的事；它最多再等 :data:`app.data.dialect.TERMINATE_GRACE_SECONDS`（决定 6），
@@ -43,7 +43,7 @@ async def test_a_round_start_query_held_up_in_the_database_holds_the_round_only_
     world, process_db, test_db, monkeypatch  # noqa: F811
 ):
     monkeypatch.setattr(
-        "app.world.rounds.SETTLED_QUERY_TIMEOUT", timedelta(seconds=QUERY_TIMEOUT)
+        "app.world.core.rounds.SETTLED_QUERY_TIMEOUT", timedelta(seconds=QUERY_TIMEOUT)
     )
     await world.deliver(_from("赤尾", "我出门了。"))  # 留下一条处理完的记录，下一轮开头要问它
     monkeypatch.setattr(receiving, "succeeded_message_ids", asks_messaging)

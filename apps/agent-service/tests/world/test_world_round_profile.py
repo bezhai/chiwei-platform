@@ -17,8 +17,9 @@ from app.agent.contracts import CostSpec, FailRound, Switches
 from app.agent.round import current_round
 from app.infra.cst_time import CST, now_cst
 from app.messaging.message import Kind, new_message
-from app.world import main_agent, records, wake
+from app.world import records
 from app.world.agents import when
+from app.world.core import main_agent, wake
 from app.world.perception import unfinished
 from app.world.services import Notice
 

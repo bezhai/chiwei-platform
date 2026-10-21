@@ -16,8 +16,8 @@ from app.agent.neutral import Role
 from app.infra.cst_time import now_cst
 from app.manifests.history import HISTORY_TEXTS
 from app.messaging.message import Kind, new_message
-from app.world import main_agent, wake
 from app.world.agents import when
+from app.world.core import main_agent, wake
 
 from .conftest import (
     LANE,
@@ -295,7 +295,7 @@ async def test_what_every_source_returns_is_trimmed_as_material_even_when_it_is_
 
 def test_the_trim_policy_keeps_the_five_constraints():
     from app.agent.continuity import MAX_CLEANUP_MINUTES
-    from app.world.main_agent import TRIM_POLICY as p
+    from app.world.core.main_agent import TRIM_POLICY as p
 
     assert p.material_minutes > 0 and p.own_minutes > 0
     assert p.own_minutes >= p.material_minutes
@@ -375,7 +375,7 @@ async def test_a_checkpoint_cut_away_on_write_back_comes_back_with_the_records_n
     from app.world import records
 
     at = now_cst()
-    monkeypatch.setattr("app.world.rounds.now_cst", lambda: at)
+    monkeypatch.setattr("app.world.core.rounds.now_cst", lambda: at)
     records.write("地方/厨房.md", "灶上炖着汤。", expected=None)
     world.history = []
     await world.deliver(_from_operator())

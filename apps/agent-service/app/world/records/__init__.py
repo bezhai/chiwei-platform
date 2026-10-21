@@ -5,7 +5,8 @@
 分由 world 自己定。代码里不预设任何目录名或文档名。
 
 **两个写者。** 主 agent 的写记录动作和人工读写接口（插件 ``record_keeping``，
-:mod:`app.world.records.keeping`、:mod:`app.world.records.admin`）都写这棵树，走的都是这里的四个入口。写和删的规矩是同一条：
+:mod:`app.world.records.keeping`、:mod:`app.world.records.admin`）都写这棵树，走的都是这里的四个
+入口。写和删的规矩是同一条：
 
 * 新建一份：``expected=None``，这一份必须还不存在；
 * 改写或删除一份已有的：``expected`` 必须是它现在的指纹（:func:`fingerprint_of`）。

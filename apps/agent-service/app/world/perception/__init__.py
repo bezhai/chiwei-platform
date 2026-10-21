@@ -185,7 +185,7 @@ def _describe(message: Message) -> str:
     if message.kind is Kind.NOT_DELIVERED:
         return f"通信机制退回给世界的一条没有送达的消息（{when(message.time)}）："
     if is_own_wake(message):
-        # 正文是主 agent 当时写给自己的（:func:`app.world.main_agent.set_the_next_wake` 排醒来时
+        # 正文是主 agent 当时写给自己的（:func:`app.world.core.main_agent.set_the_next_wake` 排醒来时
         # 那段），里面的"你"是世界；摆到感知判断眼前，"你"就成了它自己，所以说清楚。
         return (
             f"世界自己定的一次醒来（{when(message.time)}），不是谁发来的。"

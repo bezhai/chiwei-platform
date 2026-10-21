@@ -6,8 +6,7 @@ answer）。插件目录里的代码在 world 里面只 import 自己这个目�
 （框架只许 import 公开接口，由 T8 的检查管）。共享模块自己也只 import 共享模块。一个插件要用另一个
 插件的东西走服务；工具、段落、步骤由清单按名字排，谁也不用 import 谁。
 
-这里先在临时目录里造出各种写法的越界，证明检查真的会拦；再对真实代码树跑一遍。拆分还没做完的
-地方列在 :data:`KNOWN_CROSSINGS`，拆开一处就删掉一处。
+这里先在临时目录里造出各种写法的越界，证明检查真的会拦；再对真实代码树跑一遍，一处越界都没有。
 """
 from __future__ import annotations
 
@@ -21,9 +20,6 @@ from scripts.check_world_life_imports import imported_names, module_name
 
 # world 的共享模块：插件之间的契约，和几个插件都要用、又不属于哪一个插件的东西。
 SHARED = frozenset({"services", "agents", "volume"})
-
-# 拆分还没做完、现在还越界的 import：``文件 -> 它 import 的 world 模块``。拆完是空的。
-KNOWN_CROSSINGS: frozenset[str] = frozenset()
 
 
 def _world_part(target: str) -> str | None:
@@ -55,10 +51,6 @@ def crossings(root: Path) -> list[str]:
                     found.append(f"{path.relative_to(root)}:{lineno} -> app.world.{part}")
                     break
     return found
-
-
-def _without_lines(found: list[str]) -> set[str]:
-    return {f"{where.rsplit(':', 1)[0]} -> {target}" for where, target in (f.split(" -> ") for f in found)}
 
 
 def _tree(tmp_path: Path, files: dict[str, str]) -> Path:
@@ -148,7 +140,12 @@ def test_its_own_directory_the_services_the_shared_modules_and_the_rest_of_the_a
     assert crossings(root) == []
 
 
-def test_the_world_plugins_cross_only_where_the_split_is_not_done_yet():
-    found = crossings(Path(app_pkg.__file__).parent)
+def test_the_world_plugins_do_not_cross_into_each_other():
+    assert crossings(Path(app_pkg.__file__).parent) == []
 
-    assert _without_lines(found) == KNOWN_CROSSINGS, "\n".join(found)
+
+def test_world_has_no_module_outside_a_plugin_directory_but_the_shared_ones():
+    """world 的代码都在插件目录里（world 核心也是一个，``core/``），目录外只有共享模块。"""
+    world = Path(app_pkg.__file__).parent / "world"
+
+    assert sorted(p.stem for p in world.glob("*.py")) == sorted({"__init__", *SHARED})

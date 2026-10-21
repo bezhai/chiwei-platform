@@ -27,7 +27,7 @@ from app.infra.propagation import Context
 from app.messaging.message import Kind, new_message
 from app.world import perception
 from app.world.agents import world_segments
-from app.world.rounds import InboxRound
+from app.world.core.rounds import InboxRound
 
 LEVEL = LangfuseOtelSpanAttributes.OBSERVATION_LEVEL
 STATUS = LangfuseOtelSpanAttributes.OBSERVATION_STATUS_MESSAGE

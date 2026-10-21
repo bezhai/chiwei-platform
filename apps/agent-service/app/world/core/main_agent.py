@@ -1,10 +1,10 @@
 """world 主 agent 的一轮：带着收件箱里还没经过一轮的消息，看记录、看现实、让世界变化，最后定
 下次醒来的时刻。
 
-**一轮带着哪些消息、什么时候跑**由 :mod:`app.world.rounds` 决定：一轮处理收件箱里所有还没经过
+**一轮带着哪些消息、什么时候跑**由 :mod:`app.world.core.rounds` 决定：一轮处理收件箱里所有还没经过
 一轮的消息，同一时刻只有一轮在跑，一轮最多 :data:`ROUND_TIMEOUT`；这一轮的 id 和时刻也是它在
 开始跑这一轮时定的。这里是一轮由什么组成：固定循环（:func:`app.agent.round.run_round`）按清单
-``world`` 排的位置跑它们（:func:`run_inbox_round`），world 插件（:mod:`app.plugins.world`）登记。
+``world`` 排的位置跑它们（:func:`run_inbox_round`），world 插件（:mod:`app.world.core`）登记。
 
 **一轮开始前**（``unfinished.resend``，感知判断插件的 :func:`app.world.perception.resend_left_over`）：
 之前有一轮没跑完时，按原 id 把那一轮里要发的告知全部补发一遍。发送出错这一轮在模型开始之前就算
@@ -12,22 +12,22 @@
 
 **一轮怎样才算跑完。** 模型那一段结束之后，依次：
 
-1. 检查这一轮定了下次醒来的时刻（``wake.chosen``，:func:`app.world.actions.wake_me_at`）。没定就抛
+1. 检查这一轮定了下次醒来的时刻（``wake.chosen``，:func:`app.world.core.actions.wake_me_at`）。没定就抛
    :class:`NoNextWake`，这一轮算没跑完。工具预算用完时框架给的那一次不带工具的收尾定不了
    时刻，同样按没定处理；
 2. 把这一轮存进它的连续上下文（``history``，:mod:`app.agent.continuity`，按版本做 CAS），然后
    清空 :mod:`app.world.perception.unfinished`（``unfinished.clear``，感知判断插件）——这一轮发生过的
    事已经在上下文里了；
-3. 定下次醒来（``wake.next``，:func:`app.world.wake.set_next_wake`：先排出自定消息，broker 确认之后
+3. 定下次醒来（``wake.next``，:func:`app.world.core.wake.set_next_wake`：先排出自定消息，broker 确认之后
    才记成私有状态里的最新唤醒；跟已经排着、还没送到的那一条是同一个时刻，就不再排）。
 
 没有落地事务。任何一步失败都往外抛，这一轮算没跑完，带着的消息都留给之后的一轮，等它们的投递
-按通信机制重试（:mod:`app.world.rounds`）。再跑是安全的：它改过的记录留在盘上，下一次读得到；
+按通信机制重试（:mod:`app.world.core.rounds`）。再跑是安全的：它改过的记录留在盘上，下一次读得到；
 已经发出去的告知收不回来：报告过的变化、出过场的 NPC 和要发的告知（带预先定好的消息 id）在发之前
 就记在 :mod:`app.world.perception.unfinished`，下一轮模型跑之前按原 id 补发一遍（接收方按 id 去重），再摆到它
 眼前，它不会把同一件事再报告一遍；上下文和下次醒来都只在最后才写下。这一轮带着的自定消息在
 第 3 步记下新唤醒之前一直是状态里的最新唤醒，所以重投时不会被当成旧消息，失败了也不限次数
-重试、不进死信；哪一处失败、进程死在哪里，各自怎么接上见 :mod:`app.world.wake`。先存上下文、
+重试、不进死信；哪一处失败、进程死在哪里，各自怎么接上见 :mod:`app.world.core.wake`。先存上下文、
 后定时刻，是因为定时刻做完之后这一轮就不该再重跑——否则会多出一个被取代的自定消息，而上下文
 里又少了这一轮。
 
@@ -36,10 +36,11 @@
 它原来定的下次醒来，提醒它这一轮结束前要重新定（``wake.planned``）；之前有一轮没跑完时，那一轮
 里已经发生的事和补发告知的结果（``unfinished.happenings``，感知判断插件登记）。它的记录目录是状态段
 （``records.listing``，插件 ``record_keeping`` 登记），只在上下文清理时写进那条带时刻的标记消息
-（:mod:`app.agent.continuity`；每轮都一样的东西不每轮重发）。prompt 在 Langfuse（:data:`ROUND`），正文不引用任何变量。
+（:mod:`app.agent.continuity`；每轮都一样的东西不每轮重发）。prompt 在 Langfuse（:data:`ROUND`），
+正文不引用任何变量。
 
 **它手里有什么。** 清单 ``world`` 排的工具：三个知识来源插件的查询工具（records、reality、told，
-关掉的来源由一轮开始时读的开关拿掉），加上只有它才有的动作（:mod:`app.world.actions`）。来源的
+关掉的来源由一轮开始时读的开关拿掉），加上只有它才有的动作（:mod:`app.world.core.actions`）。来源的
 查询结果是读到的材料，按 :data:`TRIM_POLICY` 的短档保留。
 
 **模型和工具预算走 Dynamic Config**，跟另外三类一起在 :mod:`app.world.agents`。裁剪阈值
@@ -55,10 +56,10 @@ from datetime import datetime, timedelta
 from app.agent.continuity import TrimPolicy
 from app.agent.round import AssembledProfile, Round, run_round
 from app.messaging.message import Kind, Message
-from app.world.actions import RoundScope
 from app.world.agents import WORLD, is_own_wake, when, world_agent
-from app.world.rounds import InboxRound
-from app.world.wake import NextWake, read_next_wake, set_next_wake
+from app.world.core.actions import RoundScope
+from app.world.core.rounds import InboxRound
+from app.world.core.wake import NextWake, read_next_wake, set_next_wake
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ ROUND_SEGMENTS = tuple(
 )
 ROUND_AGENT = world_agent(ROUND, "world-round", segments=ROUND_SEGMENTS)
 
-# 一轮最多跑多久，超过就取消、算这一轮没跑完（:class:`app.world.rounds.Rounds` 管它，收件箱的
+# 一轮最多跑多久，超过就取消、算这一轮没跑完（:class:`app.world.core.rounds.Rounds` 管它，收件箱的
 # 处理时限和占位租约按它放长）。正常一轮 30 到 70 秒，10 分钟是将近十倍的余量。不能再长：一次投递
 # 最多要等两轮加一分钟（21 分钟），再给领取和记结果留出余量，要放进通信机制给一次投递的期限
 # （:data:`app.messaging.receiving.DELIVERY_DEADLINE`，28 分钟，比 broker 等确认的 30 分钟短）。
@@ -174,7 +175,7 @@ async def next_wake_chosen(round: Round) -> None:
 
 
 async def set_the_next_wake(round: Round) -> None:
-    """``wake.next``：定下这一轮选的下次醒来（:func:`app.world.wake.set_next_wake`），这一轮带着的
+    """``wake.next``：定下这一轮选的下次醒来（:func:`app.world.core.wake.set_next_wake`），这一轮带着的
     消息交给它判断要不要记成"已经醒过"。"""
     choice = round.state(RoundScope).next_wake
     round.state(Scheduled).wake = await set_next_wake(

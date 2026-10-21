@@ -15,7 +15,8 @@ import json
 import pytest
 
 from app.messaging.message import Kind, SendFailed, new_message
-from app.world import main_agent, npc, perception, wake
+from app.world import npc, perception
+from app.world.core import main_agent, wake
 from app.world.perception import unfinished
 
 from .conftest import LANE, ScriptedAgent, sets_wake, use_tool

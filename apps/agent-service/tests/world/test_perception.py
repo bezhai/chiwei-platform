@@ -19,8 +19,9 @@ from app.capabilities._errors import CapabilityTimeout
 from app.infra.cst_time import now_cst
 from app.manifests.world import QUERY_TOOLS
 from app.messaging.message import Kind, new_message
-from app.world import main_agent, perception, wake
+from app.world import perception
 from app.world.agents import when
+from app.world.core import main_agent, wake
 
 from .conftest import (
     LANE,
@@ -527,4 +528,4 @@ def test_in_worlds_code_only_perception_sends_to_others_and_only_wake_schedules(
                     a.name for a in node.names
                 )
 
-    assert senders == {"perception/__init__.py": {"send"}, "wake.py": {"send_at"}}
+    assert senders == {"perception/__init__.py": {"send"}, "core/wake.py": {"send_at"}}

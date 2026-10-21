@@ -1,4 +1,4 @@
-"""world 作为一个插件（:mod:`app.plugins.world`）：world App 的清单只有它；它开设的收件箱怎么声明、
+"""world 作为一个插件（:mod:`app.world.core`）：world App 的清单只有它；它开设的收件箱怎么声明、
 登记哪几条路由和知识来源；每次起来都有自己的一轮接一轮，停下时登记的东西全部撤掉；加载它不带进
 life 的代码。
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from app.messaging.message import Kind, new_message
 from app.messaging.receiving import INBOX_REGISTRY
-from app.world.rounds import Rounds
+from app.world.core.rounds import Rounds
 from tests.hosting import start_without_io
 from tests.messaging.helpers import eventually
 
@@ -46,7 +46,7 @@ def test_the_world_app_runs_the_world_plugin_and_its_feature_plugins_in_order():
     from app.manifests.world import MANIFEST
 
     assert MANIFEST.plugins == (
-        "app.plugins.world",
+        "app.world.core",
         "app.world.records.reading",
         "app.world.records.keeping",
         "app.world.reality",
@@ -61,10 +61,10 @@ async def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_t
     app_host,
 ):
     from app.messaging.receiving import PROCESSING_RETRY, _lease_ms
-    from app.world.intake import Intakes
-    from app.world.main_agent import ROUND_TIMEOUT
+    from app.world.core.intake import Intakes
+    from app.world.core.main_agent import ROUND_TIMEOUT
+    from app.world.core.wake import retry_latest_wake_without_limit, wake_on_start
     from app.world.volume import writer_lock
-    from app.world.wake import retry_latest_wake_without_limit, wake_on_start
 
     host = await app_host("world")
 
@@ -188,7 +188,7 @@ async def test_stop_takes_back_the_inbox_the_routes_and_every_registration(app_h
 def test_importing_the_plugin_loads_no_life_code():
     """world 的进程只加载这个插件。它带进 life 的代码，world 的进程就又背上了 life。"""
     probe = (
-        "import json, sys; import app.plugins.world; "
+        "import json, sys; import app.world.core; "
         "print(json.dumps(sorted(m for m in sys.modules if m.startswith('app.'))))"
     )
     out = subprocess.run(
@@ -202,4 +202,4 @@ def test_importing_the_plugin_loads_no_life_code():
     loaded = json.loads(out.stdout.strip().splitlines()[-1])
 
     assert [m for m in loaded if m == "app.living" or m.startswith("app.living.")] == []
-    assert "app.plugins.world" in loaded
+    assert "app.world.core" in loaded

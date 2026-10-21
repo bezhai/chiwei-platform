@@ -22,9 +22,9 @@ import pytest
 from app.infra.cst_time import CST
 from app.messaging import receiving
 from app.messaging.message import Kind, new_message
-from app.world import main_agent, pending
 from app.world.agents import when
-from app.world.rounds import RoundFailed
+from app.world.core import main_agent, pending
+from app.world.core.rounds import RoundFailed
 from tests.messaging.helpers import eventually
 
 from .conftest import LANE, self_message, sets_wake
@@ -150,7 +150,7 @@ async def test_when_messaging_does_not_answer_a_delivery_arriving_meanwhile_join
 ):
     """问通信机制那一步一直没有回音：等到时限按"这次没查到"处理，记录留着，这一轮照常跑；等的
     那段时间里到的投递并进这一轮，一起处理完。"""
-    monkeypatch.setattr("app.world.rounds.SETTLED_QUERY_TIMEOUT", timedelta(milliseconds=300))
+    monkeypatch.setattr("app.world.core.rounds.SETTLED_QUERY_TIMEOUT", timedelta(milliseconds=300))
     first = _from("赤尾", "我出门了。")
     await world.deliver(first)
     asking, joined = asyncio.Event(), asyncio.Event()
@@ -206,7 +206,7 @@ async def test_now_in_the_round_is_read_after_asking_messaging(world, monkeypatc
     slow = SlowAsking()
     monkeypatch.setattr(receiving, "succeeded_message_ids", slow)
     clock = [datetime(2026, 7, 25, 10, 59, 58, tzinfo=CST)]
-    monkeypatch.setattr("app.world.rounds.now_cst", lambda: clock[0])
+    monkeypatch.setattr("app.world.core.rounds.now_cst", lambda: clock[0])
     world.runner.plan = sets_wake()
 
     leading = asyncio.create_task(world.deliver(_from("千凪", "我在做饭。")))
@@ -230,7 +230,7 @@ def _no_clock() -> datetime:
 def _source():
     """world 收件箱的唤醒来源，跟 world 插件建的一样（一个新的 ``Rounds`` 就是一个新进程）。"""
     from app.host import Turns
-    from app.world.rounds import Rounds
+    from app.world.core.rounds import Rounds
 
     async def never_runs(due, *, round_id, now):  # pragma: no cover - due 不跑一轮
         raise AssertionError

@@ -84,7 +84,7 @@ async def test_answer_registers_its_answer_with_world_intake_and_its_prompt():
 
 
 def test_the_world_core_does_not_require_the_answer_plugin():
-    from app.plugins.world import PLUGIN as WORLD_CORE
+    from app.world.core import PLUGIN as WORLD_CORE
 
     assert WORLD_CORE.requires == ()
 
@@ -149,7 +149,7 @@ async def test_the_world_inbox_answers_questions_with_the_answer_registered_on_w
     app_host,
 ):
     from app.messaging.receiving import INBOX_REGISTRY
-    from app.world.intake import Intakes
+    from app.world.core.intake import Intakes
 
     await app_host("world")
 

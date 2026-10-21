@@ -16,8 +16,8 @@ from app.infra.cst_time import now_cst
 from app.messaging.lifecycle import start_messaging
 from app.messaging.record import read_record
 from app.messaging.sending import send
-from app.world import wake
-from app.world.actions import wake_me_at
+from app.world.core import wake
+from app.world.core.actions import wake_me_at
 from tests.messaging.conftest import (  # noqa: F401
     LANE,
     broker,
@@ -258,7 +258,7 @@ async def test_messages_arriving_while_a_round_runs_are_taken_together_by_one_ro
 ):
     from sqlalchemy import text
 
-    from app.world import pending
+    from app.world.core import pending
 
     runner = HeldFirstRound()
     monkeypatch.setattr("app.agent.core.Agent", lambda spec, *, tools=(), never_ran=None: runner)
@@ -326,11 +326,11 @@ def short_rounds(monkeypatch):
     要在 world 的宿主起来之前设好（用例里排在 ``world_process`` 前面）：收件箱的处理时限和租约
     在插件 setup 时按它们算。
     """
+    import app.world.core as world_core
     from app.messaging import receiving
-    from app.plugins import world as world_plugin
-    from app.world import rounds
+    from app.world.core import rounds
 
-    monkeypatch.setattr(world_plugin, "ROUND_TIMEOUT", timedelta(seconds=3))
+    monkeypatch.setattr(world_core, "ROUND_TIMEOUT", timedelta(seconds=3))
     monkeypatch.setattr(rounds, "_SETTLING", timedelta(0))
     monkeypatch.setattr(receiving, "LEASE_OVER_TIMEOUT_MS", 500)
 

@@ -20,10 +20,10 @@ from app.host import Turns
 from app.infra.cst_time import CST, now_cst
 from app.messaging import receiving
 from app.messaging.message import Kind, new_message
-from app.world import main_agent, pending, wake
-from app.world.actions import wake_me_at
 from app.world.agents import WORLD
-from app.world.rounds import InboxRound, RoundFailed, Rounds
+from app.world.core import main_agent, pending, wake
+from app.world.core.actions import wake_me_at
+from app.world.core.rounds import InboxRound, RoundFailed, Rounds
 from tests.messaging.helpers import eventually
 
 from .conftest import LANE, restart, self_message, sets_nothing, sets_wake
@@ -673,7 +673,7 @@ async def test_a_round_takes_its_time_and_id_when_the_source_starts_running_it(
 ):
     """一轮的时刻和 id 在 world 收件箱这个来源开始跑它的那一刻定下（读钟、生成 uuid4），交给
     跑这一轮的函数；之前判这一批的时候不读钟。"""
-    from app.world import rounds as rounds_module
+    from app.world.core import rounds as rounds_module
 
     seen: list[tuple[str, datetime]] = []
     clock = [datetime(2026, 7, 25, 10, 59, 58, tzinfo=CST)]
@@ -809,7 +809,7 @@ async def test_when_messaging_does_not_answer_in_time_the_records_stay_and_the_r
 ):
     """问通信机制那一步一直没有回音（库那边卡住了）：等到时限按"这次没查到"处理，这一轮照常跑，
     记录留到下一轮再清。不等到时限就放手的话，它卡在拿着锁的一轮开头，之后的投递全都跟着等。"""
-    monkeypatch.setattr("app.world.rounds.SETTLED_QUERY_TIMEOUT", timedelta(milliseconds=200))
+    monkeypatch.setattr("app.world.core.rounds.SETTLED_QUERY_TIMEOUT", timedelta(milliseconds=200))
     first = _from("赤尾", "我出门了。")
     await world.deliver(first)
     answers = receiving.succeeded_message_ids

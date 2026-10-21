@@ -3,12 +3,12 @@
 
 * 写记录（``write_record``）由插件 ``record_keeping`` 登记（:mod:`app.world.records.keeping`）。
 * :func:`wake_me_at` —— 定下次醒来的时刻。每一轮必须调，没调的一轮算失败
-  （:mod:`app.world.main_agent`）。
+  （:mod:`app.world.core.main_agent`）。
 * 报告世界里发生的一个变化（``report_change``，:meth:`app.world.perception.Perceiving.report_change`）
   和让一个 NPC 出场（``let_npc_appear``，:meth:`app.world.npc.Npcs.let_npc_appear`）要调别的
   agent，是拿着那两个 agent 的对象的方法，不在这里；告知先记后发的规矩见 :mod:`app.world.perception`。
 
-**它们由 world 插件逐个登记**（:mod:`app.plugins.world`，``ctx.tool``），清单 ``world`` 把它们
+**它们由 world 插件逐个登记**（:mod:`app.world.core`，``ctx.tool``），清单 ``world`` 把它们
 排在知识来源的查询工具后面。它们的返回是它自己做过的事，跟着它自己的话一起留（``trim="kept"``；
 只有来源的查询结果当材料裁）。
 

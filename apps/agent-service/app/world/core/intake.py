@@ -1,7 +1,7 @@
 """world 收件箱的 ``world_intake`` 服务（:class:`~app.world.services.WorldIntake`）：收件箱交给别的
-插件的收件处理和提问。world 核心提供它（:mod:`app.plugins.world`），用它的插件在 setup 里登记。
+插件的收件处理和提问。world 核心提供它（:mod:`app.world.core`），用它的插件在 setup 里登记。
 
-**收件处理**（:meth:`Intakes.take_in`，收件箱的处理函数 :meth:`app.world.rounds.Rounds.receive`
+**收件处理**（:meth:`Intakes.take_in`，收件箱的处理函数 :meth:`app.world.core.rounds.Rounds.receive`
 先调它）：每收到一条普通消息，交给登记过的插件的收件处理，按登记的先后；被开关关掉的插件的跳过。
 开关是 world 一轮的那一份（清单 ``world`` 的 ``switches``，Dynamic Config ``world_sources``），收件处理
 不在哪一轮里，每条消息来时读一次（:func:`app.agent.round.switched_off`）；开关不管的插件的收件处理
@@ -21,8 +21,8 @@ from app.world.services import Answer, Intake
 
 
 class Intakes:
-    """一个 world 进程的 ``world_intake``：宿主每次起来，world 插件新建一个（跟 :class:`app.world.rounds.Rounds` 一样，
-    不放在模块级）。``switches`` 是 world 一轮的开关。"""
+    """一个 world 进程的 ``world_intake``：宿主每次起来，world 插件新建一个（跟
+    :class:`app.world.core.rounds.Rounds` 一样，不放在模块级）。``switches`` 是 world 一轮的开关。"""
 
     def __init__(self, switches: Switches | None) -> None:
         self._switches = switches

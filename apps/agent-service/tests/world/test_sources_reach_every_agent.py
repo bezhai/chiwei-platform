@@ -17,7 +17,8 @@ from app.agent.tooling import tool
 from app.host import Plugin
 from app.manifests.world import MANIFEST, QUERY_TOOLS, WORLD
 from app.messaging.message import Kind, new_message
-from app.world import answer, main_agent, npc, perception
+from app.world import answer, npc, perception
+from app.world.core import main_agent
 
 from .conftest import ScriptedAgent, ask, sets_wake, tools_built_for, use_tool
 

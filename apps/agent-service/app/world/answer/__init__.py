@@ -1,14 +1,15 @@
 """插件 ``answer``：应答 agent，回答别人问 world 的问题——某处现在什么样、谁在哪。
 
-world 的收件箱声明了 ``on_question``（:mod:`app.plugins.world`），把提问交给在 ``world_intake`` 上
-登记的应答；这个插件登记的就是它。每个问题起一个应答 agent（:meth:`Answering.answer_question`）：它拿到清单给它列的工具（宿主组好的 ``world_answer``，
-``ctx.agent``）：知识来源的查询工具，跟另外三类拿的是同一份；它不在哪一轮里，关掉的来源按每个问题
-来时读的开关拿掉，prompt 里关掉的插件的段落也一样。它依据这些工具回答。能当场推出来的东西（按现在的时间、天气和记录）由它当场推，主 agent 不为此提前
-写下，也不为此醒。
+world 的收件箱声明了 ``on_question``（:mod:`app.world.core`），把提问交给在 ``world_intake`` 上
+登记的应答；这个插件登记的就是它。每个问题起一个应答 agent（:meth:`Answering.answer_question`）：
+它拿到清单给它列的工具（宿主组好的 ``world_answer``，``ctx.agent``）：知识来源的查询工具，跟另外
+三类拿的是同一份；它不在哪一轮里，关掉的来源按每个问题来时读的开关拿掉，prompt 里关掉的插件的段落
+也一样。它依据这些工具回答。能当场推出来的东西（按现在的时间、天气和记录）由它当场推，主 agent
+不为此提前写下，也不为此醒。
 
 **只读。** 它不写记录、不发消息、不报告变化，也不叫醒主 agent：它手里只有来源的查询工具。
 它不在主 agent 的任何一轮里，可以和一轮同时跑。提问也不经过各来源的收件处理——那只在普通消息那条路上
-跑（:meth:`app.world.rounds.Rounds.receive`）。问的人拿到的就是它最后说的话；它什么都没
+跑（:meth:`app.world.core.rounds.Rounds.receive`）。问的人拿到的就是它最后说的话；它什么都没
 说，就是"没有回答"。
 
 prompt 在 Langfuse（:data:`ANSWER`），正文不引用任何变量；现在几点、谁问的、问的什么写在 USER

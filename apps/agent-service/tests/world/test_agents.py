@@ -147,7 +147,7 @@ def test_the_main_agents_history_is_kept_under_the_session_every_world_trace_gro
     bare_volume,
 ):
     from app.agent.round import open_call
-    from app.world.main_agent import ROUND, ROUND_AGENT
+    from app.world.core.main_agent import ROUND, ROUND_AGENT
 
     session = open_call(ROUND, ROUND_AGENT, lane=LANE).session
     assert session == f"world:{LANE}"

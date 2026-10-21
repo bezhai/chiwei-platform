@@ -1,14 +1,14 @@
 """一轮收尾定下次醒来时，每一步都可能失败或者进程死在中间：逐个顺序看 world 会不会停转。
 
-定下次醒来是**先发后记**（:func:`app.world.wake.set_next_wake`）：先用 send_at 排出新时刻 B，
+定下次醒来是**先发后记**（:func:`app.world.core.wake.set_next_wake`）：先用 send_at 排出新时刻 B，
 broker 确认之后才把 B 记成私有状态里的"最新唤醒"。所以状态里记的唤醒，一定已经排出去了，
 或者就是正在处理、正在重试的那一条。自定消息的 id 跟"最新唤醒"对不上，就是旧消息，跳过。
 状态里的最新唤醒处理失败时不限次数重试，永不进死信
-（:func:`app.world.wake.retry_latest_wake_without_limit`）。
+（:func:`app.world.core.wake.retry_latest_wake_without_limit`）。
 
 A 是叫醒这一轮的自定消息（状态里的最新唤醒），B 是这一轮定的新时刻。"通信机制重投 A"在这里
 就是再投一次（``world.deliver``，接线里交给收件箱的处理函数）；"进程死了再起来"就是收件箱开设时
-的 :func:`app.world.wake.wake_on_start`，加上没确认的消息被重投。
+的 :func:`app.world.core.wake.wake_on_start`，加上没确认的消息被重投。
 
 每个用例最后都用 :func:`_assert_awake` 核对同一条不变量：之后一定还有一条会被执行的自定唤醒
 ——它已经排出去了，不会被当成旧消息跳过，失败了也不会进死信。
@@ -35,7 +35,7 @@ import pytest
 
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, SendFailed, new_message
-from app.world import main_agent, wake
+from app.world.core import main_agent, wake
 
 from .conftest import self_message, sets_nothing, sets_wake
 

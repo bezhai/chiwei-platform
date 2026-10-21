@@ -1,14 +1,15 @@
-"""world 的清单：world 的核心插件，记录的两个插件（``records`` 是查询工具，``record_keeping`` 是写
-记录、记录目录和人工读写接口），和另外两个知识来源插件（reality、told），所以 world 的进程不加载
-living 的任何代码。插件按这里的顺序起来，来源也按这个顺序登记，收件处理按这个顺序看到它们。
+"""world 的清单：world 的核心插件（:mod:`app.world.core`）和它的功能插件——记录的两个（``records`` 是
+查询工具，``record_keeping`` 是写记录、记录目录和人工读写接口）、现实、told、感知判断、NPC、应答，
+所以 world 的进程不加载 living 的任何代码。宿主按依赖先后起它们，收件处理按登记的先后跑。
 
-主 agent 的一轮按 ``world`` 组成（各段各步见 :mod:`app.world.main_agent`）：一轮开始前补发没跑完的
+主 agent 的一轮按 ``world`` 组成（各段各步见 :mod:`app.world.core.main_agent`）：一轮开始前补发没跑完的
 一轮的告知；状态段是记录目录，只进上下文清理的标记消息；三个输入段用一个换行拼；检查它定了下次
 醒来；没有落地事务；之后存上下文、清空没跑完的一轮、定下次醒来，三步失败都让这一轮失败。
 
 它的工具按这里列的顺序给模型（也是请求前缀缓存的一部分，改顺序就是改请求）：三个来源的查询工具
 按来源排（:data:`QUERY_TOOLS`），再是只有它才有的四个动作。三个来源能被 Dynamic Config
-``world_sources`` 关掉（开关在一轮开始时读一次，关掉的来源的工具不进这一轮）。
+``world_sources`` 关掉（开关在一轮开始时读一次，关掉的来源的工具和它在 prompt 里的段落都不进这一轮；
+收件处理在每条消息来时读一次）。
 
 感知判断、NPC、应答拿的也是 :data:`QUERY_TOOLS` 这一份，按同样的顺序（感知判断另有它记判断的
 那只手）：加一个查询工具，就是在它的插件里登记、在 :data:`QUERY_TOOLS` 里加上名字。
@@ -28,7 +29,7 @@ from app.host.manifest import App, Participant
 from app.manifests.history import HISTORY_TEXTS
 from app.world.agents import HISTORY_KEY
 from app.world.answer import ANSWER_AGENT
-from app.world.main_agent import ROUND_AGENT, TRIM_POLICY
+from app.world.core.main_agent import ROUND_AGENT, TRIM_POLICY
 from app.world.npc import NPC_AGENT
 from app.world.perception import PERCEPTION_AGENT
 
@@ -68,7 +69,7 @@ WORLD = Profile(
 
 MANIFEST = App(
     plugins=(
-        "app.plugins.world",
+        "app.world.core",
         "app.world.records.reading",
         "app.world.records.keeping",
         "app.world.reality",

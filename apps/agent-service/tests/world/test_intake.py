@@ -1,4 +1,4 @@
-"""world 收件箱的 ``world_intake`` 服务（world 核心提供，:class:`app.world.intake.Intakes`）：
+"""world 收件箱的 ``world_intake`` 服务（world 核心提供，:class:`app.world.core.intake.Intakes`）：
 
 * 收件处理：每收到一条普通消息，交给登记过的、这一刻没被开关关掉的插件，按登记的先后。开关
   （清单 ``world`` 的 ``switches``）在每条消息来时读一次；开关不管的插件的收件处理总在。
@@ -12,7 +12,7 @@ import pytest
 
 from app.agent.contracts import Switches
 from app.messaging.message import Kind, new_message
-from app.world.intake import Intakes
+from app.world.core.intake import Intakes
 
 SWITCHES = Switches("world_sources", ("told", "tides"))
 

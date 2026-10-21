@@ -1,6 +1,6 @@
 """主 agent 才有的动作：写记录（插件 ``record_keeping``）、定下次醒来的时刻。
 
-动作在 world 的一轮里跑（这一轮的状态 :class:`app.world.actions.RoundScope`，这次调用的状态里
+动作在 world 的一轮里跑（这一轮的状态 :class:`app.world.core.actions.RoundScope`，这次调用的状态里
 记着读过什么），这里直接在绑好的一轮里调它们，不起模型。
 """
 from __future__ import annotations
@@ -11,8 +11,9 @@ import pytest
 
 from app.infra.cst_time import CST, now_cst
 from app.messaging.message import Kind, new_message
-from app.world import actions, records
-from app.world.actions import RoundScope
+from app.world import records
+from app.world.core import actions
+from app.world.core.actions import RoundScope
 from app.world.records.keeping import write_record
 from app.world.records.reading import read_record
 
@@ -110,7 +111,7 @@ async def test_a_time_without_an_offset_is_read_as_utc_plus_eight(scope):
 
 def test_the_model_is_told_which_reason_it_sees_when_it_keeps_the_same_time():
     """时刻跟原来定的下次醒来相同时不另排，到点摆出来的是原来那次写的理由
-    （:func:`app.world.wake.set_next_wake`）。说明里不能许诺"这一次写的会原样摆出来"。"""
+    （:func:`app.world.core.wake.set_next_wake`）。说明里不能许诺"这一次写的会原样摆出来"。"""
     described = actions.wake_me_at.definition.parameters["properties"]["reason"]
     assert described["description"] == (
         "为什么定这个时刻。到时候这句话会原样摆在你眼前；时刻跟你原来定的下次醒来相同时，"

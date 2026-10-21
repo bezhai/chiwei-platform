@@ -6,8 +6,8 @@
 
 目录里放这几样：``records/``（记录，:mod:`app.world.records`）、``sources/told/``（别人
 告诉世界的事，:func:`app.world.told.stored_dir`）、私有状态文件（下次醒来，
-:mod:`app.world.wake`；没跑完的一轮里已经发生的事，:mod:`app.world.perception.unfinished`；收件箱里的消息
-走到了哪一步，:mod:`app.world.pending`）和写锁文件。
+:mod:`app.world.core.wake`；没跑完的一轮里已经发生的事，:mod:`app.world.perception.unfinished`；收件箱里的消息
+走到了哪一步，:mod:`app.world.core.pending`）和写锁文件。
 人工读写接口只够得到 ``records/``。
 
 **这里的读写全是同步的。** 文件都很小，卷在本机挂载；同步读写意味着"检查指纹"和
@@ -18,7 +18,7 @@
 （:func:`writer_lock`）。发布是滚动更新，单副本也会有新旧两个 world 进程同时在跑的一段；
 卷是 hostPath 卷、固定在单节点，挂它的 pod 都在同一台宿主机上读写同一个本地目录，flock
 在它们之间是真的互斥。拿着锁的进程才消费收件箱（收件箱开设时声明了 ``consume_while``，
-见 :mod:`app.plugins.world`），启动补醒也在拿到锁之后才跑；没拿到的进程照常起来、照常答
+见 :mod:`app.world.core`），启动补醒也在拿到锁之后才跑；没拿到的进程照常起来、照常答
 HTTP，读记录照常，写一律拒绝（:class:`WriterLockNotHeld`）。进程退出时先停消费、等正在
 处理的那一轮，最后才放锁（:func:`app.messaging.receiving.stop_receiving`）；进程要是直接
 死了，内核关掉它的文件，锁也跟着放开。

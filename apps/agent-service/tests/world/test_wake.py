@@ -12,7 +12,7 @@ import pytest
 
 from app.infra.cst_time import now_cst
 from app.messaging.message import Kind, SendFailed, new_message
-from app.world import wake
+from app.world.core import wake
 
 from .conftest import LANE
 

@@ -11,8 +11,9 @@ import pytest
 
 from app.agent.round import Call, in_call
 from app.messaging.message import Kind, Message, new_message
-from app.world import main_agent, records, told
+from app.world import records, told
 from app.world.agents import when
+from app.world.core import main_agent
 
 from .conftest import LANE, sets_nothing, sets_wake
 

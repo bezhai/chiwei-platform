@@ -18,7 +18,7 @@ import pytest
 
 from app.infra.cst_time import CST
 from app.living.life.moment import LIFE_MOMENT_AGENT
-from app.world.main_agent import ROUND_SEGMENTS
+from app.world.core.main_agent import ROUND_SEGMENTS
 from tests.replay import seeds
 from tests.replay.harness import Reply, ToolUse
 from tests.replay.harness.prompts import load_fixture

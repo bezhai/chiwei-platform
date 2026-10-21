@@ -82,7 +82,7 @@ def _agents_with_tools():
     from app.living.life.moment import LIFE_MOMENT_AGENT
     from app.living.reading.agent import READING_AGENT
     from app.world.answer import ANSWER_AGENT
-    from app.world.main_agent import ROUND_AGENT
+    from app.world.core.main_agent import ROUND_AGENT
     from app.world.npc import NPC_AGENT
     from app.world.perception import PERCEPTION_AGENT
 

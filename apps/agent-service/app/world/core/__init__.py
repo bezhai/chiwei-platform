@@ -1,10 +1,9 @@
-"""world App 的核心插件：主 agent 的一轮、``world`` 收件箱。world 的清单（:mod:`app.manifests.world`）
-只有它、记录的两个插件（:mod:`app.world.records`：查询工具一个，写记录、记录目录和人工读写接口一个）、
-现实的插件（:mod:`app.world.reality`）、知识来源 told 的插件（:mod:`app.world.told`）、感知判断的
-插件（:mod:`app.world.perception`）、NPC 的插件（:mod:`app.world.npc`）和应答的插件
-（:mod:`app.world.answer`），所以 world 的进程不加载 life 的任何代码。
+"""插件 ``world``：world 的核心——主 agent 的一轮、``world`` 收件箱、自己定的醒来、``world_intake``
+服务。别的都是功能插件（记录、现实、told、感知判断、NPC、应答，各在 :mod:`app.world` 下自己的目录里），
+它们依赖核心，核心不依赖它们。world 的清单（:mod:`app.manifests.world`）只有这些插件，所以 world 的
+进程不加载 life 的任何代码。
 
-**主 agent 的一轮**（:mod:`app.world.main_agent`），清单 ``world`` 排它们的位置：
+**主 agent 的一轮**（:mod:`app.world.core.main_agent`），清单 ``world`` 排它们的位置：
 
   segments (``ctx.segment``)   world_round 的几段（核心、醒来、一轮的顺序）
   tools (``ctx.tool``)         wake_me_at（kept）
@@ -16,16 +15,16 @@
 ``perception`` 服务告知）。
 
 插件起来时向宿主要组好的 ``world``（``ctx.profile``），收件箱来源跑一轮时交给
-:func:`app.world.main_agent.run_inbox_round`。
+:func:`app.world.core.main_agent.run_inbox_round`。
 
 **收件箱** ``world``：送来的消息先交给登记过的收件处理（``world_intake``，这个插件提供，
-:class:`~app.world.intake.Intakes`），再交给 :class:`~app.world.rounds.Rounds`，一轮处理收件箱里所有还没
-经过一轮的消息，一轮一轮排在宿主给 world 的轮次队列上（``ctx.turns``），同一时刻只有一轮在跑，
-一轮最多 :data:`app.world.main_agent.ROUND_TIMEOUT`；处理时限和占位租约放长到一次投递最多要等的
-时间（:attr:`~app.world.rounds.Rounds.delivery_timeout`）。
+:class:`~app.world.core.intake.Intakes`），再交给 :class:`~app.world.core.rounds.Rounds`，一轮处理
+收件箱里所有还没经过一轮的消息，一轮一轮排在宿主给 world 的轮次队列上（``ctx.turns``），同一时刻只有一轮在跑，
+一轮最多 :data:`app.world.core.main_agent.ROUND_TIMEOUT`；处理时限和占位租约放长到一次投递最多要等的
+时间（:attr:`~app.world.core.rounds.Rounds.delivery_timeout`）。
 只在拿着卷的写锁时消费（:func:`app.world.volume.writer_lock`）；开设时按私有状态补醒
-（:func:`app.world.wake.wake_on_start`，也在拿到锁之后才跑）；状态里的最新唤醒那一轮失败时不限
-次数重试、永不进死信（:func:`app.world.wake.retry_latest_wake_without_limit`）。提问交给在
+（:func:`app.world.core.wake.wake_on_start`，也在拿到锁之后才跑）；状态里的最新唤醒那一轮失败时不限
+次数重试、永不进死信（:func:`app.world.core.wake.retry_latest_wake_without_limit`）。提问交给在
 ``world_intake`` 上登记的应答（应答插件 :mod:`app.world.answer`；没有登记就什么都不说）：只读，不叫醒
 主 agent。这个插件不依赖应答插件：功能插件依赖核心，核心不反过来依赖它们。
 
@@ -41,10 +40,10 @@ from functools import partial
 from app.agent.contracts import FailRound
 from app.agent.round import store_history
 from app.host import Context, Plugin
-from app.world.actions import wake_me_at
 from app.world.agents import WORLD, world_segments
-from app.world.intake import Intakes
-from app.world.main_agent import (
+from app.world.core.actions import wake_me_at
+from app.world.core.intake import Intakes
+from app.world.core.main_agent import (
     ROUND,
     ROUND_TIMEOUT,
     next_wake_chosen,
@@ -53,9 +52,9 @@ from app.world.main_agent import (
     set_the_next_wake,
     woken_by,
 )
-from app.world.rounds import Rounds
+from app.world.core.rounds import Rounds
+from app.world.core.wake import retry_latest_wake_without_limit, wake_on_start
 from app.world.volume import writer_lock
-from app.world.wake import retry_latest_wake_without_limit, wake_on_start
 
 # 主 agent 的 prompt 里由这个插件登记的那几段；别的段（写记录、现实、报告变化、NPC、没跑完的一轮）
 # 由各自的插件登记。

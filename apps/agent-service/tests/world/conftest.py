@@ -23,9 +23,10 @@ from app.agent.round import Call, Round, in_call, in_round
 from app.infra.cst_time import now_cst
 from app.messaging import receiving
 from app.messaging.message import Delivery, Kind, SendFailed, new_message
-from app.world import agents, main_agent, perception, wake
-from app.world.actions import wake_me_at
-from app.world.rounds import InboxRound
+from app.world import agents, perception
+from app.world.core import main_agent, wake
+from app.world.core.actions import wake_me_at
+from app.world.core.rounds import InboxRound
 
 LANE = "coe-world"
 

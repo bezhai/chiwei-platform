@@ -15,7 +15,8 @@ from contextlib import contextmanager
 import pytest
 
 from app.infra.cst_time import now_cst
-from app.world import records, volume, wake
+from app.world import records, volume
+from app.world.core import wake
 
 from .conftest import LANE
 
