@@ -113,8 +113,7 @@ from typing import Annotated
 from inner_shared.dynamic_config import dynamic_config
 from pydantic import Field, field_validator
 
-from app.agent.continuity import TrimPolicy
-from app.agent.contracts import AgentSpec, Segment, VarsFn
+from app.agent.contracts import AgentSpec, Segment, TrimPolicy, VarsFn
 from app.agent.round import (
     AssembledProfile,
     Round,
@@ -749,7 +748,7 @@ async def _record(
 
 # 她的上下文裁多久。**写死在这儿，不走 Dynamic Config**：这五个数不随运行时变化，
 # 它们是"她是什么东西"的一部分，不是可调的旋钮。裁剪那一层只给形状，填什么归这里
-# （:class:`app.agent.continuity.TrimPolicy`）。
+# （:class:`app.agent.contracts.TrimPolicy`）。
 #
 #   * ``material_minutes`` 60   她读到的东西，过期了再看一次就有
 #   * ``own_minutes``     240   她自己说的话和动作回执 —— 那是她那段经历读得懂的骨架

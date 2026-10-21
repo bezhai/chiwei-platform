@@ -14,6 +14,7 @@ here and does the assembling; an app's manifest (``App``, ``Participant``) is th
   and input sections, the steps before the round, the checks, and the two phases at its end.
 * :class:`HistorySpec`, :class:`CostSpec` — where a round's history is kept and how it is trimmed,
   and how its cost row is named.
+* :class:`TrimPolicy` — the five thresholds a history is trimmed by (:mod:`app.agent.continuity`).
 * :class:`Switches` — the plugins a participant's round can switch off, and the Dynamic Config
   key that says which are on.
 * :class:`ToolSpec` — a tool as a plugin declares it: how trimming treats what it returns, and
@@ -39,7 +40,6 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from inner_shared.dynamic_config import dynamic_config
 
-from app.agent.continuity import TrimPolicy
 from app.agent.tooling import Tool
 
 if TYPE_CHECKING:
@@ -244,6 +244,25 @@ class HistoryTexts:
                 )
         if self.checkpoint_head == self.gap_head:
             raise ValueError("history texts: the two marker heads must differ")
+
+
+@dataclass(frozen=True)
+class TrimPolicy:
+    """裁剪的五个阈值（裁剪本身在 :mod:`app.agent.continuity`）—— 只有形状，值由调用方给，这里不放
+    默认值、也不从任何地方读。
+
+    这五个数是"这个 agent 是什么东西"的一部分，不是运行时旋钮：每个调用方在自己的
+    模块里写死自己那一份，并用用例钉住五条约束：两档时长都是正数；``own_minutes`` 不小于
+    ``material_minutes``；``cleanup_minutes`` 落在 1 到
+    :data:`app.agent.continuity.MAX_CLEANUP_MINUTES` 之间；
+    硬顶和裁剪目标都是正数；裁剪目标严格小于硬顶。
+    """
+
+    material_minutes: int
+    own_minutes: int
+    cleanup_minutes: int
+    hard_cap_tokens: int
+    trim_target_tokens: int
 
 
 # The variables a history key can use.

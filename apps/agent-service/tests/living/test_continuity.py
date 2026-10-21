@@ -852,7 +852,7 @@ async def test_after_the_hard_cap_took_every_marker_she_is_shown_what_she_said(
     """
     from dataclasses import replace
 
-    from app.agent.continuity import TrimPolicy
+    from app.agent.contracts import TrimPolicy
 
     tiny = TrimPolicy(
         material_minutes=60,

@@ -53,7 +53,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from app.agent.continuity import TrimPolicy
+from app.agent.contracts import TrimPolicy
 from app.agent.round import AssembledProfile, Round, run_round
 from app.messaging.message import Kind, Message
 from app.world.agents import WORLD, is_own_wake, when, world_agent

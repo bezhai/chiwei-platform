@@ -13,7 +13,6 @@ import dataclasses
 import pytest
 from inner_shared.dynamic_config import dynamic_config
 
-from app.agent.continuity import TrimPolicy
 from app.agent.contracts import (
     AgentSpec,
     CostSpec,
@@ -23,6 +22,7 @@ from app.agent.contracts import (
     Segment,
     Switches,
     ToolSpec,
+    TrimPolicy,
 )
 from app.agent.tooling import tool
 

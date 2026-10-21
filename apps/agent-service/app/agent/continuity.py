@@ -104,6 +104,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from app.agent.contracts import TrimPolicy
 from app.agent.neutral import ContentBlock, Message, Role
 from app.agent.session import replace_session
 
@@ -174,23 +175,6 @@ _FRAME_TOKENS = 8
 
 # 清理网格的起点。固定在纪元上，不跟任何业务上的"一天"对齐。
 _GRID_ORIGIN = datetime(1970, 1, 1, tzinfo=UTC)
-
-
-@dataclass(frozen=True)
-class TrimPolicy:
-    """裁剪的五个阈值 —— 只有形状，值由调用方给，这里不放默认值、也不从任何地方读。
-
-    这五个数是"这个 agent 是什么东西"的一部分，不是运行时旋钮：每个调用方在自己的
-    模块里写死自己那一份，并用用例钉住五条约束：两档时长都是正数；``own_minutes`` 不小于
-    ``material_minutes``；``cleanup_minutes`` 落在 1 到 :data:`MAX_CLEANUP_MINUTES` 之间；
-    硬顶和裁剪目标都是正数；裁剪目标严格小于硬顶。
-    """
-
-    material_minutes: int
-    own_minutes: int
-    cleanup_minutes: int
-    hard_cap_tokens: int
-    trim_target_tokens: int
 
 
 @dataclass(frozen=True)

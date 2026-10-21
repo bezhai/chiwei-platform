@@ -25,7 +25,6 @@ from langfuse.api import Prompt_Text
 from langfuse.model import TextPromptClient
 
 from app.agent.client import ModelClient
-from app.agent.continuity import TrimPolicy
 from app.agent.contracts import (
     AgentSpec,
     Continue,
@@ -37,6 +36,7 @@ from app.agent.contracts import (
     Segment,
     Switches,
     ToolSpec,
+    TrimPolicy,
 )
 from app.agent.neutral import Message, Role, ToolCall, ToolDef
 from app.agent.round import (
