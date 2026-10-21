@@ -34,7 +34,7 @@ datetime 会从缝里溜进 TIMESTAMPTZ 列）→ ``insert_append(expected_curre
 → **看返回值**。
 
 **这条链上有三个写者，输了的待遇不一样。** 另外两个是
-:func:`app.living.speaking.mouth.send_message` 的收口，和她按下撤回那只手。对账这两侧输了都
+:meth:`app.living.speaking.mouth.Mouth.send_message` 的收口，和她按下撤回那只手。对账这两侧输了都
 直接放掉：下一拍它还在待办里，等着就行。收口那一侧没有下一拍 —— 放掉的话那条记录
 就永久停在"已落地、未收口"，所以它是重读最新一版、把状态那一轴合上去再写
 （:func:`app.living.speaking.mouth._settle`）。三边写的是**正交的字段**，所以合并是安全的：

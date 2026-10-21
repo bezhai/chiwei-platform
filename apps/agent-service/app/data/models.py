@@ -124,7 +124,7 @@ class CommonMessage(Base):
     # 她在生活引擎里自己发起说话时先派生一个稳定唯一的 id，再以 ``proactive:<uuid>``
     # 的形式放在出站信封的 message_id 上；渠道服务落这条 assistant 行时把**前缀之后
     # 那个 uuid** 记在这里（前缀是线格式的命名空间标记，列是 uuid 类型，整串进不来）。
-    # 引擎按这一列把"她那次开口"和"库里这一行"对上账（``app.living.landing``）。
+    # 引擎按这一列把"她那次开口"和"库里这一行"对上账（``app.living.speaking.landing``）。
     #
     # NULL 和"确实不是主动发的"是两件事：NULL = 没记过（加列前的存量行、QQ 的行、
     # 飞书新写入方上线前的行）。所以这一列既不能 NOT NULL 也不能给默认值 —— 给了就
@@ -140,7 +140,7 @@ class CommonMessage(Base):
     # ``app.living.phone``）据此把它从她眼前拿掉。
     #
     # 引擎这边没有入站边，撤成功了没人来通知，所以撤回的结果也是**事后按
-    # ``agent_outbound_id`` 反查这一列**对回台账的（``app.living.landing``）。
+    # ``agent_outbound_id`` 反查这一列**对回台账的（``app.living.speaking.landing``）。
     #
     # 可空、无默认值，跟上面那一列同一个理由：NULL = 没撤过或者还没撤掉，跟"撤掉
     # 了"是两件事，给了默认值就再也分不开。写入方在投递侧（lark-service），TS 侧那

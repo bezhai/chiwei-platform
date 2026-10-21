@@ -3196,7 +3196,7 @@ async def test_looking_someone_up_marks_the_owner_and_escapes_the_names(
 # 都印得出全角方括号加 hex —— 跟改名冒充是同一个洞。所以撤回状态和撤回编号一起进属
 # 性，散文槽一个不留。
 #
-# ``app.living.happening.own_line`` 那侧**不动**：它印的是她自己说过的话，别人伪造不
+# ``app.living.her_records.deeds.own_line`` 那侧**不动**：它印的是她自己说过的话，别人伪造不
 # 了。于是「两处逐字一致」这条不变量改成「两侧是同一个值」。
 
 

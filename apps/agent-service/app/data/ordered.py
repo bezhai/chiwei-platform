@@ -30,12 +30,14 @@ consistent order. Two transactions that take the same two locks in opposite orde
 other; Postgres detects the deadlock and aborts one of them, whose whole transaction rolls back with
 an error. Two transactions hold more than one lock today:
 
-* The round's commit in :mod:`app.living.moment`: the ``LifeMoment`` axis ``(lane, persona_id)``,
-  then the ``PhoneRead`` rows, then the ``ReceivedRead`` rows. Those rows are written with
-  ``insert_idempotent``, which takes no advisory lock, but inserting a Key that another open
-  transaction has inserted waits for that transaction to end.
-* ``compose`` in :mod:`app.living.outgoing`: the ``OutgoingMessage`` axis ``(lane, persona_id)``
-  (the same lock for every message it writes), then ``OutgoingUpTo``'s Key
+* Her round's commit (the ``commit`` steps of her profile in :mod:`app.manifests.agent_service`,
+  run in one transaction by :func:`app.agent.round.run_round`): the ``LifeMoment`` axis
+  ``(lane, persona_id)`` (:mod:`app.living.life.moment`), then the ``PhoneRead`` rows
+  (:mod:`app.living.phone`), then the ``ReceivedRead`` rows (:mod:`app.living.household`). Those
+  rows are written with ``insert_idempotent``, which takes no advisory lock, but inserting a Key
+  that another open transaction has inserted waits for that transaction to end.
+* ``compose`` in :mod:`app.living.household.outgoing`: the ``OutgoingMessage`` axis
+  ``(lane, persona_id)`` (the same lock for every message it writes), then ``OutgoingUpTo``'s Key
   ``(lane, persona_id, happening_seq, whereabouts_seq)`` through ``insert_append``.
 
 The two share no lock. A new transaction that takes one of these locks together with another keeps

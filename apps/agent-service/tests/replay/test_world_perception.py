@@ -1,6 +1,6 @@
 """Replay: the perception judgement, driven the way production drives it — the world main agent
 reports a change inside a round (``report_change``), which runs one judgement
-(``app.world.perception.judge_who_notices``) and sends what it judged.
+(``app.world.perception.Perceiving.judge_who_notices``) and sends what it judged.
 
 * ``right_away_and_later`` — one change, two people notice: one is called over right away
   (``wakes_recipient: true``), the other reads it when she next looks (``wakes_recipient:

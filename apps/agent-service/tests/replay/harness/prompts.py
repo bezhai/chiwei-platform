@@ -1,6 +1,6 @@
 """Langfuse at its SDK boundary: prompts come from fixture files in ``tests/replay/prompts``.
 
-``app.agent.prompts.get_prompt`` keeps its own label logic (lane label first, then production);
+``app.agent.prompts._fetch`` keeps its own label logic (lane label first, then production);
 only the client underneath it is replaced. A fixture is ``<prompt id>.txt`` (a text prompt, one
 SYSTEM message) or ``<prompt id>.json`` (a chat prompt: a list of ``{"role", "content"}``). Every
 lookup returns a fresh prompt object that remembers the variables it was compiled with, so the

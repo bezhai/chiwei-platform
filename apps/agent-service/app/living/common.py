@@ -166,7 +166,7 @@ def living_lane() -> str:
 def message_handle(happening_id: str) -> str | None:
     """这一条要是她发出去的消息，给出她能拿去撤回的那个编号；否则 ``None``。
 
-    编号就是 ``outbound_id``——:func:`app.living.speaking.takeback.take_back_message` 按等值查
+    编号就是 ``outbound_id``——:meth:`app.living.speaking.takeback.TakeBack.take_back_message` 按等值查
     的那个键。前缀走 :data:`~app.living.services.OUTBOUND_HAPPENING_PREFIX`，跟
     :mod:`app.living.speaking.mouth` 拼 ``happening_id`` 时用的是同一个常量，所以"这里印出去
     的"和"她照抄回来的"必然是同一个东西。
@@ -183,8 +183,8 @@ def printed_handle(happening_id: str) -> str:
     """那个编号印在她眼前的样子：``［<编号>］``；不是她发出去的消息就是空串。
 
     **印法只在这里写一次。** 她在两处见到这个形状 —— 「你刚做过、说过」那段
-    （:func:`app.living.her_records.deeds.own_line`）和发送回执（:func:`app.living.speaking.mouth.send_message`）—— 两处都走
-    它，所以她照抄给 :func:`app.living.speaking.takeback.take_back_message` 的是同一种东西。
+    （:func:`app.living.her_records.deeds.own_line`）和发送回执（:meth:`app.living.speaking.mouth.Mouth.send_message`）—— 两处都走
+    它，所以她照抄给 :meth:`app.living.speaking.takeback.TakeBack.take_back_message` 的是同一种东西。
     手机那侧刻意不用这个印法（``take_back_id`` 属性，理由见
     :func:`app.living.phone.handset._one_message`）。
     """

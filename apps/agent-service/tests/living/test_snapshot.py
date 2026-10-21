@@ -351,8 +351,8 @@ async def test_a_message_she_sent_carries_the_handle_that_takes_it_back(snap_db)
     """她发出去的每条消息后面带着它的编号 —— 撤回时她唯一指得动的东西。
 
     编号就是 ``outbound_id``（``happening_id`` 去掉
-    :data:`~app.living.records.OUTBOUND_HAPPENING_PREFIX` 之后那一串），
-    :func:`app.living.speaking.takeback.take_back_message` 收的是同一个东西。不印出来的话她
+    :data:`~app.living.services.OUTBOUND_HAPPENING_PREFIX` 之后那一串），
+    :meth:`app.living.speaking.takeback.TakeBack.take_back_message` 收的是同一个东西。不印出来的话她
     只能拿原话去指，同一句话说过两遍就分不出是哪一次。
 
     **整串照印，不截断。** 截断要配一套前缀唯一性校验，而那个分支在真实数据量下永

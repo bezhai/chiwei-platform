@@ -1,6 +1,6 @@
 """Replay: world answering a question, driven the way production drives it — a question another
 process asked (``app.messaging.sending.ask``) lands on world's question queue and is delivered
-to its consumer, which runs the answer agent (``app.world.answer.answer_question``).
+to its consumer, which runs the answer agent (``app.world.answer.Answering.answer_question``).
 
 Each scenario starts world, writes one record the answer agent can read (a seed, not part of
 any step), gives the asker a reply queue the way its process would have, and puts 绫奈's

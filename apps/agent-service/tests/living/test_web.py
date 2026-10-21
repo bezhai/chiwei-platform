@@ -454,7 +454,7 @@ async def test_neither_hand_works_outside_one_of_her_moments(wire_web):
 def test_neither_hand_ever_asks_her_how_long_something_takes():
     """真人对「多久」没有内感受。问她要一个时长就是把生活切成日程表。
 
-    ``tests/living/test_moment.py`` 对 ``MOMENT_TOOLS`` 有同一条；这两只手自己也守
+    ``tests/living/test_moment.py`` 对她一轮的整份工具（``resident`` 的 tools）有同一条；这两只手自己也守
     一遍，改坏了在本文件就该红。
     """
     banned = ("minute", "duration", "how_long", "seconds", "until", "hour")

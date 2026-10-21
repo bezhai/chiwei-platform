@@ -1,11 +1,12 @@
 """One app process inside the test: started the way ``app.main``'s lifespan starts it, minus the
 parts the scenario drives itself.
 
-Start: fresh in-process state (registries, messaging's module state, residents, the volume
-lock), then the app's plugin host (``Host.for_app``, the manifest in ``app.deployment.APPS``)
-with the broker phases only: every plugin's setup, the graph compiled, the broker connected, and
-messaging (inboxes, question queues, scheduled delivery). Not started: the schema step (the replay builds the schema once, :func:`create_schema`), the interval
-clocks, the HTTP routes, the skill reload task. Rounds run when the scenario calls them. The skills
+Start: fresh in-process state (the outbound and inbox registries, messaging's module state, the
+volume lock, the skills registry, Dynamic Config's lane source), then the app's plugin host
+(``Host.for_app``, the manifest in ``app.deployment.APPS``) with the broker phases only: every
+plugin's setup, the graph compiled, the broker connected, and messaging (inboxes, question queues,
+scheduled delivery). Not started: the schema step (the replay builds the schema once,
+:func:`create_schema`), the interval clocks, the HTTP routes, the skill reload task. Rounds run when the scenario calls them. The skills
 plugin loads ``SKILLS_DIR``, which the replay points at a directory of its own: empty, so no guides
 on hand, unless the scenario put one there first (``Replay.guide``).
 

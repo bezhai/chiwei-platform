@@ -51,7 +51,7 @@ def _ms(moment: dt.datetime) -> int:
 
 
 def _derived(seed: str) -> str:
-    """跟 :func:`app.living.speaking.mouth.send_message` 同款：uuid 的 **hex**，没有短横。"""
+    """跟 :meth:`app.living.speaking.mouth.Mouth.send_message` 同款：uuid 的 **hex**，没有短横。"""
     return uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
 
 

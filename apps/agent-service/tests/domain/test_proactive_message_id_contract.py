@@ -1,6 +1,6 @@
 """主动发 message_id 前缀的跨语言线格式契约（生产方这一侧）。
 
-``proactive:<uuid>`` 这个形状由本服务产出（app/living/mouth.py 拼出来），由
+``proactive:<uuid>`` 这个形状由本服务产出（app/living/speaking/mouth.py 拼出来），由
 lark-service（TS）的出站投递剥掉前缀取 uuid 落进 ``common_message.agent_outbound_id``。
 前缀是两边共同的约定，但两边各写各的字面量 —— 只改一边不会有任何测试变红：
 投递方静默认不出主动消息，那次开口在库里永久失联，全程零报错。

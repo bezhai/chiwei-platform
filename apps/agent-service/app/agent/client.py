@@ -43,20 +43,20 @@ from app.capabilities._errors import CapabilityTimeout
 # (``HttpOptions.timeout`` unset → httpx ``timeout=None`` for connect, read,
 # write and pool), and the TLS handshake with the model gateway sometimes never
 # completes. Nothing then ended the call until the hold limit of her queue
-# (``app.plugins.living.HOLD_LIMIT``, 900 s) cut the whole round: she was stuck
+# (``app.living.common.HOLD_LIMIT``, 900 s) cut the whole round: she was stuck
 # for 15 minutes, and Langfuse showed a generation with no output and no error.
 #
 # Calibrated on measured calls: single-call traces in Langfuse (day page /
 # persona review on gpt-5.5, 2026-09-05..10-05) top out at 59 s; her completed
 # rounds on gemini-3.7-flash (coe-world, 10-03..10-05, n=60) take 37 s at most
 # for the whole multi-call round; the slowest round of any kind measured was
-# 189 s (``app.plugins.living.HOLD_LIMIT``). 180 s is three times the slowest single call,
+# 189 s (``app.living.common.HOLD_LIMIT``). 180 s is three times the slowest single call,
 # and two attempts (the Agent layer's default retry) still end well inside the
 # 900 s hold limit.
 #
 # A source constant, not Dynamic Config: it changes nothing about what any agent
 # does, it only turns a hang into a failure — the same judgment as the other
-# hang guards in this service (``app.living.outgoing``, ``app.living.reading_agent``).
+# hang guards in this service (``app.living.household.outgoing``, ``app.living.reading.agent``).
 MODEL_ANSWER_SECONDS = 180.0
 
 

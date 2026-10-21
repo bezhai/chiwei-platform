@@ -128,7 +128,7 @@ def recalls(monkeypatch):
 
 @pytest.fixture
 def her_mouth(monkeypatch):
-    """让 :func:`app.living.speaking.mouth.send_message` 真的跑完，但不碰模型、不投 MQ。
+    """让 :meth:`app.living.speaking.mouth.Mouth.send_message` 真的跑完，但不碰模型、不投 MQ。
 
     只有要**真的走一遍她开口那条路**的用例需要它（快照印的编号、回执印的编号各一条）：
     ``happening_id`` 由嘴自己拼、快照和回执各自解析、撤回自己收 —— 中间任何一处各写

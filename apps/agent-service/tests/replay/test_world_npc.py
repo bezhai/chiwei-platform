@@ -1,5 +1,5 @@
 """Replay: an NPC's appearance, driven the way production drives it — the world main agent calls
-``let_npc_appear`` inside a round, a one-off NPC agent (``app.world.npc.play_npc``) plays him,
+``let_npc_appear`` inside a round, a one-off NPC agent (``app.world.npc.Npcs.play``) plays him,
 and what he said and did goes to the perception judgement as the change.
 
 * ``appears`` — the NPC agent looks something up and then acts; the perception judgement tells

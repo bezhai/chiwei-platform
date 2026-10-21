@@ -16,7 +16,7 @@
     并且有一条顶层 ``AND`` 条件恰好是"这一行属于谁的那一列 = 一个绑定参数"。``WHERE`` 里
     夹着别的 f-string 值、注释、引号，算认不出来。
   * 类本身只能当类型注解、构造一行，或者交给 :data:`_ROW_TO_RECORD` 里列出来的函数；交给别的
-    函数（比如 :func:`app.runtime.query.query`）都算认不出来。写一行是把构造好的那一行交出去
+    函数（比如 :func:`app.data.persist.select_latest`）都算认不出来。写一行是把构造好的那一行交出去
     （:func:`app.data.ordered.insert_in_commit_order`），类不经手。那里面的读只有两处：取号的
     ``MAX(seq)``，拿到的是一个号，不是谁的内容；重放撞上自然键时取回自然键相同的那一行，
     也就是她这一行早先落下的那份。
