@@ -6,7 +6,7 @@ leaving it in a commit message or a conversation, and clear it at ship time.
 
 Two things do not belong here:
 
-- **dataflow `Data` tables.** `migrate_schema()` (`app/data/migrator.py`) runs
+- **`Data` tables.** `migrate_schema()` (`app/data/migrator.py`) runs
   unconditionally on startup, in the plugin host's schema phase (`app/host/host.py`),
   on every lane including prod. New `data_*` tables and new columns on tables that
   are still declared get created automatically. See "What migrator covers" below for
@@ -143,7 +143,8 @@ UPDATE model_mappings
 
 Ran as mutation 256 on 2026-09-11, right after agent-service was released — the order
 mattered, because until then the alias was live under the old engine, which had never
-run on Gemini. Her moment turn resolves it at `app/living/moment.py:165`.
+run on Gemini. Her round's main agent names it (`model="life-model"` in the agent
+definition in `app/living/life/moment.py`).
 
 `api_version` stays NULL on the `gemini` provider: that row points at Google's own
 endpoint, where the SDK default (v1beta) is the shape that works. Pinning v1 is what
@@ -205,7 +206,7 @@ longer has (`migrator.py:218-224`) or if a column's pg type no longer matches th
 declaration (`:232-238`). Both say "write explicit migration script" — meaning an
 entry in this file. `data_happening` losing `lasts_until` takes the first path, and so
 do the five location-based perception columns; both entries are under Pending. `data_persona_version` moved from `app/life/persona_chain.py` to
-`app/living/persona.py:58` with its fields unchanged.
+`app/living/persona/chain.py` (`PersonaVersion`) with its fields unchanged.
 
 ## Tables prod keeps but nothing reads
 

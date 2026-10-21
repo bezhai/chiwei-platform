@@ -16,7 +16,7 @@ Mapping (capability method → the function underneath):
     update_audit           → update_audit_status
     AuditAction / Status   → re-exported enums
 
-Failure mapping (contract §4.8):
+Failure mapping (``app.capabilities.errors``):
     upstream HTTP error      → CapabilityCallFailed
     invalid `by` arg         → CapabilityInvalidArg
     inflight already done    → ClearInflightResult(already_succeeded=True)

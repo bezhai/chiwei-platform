@@ -203,6 +203,5 @@ def request_data(data_cls: type[Data], fields: dict[str, Any], detail_for: Refus
         return data_cls(**fields)
     except Exception as exc:
         # Classification: PER-REQUEST validation failure, the caller's to fix: 422 to the HTTP
-        # caller. A route is request/response, not a polling loop, so contract §4.1 does not
-        # apply.
+        # caller. A route is request/response, not a polling loop: nothing here is retried.
         raise HTTPException(status_code=422, detail=detail_for(str(exc))) from exc

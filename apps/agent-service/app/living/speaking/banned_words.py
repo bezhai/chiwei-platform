@@ -22,7 +22,7 @@ _KEY = "banned_words"
 async def contains(text: str) -> str | None:
     """撞上的那个禁用词；干净就是 ``None``。
 
-    ``None`` 是契约允许的（§4.8）："没撞上"是业务结果，不是能力层的失败。读 Redis 出错照能力层的
+    ``None`` 是能力层约定允许的（``docs/guides/plugin-host.md`` 第 6 节）："没撞上"是业务结果，不是能力层的失败。读 Redis 出错照能力层的
     类型往外抛（``CapabilityCallFailed`` / ``CapabilityTimeout``）。
     """
     cap = await get_redis_capability()

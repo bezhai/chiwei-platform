@@ -7,7 +7,7 @@ write/read goes through this capability so:
 * Keys reach the client verbatim, with no lane prefix: cross-lane isolation
   is the ConfigBundle's job (see "Lane key space" below).
 * Raw redis failures map to the typed ``CapabilityCallFailed`` /
-  ``CapabilityTimeout`` exceptions (contract §4.8).
+  ``CapabilityTimeout`` exceptions (``app.capabilities.errors``).
 
 Uses ``fakeredis[lua]`` so Lua scripts execute against a real interpreter.
 """

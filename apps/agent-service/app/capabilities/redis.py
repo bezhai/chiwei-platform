@@ -5,7 +5,7 @@ Business code never reaches into the raw client; every read/write goes
 through this capability so:
 
 * Raw redis failures map to the typed ``CapabilityCallFailed`` /
-  ``CapabilityTimeout`` exceptions (contract §4.8) — no naked
+  ``CapabilityTimeout`` exceptions (``app.capabilities.errors``) — no naked
   ``redis.RedisError`` escapes capability boundaries.
 
 **No implicit lane key prefix.** Cross-lane isolation is the

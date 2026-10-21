@@ -121,7 +121,7 @@ class Clocks:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            # Classification: FATAL (contract §4.1, "payload build / clock setup"): the clock
+            # Classification: FATAL (payload build / clock setup): the clock
             # itself is broken; the watchdog exits the process.
             self._record_error(clock.name, e)
 
@@ -133,7 +133,7 @@ class Clocks:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # Classification: per-tick failure (contract §4.1): log, drop this tick's work,
+                # Classification: per-tick failure: log, drop this tick's work,
                 # keep ticking.
                 logger.exception(
                     "runtime: clock %s tick raised %r; dropping this tick's work and continuing",

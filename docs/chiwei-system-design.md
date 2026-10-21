@@ -142,9 +142,9 @@ world 和 life 的连续意识靠 **session transcript**：按天一条、落 du
 - **max_retries=1**：含 durable 写的轮一律关掉整轮重放（`run` 默认把整轮包在 retry 里，重放会重复执行已落库的写）。幂等靠 round marker + 确定性 id 派生：act_id / event_id 从触发源派生，重投同一批得同一 id，落库 ON CONFLICT DO NOTHING 去重。
 - prompt 全部走 langfuse 版本化（`app/agent/prompts.py`），非 prod 泳道先试 label=lane、再回落 prod label。
 
-### dataflow runtime（`app/runtime/`）
+### 插件宿主（`app/host/`）
 
-世界的钟和管道全是 runtime 原语，业务不自己碰 MQ：durable wire（持久投递）、debounce（攒批唤醒）、cron / interval 时间源、emit_delayed（自排唤醒）、single_flight（跨进程单飞锁）、insert_append / select_latest（版本链）、insert_idempotent（幂等落库）。详见 `docs/guides/dataflow-framework.md`。
+agent-service 和 world 两个 App 都跑在插件宿主上：每个功能是一个插件，插件在 setup 里向宿主登记它的工具、prompt 段落、状态和输入段、一轮各阶段的步骤、钟、收件箱和出站队列，插件之间只经服务交互；一个 App 由哪些插件组成、一个参与者的一轮里这些东西按什么顺序排，写在它的清单里（`app/manifests/`）。唤醒统一由宿主的轮次队列管，每个参与者每个用途一条队列，同一条队列上一次只跑一轮；一轮由固定的 agent 循环跑（`app/agent/round.py`）。业务不自己碰 MQ、不自己起任务、不开数据库会话：参与者之间经通信机制的具名收件箱交流（`app/messaging/`），出站经宿主登记的出站队列，存储经 `app/data/` 的读写函数（`insert_append` / `insert_idempotent`，追加写入、保留历史）。详见 `docs/guides/plugin-host.md`。
 
 ### 成本与观测（`app/domain/thinking_cost.py`）
 

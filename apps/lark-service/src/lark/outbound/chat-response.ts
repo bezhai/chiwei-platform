@@ -1,7 +1,7 @@
 // agent-service 发过来的那条出站消息长什么样。
 //
 // 这是**跨服务、跨语言的线格式**：写的是 agent-service（Python，
-// app/runtime/sink_dispatch.py 把一个 Data 序列化之后直接发出来），读的是这里。
+// app/infra/outbound.py 的 publish 把一个 Data 序列化之后直接发出来），读的是这里。
 // 两边各写一份字段名，编译期对不上，所以字段一律照抄 Python 那边的下划线命名 ——
 // 中间加一层驼峰翻译，只会让"哪个名字是线上真的那个"变得需要猜。
 //

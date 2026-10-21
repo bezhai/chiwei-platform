@@ -1,4 +1,4 @@
-"""Tests for capability exception hierarchy (A3 / contract §4.8).
+"""Tests for capability exception hierarchy (``app.capabilities.errors``).
 
 The five capability exception classes plus the base ``CapabilityError``
 are the typed contract that capability/infra layers MUST raise instead

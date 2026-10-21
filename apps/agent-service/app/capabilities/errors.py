@@ -1,4 +1,4 @@
-"""Capability exception hierarchy — contract §4.8 / plan A3.
+"""Capability exception hierarchy (``docs/guides/plugin-host.md``, section 6).
 
 Five typed exception classes plus a common base. Capability and infra
 modules raise these instead of returning ``False`` / ``None`` /
@@ -6,7 +6,7 @@ stringifying upstream failures; business nodes propagate them to their
 caller, and tool wrappers (``tool_error`` in :mod:`app.agent.tools.outcome`)
 map a subset to LLM-visible typed outcomes.
 
-Routing table (contract §4.7 + §4.8):
+Routing table:
 
 * ``CapabilityInvalidArg``  — wrong arg / validation failure (LLM-visible).
 * ``CapabilityNotFound``    — resource missing (LLM-visible).

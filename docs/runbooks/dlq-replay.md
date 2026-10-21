@@ -2,15 +2,18 @@
 
 Phase 7b Gap 12 — operator playbook for `runtime_inflight` + RabbitMQ DLQ replay.
 
-## When does a message land in DLQ?
+## Which dead letters these targets read
 
-A durable consumer raised an exception that:
+The `make dlq-*` targets call agent-service's `/admin/dlq/*` routes, which read the RabbitMQ
+queue named in `QUEUE`. Today that is the shared `dead_letters` queue: the outbound queues
+agent-service publishes to (`chat_response_<channel>`, `recall_<channel>`, consumed by
+lark-outbound and chat-response-worker) dead-letter through the exchange `post_processing_dlx`
+into it when their consumer rejects a message for good.
 
-- Was not classified as `DuplicateData` with `on_error="ignore-duplicate"`
-- Was not classified as `NeedsReview` with `on_error="manual-review"`
-- Exhausted the wire's `.retry(...)` budget (or the wire had no retry policy)
-
-The broker routed the original message via DLX → DLQ. Default DLQ name is `durable_<data>_<consumer>-dlx` (matches `_route_for(...)` naming).
+Messages between participants (messaging's inboxes) do not land there. Each lane's inboxes
+dead-letter into that lane's own `isolated_dead_letters_<lane>`, which messaging's operator routes
+inspect and replay (`/admin/messaging/dead-letters` and `/admin/messaging/dead-letters/replay`),
+not these targets.
 
 ## Decision tree
 
@@ -57,30 +60,8 @@ SELECT id, queue, recovery_hint, created_at
 - These were "second-replay zombies": the consumer had already succeeded between the original failure and this replay attempt. The 6-step protocol detected `state='succeeded'` on the inflight row and acked the DLQ message silently.
 - `runtime_dlq_audit` row has `status='zombie_acked'`. No action needed — consumer side already at terminal `succeeded`.
 
-## Manual-review queues
-
-Same `make dlq-*` commands work; pass `KIND=review`. Example:
-
-```
-make dlq-inspect QUEUE=durable_<data>_<consumer>_review KIND=review
-```
-
-To **dispose** of a review message (operator decides "ignore"):
-
-```
-make dlq-replay QUEUE=<review queue> KIND=review CLEAR=false LIMIT=1
-```
-
-The message is acked but NOT re-published (`CLEAR=false` leaves the `runtime_inflight` row in `state='review'`; `claim_inflight` will skip it on any redelivery).
-
-To **re-process** a review message after fixing the underlying issue:
-
-1. `make dlq-replay QUEUE=<review queue> KIND=review CLEAR=true` — clears the `state='review'` row from `runtime_inflight`.
-2. Manually re-publish the original message body to the **original durable queue** (NOT the review queue) via a one-off `mq.publish_with_confirm` call from a Python REPL bound to the agent-service runtime — credentials per ConfigBundle.
-
 ## Routine checks (oncall checklist)
 
-- Any non-empty review queues? Run `make dlq-inspect KIND=review` per known review queue name.
 - Any DLQ over a per-queue threshold? Indicates an unfixed bug in production — open an incident.
 - Any `runtime_dlq_audit` rows with `status NOT IN ('requeued', 'zombie_acked')` older than 24h? Stale `cleared` / `publish_failed` — needs operator intervention.
 

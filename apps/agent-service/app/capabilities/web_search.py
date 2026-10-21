@@ -37,7 +37,7 @@ async def web_search(
 ) -> list[SearchHit]:
     """Route to You Search / Google CSE based on settings; empty list if neither configured.
 
-    contract-allowed empty list (§4.8): config-not-provisioned is a
+    contract-allowed empty list: config-not-provisioned is a
     deployment outcome. Transport / HTTP errors propagate.
     """
     if settings.you_search_host and settings.you_search_api_key:
@@ -94,7 +94,7 @@ async def _google_search(query: str, count: int) -> list[SearchHit]:
 async def read_webpage(url: str) -> str:
     """Fetch + html→markdown via You Contents API. Empty string if not configured.
 
-    contract-allowed empty string (§4.8): config-not-provisioned plus
+    contract-allowed empty string: config-not-provisioned plus
     "no contents in response" are business outcomes. Transport errors
     propagate from ``HTTPClient``.
     """

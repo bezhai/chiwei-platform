@@ -10,7 +10,7 @@ Sibling abstraction to ``app/messaging/retry.py`` but a different scope:
   where transient timeouts and 429s benefit from retrying inside the
   same task rather than dropping the request to DLQ.
 
-Defaults match the typed capability layer (A3 / contract §4.8): the
+Defaults match the typed capability layer (``app.capabilities.errors``): the
 white-list is the three retry-eligible classes ``CapabilityTimeout``,
 ``CapabilityRateLimited``, ``CapabilityCallFailed``; the two LLM-visible
 classes ``CapabilityInvalidArg`` and ``CapabilityNotFound`` are *not*

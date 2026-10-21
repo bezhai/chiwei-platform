@@ -16,7 +16,7 @@ module defines:
 Failures that are *not* business-semantic (timeout / rate-limit /
 upstream 5xx) propagate out of ``@tool_error`` to the caller.
 
-Contract reference: ``docs/guides/dataflow-node-contract.md`` §4.7 + §4.8.
+The rules are described in ``docs/guides/plugin-host.md`` (section 6, tools and failures).
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ class ToolNotFound(Exception):
 
 
 def tool_error(error_message: str):
-    """Decorator: route tool failures per contract §4.7/§4.8.
+    """Decorator: route tool failures (``docs/guides/plugin-host.md``, section 6).
 
     Every failure surfaces to the LLM as a ``ToolOutcomeError`` dict —
     no exception escapes the wrapper. The agent turn stays alive even

@@ -6,7 +6,7 @@
 
 ```
 apps/
-  agent-service/         # AI 对话 + world/life 自主生活引擎 (Python)：自研 agent 工具循环 + dataflow runtime
+  agent-service/         # world/life 自主生活引擎 (Python)：插件宿主 + 自研 agent 工具循环，两个 App 各一份清单
   alert-webhook/         # Prometheus 告警转飞书 (Go)
   api-gateway/           # 外部流量统一入口，按规则分流并注入泳道 header (Go)
   channel-server/        # QQ 渠道服务：内网入站入口 + 平台无关 core + QQ 插件 (Bun/TS)
@@ -40,7 +40,7 @@ packages/
 - [docs/config-management.md](docs/config-management.md) — ConfigBundle、环境变量、Dynamic Config 与最终生效优先级
 - [docs/ci-pipeline-roadmap.md](docs/ci-pipeline-roadmap.md) — CI 流水线规划
 - [docs/plan/](docs/plan/README.md) — 设计文档索引（spec、plan、handoff）
-- `docs/specs/` 是已落地的功能 spec，`docs/guides/` 是 dataflow 框架文档，`docs/runbooks/` 是操作手册，`docs/archive/` 是历史存档（含旧版泳道路由设计）
+- `docs/specs/` 是已落地的功能 spec，`docs/guides/` 是 agent-service 插件宿主的说明，`docs/runbooks/` 是操作手册，`docs/archive/` 是历史存档（含旧版泳道路由设计）
 
 ## 快速开始
 

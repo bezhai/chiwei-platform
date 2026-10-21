@@ -1,7 +1,7 @@
 // 一条 AMQP 消息随身携带的跨进程上下文（lane + trace_id），消费侧的读出口径。
 //
 // 这一头和 rabbitmq.ts::publish 的写入是同一份约定的两侧，也和 agent-service 的
-// app/runtime/propagation.py（inject_context / extract_context）是同一份跨语言约定：
+// app/infra/propagation.py（inject_context / extract_context）是同一份跨语言约定：
 // key 固定 `lane` / `trace_id`，空值写空串而不是省略 key，读回来时空串和非字符串
 // 都归一成「无」。三处必须同时改，改一处就是让同一条消息在 TS worker 和 Python
 // 服务里解出两个不同的 lane。

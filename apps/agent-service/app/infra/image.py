@@ -113,7 +113,7 @@ class _ImageClient:
 
         Returns ``data`` dict on success, ``None`` on any failure.
 
-        contract-allowed None (§4.8) for legacy-pinned reason: this client
+        contract-allowed None for legacy-pinned reason: this client
         has 4 call-sites in ``infra.image`` plus external callers
         (``_context_images.py``, :func:`upload_image`)
         that all branch on ``if data:`` / ``return_exceptions=True``. Migrating
@@ -240,7 +240,7 @@ class _ImageClient:
     ) -> str | None:
         """Download an image and return it as a data URI.
 
-        contract-allowed None (§4.8): same legacy pin as ``_post`` — callers
+        contract-allowed None: same legacy pin as ``_post`` — callers
         branch on the falsy return (``gather(return_exceptions=True)`` /
         ``isinstance(r, str)`` filtering), so flipping to raise is safe but
         is deferred to the dedicated image-client migration (backlog L1)."""

@@ -13,12 +13,13 @@ name: dataflow grep gate
 #
 # **业务目录清单**（每个 step 里那份 BUSINESS）是 app/ 下真实存在的业务包：
 #
-#     agent  living  nodes  skills  world
+#     living  plugins  nodes  skills  world
 #
-# 不在里面的是框架和基建：host / plugins / manifests / data / infra / api / capabilities /
-# messaging / domain。plugins 和 manifests 是各 App 的组装（插件把业务登记到宿主上，相当于
-# 原来的接线；清单写一个 App 由哪些插件、agent、profile 组成），跟 host 一样归框架层。
-# 加一个业务包就要把它加进每一处清单 —— 漏一处等于那个包不受任何一条 gap 管，这正是
+# living 和 world 下每个目录是一个插件，plugins 下每个模块是一个插件（ops、operator、skills），
+# nodes 和 skills 是插件调用的业务模块。不在里面的是框架和基建：host / agent / manifests / data /
+# infra / api / capabilities / messaging / domain。agent 是固定的 agent 循环和单次模型调用，替插件
+# 跑一轮，跟 host 一样归框架层；manifests 只写一个 App 由哪些插件、agent、profile 组成。分层见
+# docs/guides/plugin-host.md。加一个业务包就要把它加进每一处清单 —— 漏一处等于那个包不受任何一条 gap 管，这正是
 # app/living/ 建起来之后发生过的事（22 个文件、一条 gap 都没扫到）。删一个包同理要从每一处
 # 摘掉，否则清单会慢慢变成一份指向空目录的名单，每条断言都因为扫不到东西而通过。
 
@@ -38,7 +39,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+          BUSINESS=(apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
                     apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
                     apps/agent-service/app/world/)
           # business code must not implement its own retry / sleep loops
@@ -70,14 +71,13 @@ jobs:
           set -e
           # 出站一律经宿主登记的出站队列（ctx.outbound 登记类型 -> 队列，业务调
           # app.infra.outbound.publish）；每一处 `publish(` 都要有独立理由，并且数在这里
-          # 钉死。当前 2 处全在 app/living/，各自的 docstring 写明为什么不能进事务
+          # 钉死。当前 2 处全在 app/living/speaking/，各自的 docstring 写明为什么不能进事务
           # （takeback / mouth：都是"交给外面之后才知道下场"的那一跳）。读一程那一处
-          # 改成了发给读书收件箱的消息（app/living/reading.py）。旧的 10 处随上一版
-          # 实现删除，它们所在的 nodes/agent/life/memory 现在是 0。
+          # 改成了发给读书收件箱的消息（app/living/reading/）。
           #
           # 加一处新的就要更新这个数，否则 gate 抓回归。
           c=$(grep -rn '\bpublish(' \
-              apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+              apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
               apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
               apps/agent-service/app/world/ \
               --include='*.py' 2>/dev/null | wc -l || true)
@@ -119,7 +119,7 @@ jobs:
           set -e
           # No more "不要 catch" / "don't catch" warnings in business code.
           c=$(grep -rn "# 不要 catch\|# 不要 try/except\|# don't catch" \
-              apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+              apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
               apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
               apps/agent-service/app/world/ \
               2>/dev/null | wc -l || true)
@@ -133,7 +133,7 @@ jobs:
           # removed once prod has switched over and the old queue is deleted.
           # Scan business dirs only.
           c=$(grep -rn "requeue=False\|\.nack(" \
-              apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+              apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
               apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
               apps/agent-service/app/world/ \
               2>/dev/null \
@@ -163,7 +163,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+          BUSINESS=(apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
                     apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
                     apps/agent-service/app/world/)
           c=$(grep -rnE "from app\.infra\.redis import|from app\.infra import redis" \
@@ -176,16 +176,13 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/living/ \
+          BUSINESS=(apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
                     apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
                     apps/agent-service/app/world/)
-          # app/agent/adapters/ 排除在外，永久：它们**就是**跟外部 HTTP 讲话的
-          # 那一层（openai / gemini 的 ModelClient 实现），跟 app/capabilities/
-          # 同级。Gap 11 已经按同样理由豁免了 capabilities/。要求适配层不碰
-          # httpx 等于要求它别干自己的活。
+          # 模型的适配层（app/agent/adapters/）跟外部 HTTP 讲话，它在框架层的 app/agent 里，
+          # 不在这份清单上。
           c=$(grep -rnE "import httpx|from httpx" "${BUSINESS[@]}" 2>/dev/null \
-              | grep -v "__pycache__\|/test_" \
-              | grep -v "agent/adapters/" | wc -l) || true
+              | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c httpx imports in business"; exit 1; }
           c=$(grep -rnE "from app\.capabilities\.http import|from app\.capabilities import http" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
@@ -204,7 +201,7 @@ jobs:
 
           baselines = json.load(open(".github/grep-baselines.json"))
           BUSINESS = [
-              "apps/agent-service/app/agent/", "apps/agent-service/app/living/",
+              "apps/agent-service/app/living/", "apps/agent-service/app/plugins/",
               "apps/agent-service/app/nodes/", "apps/agent-service/app/skills/",
               "apps/agent-service/app/world/",
           ]
@@ -225,13 +222,11 @@ jobs:
                   ["apps/agent-service/app/"],
                   ["data/persist.py", "data/ordered.py"],
               ),
-              # 业务代码自己 new httpx client 的残留。app/agent/adapters/ 不在
-              # 这里数（它们是适配层本身，理由写在 Gap 16 那个 step 里）。现在是 0，
-              # 新工具一律走 capability。
+              # 业务代码自己 new httpx client 的残留。现在是 0，新工具一律走 capability。
               "gap_16_business_owns_http": (
                   r"import httpx|from httpx",
                   BUSINESS,
-                  ["agent/adapters/"],
+                  [],
               ),
           }
           fail = False

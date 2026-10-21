@@ -10,7 +10,7 @@
 // 判定写在代码里而不是再加环境变量：这类准入条件一旦挂在 env / Release 配置上，
 // 配置被覆盖就会静默失效。
 //
-// 对位 agent-service 的 app/runtime/lane_policy.py（Python 侧同一套判断）。
+// 对位 agent-service 的 app/infra/lane_policy.py（Python 侧同一套判断）。
 //
 // 注：./mq/client.ts 的 getLane() 读同一个 LANE，但答的是另一个问题——本进程的
 // 队列 / 路由后缀是什么。准入判断刻意不挂在它上面：那个模块被多处测试整体

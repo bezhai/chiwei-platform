@@ -215,7 +215,7 @@ class TestSearchWebTool:
 
         TODO(C3 follow-up): migrate this tool to raise typed errors or let
         them propagate to the caller — see
-        ``docs/guides/dataflow-node-contract.md`` §4.7/§4.8.
+        ``docs/guides/plugin-host.md`` section 6.
         """
         from app.agent.tools.search import search_web
 

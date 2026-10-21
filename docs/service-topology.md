@@ -127,11 +127,11 @@ QQ 那条链形状相同,只是入站是 qq-gateway 把 QQ 协议归一化成 `C
 - **lark-service** 是飞书渠道的全部:入站(长连 + webhook + 泳道交接接收端)、common 投影、规则与指令、以及三个定时任务(daily-photo / daily-new-photo / emoji-sync)。入站走一条钉死顺序的契约链——解析 → 收敛成 common 口径 + 换全局身份 → 判泳道(要交接就在这儿停) → 存消息 → 平台无关的规则引擎分发,**到规则引擎的终态为止,不发任何队列**。出站在同镜像的另一个 Deployment **lark-outbound** 里:它消费 `chat_response_lark` / `recall_lark` 两条队列,把话送到飞书、把判违规的撤掉。拆成两个进程是因为部署策略冲突——持长连的只能单副本 + Recreate,出站是竞争消费、可多副本可滚动更新。
 - **channel-server** 是 QQ 渠道的同类角色(入站 HTTP 入口 + 渠道核心 + 规则引擎),同样到落库为止不发队列,出站在 chat-response-worker。跟飞书那条唯一的顺序差别:QQ 先跑规则引擎再落库,飞书先落库再跑规则引擎。
 - **规则引擎对赤尾基本是空转。** 它按 bot 的角色过滤指令:飞书那 10 条里有 9 条声明了 `category: 'utility'`,人设 bot 撞上直接跳过,她唯一会命中的是没声明 category 的「撤回」;QQ 侧的指令表干脆是空的。所以一条普通的 @ 消息走完整个序列没有任何规则接住它,收敛成 `no_match` —— 这是正确终态,不是漏了一条兜底:她要不要开口是她自己在下次醒来时决定的,不由入站这一段决定。
-- **agent-service** 是「大脑」。她每次醒来直接查 `common_message` 看有没有人找她(`app/living/phone.py`),把赤尾的人格、当下状态、手机信封「组装」成上下文喂给大模型,用自研的 agent 工具循环驱动推理(不依赖 langchain 之类的框架),推理过程中可以调工具(搜索、画图、找图、执行代码、技能脚本、看手机、读文件),决定开口就把话分段丢进 `chat_response` 队列。
+- **agent-service** 是「大脑」。她每次醒来直接查 `common_message` 看有没有人找她(手机插件 `app/living/phone/`),把赤尾的人格、当下状态、手机信封「组装」成上下文喂给大模型,用自研的 agent 工具循环驱动推理(不依赖 langchain 之类的框架),推理过程中可以调工具(搜索、画图、找图、执行代码、技能脚本、看手机、读文件),决定开口就把话分段丢进 `chat_response` 队列。
 
 「回复」不是独立的一条线,它就是她生活的一部分:同一次醒来里她既决定要不要换手上的事、去哪儿、记住什么,也决定要不要开口。这些全跑在 agent-service 主进程里,由她的几个插件(`apps/agent-service/app/living/<插件>/`)登记的五条钟驱动。
 
-world(推演客观世界的那个引擎)不在 agent-service 这个 App 里,也不跟 life 共读共写任何表:它是同一个镜像上单独发布的 App `world`(代码在 `apps/agent-service/app/world/`,进程只起 world 的插件 `app.plugins.world`,见 `apps/agent-service/app/deployment.py`),两边唯一的连接是通信机制(`apps/agent-service/app/messaging/`,具名收件箱 + RabbitMQ,按泳道隔离)。world 的主 agent 只在两种时候醒:收件箱 `world` 来了消息,或者它自己上一轮定的时刻到了(用通信机制的定时送达发给自己);没有心跳。它的记录是私有卷上按泳道分目录的自然语言文档(`$WORLD_DATA_DIR/<泳道>/records/`),下次醒来的时刻也存在那个目录里。主 agent 之外还有三类按需起的 agent:感知判断(主 agent 报告一个变化时判断谁会察觉、察觉到什么,代码把判断经通信机制发给那个参与者——这是 world 告知别人的唯一途径)、NPC 扮演(NPC 的言行出自它,原样交给感知判断)、应答(回答问 world 的问题,只读,不叫醒主 agent)。四类 agent 能查的东西都来自同一组知识来源(记录、现实、别人发给 world 的消息),启用哪些走 Dynamic Config `world_sources`;"别人发给 world 的消息"存在同一个目录的 `sources/` 下,跟记录分开。同一时刻只有一个 world 进程写这个目录(滚动发布时新旧两个进程会同时在跑一段):卷是 hostPath 卷、固定在单节点,world 拿着目录里锁文件上的 flock 独占锁时才消费收件箱,没拿到的进程照常起来、只读不写;记录的人工读写接口是 world App 上的 `/admin/world/records*`,从开发机经 monitor-dashboard 的 `/dashboard/api/ops/world/records*` 转发并落审计。旧的 world 轮次、日历和 world 的文档树已经删掉。
+world(推演客观世界的那个引擎)不在 agent-service 这个 App 里,也不跟 life 共读共写任何表:它是同一个镜像上单独发布的 App `world`(代码在 `apps/agent-service/app/world/`,进程只起 world 清单里的插件,清单是 `apps/agent-service/app/manifests/world.py`,`app/deployment.py` 把 App 名映射到清单),两边唯一的连接是通信机制(`apps/agent-service/app/messaging/`,具名收件箱 + RabbitMQ,按泳道隔离)。world 的主 agent 只在两种时候醒:收件箱 `world` 来了消息,或者它自己上一轮定的时刻到了(用通信机制的定时送达发给自己);没有心跳。它的记录是私有卷上按泳道分目录的自然语言文档(`$WORLD_DATA_DIR/<泳道>/records/`),下次醒来的时刻也存在那个目录里。主 agent 之外还有三类按需起的 agent:感知判断(主 agent 报告一个变化时判断谁会察觉、察觉到什么,代码把判断经通信机制发给那个参与者——这是 world 告知别人的唯一途径)、NPC 扮演(NPC 的言行出自它,原样交给感知判断)、应答(回答问 world 的问题,只读,不叫醒主 agent)。四类 agent 能查的东西都来自同一组知识来源(记录、现实、别人发给 world 的消息),启用哪些走 Dynamic Config `world_sources`;"别人发给 world 的消息"存在同一个目录的 `sources/` 下,跟记录分开。同一时刻只有一个 world 进程写这个目录(滚动发布时新旧两个进程会同时在跑一段):卷是 hostPath 卷、固定在单节点,world 拿着目录里锁文件上的 flock 独占锁时才消费收件箱,没拿到的进程照常起来、只读不写;记录的人工读写接口是 world App 上的 `/admin/world/records*`,从开发机经 monitor-dashboard 的 `/dashboard/api/ops/world/records*` 转发并落审计。旧的 world 轮次、日历和 world 的文档树已经删掉。
 
 ---
 
@@ -158,13 +158,13 @@ flowchart LR
 | `recall_lark` | agent-service | lark-outbound | 「刚那条要撤回」 |
 | `chat_response_qq` | agent-service | chat-response-worker | 「这是赤尾说的话,帮我发 QQ」 |
 
-`chat_response` / `recall` 两条不带 channel 后缀的 base 队列也声明着,但**没有生产者也没有消费者**:它们在代码里只当逻辑 sink 的名字用(`Sink.mq("chat_response")`),真实 routing key 由出站时按 payload 的 channel 现算。同理 `recall_qq` 声明了但 QQ 侧没起 recall 消费者,`proactive_eval` 两头都没有,都是空队列。
+`chat_response` / `recall` 两条不带 channel 后缀的 base 队列也声明着,但**没有生产者也没有消费者**:它们在代码里只当出站登记的名字用(说话插件的 `ctx.outbound(ChatResponseSegment, "chat_response")`),真实 routing key 由出站时按 payload 的 channel 现算。同理 `recall_qq` 声明了但 QQ 侧没起 recall 消费者,`proactive_eval` 两头都没有,都是空队列。
 
 通信机制(`apps/agent-service/app/messaging/`)的队列也不在上表,它们连接的是参与者而不是渠道:收件箱 `inbox_<名字>_<泳道>` 由开设它的 App 消费(`inbox_world_*` 归 world,`inbox_operator_*` 归 agent-service),它旁边的问题队列 `questions_<名字>_<泳道>` 也由同一个 App 消费、和收件箱分开消费,问题因此不排在正在处理的普通消息后面;名字含非 ASCII 字符时队列名里写成 `:` 加 punycode(`赤尾` 是 `:bgtr75i`),定时送达 `messaging_scheduled_<泳道>` 由开着通信机制的进程共同消费,死信进 `isolated_dead_letters_<泳道>`。发送方是任何用通信机制的进程:world 给自己排下次醒来、把感知判断的结果发给参与者、回答问它的问题,运维经 agent-service 的人工入口(`/admin/messaging/*`)发给任何收件箱、向 world 提问。这几条都按进程的部署泳道隔离,没有消费者时不退回 prod。
 
-agent-service 进程内还有两类队列不在上表:一是 durable 边(当前只有一条——她拿起一个文件 → 读一程)底下的队列,由 runtime 框架按 Data 类型和消费者名自动声明(`durable_<data>_<consumer>`);二是 `runtime_delayed_trigger_agent-service`,框架自己的延迟自触发回投。两者的生产者和消费者都在同一个进程里。
+她拿起一个文件之后的「读一程」也走通信机制:读书插件开设收件箱 `reading`(队列 `inbox_reading_<泳道>`),她在自己的一轮里发一条消息进去,读一程在收件箱的处理函数里跑,不占她的那一轮;发送方和消费方都是 agent-service 自己。三姐妹各自的收件箱(名字是她们在世界里的名字)也由 agent-service 开设,收到的消息只存一行,等她下次醒来自己读。
 
-所有队列都带泳道后缀(`xxx_<lane>`),泳道队列有 10s TTL,过期后消息降级回 prod 队列——这保证了未部署泳道的服务能 fallback 到线上。例外是 `runtime_delayed_trigger_*`:它按 `lane_fallback=False` 声明,泳道的延迟消息留在自己泳道等到期,不会溢到 prod。
+所有队列都带泳道后缀(`xxx_<lane>`)。出站队列在泳道里有 10s TTL,过期后消息降级回 prod 队列——这保证了未部署泳道的服务能 fallback 到线上。通信机制的队列是例外:它们按泳道完全隔离,没有消费者时消息留在自己泳道,不降级回 prod。
 
 ---
 
@@ -244,7 +244,7 @@ flowchart LR
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark`,发飞书回复与撤回 |
 | channel-server | **channel-server** | HTTP,QQ 入站(`POST /api/internal/qq/inbound`) |
 | channel-server | **chat-response-worker** | 消费 `chat_response_qq`,经 qq-gateway 发 QQ 回复 |
-| agent-service | **agent-service** | HTTP(健康检查 + admin/DLQ + 通信机制人工入口)+ dataflow runtime(五条时间源 + 一条 durable 边)+ life 引擎;不挂 world 的卷 |
+| agent-service | **agent-service** | HTTP(健康检查 + admin/DLQ + 通信机制人工入口)+ 插件宿主上的 life 引擎(五条钟 + 三姐妹和读书的收件箱);不挂 world 的卷 |
 | agent-service | **world** | world 引擎:只通过通信机制跟其他参与者交流(收件箱 `world` 收消息、答提问 + 定时送达 + 发给参与者的告知),私有记录放在只挂给它的卷上;HTTP 上是健康检查和记录的人工读写接口 `/admin/world/records*`。不是 sibling,单独发布(`make deploy APP=world`) |
 | 其余 10 个 | 各自 1 个同名 Deployment | — |
 
@@ -279,7 +279,7 @@ flowchart LR
 | channel-server | Bun/TS | 数据面 | QQ 入站 + 渠道契约链 + 规则引擎 + 存储,投影落库即止 |
 | chat-response-worker | Bun/TS | 数据面 | 消费 `chat_response_qq`,经 qq-gateway 发 QQ 回复 + 存储 |
 | qq-gateway | Bun/TS | 数据面 | QQ 官方 bot 协议 ↔ channel-server 通用协议的双向适配 |
-| agent-service | Python | 数据面 | 赤尾的生活引擎(自研 agent 工具循环 + dataflow runtime 的五条时间源);她开口也发生在她的 moment 里 |
+| agent-service | Python | 数据面 | 赤尾的生活引擎(插件宿主 + 固定的 agent 循环,五条钟驱动);她开口也发生在她的一轮里 |
 | world | Python | 数据面 | world 引擎:同一镜像单独发布的 App,只经通信机制交流,被消息或自己定的时刻叫醒,记录在只挂给它的私有卷上 |
 | sandbox-worker | Python | AI 工具 | 隔离环境跑 bash / 技能脚本 |
 | tool-service | Python | AI 工具 | 图像管道(下载→压缩→TOS)+ jieba 关键词 |
@@ -303,7 +303,7 @@ flowchart LR
 
 ### 1. agent-service 主进程承担过多
 
-一个 Deployment 里同时跑着 admin/DLQ 管理 HTTP、五条时间源、三个角色各自的 moment,以及「读一程」那条 durable 边。后面几件都是模型重活,共享同一份 CPU 和同一个进程生命周期——部署一次就把所有正在跑的 moment 和轮次一起杀掉。
+一个 Deployment 里同时跑着 admin/DLQ 管理 HTTP、五条钟、三个角色各自的一轮,以及读书收件箱上的「读一程」。后面几件都是模型重活,共享同一份 CPU 和同一个进程生命周期——部署一次就把所有正在跑的轮次和读书一起杀掉。
 
 ### 2. paas-engine 是个「全能控制面」
 
