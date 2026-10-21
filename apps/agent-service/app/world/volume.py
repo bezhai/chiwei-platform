@@ -4,8 +4,8 @@
 下面按进程的部署泳道分目录（prod 写成 ``prod``）：泳道那一段由代码拼，不让每条泳道各配
 一个路径——忘了配的后果是静默写进别的泳道。路径本身不是世界内容。
 
-目录里放这几样：``records/``（记录，:mod:`app.world.records`）、``sources/<来源>/``（各知识
-来源自己存的东西，:func:`app.world.sources.private_dir`）、私有状态文件（下次醒来，
+目录里放这几样：``records/``（记录，:mod:`app.world.records`）、``sources/told/``（别人
+告诉世界的事，:func:`app.world.told.stored_dir`）、私有状态文件（下次醒来，
 :mod:`app.world.wake`；没跑完的一轮里已经发生的事，:mod:`app.world.unfinished`；收件箱里的消息
 走到了哪一步，:mod:`app.world.pending`）和写锁文件。
 人工读写接口只够得到 ``records/``。

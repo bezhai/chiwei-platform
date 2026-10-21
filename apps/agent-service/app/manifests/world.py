@@ -31,7 +31,6 @@ from app.world.answer import ANSWER_AGENT
 from app.world.main_agent import ROUND_AGENT, TRIM_POLICY
 from app.world.npc import NPC_AGENT
 from app.world.perception import PERCEPTION_AGENT
-from app.world.sources import ENABLED_SOURCES_KEY
 
 # 三个知识来源的查询工具，按来源排：主 agent 和另外三类 agent 拿的都是这一份。
 QUERY_TOOLS = (
@@ -63,7 +62,8 @@ WORLD = Profile(
     after_commit=("history", "unfinished.clear", "wake.next"),
     history=HistorySpec(key=HISTORY_KEY, policy=TRIM_POLICY, texts=HISTORY_TEXTS),
     cost=CostSpec(actor="world", round_id="{trace}:{round_id}"),
-    switches=Switches(ENABLED_SOURCES_KEY, ("records", "reality", "told")),
+    # Dynamic Config：启用哪些知识来源，逗号分隔的插件名，没配就是全部。改它不用重新部署。
+    switches=Switches("world_sources", ("records", "reality", "told")),
 )
 
 MANIFEST = App(
@@ -72,7 +72,7 @@ MANIFEST = App(
         "app.world.records.reading",
         "app.world.records.keeping",
         "app.world.reality",
-        "app.world.sources.told",
+        "app.world.told",
     ),
     agents={
         "world_round": ROUND_AGENT,

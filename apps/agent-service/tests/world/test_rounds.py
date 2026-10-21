@@ -29,6 +29,10 @@ from tests.messaging.helpers import eventually
 from .conftest import LANE, restart, self_message, sets_nothing, sets_wake
 
 
+async def _takes_nothing(_message) -> None:
+    """没有登记收件处理的收件箱。"""
+
+
 def _world_turns() -> Turns:
     """world 的一条轮次队列，跟宿主给 world 插件的一样（``ctx.turns``），不经过宿主。"""
     return Turns(WORLD, "round", hold_limit=None, clock=now_cst)
@@ -639,7 +643,7 @@ async def test_a_round_over_its_time_fails_every_delivery_it_took(world):
             return
         await asyncio.sleep(10)
 
-    rounds = Rounds(run, round_timeout=timedelta(seconds=0.2), turns=_world_turns())
+    rounds = Rounds(run, round_timeout=timedelta(seconds=0.2), turns=_world_turns(), take_in=_takes_nothing)
     running = asyncio.create_task(rounds.receive(_from("赤尾", "我出门了。")))
     await eventually(lambda: taken, timeout=5)
     later = []
@@ -660,7 +664,7 @@ def test_a_delivery_may_wait_for_the_round_ahead_and_then_its_own():
     async def run(due, *, round_id, now):
         return None
 
-    rounds = Rounds(run, round_timeout=timedelta(minutes=30), turns=_world_turns())
+    rounds = Rounds(run, round_timeout=timedelta(minutes=30), turns=_world_turns(), take_in=_takes_nothing)
     assert rounds.delivery_timeout > timedelta(minutes=60)
 
 
@@ -680,7 +684,7 @@ async def test_a_round_takes_its_time_and_id_when_the_source_starts_running_it(
         seen.append((round_id, now))
         clock[0] = datetime(2026, 7, 25, 11, 30, tzinfo=CST)
 
-    rounds = Rounds(run, round_timeout=timedelta(minutes=10), turns=_world_turns())
+    rounds = Rounds(run, round_timeout=timedelta(minutes=10), turns=_world_turns(), take_in=_takes_nothing)
     clock[0] = datetime(2026, 7, 25, 11, 0, 3, tzinfo=CST)
     await rounds.source.run(InboxRound(reason="test", messages=()))
 

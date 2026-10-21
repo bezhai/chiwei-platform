@@ -264,13 +264,12 @@ async def test_what_every_source_returns_is_trimmed_as_material_even_when_it_is_
     from inner_shared.dynamic_config import dynamic_config
 
     import app.agent.round as agent_round
-    from app.manifests.world import QUERY_TOOLS
-    from app.world.sources import ENABLED_SOURCES_KEY
+    from app.manifests.world import QUERY_TOOLS, WORLD
 
     monkeypatch.setattr(
         dynamic_config,
         "get",
-        lambda k, default="": enabled if k == ENABLED_SOURCES_KEY else default,
+        lambda k, default="": enabled if k == WORLD.switches.key else default,
     )
     seen = {}
     real = agent_round.trim_for_round

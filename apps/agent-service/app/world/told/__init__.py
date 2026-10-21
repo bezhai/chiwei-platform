@@ -1,4 +1,6 @@
-"""知识来源"别人告诉世界的事"：别的参与者发给 world 的消息，按发送方存，可以查谁最近说过什么。
+"""插件 ``told``：知识来源"别人告诉世界的事"，别的参与者发给 world 的消息，按发送方存，可以查谁
+最近说过什么。它在 world 收件箱的 ``world_intake`` 上登记收件处理（:func:`take_in`），给出两个查询
+工具（返回的都是读到的材料）；开关（``world_sources``）关掉它时，工具和收件处理一起停。
 
 **收哪些。** 别的参与者发给 world 的消息。居民说自己在哪、在做什么、对世界做了什么，都在这
 里面。不收：
@@ -15,7 +17,8 @@
 通信机制提问的来源、在启用列表里换掉这一个，记录和主 agent 的写法都不用动。
 
 **怎么存。** 一条消息一份文件：``<发送方目录>/<消息 id>.json``，在这个来源自己的目录里
-（:func:`app.world.sources.private_dir`）。发送方目录名取名字的摘要：名字由通信机制校验，可能
+（:func:`stored_dir`，``$WORLD_DATA_DIR/<泳道>/sources/told/``，跟 world 的记录 ``records/`` 分开放，
+记录的人工读写接口够不到这里）。发送方目录名取名字的摘要：名字由通信机制校验，可能
 含有不能直接做文件名的字符；原名、消息时间、正文都存在文件里，"最近"按文件里的消息时间排。
 文件只按消息 id 命名：同一条消息再来一次（投递至少一次），或者发送方拿着原 id 重发（那一次的
 消息时间是重发那一刻），都落在同一个文件上；已经在了就不再写，留下的是先到的那一份。写走
@@ -33,10 +36,11 @@ from pydantic import Field
 
 from app.agent.tooling import tool
 from app.agent.tools._common import tool_error
+from app.host import Context, Plugin
 from app.messaging.message import Message
 from app.world.agents import WORLD, when
-from app.world.sources import Source, private_dir, source_plugin
-from app.world.volume import write_atomically
+from app.world.services import WorldIntake
+from app.world.volume import lane_dir, write_atomically
 
 NAME = "told"
 
@@ -44,12 +48,13 @@ NAME = "told"
 RECENT = 20
 
 
-def _root() -> Path:
-    return private_dir(NAME)
+def stored_dir() -> Path:
+    """它存消息的目录（不一定已经存在）：``$WORLD_DATA_DIR/<泳道>/sources/told/``。"""
+    return lane_dir() / "sources" / NAME
 
 
 def _sender_dir(sender: str) -> Path:
-    return _root() / hashlib.sha256(sender.encode("utf-8")).hexdigest()[:16]
+    return stored_dir() / hashlib.sha256(sender.encode("utf-8")).hexdigest()[:16]
 
 
 async def take_in(message: Message) -> None:
@@ -88,7 +93,7 @@ def _kept(directory: Path) -> list[dict[str, str]]:
 
 def _senders() -> list[tuple[str, int, datetime]]:
     """发过消息的每个人：名字、几条、最近一条的时间，最近发过的排在前面。"""
-    root = _root()
+    root = stored_dir()
     if not root.is_dir():
         return []
     found = []
@@ -136,7 +141,11 @@ async def read_messages_from(
     return "\n".join(lines)
 
 
-SOURCE = Source(name=NAME, tools=(list_senders, read_messages_from), intake=take_in)
+def setup(ctx: Context) -> None:
+    intake: WorldIntake = ctx.service("world_intake")
+    ctx.on_stop(intake.register(NAME, take_in))
+    for query in (list_senders, read_messages_from):
+        ctx.tool(query, trim="material")
 
 
-PLUGIN = source_plugin(SOURCE)
+PLUGIN = Plugin(name=NAME, setup=setup, requires=("world_intake",))

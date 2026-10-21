@@ -6,7 +6,7 @@
 直接换成替身。world 的插件目录之间不互相 import，只 import 这里、共享模块和框架公开的东西
 （``tests/world/test_plugin_boundaries.py``）。
 
-* ``world_intake``（world 核心提供，told 用）：:class:`WorldIntake`。
+* ``world_intake``（world 核心提供，told 和 answer 用）：:class:`WorldIntake`。
 * ``perception``（perception 提供，npc 用）：:class:`Perception`。
 """
 from __future__ import annotations
@@ -20,17 +20,29 @@ from app.messaging.message import Message
 
 # 一个插件的收件处理：world 收件箱刚收到的一条普通消息。
 Intake = Callable[[Message], Awaitable[None]]
+# 回答问 world 的一个问题：交回回答的话，什么都没说就是 ``None``。
+Answer = Callable[[Message], Awaitable["str | None"]]
 
 
 class WorldIntake(Protocol):
-    """world 收件箱的收件处理：每收到一条普通消息（别人发来的、自己排的醒来、"没有送达"告知；
-    提问不算，提问只读不写），交给登记过的、这一刻没被开关关掉的插件，按登记的先后。"""
+    """world 收件箱交给别的插件的两样：收件处理——每收到一条普通消息（别人发来的、自己排的
+    醒来、"没有送达"告知；提问不算，提问只读不写），交给登记过的、这一刻没被开关关掉的插件，按
+    登记的先后；提问——交给登记的那一个应答。"""
 
     def register(self, plugin: str, intake: Intake) -> Disposer:
         """登记插件 ``plugin`` 的收件处理，交回取消登记的 disposer。
 
         投递至少一次，同一条消息可能来两次，所以 ``intake`` 按消息 id 去重：同一条再来，什么都
         不变。它失败原样往外抛，这次投递按处理失败重试。
+        """
+        ...
+
+    def answer_with(self, plugin: str, answer: Answer) -> Disposer:
+        """问 world 的问题交给插件 ``plugin`` 的 ``answer`` 回答，交回取消登记的 disposer。最多一个
+        插件登记，第二个抛 ``ValueError``；没有登记时收件箱对提问什么都不说。
+
+        提问只读：它不经过收件处理，也不叫醒主 agent。``answer`` 失败原样往外抛，通信机制告诉
+        提问方"没有回答"。
         """
         ...
 

@@ -7,7 +7,8 @@
 
 **一次投递怎么处理**（:meth:`Rounds.receive`，就是 world 收件箱的处理函数）：
 
-1. 交给各知识来源收下（:func:`app.world.sources.take_in`，按消息 id 去重）；
+1. 交给登记过的收件处理收下（``world_intake``，:meth:`app.world.intake.Intakes.take_in`，按消息 id
+   去重）；
 2. 某一轮已经处理完了的（:func:`app.world.pending.is_handled`），跳过；
 3. 收进还没经过一轮的消息里（:func:`app.world.pending.add`，记在私有卷上）；
 4. 不叫醒 world 的消息到这里就算处理完了：它不单独起一轮，等下一轮一起看；
@@ -90,7 +91,7 @@ from app.messaging import receiving
 from app.messaging.message import Message
 from app.world import pending
 from app.world.agents import WORLD, is_own_wake
-from app.world.sources import take_in
+from app.world.services import Intake
 from app.world.wake import is_stale_wake
 
 logger = logging.getLogger(__name__)
@@ -131,14 +132,21 @@ class Rounds:
     """world 的一轮接一轮。``run`` 带着判出来的这一轮（:class:`InboxRound`，消息按到达的先后）跑
     一轮，失败就抛异常。
 
-    ``turns`` 是 world 的轮次队列，world 插件从宿主拿（``ctx.turns``）。"""
+    ``turns`` 是 world 的轮次队列，world 插件从宿主拿（``ctx.turns``）；``take_in`` 是收件处理
+    （``world_intake`` 的 :meth:`~app.world.intake.Intakes.take_in`），每次投递先交给它。"""
 
     def __init__(
-        self, run: RunRound, *, round_timeout: timedelta, turns: Turns
+        self,
+        run: RunRound,
+        *,
+        round_timeout: timedelta,
+        turns: Turns,
+        take_in: Intake,
     ) -> None:
         self._run = run
         self._round_timeout = round_timeout
         self._turns = turns
+        self._take_in = take_in
         self.source: WakeSource[InboxRound, None] = WakeSource(
             "world-inbox", Coalesce.JOIN_NEXT, self._due, self._run_round
         )
@@ -150,7 +158,7 @@ class Rounds:
 
     async def receive(self, message: Message) -> None:
         """world 收件箱的处理函数：收下这条消息，要叫醒 world 的就等一轮把它处理完。"""
-        await take_in(message)
+        await self._take_in(message)
         if pending.is_handled(message.message_id):
             logger.info(
                 "world: message %s was handled by an earlier round; skipped",

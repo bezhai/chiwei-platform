@@ -34,11 +34,9 @@ def _fresh_process_state(monkeypatch) -> None:
     from app.infra import outbound
     from app.messaging.receiving import clear_inboxes
     from app.skills.registry import SkillRegistry
-    from app.world.sources import clear_sources
 
     outbound.clear()
     clear_inboxes()
-    clear_sources()
     for module, name, value in (
         (receiving, "_consumers", []),
         (receiving, "_in_flight", set()),

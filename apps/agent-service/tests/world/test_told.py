@@ -11,11 +11,10 @@ import pytest
 
 from app.agent.round import Call, in_call
 from app.messaging.message import Kind, Message, new_message
-from app.world import main_agent, records
+from app.world import main_agent, records, told
 from app.world.agents import when
-from app.world.sources import private_dir, told
 
-from .conftest import sets_nothing, sets_wake
+from .conftest import LANE, sets_nothing, sets_wake
 
 
 def _said(sender: str, body: str, *, minutes_ago: int = 0, message_id: str | None = None) -> Message:
@@ -37,8 +36,61 @@ async def _call(t, **arguments):
 
 
 def _stored() -> list:
-    root = private_dir(told.SOURCE.name)
+    root = told.stored_dir()
     return sorted(p for p in root.rglob("*") if p.is_file()) if root.exists() else []
+
+
+# ---------------------------------------------------------------------------
+# 插件
+# ---------------------------------------------------------------------------
+
+
+class _Setup:
+    """told 的 setup 拿到的东西的替身：``world_intake`` 服务记下登记的收件处理，工具和停下时要做的
+    事记下来。"""
+
+    def __init__(self) -> None:
+        self.intakes: list[tuple[str, object]] = []
+        self.tools: list[tuple[str, str]] = []
+        self.on_stops: list[object] = []
+
+    # world_intake
+    def register(self, plugin, intake):
+        self.intakes.append((plugin, intake))
+
+        async def dispose() -> None:
+            self.intakes.remove((plugin, intake))
+
+        return dispose
+
+    # the plugin's context
+    def service(self, name):
+        assert name == "world_intake"
+        return self
+
+    def tool(self, t, *, trim):
+        self.tools.append((t.name, trim))
+
+    def on_stop(self, undo):
+        self.on_stops.append(undo)
+
+
+async def test_told_registers_its_intake_with_world_intake_and_its_two_query_tools():
+    setup = _Setup()
+
+    told.PLUGIN.setup(setup)
+
+    assert told.PLUGIN.requires == ("world_intake",)
+    assert setup.intakes == [("told", told.take_in)]
+    assert setup.tools == [("list_senders", "material"), ("read_messages_from", "material")]
+    for undo in setup.on_stops:
+        await undo()
+    assert setup.intakes == []
+
+
+def test_it_keeps_what_it_is_told_in_its_own_directory_next_to_the_records(bare_volume):
+    assert told.stored_dir() == bare_volume / LANE / "sources" / "told"
+    assert records.records_root() == bare_volume / LANE / "records"
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +148,7 @@ async def test_what_it_keeps_stays_apart_from_worlds_records(volume):
     await told.take_in(_said("ayana", "我在厨房。"))
 
     assert records.listing() == []
-    assert all(private_dir(told.SOURCE.name) in p.parents for p in _stored())
+    assert all(told.stored_dir() in p.parents for p in _stored())
 
 
 # ---------------------------------------------------------------------------
@@ -151,16 +203,10 @@ async def test_asking_about_someone_who_never_sent_anything_says_so_and_lists_wh
 async def test_any_name_the_messaging_layer_lets_through_is_stored_safely(volume, name):
     await told.take_in(_said(name, "我在这儿。"))
 
-    root = private_dir(told.SOURCE.name)
+    root = told.stored_dir()
     assert all(root in p.parents for p in _stored())
     assert "我在这儿。" in await _call(told.read_messages_from, name=name)
     assert name in await _call(told.list_senders)
-
-
-def test_the_source_reads_through_two_tools_and_keeps_messages_through_its_intake():
-    assert told.SOURCE.name == "told"
-    assert [t.name for t in told.SOURCE.tools] == ["list_senders", "read_messages_from"]
-    assert told.SOURCE.intake is told.take_in
 
 
 # ---------------------------------------------------------------------------

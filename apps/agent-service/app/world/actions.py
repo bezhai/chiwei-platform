@@ -1,4 +1,4 @@
-"""world 主 agent 才有的动作。别的几类 agent 只拿知识来源的只读工具（:mod:`app.world.sources`），
+"""world 主 agent 才有的动作。别的几类 agent 只拿知识来源的只读工具（清单的 ``QUERY_TOOLS``），
 这些只给主 agent：
 
 * 写记录（``write_record``）由插件 ``record_keeping`` 登记（:mod:`app.world.records.keeping`）。

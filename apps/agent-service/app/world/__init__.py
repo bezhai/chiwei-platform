@@ -11,7 +11,8 @@
   工具 ``records``；写记录、记录目录和人工读写接口 ``record_keeping``）；
 * :mod:`app.world.wake` —— 下次醒来的时刻（私有状态）和醒来规则；
 * :mod:`app.world.reality` —— 知识来源"现实"的插件：天气、网页搜索；
-* :mod:`app.world.sources` —— 知识来源"别人告诉世界的事"的插件，和来源的登记表；
+* :mod:`app.world.told` —— 知识来源"别人告诉世界的事"的插件，收件处理登记在 ``world_intake`` 上；
+* :mod:`app.world.intake` —— 收件箱的 ``world_intake`` 服务：收件处理和提问交给哪些插件；
 * :mod:`app.world.agents` —— world 的几类 agent 怎么调模型（模型、trace、成本）；
 * :mod:`app.world.rounds` —— 收件箱的处理：一轮处理所有还没经过一轮的消息，一次只跑一轮；
 * :mod:`app.world.pending` —— 收件箱里的消息走到了哪一步：还没经过一轮、处理完了、放弃了；

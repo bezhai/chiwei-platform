@@ -14,10 +14,10 @@ from dataclasses import replace
 import pytest
 
 from app.agent.tooling import tool
+from app.host import Plugin
 from app.manifests.world import MANIFEST, QUERY_TOOLS, WORLD
 from app.messaging.message import Kind, new_message
 from app.world import answer, main_agent, npc, perception
-from app.world.sources import ENABLED_SOURCES_KEY, Source, source_plugin
 
 from .conftest import ScriptedAgent, ask, sets_wake, tools_built_for, use_tool
 
@@ -43,7 +43,7 @@ async def look_up_tides() -> str:
     return "傍晚涨潮。"
 
 
-PLUGIN = source_plugin(Source(name="tides", tools=(look_up_tides,)))
+PLUGIN = Plugin(name="tides", setup=lambda ctx: ctx.tool(look_up_tides, trim="material"))
 
 
 def _with_tides(tools: tuple[str, ...]) -> tuple[str, ...]:
@@ -108,7 +108,7 @@ def _enabled(monkeypatch, names: str) -> None:
     monkeypatch.setattr(
         dynamic_config,
         "get",
-        lambda k, default="": names if k == ENABLED_SOURCES_KEY else default,
+        lambda k, default="": names if k == WORLD.switches.key else default,
     )
 
 

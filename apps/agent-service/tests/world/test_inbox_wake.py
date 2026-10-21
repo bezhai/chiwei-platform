@@ -236,7 +236,12 @@ def _source():
         raise AssertionError
 
     turns = Turns("world", "round", hold_limit=None, clock=_no_clock)
-    rounds = Rounds(never_runs, round_timeout=main_agent.ROUND_TIMEOUT, turns=turns)
+    async def takes_nothing(_message) -> None:
+        return None
+
+    rounds = Rounds(
+        never_runs, round_timeout=main_agent.ROUND_TIMEOUT, turns=turns, take_in=takes_nothing
+    )
     return rounds.source
 
 

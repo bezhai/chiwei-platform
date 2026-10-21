@@ -6,9 +6,8 @@ from __future__ import annotations
 
 from app.manifests.world import QUERY_TOOLS
 from app.messaging.message import Kind, new_message
-from app.world import answer, records
+from app.world import answer, records, told
 from app.world.records import reading
-from app.world.sources import told
 
 from .conftest import LANE, ScriptedAgent, ask, spec_called, tools_built_for
 
@@ -81,11 +80,13 @@ async def test_saying_nothing_is_no_answer(world):
     assert await ask(world, _question("赤尾在哪？")) is None
 
 
-async def test_the_world_inbox_answers_questions_with_the_answer_agent(app_host):
+async def test_the_world_inbox_answers_questions_with_the_answer_registered_on_world_intake(
+    app_host,
+):
     from app.messaging.receiving import INBOX_REGISTRY
+    from app.world.intake import Intakes
 
     await app_host("world")
 
-    on_question = INBOX_REGISTRY["world"].on_question
-    assert isinstance(on_question.__self__, answer.Answering)
-    assert on_question.__func__ is answer.Answering.answer_question
+    # 收件箱把提问交给 world_intake，它交给登记的应答；上面几条经 ``ask`` 走的就是这条路。
+    assert INBOX_REGISTRY["world"].on_question.__func__ is Intakes.answer

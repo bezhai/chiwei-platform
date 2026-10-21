@@ -17,7 +17,6 @@ from pathlib import Path
 from app.messaging.message import Kind, new_message
 from app.messaging.receiving import INBOX_REGISTRY
 from app.world.rounds import Rounds
-from app.world.sources import enabled_sources
 from tests.hosting import start_without_io
 from tests.messaging.helpers import eventually
 
@@ -43,7 +42,7 @@ def _rounds_now() -> Rounds:
 
 
 def test_the_world_app_runs_the_world_plugin_the_record_plugins_reality_and_told_in_order():
-    """来源插件的顺序就是来源登记的顺序：收件处理按它看到来源。"""
+    """插件按这个顺序起来：收件处理按插件登记的先后跑（told 是其中唯一有收件处理的）。"""
     from app.manifests.world import MANIFEST
 
     assert MANIFEST.plugins == (
@@ -51,7 +50,7 @@ def test_the_world_app_runs_the_world_plugin_the_record_plugins_reality_and_told
         "app.world.records.reading",
         "app.world.records.keeping",
         "app.world.reality",
-        "app.world.sources.told",
+        "app.world.told",
     )
 
 
@@ -59,7 +58,7 @@ async def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_t
     app_host,
 ):
     from app.messaging.receiving import PROCESSING_RETRY, _lease_ms
-    from app.world.answer import Answering
+    from app.world.intake import Intakes
     from app.world.main_agent import ROUND_TIMEOUT
     from app.world.volume import writer_lock
     from app.world.wake import retry_latest_wake_without_limit, wake_on_start
@@ -69,7 +68,7 @@ async def test_world_opens_one_inbox_whose_deliveries_wait_for_the_rounds_that_t
     assert [r.name for r in host.registered() if r.kind == "inbox"] == ["world"]
     spec = INBOX_REGISTRY["world"]
     rounds = _rounds_now()
-    assert spec.on_question.__func__ is Answering.answer_question
+    assert spec.on_question.__func__ is Intakes.answer
     assert spec.on_open is wake_on_start
     # 状态里的最新唤醒失败时不限次数重试，永不进死信；别的消息照常有限次重试。
     assert spec.retry_without_limit is retry_latest_wake_without_limit
@@ -173,18 +172,14 @@ async def test_a_round_left_running_by_the_previous_start_does_not_hold_up_the_n
     assert "我在做饭。" in world.runner.runs[1][-1].content
 
 
-async def test_stop_takes_back_the_sources_the_inbox_and_the_routes(app_host, monkeypatch):
-    from inner_shared.dynamic_config import dynamic_config
-
-    monkeypatch.setattr(dynamic_config, "get", lambda k, default="": default)
+async def test_stop_takes_back_the_inbox_the_routes_and_every_registration(app_host):
     host = await app_host("world")
-    assert [s.name for s in await enabled_sources()] == ["told"]
+    assert host.registered() != ()
 
     await host.stop()
 
     assert host.registered() == ()
     assert "world" not in INBOX_REGISTRY
-    assert await enabled_sources() == []
 
 
 def test_importing_the_plugin_loads_no_life_code():
