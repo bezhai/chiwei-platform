@@ -24,6 +24,7 @@ skipping, because a baseline that silently skips guards nothing.
 | `test_<kind>.py` | Scenarios of one round kind. |
 | `test_harness.py` | Self-tests of the core, for guarantees whose breaking no scenario would notice (a swallowed `ScriptExhausted`, Redis shared between scenarios, a missing answer from an outside service, a request to a host nothing serves, a model call scripted by its call's agent rather than by the prompt it was rendered from). |
 | `baselines/<kind>/<scenario>.json` | The recorded baselines. |
+| `baselines/tool_schemas.json` | The schema of every tool a baseline offers, kept once for all of them. |
 | `.actual/` | Written when a comparison fails; git-ignored. |
 
 ## Prompt fixtures
@@ -88,8 +89,7 @@ plugins' setup and the outbound publishes.
 
 ## What a baseline holds
 
-One JSON document per scenario: the steps in order, and the schema of every tool offered
-(`tool_schemas`). Each step records:
+One JSON document per scenario, holding the steps in order. Each step records:
 
 - `outcome`: what the step's action returned, or the exception (type and first line).
 - `model_calls`: agent, call number, model id, prompt name/version and the variables passed,
@@ -114,6 +114,25 @@ One JSON document per scenario: the steps in order, and the schema of every tool
 - `consumers_started`: queues that got a consumer (the start step lists what the app opens).
 - `rows`: per table, rows added / changed / removed by the step.
 - `files`: per file on the world volume, added / before→after / removed.
+
+The schemas of the tools are kept once for all baselines, in `baselines/tool_schemas.json`
+(`{name: {description, parameters}}`, sorted by name); a model call names the tools it offered. So
+a change to one tool's description is one hunk in one file, not one in every baseline offering it.
+
+- **Keyed by tool name.** A tool's schema comes from its definition alone, so every agent and every
+  scenario offering a tool is offered the same schema (checked when the split was made: no name had
+  two schemas in any of the 50 baselines). `test_tool_schemas.py` checks this across agents, and
+  one scenario offering one name with two schemas fails the replay; either way the file would have
+  to be keyed by something that keeps the two apart, not merged.
+- **Comparing** a scenario compares its own file and the kept schema of each tool it offered. A
+  tool described differently in the code, or a hand edit to the file, fails every scenario
+  offering that tool (`differs at: tool_schemas.<name>.description`) and `test_tool_schemas.py`.
+- **Recording** a scenario sets the kept schema of each tool it offered and drops the schemas no
+  baseline offers any more; the schemas only other baselines offer stay. Scenarios recording in
+  parallel (`-n auto`) take turns on a lock on `baselines/`.
+- **Stale entries**: `test_tool_schemas.py` fails while the file keeps a schema no baseline offers
+  (a tool or scenario was removed without recording anything), or lacks one a baseline offers.
+  Recording any scenario drops the stale ones; deleting them by hand works too.
 
 ### What is normalised
 
@@ -218,6 +237,9 @@ scenario with the request it refused.
 2. When every difference is intended, re-record only the affected baselines:
    `REPLAY_RECORD=world_round/continuation uv run pytest tests/replay` (names or globs, comma
    separated; `REPLAY_RECORD=1` records everything the run reaches).
+   Recording also updates the kept schemas of the tools those scenarios offer
+   (`baselines/tool_schemas.json`), so a tool description change is one hunk there and needs only
+   one scenario offering the tool re-recorded; the others then pass as they are.
 3. `git diff tests/replay/baselines` is the list of intended changes; describe each in the
    commit.
 

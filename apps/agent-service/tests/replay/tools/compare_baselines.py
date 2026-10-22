@@ -12,6 +12,9 @@ in a pattern ``[*]`` stands for any index and ``*`` for any one key. A differenc
 allowed path is allowed: a key present on one side only is a difference at that key, a list that
 changed length is a difference at the list. Prints, per document, the allowed differences and the
 others; exits 1 when there is any other difference or a document is in one directory only.
+
+``tool_schemas.json`` (the tools' schemas, kept once for all baselines) is compared like any other
+document; its paths start at the tool name (``search_web.description``).
 """
 
 from __future__ import annotations

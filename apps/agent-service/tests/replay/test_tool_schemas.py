@@ -2,8 +2,10 @@
 reflected from the tool, in the order the declarations are given. Declaring a tool must not change
 a byte of what the model sees — the schemas are part of every request, and the order is part of the
 prompt cache's prefix — so every agent's tools, declared the way the code declares them, are run
-through ``Agent`` and checked against what the baselines recorded: the schemas in
-``tool_schemas`` and, for each model call, the names in ``tools``.
+through ``Agent`` and checked against what the baselines recorded: for each model call, the names
+in ``tools``, and the schemas kept for all baselines in ``baselines/tool_schemas.json``. Those are
+keyed by tool name, which holds only while every agent offered a tool is offered the same schema;
+and they are the schemas of exactly the tools some baseline offers.
 
 Runs no scenario: the baselines are read as files, the model is a stand-in that answers at once.
 """
@@ -17,7 +19,13 @@ from app.agent.contracts import AgentSpec, ToolSpec
 from app.agent.core import Agent
 from app.agent.neutral import Message, Role
 from app.agent.round import Call
-from tests.replay.harness.baseline import BASELINES, _Normaliser
+from tests.replay.harness.baseline import (
+    BASELINES,
+    TOOL_SCHEMAS,
+    _Normaliser,
+    offered_tools,
+    read_tool_schemas,
+)
 
 
 class _NoPrompts:
@@ -100,6 +108,17 @@ async def test_every_agent_is_offered_its_tools_as_the_baselines_recorded_them(
     declared = await _declared(app_host, monkeypatch)
     offered = {agent: await _offered(specs) for agent, specs in declared.items()}
 
+    first_offered: dict[str, tuple[str, dict]] = {}
+    for agent, defs in offered.items():
+        for d in defs:
+            schema = {"description": d["description"], "parameters": d["parameters"]}
+            other, seen = first_offered.setdefault(d["name"], (agent, schema))
+            assert seen == schema, (
+                f"{d['name']} is offered to {other} and to {agent} with different schemas; "
+                f"baselines/{TOOL_SCHEMAS} keeps one schema per tool name, so key it by "
+                f"something that keeps them apart"
+            )
+
     checked: set[str] = set()
     for name, doc in _baselines():
         for step in doc["steps"]:
@@ -110,11 +129,26 @@ async def test_every_agent_is_offered_its_tools_as_the_baselines_recorded_them(
                 agent = call["agent"]
                 assert agent in offered, f"{name}: {agent} is offered tools nothing here declares"
                 assert recorded == [d["name"] for d in offered[agent]], f"{name}: {agent}"
-                for d in offered[agent]:
-                    assert doc["tool_schemas"][d["name"]] == {
-                        "description": d["description"],
-                        "parameters": d["parameters"],
-                    }, f"{name}: {d['name']}"
                 checked.add(agent)
-
     assert checked == set(declared)
+
+    kept = read_tool_schemas()
+    for agent, defs in offered.items():
+        for d in defs:
+            assert kept.get(d["name"]) == {
+                "description": d["description"],
+                "parameters": d["parameters"],
+            }, f"baselines/{TOOL_SCHEMAS}: {d['name']} (offered to {agent})"
+
+
+def test_the_kept_schemas_are_those_of_the_tools_the_baselines_offer():
+    kept, in_use = set(read_tool_schemas()), offered_tools()
+
+    assert not kept - in_use, (
+        f"baselines/{TOOL_SCHEMAS} keeps the schemas of tools no baseline offers: "
+        f"{sorted(kept - in_use)}; recording any scenario drops them, or delete them by hand"
+    )
+    assert not in_use - kept, (
+        f"baselines/{TOOL_SCHEMAS} keeps no schema for {sorted(in_use - kept)}; re-record a "
+        f"scenario that offers them"
+    )

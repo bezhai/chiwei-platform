@@ -1,13 +1,27 @@
 """The baseline document: building it from the recorded steps, normalising it, and comparing it
-with (or recording it as) ``tests/replay/baselines/<name>.json``.
+with (or recording it as) ``tests/replay/baselines/<name>.json`` and the shared
+``tests/replay/baselines/tool_schemas.json``.
 
-Layout of a document::
+Layout of a document as built::
 
     {
       "baseline": "<kind>/<scenario>",
       "steps": [ {step}, ... ],          # in the order the scenario ran them
       "tool_schemas": {name: {description, parameters}}   # every tool any call offered
     }
+
+It is kept in two places. ``baselines/<name>.json`` holds everything but ``tool_schemas``; the
+schemas are kept once for all baselines, in ``baselines/tool_schemas.json`` (``{name:
+{description, parameters}}``, sorted by name, normalised like the rest). They are keyed by tool
+name because a tool's schema comes from its definition alone: every agent and every scenario that
+offers it is offered the same one (``test_tool_schemas.py`` checks this across agents). One
+scenario offering one name with two schemas fails ``build``, since the shared file could keep only
+one of them.
+
+Comparing a scenario compares its own file byte for byte and, for each tool it offered, the kept
+schema; a difference in either fails it the same way. Recording a scenario writes its own file, sets
+the kept schema of each tool it offered, and drops the schemas no baseline names in a model call's
+``tools`` any more; the schemas only other baselines offer stay as they are.
 
 A step::
 
@@ -23,7 +37,7 @@ A step::
       "files": {path: {"added"|"before"/"after"|"removed": ...}}
     }
 
-A model call lists the tools it offered by name (schemas once, in ``tool_schemas``). Its
+A model call lists the tools it offered by name (their schemas are in ``tool_schemas``). Its
 messages are written out in full the first time; a later call of the same agent in the same
 step whose messages begin with an earlier call's messages says so (``"continues"``) and lists
 only what was added (``"then"``) — the ReAct loop resends the whole conversation every turn.
@@ -41,11 +55,14 @@ from __future__ import annotations
 import base64
 import binascii
 import difflib
+import fcntl
 import fnmatch
 import hashlib
 import json
 import os
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +71,9 @@ import pytest
 REPLAY_DIR = Path(__file__).resolve().parent.parent
 BASELINES = REPLAY_DIR / "baselines"
 ACTUAL = REPLAY_DIR / ".actual"
+
+# The schemas of the tools the baselines offer, kept once for all of them (under ``BASELINES``).
+TOOL_SCHEMAS = "tool_schemas.json"
 
 # ``REPLAY_RECORD=1`` (or ``all``) re-records every baseline the run reaches; otherwise a
 # comma-separated list of names or globs (``living_moment/*``) picks which.
@@ -70,12 +90,14 @@ def _tool_names(defs: list[dict[str, Any]], catalogue: dict[str, Any]) -> list[s
     names = []
     for d in defs:
         schema = {"description": d["description"], "parameters": d["parameters"]}
-        key, n = d["name"], 1
-        while key in catalogue and catalogue[key] != schema:
-            n += 1
-            key = f"{d['name']} (variant {n})"
-        catalogue.setdefault(key, schema)
-        names.append(key)
+        if catalogue.setdefault(d["name"], schema) != schema:
+            raise AssertionError(
+                f"replay: tool {d['name']!r} was offered with two different schemas in one "
+                f"scenario; baselines/{TOOL_SCHEMAS} keeps one schema per tool name, so it "
+                f"cannot hold both. Key the kept schemas by something that keeps them apart "
+                f"(harness/baseline.py)."
+            )
+        names.append(d["name"])
     return names
 
 
@@ -237,15 +259,75 @@ def _differences(old: Any, new: Any, path: str = "") -> list[str]:
     return [] if old == new else [path]
 
 
-def compare_or_record(name: str, document: dict[str, Any]) -> None:
+def read_tool_schemas() -> dict[str, Any]:
+    """The kept schemas, ``{name: {description, parameters}}`` (``{}`` while there are none)."""
+    path = BASELINES / TOOL_SCHEMAS
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def offered_tools() -> set[str]:
+    """The name of every tool a model call in some baseline was offered."""
+    return {
+        tool
+        for path in BASELINES.glob("*/*.json")
+        for step in json.loads(path.read_text(encoding="utf-8"))["steps"]
+        for call in step["model_calls"]
+        for tool in call.get("tools") or []
+    }
+
+
+@contextmanager
+def _one_recorder_at_a_time() -> Iterator[None]:
+    """Scenarios run in parallel (``-n auto``). A recording reads the kept schemas and every
+    baseline and rewrites the schemas; holding a lock on the baselines directory meanwhile, it
+    neither loses another recording's schemas nor reads a baseline another one is writing."""
+    BASELINES.mkdir(parents=True, exist_ok=True)
+    fd = os.open(BASELINES, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _record(name: str, own: dict[str, Any], offered: dict[str, Any]) -> None:
     path = BASELINES / f"{name}.json"
-    actual = _render(document)
-    if _recording(name):
+    actual = _render(own)
+    with _one_recorder_at_a_time():
         if not path.exists() or path.read_text(encoding="utf-8") != actual:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(actual, encoding="utf-8")
             print(f"replay: recorded {path.relative_to(REPLAY_DIR.parent.parent)}")
+        kept = read_tool_schemas()
+        merged = {**kept, **offered}
+        in_use = offered_tools()
+        schemas = {tool: merged[tool] for tool in sorted(merged) if tool in in_use}
+        target = BASELINES / TOOL_SCHEMAS
+        rendered = _render(schemas)
+        if target.exists() and target.read_text(encoding="utf-8") == rendered:
+            return
+        # A scenario comparing meanwhile (not under the lock) reads the old file or the new one,
+        # never half of one.
+        staged = target.with_name(f"{TOOL_SCHEMAS}.tmp")
+        staged.write_text(rendered, encoding="utf-8")
+        os.replace(staged, target)
+        changed = [tool for tool in offered if kept.get(tool) != offered[tool]]
+        dropped = [tool for tool in kept if tool not in schemas]
+        print(
+            f"replay: recorded {target.relative_to(REPLAY_DIR.parent.parent)} "
+            f"(set: {', '.join(changed) or '-'}; dropped: {', '.join(dropped) or '-'})"
+        )
+
+
+def compare_or_record(name: str, document: dict[str, Any]) -> None:
+    own = {key: value for key, value in document.items() if key != "tool_schemas"}
+    offered = document["tool_schemas"]
+    if _recording(name):
+        _record(name, own, offered)
         return
+    path = BASELINES / f"{name}.json"
     if not path.exists():
         pytest.fail(
             f"replay: no baseline {path.relative_to(REPLAY_DIR)}; record it with "
@@ -253,31 +335,49 @@ def compare_or_record(name: str, document: dict[str, Any]) -> None:
             pytrace=False,
         )
     expected = path.read_text(encoding="utf-8")
-    if expected == actual:
+    actual = _render(own)
+    all_kept = read_tool_schemas()
+    kept = {tool: all_kept[tool] for tool in offered if tool in all_kept}
+    if expected == actual and kept == offered:
         return
-    out = ACTUAL / f"{name}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(actual, encoding="utf-8")
-    diff = list(
-        difflib.unified_diff(
+    where: list[str] = []
+    diff: list[str] = []
+    out = None
+    if expected != actual:
+        out = ACTUAL / f"{name}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(actual, encoding="utf-8")
+        where += _differences(json.loads(expected), json.loads(actual))
+        diff += difflib.unified_diff(
             expected.splitlines(),
             actual.splitlines(),
             fromfile=f"baselines/{name}.json",
             tofile=f".actual/{name}.json",
             lineterm="",
         )
-    )
-    where = _differences(json.loads(expected), json.loads(actual))
+    if kept != offered:
+        where += _differences({"tool_schemas": kept}, {"tool_schemas": offered})
+        diff += difflib.unified_diff(
+            _render(kept).splitlines(),
+            _render(offered).splitlines(),
+            fromfile=f"baselines/{TOOL_SCHEMAS} (the tools this scenario offers)",
+            tofile="the tools as offered in this replay",
+            lineterm="",
+        )
     shown = ["differs at:", *(f"  {w}" for w in where[:20])]
     if len(where) > 20:
         shown.append(f"  ... and {len(where) - 20} more")
     shown += diff[:_DIFF_LINES]
     if len(diff) > _DIFF_LINES:
-        shown.append(f"... {len(diff) - _DIFF_LINES} more diff lines; see {out}")
+        shown.append(
+            f"... {len(diff) - _DIFF_LINES} more diff lines"
+            + (f"; see {out}" if out else "")
+        )
+    written = f"Full replay written to {out}. " if out else ""
     pytest.fail(
         "replay: behaviour differs from the baseline\n"
         + "\n".join(shown)
-        + f"\n\nFull replay written to {out}. If every difference is intended, list each one "
-        f"and re-record with {RECORD_ENV}={name}.",
+        + f"\n\n{written}If every difference is intended, list each one and re-record with "
+        f"{RECORD_ENV}={name}.",
         pytrace=False,
     )
