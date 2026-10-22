@@ -363,13 +363,32 @@ class Summons:
     at: datetime
 
 
+@dataclass(frozen=True)
+class SaidToHer:
+    """别人在她手机上对她说的一条：私聊里来的，或者群里点了她的名、回了她某句话的。
+
+    ``body`` 是正文原样，附件和图片按她手机上的写法留着印子（:mod:`app.living.phone.handset`），
+    **没有转义**：摆到她眼前时由 :meth:`Phone.said_to_her_line` 转。
+    """
+
+    at: datetime
+    scope: str        # 'direct'（私聊） | 'group'（群）
+    title: str        # 会话叫什么；私聊多半是空串
+    sender: Sender
+    named_her: bool
+    replied_to_her: bool
+    body: str
+
+
 class Phone(Protocol):
-    """她的手机：哪些会话在她手机上、谁在叫她、她在一条会话上说的话算哪一档、一个人摆在她眼前的样子。
+    """她的手机：哪些会话在她手机上、谁在叫她、一段时间里别人对她说了什么、她在一条会话上说的话算
+    哪一档、一个人摆在她眼前的样子。
 
     **哪些会话在她手机上只有一道闸**：她自己的 bot 还在，而且这条会话在她视野里。闸就在
     :meth:`reachable_conversations` 上，发消息、读文件问的都是这一份，别处不许自己拼一份；视野在她的
-    一轮之内只定一次（一轮里多处各算一次的话，她看到的会话会在这一轮中途变化）。唯一不过视野那一半
-    的是撤回（:meth:`conversation_her_bot_is_in`）。
+    一轮之内只定一次（一轮里多处各算一次的话，她看到的会话会在这一轮中途变化）。不过视野那一半的
+    只有两处：撤回（:meth:`conversation_her_bot_is_in`），和读回一段时间里别人对她说的
+    （:meth:`said_to_her`，理由写在实现上）。
     """
 
     async def reachable_conversations(
@@ -395,6 +414,16 @@ class Phone(Protocol):
         self, *, lane: str, persona_id: str, now: datetime
     ) -> Summons | None:
         """她手机上还没看过、而且是在叫她的那条消息里最新的一条；没有返回 ``None``。"""
+        ...
+
+    async def said_to_her(
+        self, *, persona_id: str, since: datetime, until: datetime
+    ) -> list[SaidToHer]:
+        """``[since, until)`` 之间别人在她手机上对她说的，按时刻排；看没看过都算。"""
+        ...
+
+    def said_to_her_line(self, said: SaidToHer) -> str:
+        """这样一条摆到她眼前的样子：哪条会话、怎么找到她的、谁说的、原话。"""
         ...
 
     def medium_for(self, scope: str) -> str:

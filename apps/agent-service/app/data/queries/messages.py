@@ -1,8 +1,9 @@
 """``common_message`` queries — 一个 bot 身份在会话里看得到什么。
 
 调用方给的是 ``persona`` 名下那些 bot（``own_bots`` / ``bot_user_ids``，由
-:mod:`app.data.queries.persona` 取），这一层据此回答四个问题：哪些行还没被看过、
-谁点了谁的名、打开一条会话看到哪一段、她那次开口在公共层落成了什么。
+:mod:`app.data.queries.persona` 取），这一层据此回答五个问题：哪些行还没被看过、
+谁点了谁的名、一段时间里别人对她说了什么、打开一条会话看到哪一段、她那次开口在公共层
+落成了什么。
 
 **这里的判据认 ``bot_name``，不认 ``role``。** 几个 bot 挂在同一个群里时它们的出站
 在这张表里全是 ``role='assistant'``，长得一模一样；分得开的只有 ``bot_name``
@@ -28,6 +29,7 @@ __all__ = [
     "find_unread_summary",
     "find_unread_senders",
     "find_newest_unread_summons",
+    "find_said_to_her",
     "find_conversation_page",
     "find_conversations_by_last_message",
     "search_conversations_by_name",
@@ -350,6 +352,108 @@ async def find_newest_unread_summons(
             )
         ).mappings().first()
     return dict(row) if row is not None else None
+
+
+# ---------------------------------------------------------------------------
+# 一段时间里别人对她说的
+# ---------------------------------------------------------------------------
+
+# 一段时间里别人在她手机上**对她说的**：私聊里别人发的每一条，群里点了她的名、或者回了她某句
+# 话的那些。每周回看（``app.living.persona_review``）读的就是这个。
+#
+# 判据三条，前两条跟别处是同一份：不是她说的（:data:`_SAID_BY_HER`）、还在会话里
+# （:data:`_STILL_IN_THE_CONVERSATION`）；群里再要点了她的名（:data:`_NAMED_HER`），或者回的是
+# 她说的某一句。
+#
+# **"回了她的话"只在这里算，没有并进 :data:`_CALLING_HER`。** 飞书里回一条消息不会自动 @ 它的
+# 作者，prod 上这样的回复一周有几十条（2026-09-07 那一周 akao 名下 72 条），不算进来，有人在接
+# 她的话这件事她回头看时就看不到。并进 _CALLING_HER 改的是另一件事：谁能把她提前叫醒、她点开
+# 会话落在哪一条。
+#
+# 被回的那一行是不是她说的，认的同样是 :data:`_SAID_BY_HER`。为了原样复用这条判据，查询分两步：
+# ``others`` 先取出时间窗里别人说的、还在会话里、可能是在对她说的那些（私聊、点了她名的、回了
+# 某一条的），"点没点她的名"在这一步算成一列；``toward_her`` 的别名是 ``o``，被回那一行的子查询
+# 里就能再叫 ``cm``。先把"回了某一条"收窄进来，是为了不给一周里群里的每一句闲聊都查一次被回的
+# 那一行。
+#
+# 时间窗左闭右开，两头都是常量下界，走得上 ``idx_common_message_conversation_time``（同
+# :data:`_SUMMONS_COUNT_SQL` 那条论证）。``named_her`` 不套 COALESCE：没人算过的那一列是 NULL，
+# 在 WHERE 里不算点了名，读出来也是"没点名"，跟 :data:`_NAMED_HER` 上那条口径一致。
+_SAID_TO_HER_SQL = f"""
+WITH given AS (
+{_GIVEN_CONVERSATIONS_CTE}
+),
+others AS (
+  SELECT g.scope                    AS scope,
+         g.title                    AS title,
+         cm.common_message_id       AS message_id,
+         cm.event_time              AS at_ms,
+         cm.common_reply_message_id AS reply_to,
+         cm.content                 AS content,
+         cm.content_text            AS content_text,
+         {_WHO_AND_OWNER},
+         ({_NAMED_HER})             AS named_her
+    FROM given g
+    JOIN common_message cm
+      ON cm.common_conversation_id = g.channel_id
+     AND cm.event_time >= :since_ms
+     AND cm.event_time < :until_ms
+    {_JOIN_SPEAKER}
+   WHERE NOT {_SAID_BY_HER}
+     AND {_STILL_IN_THE_CONVERSATION}
+     AND (g.scope = 'direct'
+          OR {_NAMED_HER}
+          OR cm.common_reply_message_id IS NOT NULL)
+),
+toward_her AS (
+  SELECT o.*,
+         EXISTS (
+           SELECT 1
+             FROM common_message cm
+            WHERE cm.common_message_id = o.reply_to
+              AND {_SAID_BY_HER}
+         ) AS replied_to_her
+    FROM others o
+)
+SELECT *
+  FROM toward_her
+ WHERE scope = 'direct' OR named_her OR replied_to_her
+ ORDER BY at_ms, message_id
+"""
+
+
+async def find_said_to_her(
+    *,
+    conversations: list[dict],
+    bot_user_ids: list[str],
+    own_bots: list[str],
+    since_ms: int,
+    until_ms: int,
+) -> list[dict]:
+    """``conversations`` 里 ``[since_ms, until_ms)`` 之间别人对她说的，按 ``event_time`` 排。
+
+    集合由调用方给定（形状同
+    :func:`app.data.queries.persona.find_conversations_with_persona_bot` 的出参），理由见
+    :data:`_GIVEN_CONVERSATIONS_CTE`；集合为空就返回空。
+
+    每一行：``scope`` / ``title``（哪条会话）、``at_ms``、``who`` / ``by_owner`` / ``is_bot``
+    （谁说的，口径同 :data:`_WHO_AND_OWNER`）、``content`` / ``content_text``（正文的两份事实）、
+    ``named_her``（``True`` / ``False`` / ``None``，见 :data:`_NAMED_HER`）、``replied_to_her``。
+    """
+    async with auto_tx():
+        rows = (
+            await current_session().execute(
+                text(_SAID_TO_HER_SQL),
+                {
+                    **_unzip_conversations(conversations),
+                    "bot_user_ids": bot_user_ids,
+                    "own_bots": own_bots,
+                    "since_ms": since_ms,
+                    "until_ms": until_ms,
+                },
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

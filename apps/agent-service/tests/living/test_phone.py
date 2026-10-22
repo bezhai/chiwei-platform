@@ -272,6 +272,7 @@ async def _incoming(
     message_id: uuid.UUID | None = None,
     items: list[dict] | None = None,
     content_text: str | None = None,
+    replies_to: str | None = None,
 ) -> str:
     """真人发来的一条消息。
 
@@ -288,6 +289,8 @@ async def _incoming(
     等价的事实**：投影层把每个非文本项都拼成字面的 ``[kind]`` 写进 ``content_text``
     （两个渠道共用 ``packages/ts-shared`` 的 ``summarizeContent``），文件名只留在 items 的
     ``meta.file_name`` 里。要验她看不看得出发来的是什么，就得能分别摆布这两边。
+
+    ``replies_to`` 写 ``common_reply_message_id``：这条是在回哪一条（飞书投影落账时写下）。
     """
     if items is None:
         items = [{"kind": "text", "text": text_body}]
@@ -301,10 +304,10 @@ async def _incoming(
                 "INSERT INTO common_message "
                 "(common_message_id, channel, common_conversation_id, common_user_id,"
                 " sender_display_name, role, content, content_text, scope, bot_name,"
-                " event_time, mentioned_common_user_ids) "
+                " event_time, mentioned_common_user_ids, common_reply_message_id) "
                 "VALUES (CAST(:m AS uuid), 'lark', CAST(:c AS uuid), CAST(:u AS uuid),"
                 " :sn, 'user', CAST(:body AS jsonb), :txt, :sc, :bn, :et,"
-                " CAST(:named AS text[])::uuid[])"
+                " CAST(:named AS text[])::uuid[], CAST(:reply AS uuid))"
             ),
             {
                 "m": str(mid),
@@ -319,6 +322,7 @@ async def _incoming(
                 "bn": bot_name,
                 "et": _ms(at),
                 "named": None if mention_unrecorded else named,
+                "reply": replies_to,
             },
         )
     return str(mid)
@@ -4165,3 +4169,147 @@ async def test_a_sisters_picture_is_someone_elses_picture(
     assert _picture_urls(shown) == [pictures.url_of("temp/img_sis.jpg")], (
         f"姐姐发的图被当成她自己发的了。拿到：\n{shown!r}"
     )
+
+
+# --------------------------------------------------------------------------
+# 十八 · 一段时间里别人在手机上对她说的
+# --------------------------------------------------------------------------
+#
+# 每周回看（:mod:`app.living.persona_review`）问的是这一段：这一周谁在手机上对她说过什么。
+# "对她说的"是私聊里别人发的每一条，加上群里点了她名的、回了她某句话的；她自己说的一条
+# 都不算 —— 那是她自己的腔调，回看拿它当证据就是让她的口头禅给自己作证。
+
+_SINCE = _at(9)
+_UNTIL = _at(22)
+
+
+async def _said_to_her(persona_id: str = "akao"):
+    return await PHONE.said_to_her(persona_id=persona_id, since=_SINCE, until=_UNTIL)
+
+
+@pytest.mark.integration
+async def test_what_was_said_to_her_is_the_private_chat_and_the_group_calls(living_db):
+    """私聊里别人发的、群里点她名的、群里回她话的，按时刻排；她自己的话、群里的闲聊、点别人名的、
+    回姐姐话的、姐姐私聊线上的、时间窗外的都不在里面。"""
+    await _seed_world()
+    await _incoming(_DM, text_body="窗外那条之前的", at=_at(8, 59))
+    await _incoming(_DM, text_body="周末去抹茶店吗", at=_at(10))
+    await _her_own(_DM, text_body="去呀去呀", at=_at(10, 5))
+    await _incoming(_OTHERS_DM, text_body="绫奈那边的私聊", at=_at(10, 30))
+    await _incoming(
+        _GROUP, text_body="今天好热", at=_at(11), sender=_SOMEONE, sender_name="路人"
+    )
+    await _incoming(
+        _GROUP, text_body="@赤尾 你来评评理", at=_at(11, 5), sender=_SOMEONE,
+        sender_name="路人", names_bot=_AKAO_BOT_UID,
+    )
+    await _incoming(
+        _GROUP, text_body="@绫奈 你呢", at=_at(11, 6), sender=_SOMEONE,
+        sender_name="路人", names_others=(_AYANA_BOT_UID,),
+    )
+    hers = await _her_own(_GROUP, text_body="我觉得是猫", at=_at(11, 10))
+    await _incoming(
+        _GROUP, text_body="哈哈对", at=_at(11, 12), sender=_SOMEONE,
+        sender_name="路人", replies_to=hers,
+    )
+    sisters = await _sister_said(_GROUP, text_body="我觉得是狗", at=_at(11, 15))
+    await _incoming(
+        _GROUP, text_body="狗也行", at=_at(11, 20), sender=_SOMEONE,
+        sender_name="路人", replies_to=sisters,
+    )
+    await _incoming(_DM, text_body="时间窗右边界上的", at=_UNTIL)
+
+    said = await _said_to_her()
+
+    assert [(s.body, s.scope, s.named_her, s.replied_to_her) for s in said] == [
+        ("周末去抹茶店吗", "direct", False, False),
+        ("@赤尾 你来评评理", "group", True, False),
+        ("哈哈对", "group", False, True),
+    ], f"拿到：{said}"
+    assert [s.at for s in said] == [_at(10), _at(11, 5), _at(11, 12)]
+
+
+@pytest.mark.integration
+async def test_a_message_taken_back_is_not_part_of_her_week(living_db):
+    """渠道上撤掉的那条，对面已经看不到了，也就不算谁对她说过。"""
+    await _seed_world()
+    gone = await _incoming(_DM, text_body="发错了", at=_at(10))
+    await _recalled_on_the_channel(gone, at=_at(10, 1))
+    await _incoming(_DM, text_body="这条才是", at=_at(10, 2))
+
+    assert [s.body for s in await _said_to_her()] == ["这条才是"]
+
+
+@pytest.mark.integration
+async def test_who_said_it_comes_from_common_user_not_from_the_name(living_db):
+    """主人是 ``common_user.is_owner`` 说了算：昵称跟主人一模一样的陌生人不是主人。"""
+    await _seed_world()
+    await _seed_a_stranger_wearing_his_name()
+    await _incoming(_DM, text_body="是我", at=_at(10))
+    await _incoming(_DM, text_body="也是我", at=_at(10, 1), sender=_TWIN)
+
+    said = await _said_to_her()
+
+    assert [(s.sender.name, s.sender.is_owner) for s in said] == [
+        ("bezhai", True),
+        ("bezhai", False),
+    ]
+
+
+@pytest.mark.integration
+async def test_what_was_said_then_counts_even_if_the_chat_is_out_of_sight_now(living_db):
+    """读回一段时间里别人对她说的，不过此刻的白名单。
+
+    白名单管的是她此刻手机上有哪些会话；而私聊来的、群里点她名的消息，到的那一刻就让那条会话进了
+    她视野（近 1 小时有 1 条在叫她就算）。拿回看那一刻的名单去筛，会把她当时看见过的话筛掉：
+    群里上午点过她一次名，到晚上那个群已经不在她手机上了，可那句话她是看见过的。
+    """
+    await _seed_world()
+    await _incoming(
+        _GROUP, text_body="@赤尾 早", at=_at(10), sender=_SOMEONE,
+        sender_name="路人", names_bot=_AKAO_BOT_UID,
+    )
+
+    on_her_phone_now = {
+        c.channel_id for c in await reachable_conversations(persona_id="akao", now=_UNTIL)
+    }
+    assert str(_GROUP) not in on_her_phone_now, "前提不成立：这个群此刻还在她手机上"
+    assert [s.body for s in await _said_to_her()] == ["@赤尾 早"]
+
+
+@pytest.mark.integration
+async def test_each_one_reads_as_where_it_came_from_who_said_it_and_the_words(living_db):
+    """摆到她眼前是一行：哪条会话、怎么找到她的，``<msg>`` 里谁说的和原话。署名跟她手机上同一套
+    （``rel`` 由系统算，正文过转义），附件按手机上的写法留印子，图片如实说这一次没给她看。"""
+    await _seed_world()
+    await _incoming(_DM, text_body="周末去抹茶店吗", at=_at(10))
+    await _incoming(
+        _GROUP, text_body="@赤尾 你来评评理", at=_at(11, 5), sender=_SOMEONE,
+        sender_name="路人", names_bot=_AKAO_BOT_UID,
+    )
+    hers = await _her_own(_GROUP, text_body="我觉得是猫", at=_at(11, 10))
+    await _incoming(
+        _GROUP, text_body="哈哈对", at=_at(11, 12), sender=_SOMEONE,
+        sender_name="路人", replies_to=hers,
+    )
+    await _incoming(
+        _DM,
+        at=_at(12),
+        items=[
+            {"kind": "text", "text": "看这个"},
+            {"kind": "image", "key": "img_1", "object": "temp/img_1.jpg"},
+            {"kind": "file", "key": "file_1", "meta": {"file_name": "课表.pdf"}},
+        ],
+        content_text="看这个[image][file]",
+    )
+    await _incoming(_DM, text_body='a < b & "c"', at=_at(13))
+
+    lines = [PHONE.said_to_her_line(s) for s in await _said_to_her()]
+
+    assert lines == [
+        '私聊 <msg from="bezhai" rel="owner">周末去抹茶店吗</msg>',
+        '群「宅居研究所」里点了你的名 <msg from="路人">@赤尾 你来评评理</msg>',
+        '群「宅居研究所」里回了你的话 <msg from="路人">哈哈对</msg>',
+        '私聊 <msg from="bezhai" rel="owner">看这个[图片：这轮没给你看][文件: 课表.pdf]</msg>',
+        '私聊 <msg from="bezhai" rel="owner">a &lt; b &amp; &quot;c&quot;</msg>',
+    ]
