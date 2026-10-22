@@ -1,17 +1,22 @@
 """Replay: her weekly review, driven the way the host's clock drives it (one tick of the
 ``persona-review`` wake, signalling the three sisters' review queues at once).
 
-The tick reaches the three sisters concurrently. Only 赤尾 has day pages in the week being read,
-so the other two return before any write or model call and the order of effects is fixed.
+The tick reaches the three sisters concurrently. Only 赤尾 has a bot, and only she has anything said
+to her in the week being read, so the other two return before any write or model call and the
+order of effects is fixed.
 
-Her day pages are seeded with the product's own write (``insert_idempotent``), between steps, so
-they are not part of the record: the round under test reads them.
+What was said to her is seeded with the product's own writes, between steps, so it is not part of
+the record: the round under test reads it. Messages delivered to her inbox (a sister in person,
+what world tells her she noticed) are stored as her inbox stores them (``insert_idempotent`` of a
+``ReceivedMessage``); messages on her phone are what lark-service would have stored in
+``common_message`` (``seeds.bezhai_says``).
 
 * ``two_weeks`` — a tick before the Monday 06:00–08:00 window does nothing. The first tick in the
   window finds her chain empty, seeds it with the persona row's text (``source='seed'``), then
-  she rewrites it from last week's pages (only Monday to Sunday of that week, oldest first) with
-  the flat persona text as the anchor; a later tick finds this week's review written. The next
-  Monday's review reads the version she wrote the week before.
+  she rewrites it from what was said to her last week (only Monday 00:00 to the next Monday 00:00,
+  phone and inbox merged by time, day by day) with the flat persona text as the anchor; a later
+  tick finds this week's review written. The next Monday's review reads the version she wrote the
+  week before.
 * ``model_call_fails`` — the model call fails after the chain was seeded; the tick does not raise
   it.
   The next tick does not seed again and writes the review.
@@ -23,14 +28,15 @@ they are not part of the record: the round under test reads them.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import datetime
 
 import pytest
 
 from app.capabilities.errors import CapabilityTimeout
 from app.data.persist import insert_idempotent
 from app.infra.cst_time import CST
-from app.living.day_page.pages import LivingDayPage
+from app.living.household.received import ReceivedMessage
+from app.living.services import WORLD
 from tests.replay import seeds
 from tests.replay.harness import Fail, Reply
 from tests.replay.harness.prompts import config_errors
@@ -50,49 +56,55 @@ def _tick(replay):
 
 async def _her_household_is_up(replay) -> None:
     await seeds.seed_household()
+    await seeds.seed_akaos_phone()
     await replay.start("agent-service")
 
 
-async def _her_pages(replay, pages: dict[date, str]) -> None:
-    """Day pages she wrote, as the day-page round stores them (written at 04:00 the next day)."""
-    for day, words in pages.items():
+async def _said_to_her(replay, said: list[tuple[datetime, str, str]]) -> None:
+    """What was said to her: ``(when, who, words)``. ``who`` is ``"phone"`` for bezhai in their
+    private chat; anyone else came to her inbox (a sister in person, or world)."""
+    for at, who, words in said:
+        name = f"{at.isoformat()} {who}"
+        if who == "phone":
+            await seeds.bezhai_says(words, at=at, name=name)
+            continue
         await insert_idempotent(
-            LivingDayPage(
+            ReceivedMessage(
                 lane=replay.lane,
                 persona_id="akao",
-                day=day,
-                text=words,
-                written_at=datetime.combine(
-                    day + timedelta(days=1), time(4), tzinfo=CST
-                ),
-                happenings=3,
+                message_id=str(seeds.fixed_id(f"received:{name}")),
+                sender=who,
+                body=words,
+                message_time=at,
+                wakes_recipient=True,
             )
         )
 
 
-# The week 07-20 (Mon) .. 07-26 (Sun), with one page from the week before and the Sunday page
-# out of order, to show the window and the order she reads them in.
-LAST_WEEK = {
-    date(2026, 7, 19): "上周日：整理了一下午的周边。",
-    date(2026, 7, 26): "周日：把冲好的胶片扫进电脑，千凪借走了相机。",
-    date(2026, 7, 21): "周二：第一次自己冲胶卷，手忙脚乱，但冲出来了。",
-    date(2026, 7, 23): "周四：在论坛上写了一篇角色分析，有人回帖说写得好。",
-}
+# The week 07-20 (Mon) .. 07-26 (Sun), with one message from the week before and the Sunday one
+# stored first, to show the window and the order she reads them in.
+LAST_WEEK = [
+    (_at(7, 26, 20), "千凪", "相机我先借走啦，下周还你。"),
+    (_at(7, 19, 21), "千凪", "明天开始我去图书馆打工，晚饭不用等我。"),
+    (_at(7, 21, 18, 30), WORLD, "你看到绫奈抱着一摞新买的胶卷进门，放在客厅茶几上。"),
+    (_at(7, 23, 22, 5), "phone", "论坛上有人回你那篇角色分析了，说写得很好"),
+    (_at(7, 23, 22, 10), "绫奈", "姐姐教我冲胶卷好不好"),
+]
 
-WEEK_AFTER = {
-    date(2026, 7, 28): "周二：又冲了一卷，这次没有手忙脚乱。",
-    date(2026, 8, 1): "周六：和绫奈去了抹茶店，聊了很久。",
-}
+WEEK_AFTER = [
+    (_at(7, 28, 19), "千凪", "相机还你，胶卷我顺手帮你冲好了。"),
+    (_at(8, 1, 15), "phone", "周六有空吗，一起去抹茶店"),
+]
 
 FIRST_REVIEW = (
-    "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。这阵子开始自己冲胶卷，"
-    "第一次手忙脚乱，但喜欢上了暗房里慢慢等显影的感觉。"
+    "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。这阵子绫奈想跟她学冲胶卷，"
+    "她写的角色分析在论坛上有人认真回了。"
 )
 
 
 async def test_two_weeks(replay):
     await _her_household_is_up(replay)
-    await _her_pages(replay, LAST_WEEK)
+    await _said_to_her(replay, LAST_WEEK)
 
     await replay.step(
         "a tick before the window does nothing", _tick(replay), at=_at(7, 27, 5, 55)
@@ -109,10 +121,10 @@ async def test_two_weeks(replay):
         "a later tick finds this week's review written", _tick(replay), at=_at(7, 27, 6, 5)
     )
 
-    await _her_pages(replay, WEEK_AFTER)
+    await _said_to_her(replay, WEEK_AFTER)
     replay.model.script(
         REVIEW,
-        Reply(text=FIRST_REVIEW + "冲胶卷已经顺手了。跟绫奈待在一起的时间比以前多。"),
+        Reply(text=FIRST_REVIEW + "bezhai 约她周末去抹茶店。"),
     )
     await replay.step(
         "the next Monday: she rewrites the version she wrote last week",
@@ -125,7 +137,7 @@ async def test_two_weeks(replay):
 
 async def test_model_call_fails(replay):
     await _her_household_is_up(replay)
-    await _her_pages(replay, LAST_WEEK)
+    await _said_to_her(replay, LAST_WEEK)
 
     replay.model.script(
         REVIEW,
@@ -149,7 +161,7 @@ async def test_model_call_fails(replay):
 
 async def test_prompt_config_error(replay):
     await _her_household_is_up(replay)
-    await _her_pages(replay, LAST_WEEK)
+    await _said_to_her(replay, LAST_WEEK)
     errors_before = config_errors(REVIEW, "production", "akao")
 
     replay.misconfigure_prompt(REVIEW, "mood")

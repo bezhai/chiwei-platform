@@ -32,7 +32,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -41,10 +41,8 @@ from langfuse._client.attributes import LangfuseOtelSpanAttributes as Attr
 from openai import InternalServerError
 
 import app.world.perception as perception
-from app.data.persist import insert_idempotent
 from app.infra.cst_time import CST
 from app.infra.rabbitmq import lane_queue
-from app.living.day_page.pages import LivingDayPage
 from app.living.her_records.deeds import record_happening
 from app.living.services import KIND_ACT, MEDIUM_IN_PERSON
 from app.messaging.broker import headers, question_route, reply_route
@@ -444,23 +442,11 @@ async def test_her_weekly_look_back_is_a_trace_of_its_own_in_her_review_session(
     replay, spans
 ):
     await seeds.seed_household()
+    await seeds.seed_akaos_phone()
     await replay.start("agent-service")
-    for day, words in {
-        date(2026, 7, 21): "周二：第一次自己冲胶卷。",
-        date(2026, 7, 23): "周四：写了一篇角色分析。",
-    }.items():
-        await insert_idempotent(
-            LivingDayPage(
-                lane=replay.lane,
-                persona_id="akao",
-                day=day,
-                text=words,
-                written_at=datetime.combine(
-                    day + timedelta(days=1), time(4), tzinfo=CST
-                ),
-                happenings=1,
-            )
-        )
+    await seeds.bezhai_says(
+        "论坛上有人回你那篇角色分析了", at=_at(23, 22), name="review-trace"
+    )
     replay.model.script("living_persona_review", Reply(text="她这阵子开始自己冲胶卷。"))
     await replay.step(
         "the look-back tick in the window",

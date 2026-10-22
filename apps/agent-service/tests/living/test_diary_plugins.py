@@ -1,10 +1,11 @@
 """day_page 和 persona_review 两个插件：她的日记和她每周的回看，各有一条自己的队列。
 
   * day_page 插件对象（:class:`app.living.day_page.pages.Diary`）：她一轮里"上一次写下的那一天"那一段，
-    和 ``day_pages`` 服务（每周回看读一周的日记经它读）。
-  * persona_review 插件：每周回看读的是 ``day_pages`` 服务交回的那几页。
+    和 ``day_pages`` 服务。
+  * persona_review 插件：每周回看读的是 ``phone`` 服务交回的别人在手机上对她说的，和 ``received`` 服务
+    交回的传到她这里的。
 
-``persona``、``her_records``、``received``、``day_pages`` 服务用替身，库是用例的库。日记怎么判、怎么写在
+``persona``、``her_records``、``received``、``phone`` 服务用替身，库是用例的库。日记怎么判、怎么写在
 ``test_day_page.py``，回看在 ``test_persona_review.py``；这里只验插件这一面。
 """
 from __future__ import annotations
@@ -36,16 +37,34 @@ class _NoReviewYet:
         return False
 
 
-class _PagesOf:
-    """``day_pages`` 服务的替身：交回给定的那几页，问过哪一段记下来。"""
+class _SaidToHerOnPhone:
+    """``phone`` 服务的替身：交回给定的那几条别人对她说的，问过哪一段记下来。"""
 
-    def __init__(self, *pages) -> None:
-        self.pages = list(pages)
+    def __init__(self, *said) -> None:
+        self.said = list(said)
+        self.asked: list[tuple] = []
+
+    async def said_to_her(self, *, persona_id, since, until):
+        self.asked.append((persona_id, since, until))
+        return self.said
+
+    def said_to_her_line(self, said):
+        return f"手机上的一行：{said.body}"
+
+
+class _ReceivedLetters:
+    """``received`` 服务的替身：交回给定的那几条传到她这里的，问过哪一段记下来。"""
+
+    def __init__(self, *letters) -> None:
+        self.letters = list(letters)
         self.asked: list[tuple] = []
 
     async def between(self, *, lane, persona_id, since, until):
         self.asked.append((lane, persona_id, since, until))
-        return self.pages
+        return self.letters
+
+    def line(self, letter):
+        return f"收到的一行：{letter.body}"
 
 
 def _diary():
@@ -116,12 +135,16 @@ async def test_the_last_page_she_wrote_is_the_one_before_today(living_db):
     assert shown == "昨天（07-24）你写下的：\n胶片摊了一茶几。"
 
 
-async def test_the_look_back_reads_last_week_from_the_day_pages_service():
-    """每周回看要回看的那一周的几页，问的是 ``day_pages`` 服务，问的是上一个完整自然周。"""
+async def test_the_look_back_asks_the_phone_and_the_mailbox_for_last_full_week():
+    """每周回看要回看的那一周，别人在手机上对她说的问 ``phone`` 服务，传到她这里的问 ``received`` 服务，
+    问的都是上一个完整自然周（周一零点到下周一零点，CST）；摆给她的行是两个服务各自交回的样子，按时间
+    先后合在一起。"""
     from app.living.persona_review.review import persona_review_due
 
-    page = SimpleNamespace(day=dt.date(2026, 7, 21), text="周二。")
-    day_pages = _PagesOf(page)
+    said = SimpleNamespace(at=_on(21, 9, 12), body="考完试了吗")
+    letter = SimpleNamespace(message_time=_on(20, 19), body="一起吃晚饭吗")
+    phone = _SaidToHerOnPhone(said)
+    received = _ReceivedLetters(letter)
 
     due = await persona_review_due(
         lane=LANE,
@@ -129,8 +152,14 @@ async def test_the_look_back_reads_last_week_from_the_day_pages_service():
         at=_on(27, 6, 30),
         clock=lambda: _on(27, 6, 30),
         persona=_NoReviewYet(),
-        day_pages=day_pages,
+        phone=phone,
+        received=received,
     )
 
-    assert due is not None and due.pages == (page,)
-    assert day_pages.asked == [(LANE, "akao", dt.date(2026, 7, 20), dt.date(2026, 7, 27))]
+    week = (_on(20, 0), _on(27, 0))
+    assert phone.asked == [("akao", *week)]
+    assert received.asked == [(LANE, "akao", *week)]
+    assert due is not None and due.evidence.heard == (
+        (_on(20, 19), "【身边】收到的一行：一起吃晚饭吗"),
+        (_on(21, 9, 12), "【手机】手机上的一行：考完试了吗"),
+    )
