@@ -4241,6 +4241,41 @@ async def test_a_message_taken_back_is_not_part_of_her_week(living_db):
 
 
 @pytest.mark.integration
+async def test_a_reply_to_a_bot_line_nobody_can_attribute_is_not_a_reply_to_her(living_db):
+    """被回的那一行得**确认**是她说的：``role='assistant'``、``bot_name`` 是她名下的 bot。
+
+    ``bot_name`` 为空的 assistant 行（加列之前的存量行）认不出是谁说的。别处把它算成"她说的"，是为了
+    宁可少一条未读、不把她自己的话摆成别人在说（:data:`app.data.queries.messages._SAID_BY_HER`）；
+    拿同一条判据当"这是她的话"的证据就反过来了：这一周有人不点名地回了一句很久以前、不知道是哪个
+    角色说的话，这句回复会以"回了你的话"进她的一周。
+    """
+    await _seed_world()
+    nobodys = await _bot_said(
+        _GROUP,
+        text_body="一句认不出是谁说的旧话",
+        at=_at(9) - dt.timedelta(days=30),
+        bot_name=None,
+        bot_uid=_AYANA_BOT_UID,
+        display_name="某个角色",
+    )
+    await _incoming(
+        _GROUP, text_body="回那句旧话", at=_at(10), sender=_SOMEONE,
+        sender_name="路人", replies_to=nobodys,
+    )
+    hers = await _her_own(_GROUP, text_body="上个月我说的", at=_at(9) - dt.timedelta(days=30))
+    await _incoming(
+        _GROUP, text_body="回她上个月那句", at=_at(10, 5), sender=_SOMEONE,
+        sender_name="路人", replies_to=hers,
+    )
+
+    said = await _said_to_her()
+
+    assert [(s.body, s.replied_to_her) for s in said] == [("回她上个月那句", True)], (
+        f"回一句认不出是谁说的话被算成了回她的话。拿到：{said}"
+    )
+
+
+@pytest.mark.integration
 async def test_who_said_it_comes_from_common_user_not_from_the_name(living_db):
     """主人是 ``common_user.is_owner`` 说了算：昵称跟主人一模一样的陌生人不是主人。"""
     await _seed_world()

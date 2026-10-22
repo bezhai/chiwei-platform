@@ -10,8 +10,8 @@
 （``bot_config`` 里 bot → persona 那条映射）。按 ``role`` 判会同时错两次：别的 bot
 说的话被整段排除，同时又被无条件当成"她自己说的"。
 
-判据只在这个模块里定义一次（:data:`_SAID_BY_HER` / :data:`_STILL_IN_THE_CONVERSATION`
-/ :data:`_STILL_UNREAD`），每个查询拼同一份 —— 各写一遍的话，抄漏一个条件就是
+判据只在这个模块里定义一次（:data:`_SAID_BY_HER` / :data:`_SAID_BY_HER_FOR_SURE` /
+:data:`_STILL_IN_THE_CONVERSATION` / :data:`_STILL_UNREAD`），每个查询拼同一份 —— 各写一遍的话，抄漏一个条件就是
 "信封说三条、翻开却数出两条"，而库里没有任何东西对不上。
 """
 from __future__ import annotations
@@ -58,6 +58,15 @@ _SAID_BY_HER = (
     "(cm.role = 'assistant'"
     " AND (cm.bot_name IS NULL"
     "      OR cm.bot_name = ANY(CAST(:own_bots AS text[]))))"
+)
+
+
+# 「这一行**确认**是她说的」：她名下某个 bot 发的。跟 :data:`_SAID_BY_HER` 只差 ``bot_name`` 为空
+# 的那些历史行：那边为了不把她的话摆成别人在说，把认不出的都算成她的；这里要的是"这是她的话"的
+# 证据，认不出就不算。只有一处用它：别人回的那一行是不是她说的（:data:`_SAID_TO_HER_SQL`）。
+_SAID_BY_HER_FOR_SURE = (
+    "(cm.role = 'assistant'"
+    " AND cm.bot_name = ANY(CAST(:own_bots AS text[])))"
 )
 
 
@@ -370,11 +379,16 @@ async def find_newest_unread_summons(
 # 她的话这件事她回头看时就看不到。并进 _CALLING_HER 改的是另一件事：谁能把她提前叫醒、她点开
 # 会话落在哪一条。
 #
-# 被回的那一行是不是她说的，认的同样是 :data:`_SAID_BY_HER`。为了原样复用这条判据，查询分两步：
-# ``others`` 先取出时间窗里别人说的、还在会话里、可能是在对她说的那些（私聊、点了她名的、回了
-# 某一条的），"点没点她的名"在这一步算成一列；``toward_her`` 的别名是 ``o``，被回那一行的子查询
-# 里就能再叫 ``cm``。先把"回了某一条"收窄进来，是为了不给一周里群里的每一句闲聊都查一次被回的
-# 那一行。
+# **被回的那一行得确认是她说的**（:data:`_SAID_BY_HER_FOR_SURE`），不能拿 :data:`_SAID_BY_HER` 判。
+# 后者把 ``bot_name`` 为空的 assistant 行也算成她的，那是"排除可能是她的话"时宁严勿宽；拿它当
+# "这是她的话"的证据就反过来了：有人这一周不点名地回了一句很久以前、认不出是哪个角色说的话，这句
+# 回复会以"回了你的话"进她的一周。被回的那一行不限在时间窗里：这一周有人回她上个月说的话，也是这一
+# 周有人在接她的话。
+#
+# 查询分两步：``others`` 先取出时间窗里别人说的、还在会话里、可能是在对她说的那些（私聊、点了她名的、
+# 回了某一条的），"点没点她的名"在这一步算成一列；``toward_her`` 的别名是 ``o``，被回那一行的子查询
+# 里就能再叫 ``cm``，判据原样拼进去。先把"回了某一条"收窄进来，是为了不给一周里群里的每一句闲聊都
+# 查一次被回的那一行。
 #
 # 时间窗左闭右开，两头都是常量下界，走得上 ``idx_common_message_conversation_time``（同
 # :data:`_SUMMONS_COUNT_SQL` 那条论证）。``named_her`` 不套 COALESCE：没人算过的那一列是 NULL，
@@ -411,7 +425,7 @@ toward_her AS (
            SELECT 1
              FROM common_message cm
             WHERE cm.common_message_id = o.reply_to
-              AND {_SAID_BY_HER}
+              AND {_SAID_BY_HER_FOR_SURE}
          ) AS replied_to_her
     FROM others o
 )
