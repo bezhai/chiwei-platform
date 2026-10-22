@@ -33,15 +33,17 @@ Each fixture is the text of one Langfuse prompt version, copied byte for byte, r
 langfuse skill (`langfuse_api.py get-prompt '{"name": "<id>", "label": "<label>"}'`); a chat
 prompt keeps the `role` and `content` of each message. The label is the one the `coe-world` lane
 is served (`app.agent.prompts.get_prompt`): the lane's own label where the prompt has one,
-otherwise `production`. The loader reports every fixture as version 1
+otherwise `production`. The exception is `living_persona_review`, copied from the version its
+change is verified with on `coe-review` (the text that goes to `production` with that change), on
+2026-10-22. The loader reports every fixture as version 1
 (`harness/prompts.py::FIXTURE_VERSION`), so the `version` in a baseline is not the Langfuse
-version; this table is. Copied on 2026-10-08.
+version; this table is. Copied on 2026-10-08 unless said otherwise.
 
 | Fixture | Langfuse prompt | Label | Version | Type |
 |---|---|---|---|---|
 | `living_life_moment.txt` | `living_life_moment` | `production` | 8 | text |
 | `living_day_page.txt` | `living_day_page` | `production` | 2 | text |
-| `living_persona_review.txt` | `living_persona_review` | `production` | 2 | text |
+| `living_persona_review.txt` | `living_persona_review` | `coe-review` | 3 | text |
 | `book_reading_impression.txt` | `book_reading_impression` | `production` | 1 | text |
 | `guard_output_safety.json` | `guard_output_safety` | `production` | 5 | chat (system, user) |
 | `world_round.txt` | `world_round` | `coe-world` | 6 | text |
