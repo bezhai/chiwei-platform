@@ -14,7 +14,7 @@ import type { ConsumeMessage } from 'amqplib';
 // 唯一能穿过 TTL/DLX 降级还保持原样的载体（body 里的 lane 是 agent-service 写给
 // 别的用途的字段，判 lane 不看它）。
 //
-// 口径（与 agent-service app/runtime/propagation.py 的 inject/extract 对齐）：
+// 口径（与 agent-service app/infra/propagation.py 的 inject/extract 对齐）：
 //   * header key 是 `lane`；
 //   * 空串 / 非字符串 = 无 lane（等价 prod），因为 Python 侧 inject_context 对
 //     「没有 lane」写的就是空串，两端必须同样归一；

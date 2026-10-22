@@ -10,13 +10,13 @@ from typing import Annotated
 
 from pydantic import model_validator
 
-from app.runtime import Data, Key
+from app.data.schema import Data, Key
 
 
 class PreSafetyRequest(Data):
     """Pre-safety check 请求（chat pipeline 内部触发）。
 
-    pre_request_id 每次 pre-check 独立 uuid4，避免并发 / DLQ replay 时
+    pre_request_id 每次 pre-check 独立 uuid4，避免并发时
     waiter Future 互相覆盖。跟 session_id 完全解耦。
     """
     pre_request_id: Annotated[str, Key]
@@ -44,7 +44,7 @@ class PostSafetyRequest(Data):
     """Post-safety check request keyed by response session_id.
 
     ``channel`` 必填。它一路传给 ``Recall``，最终决定撤回投哪个队列；
-    默认值会让缺 channel 的请求静默变成飞书，而 sink dispatch 的
+    默认值会让缺 channel 的请求静默变成飞书，而出站发布的
     fail-closed 校验在 pydantic 填完默认值之后才跑，拦不住。
     """
     session_id: Annotated[str, Key]
@@ -58,10 +58,10 @@ class PostSafetyRequest(Data):
 
 
 class Recall(Data):
-    """撤回事件，通过 Sink.mq("recall") 出 graph 给拥有该 channel 的渠道服务。
+    """撤回事件，经出站队列 recall 发给拥有该 channel 的渠道服务（:func:`app.infra.outbound.publish`）。
 
-    实际投的是 ``recall_{channel}``（sink dispatch 按 ``channel`` 现算 rk），
-    飞书那条由 lark-service 消费。``lane`` 必须显式带 —— sink dispatch 拿它当
+    实际投的是 ``recall_{channel}``（出站发布按 ``channel`` 现算 rk），
+    飞书那条由 lark-service 消费。``lane`` 必须显式带 —— 出站发布拿它当
     ``outbound_context`` 的 fallback，最终写进 AMQP header，而消费侧只认 header。
 
     ``channel`` 必填：它直接决定 routing key，猜错就把撤回投到别的渠道去了。

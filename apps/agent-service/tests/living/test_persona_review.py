@@ -26,23 +26,27 @@ import datetime as dt
 
 import pytest
 
-import app.data.session as session_mod
-from app.agent.neutral import Message, Role
-from app.living.day_page import LivingDayPage
-from app.living.persona import (
-    PersonaVersion,
-    read_latest_persona_version,
-    write_persona_version,
-)
-from app.living.persona_review import (
+from app.data.persist import insert_idempotent
+from app.data.tx import current_session, tx
+from app.host import Signal
+from app.living.day_page.pages import LivingDayPage
+from app.living.persona.chain import PersonaChain, PersonaVersion
+from app.living.persona_review.review import (
     PERSONA_REVIEW_FROM,
     PERSONA_REVIEW_UNTIL,
     last_full_week,
-    persona_review_tick,
-    review_persona,
     week_material,
 )
-from app.runtime.persist import insert_idempotent, select_all_versions
+from app.living.services import PersonaText
+from tests.data.read_back import all_versions
+from tests.living.conftest import (
+    Calls,
+    clock_at,
+    her_diary,
+    her_queue,
+    her_round_runs,
+    settled,
+)
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -62,6 +66,26 @@ def _at(hour: int, minute: int = 0) -> dt.datetime:
     return dt.datetime(2026, 9, 7, hour, minute, tzinfo=_CST)
 
 
+# persona 服务：这个文件里的回看读写的就是它那条链（:mod:`app.living.persona`）。
+CHAIN = PersonaChain()
+
+
+def _reviews():
+    """每周回看这个唤醒来源，跟 persona_review 插件给她登记的一样（:mod:`app.living.persona_review`）：
+    那一周的几页从 ``day_pages`` 服务（day_page 插件对象）读。"""
+    from app.living.persona_review import persona_review_wake
+
+    return persona_review_wake(LANE, CHAIN, her_diary())
+
+
+async def _tick(at: dt.datetime, persona_id: str = "akao") -> PersonaText | None:
+    """回看的钟在 ``at`` 响的一拍：送到她一条新的回看队列上（一个刚起来的进程），轮到她时钟
+    也停在 ``at``。交回她写下的那一版，这一拍不写就是 ``None``。"""
+    return await her_queue(persona_id, "persona-review", clock=clock_at(at)).take(
+        _reviews(), Signal(at=at)
+    )
+
+
 @pytest.fixture
 async def review_db(living_db):
     """``living_db`` 建齐了 ``LivingDayPage`` / ``PersonaVersion``，再补 ``bot_persona``。
@@ -76,7 +100,8 @@ async def review_db(living_db):
         await conn.run_sync(
             lambda c: Base.metadata.create_all(c, tables=[BotPersona.__table__])
         )
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         for persona_id, name in (
             ("akao", "赤尾"),
             ("ayana", "绫奈"),
@@ -96,37 +121,17 @@ async def review_db(living_db):
     return living_db
 
 
-class FakeReview:
-    """替身：这一轮她写下的那一版是钉死的，只有模型那一步是假的。"""
-
-    def __init__(self, said: str) -> None:
-        self.said = said
-        self.runs: list[tuple[list[Message], dict]] = []
-
-    async def run(self, messages, **kwargs):
-        self.runs.append((messages, kwargs))
-        return Message(role=Role.ASSISTANT, content=self.said)
-
-    @property
-    def material(self) -> str:
-        """最后一轮真的摆到她眼前的那段文字。"""
-        return "\n".join(m.content for m in self.runs[-1][0])
-
-    @property
-    def prompt_vars(self) -> dict[str, str]:
-        """最后一轮真的传进去的那几个 prompt 变量。"""
-        return self.runs[-1][1]["prompt_vars"]
-
-
 @pytest.fixture
-def stub_review(monkeypatch):
-    def install(said: str = "她这周开始每天写一页，好像有点上瘾。") -> FakeReview:
-        runner = FakeReview(said)
-        from app.living import persona_review as review_mod
+def stub_review(monkeypatch, models):
+    """装一个模型替身：这一轮她写下的那一版是钉死的（:class:`tests.living.conftest.Calls`）；
+    ``material`` 是最后一轮真的摆到她眼前的那段文字，``prompt_vars`` 是那一轮 prompt 编译时拿到的
+    变量。"""
 
-        monkeypatch.setattr(
-            review_mod, "build_persona_review_runner", lambda: runner
-        )
+    def install(said: str = "她这周开始每天写一页，好像有点上瘾。") -> Calls:
+        runner = Calls(said=said)
+        from app.living.persona_review import review as review_mod
+
+        models[review_mod.PERSONA_REVIEW_PROMPT_ID] = runner.client
         return runner
 
     return install
@@ -197,7 +202,11 @@ async def test_only_last_weeks_pages_are_material(review_db):
     await _page("akao", dt.date(2026, 9, 7), "本周一那页。")
 
     pages = await week_material(
-        lane=LANE, persona_id="akao", since=_LAST_MONDAY, until=_THIS_MONDAY
+        lane=LANE,
+        persona_id="akao",
+        since=_LAST_MONDAY,
+        until=_THIS_MONDAY,
+        day_pages=her_diary(),
     )
 
     assert [p.day for p in pages] == [
@@ -215,13 +224,13 @@ async def test_she_rewrites_who_she_is_from_last_week(review_db, stub_review):
     await _a_week_of_pages()
     stub_review("她还是那个拍胶片的人，只是这周开始在意起自己写的东西了。")
 
-    got = await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    got = await _tick(_NOW)
 
     assert got is not None, "到点了、上周也有日记，却什么都没写下"
     assert got.source == "review", "来源必须仍然是 review —— prod 那 38 行认的就是它"
     assert got.narrative == "她还是那个拍胶片的人，只是这周开始在意起自己写的东西了。"
 
-    latest = await read_latest_persona_version(lane=LANE, persona_id="akao")
+    latest = await CHAIN.latest(lane=LANE, persona_id="akao")
     assert latest.narrative == got.narrative, "写下的那一版没有成为她读到的自己"
 
 
@@ -231,8 +240,8 @@ async def test_a_week_already_reviewed_is_not_reviewed_again(review_db, stub_rev
     await _a_week_of_pages()
     runner = stub_review()
 
-    first = await review_persona(lane=LANE, persona_id="akao", now=_NOW)
-    again = await review_persona(lane=LANE, persona_id="akao", now=_at(7, 0))
+    first = await _tick(_NOW)
+    again = await _tick(_at(7, 0))
 
     assert first is not None
     assert again is None, "同一周写了第二版"
@@ -251,7 +260,7 @@ async def test_a_missed_monday_is_picked_up_later_in_the_week(review_db, stub_re
     stub_review("周二才补上的这一版。")
 
     tuesday = dt.datetime(2026, 9, 8, 6, 30, tzinfo=_CST)
-    got = await review_persona(lane=LANE, persona_id="akao", now=tuesday)
+    got = await _tick(tuesday)
 
     assert got is not None and got.source == "review"
 
@@ -261,11 +270,11 @@ async def test_once_written_the_rest_of_the_week_does_nothing(review_db, stub_re
     """周一写过之后，这一周剩下每一天的那一拍都不再叫模型。"""
     await _a_week_of_pages()
     runner = stub_review()
-    await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    await _tick(_NOW)
 
     for day in (8, 9, 10, 11, 12, 13):
         at = dt.datetime(2026, 9, day, 6, 30, tzinfo=_CST)
-        assert await review_persona(lane=LANE, persona_id="akao", now=at) is None
+        assert await _tick(at) is None
 
     assert len(runner.runs) == 1, f"这一周叫了 {len(runner.runs)} 次模型"
 
@@ -276,7 +285,7 @@ async def test_an_owner_version_this_week_does_not_block_the_review(
 ):
     """bezhai 本周盖过版不挡自动班 —— 幂等只认 ``source='review'``。"""
     await _a_week_of_pages()
-    await write_persona_version(
+    await CHAIN.write_version(
         lane=LANE,
         persona_id="akao",
         narrative="bezhai 本周手写的一版。",
@@ -285,7 +294,7 @@ async def test_an_owner_version_this_week_does_not_block_the_review(
     )
     stub_review("她自己写的这一版。")
 
-    got = await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    got = await _tick(_NOW)
 
     assert got is not None and got.source == "review"
 
@@ -301,10 +310,10 @@ async def test_outside_the_window_she_does_not_look_back(review_db, stub_review)
     await _a_week_of_pages()
     runner = stub_review()
 
-    assert await review_persona(lane=LANE, persona_id="akao", now=_at(3)) is None
-    assert await review_persona(lane=LANE, persona_id="akao", now=_at(12)) is None
+    assert await _tick(_at(3)) is None
+    assert await _tick(_at(12)) is None
     assert runner.runs == [], "没到点却叫了模型"
-    assert await read_latest_persona_version(lane=LANE, persona_id="akao") is None
+    assert await CHAIN.latest(lane=LANE, persona_id="akao") is None
 
 
 @pytest.mark.integration
@@ -312,9 +321,9 @@ async def test_a_week_with_no_pages_gets_no_version(review_db, stub_review):
     """上一周一页日记都没有：那是服务根本没跑的一周，不该有那一版。"""
     runner = stub_review()
 
-    assert await review_persona(lane=LANE, persona_id="akao", now=_NOW) is None
+    assert await _tick(_NOW) is None
     assert runner.runs == [], "一周一页日记都没有，却还是叫了模型"
-    assert await read_latest_persona_version(lane=LANE, persona_id="akao") is None, (
+    assert await CHAIN.latest(lane=LANE, persona_id="akao") is None, (
         "没材料的一周连 seed 都不该留下 —— 那一版记的是没人读过的东西"
     )
 
@@ -325,9 +334,9 @@ async def test_a_round_that_writes_nothing_leaves_no_version(review_db, stub_rev
     await _a_week_of_pages()
     stub_review("   ")
 
-    assert await review_persona(lane=LANE, persona_id="akao", now=_NOW) is None
+    assert await _tick(_NOW) is None
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         PersonaVersion, {"lane": LANE, "persona_id": "akao"}
     )
     assert [v.source for v in versions] == ["seed"], (
@@ -335,7 +344,7 @@ async def test_a_round_that_writes_nothing_leaves_no_version(review_db, stub_rev
     )
 
     stub_review("补上了：她这周开始每天写一页。")
-    later = await review_persona(lane=LANE, persona_id="akao", now=_at(7, 0))
+    later = await _tick(_at(7, 0))
     assert later is not None, "上一拍空了就再也不写了 —— 这一周她永远丢了"
     assert later.narrative == "补上了：她这周开始每天写一页。"
 
@@ -351,9 +360,9 @@ async def test_an_empty_chain_gets_her_starting_point_first(review_db, stub_revi
     await _a_week_of_pages()
     stub_review("她这周开始每天写一页。")
 
-    await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    await _tick(_NOW)
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         PersonaVersion, {"lane": LANE, "persona_id": "akao"}
     )
     assert [v.source for v in versions] == ["seed", "review"]
@@ -366,7 +375,7 @@ async def test_an_empty_chain_gets_her_starting_point_first(review_db, stub_revi
 async def test_a_chain_that_already_has_versions_is_not_seeded(review_db, stub_review):
     """链非空（prod 就是这样）→ 不补 seed，直接在上一版基础上改。"""
     await _a_week_of_pages()
-    await write_persona_version(
+    await CHAIN.write_version(
         lane=LANE,
         persona_id="akao",
         narrative="上一版：她在准备去日本读书。",
@@ -375,9 +384,9 @@ async def test_a_chain_that_already_has_versions_is_not_seeded(review_db, stub_r
     )
     stub_review("这一版：她把语言学校的事定下来了。")
 
-    await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    await _tick(_NOW)
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         PersonaVersion, {"lane": LANE, "persona_id": "akao"}
     )
     assert [v.source for v in versions] == ["review", "review"]
@@ -395,7 +404,7 @@ async def test_last_weeks_pages_reach_her_verbatim(review_db, stub_review):
     await _page("akao", dt.date(2026, 9, 6), "周日：去了趟唱片店，买了张旧碟。")
     runner = stub_review()
 
-    await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    await _tick(_NOW)
 
     assert "把胶片摊了一茶几" in runner.material
     assert "买了张旧碟" in runner.material
@@ -405,7 +414,7 @@ async def test_last_weeks_pages_reach_her_verbatim(review_db, stub_review):
 async def test_her_current_version_is_the_draft_she_rewrites(review_db, stub_review):
     """她当前那一版是底稿。不给的话她是凭空写一份，不是"改"。"""
     await _a_week_of_pages()
-    await write_persona_version(
+    await CHAIN.write_version(
         lane=LANE,
         persona_id="akao",
         narrative="当前这一版：她在准备去日本读书。",
@@ -414,7 +423,7 @@ async def test_her_current_version_is_the_draft_she_rewrites(review_db, stub_rev
     )
     runner = stub_review()
 
-    await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    await _tick(_NOW)
 
     assert "当前这一版：她在准备去日本读书。" in runner.material, (
         f"要被重写的底稿不在材料里：{runner.material}"
@@ -430,7 +439,7 @@ async def test_the_anchor_is_the_flat_column_not_the_chain(review_db, stub_revie
     装的是链上最新一版）—— 两者同名不同值是刻意的，这条断言就是那道门。
     """
     await _a_week_of_pages()
-    await write_persona_version(
+    await CHAIN.write_version(
         lane=LANE,
         persona_id="akao",
         narrative="链上最新那一版：她今年不拍胶片了。",
@@ -439,7 +448,7 @@ async def test_the_anchor_is_the_flat_column_not_the_chain(review_db, stub_revie
     )
     runner = stub_review()
 
-    await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    await _tick(_NOW)
 
     assert runner.prompt_vars["persona_core"] == _CORE, (
         "锚被换成了链上最新版 —— 自我回流没有外部参照，她会一路漂走"
@@ -459,7 +468,7 @@ async def test_the_variables_are_exactly_the_two_the_prompt_names(
     await _a_week_of_pages()
     runner = stub_review()
 
-    await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    await _tick(_NOW)
 
     assert set(runner.prompt_vars) == {"persona_name", "persona_core"}
 
@@ -475,9 +484,9 @@ async def test_another_lanes_pages_are_not_her_week(review_db, stub_review):
     await _a_week_of_pages("akao", lane="prod")
     runner = stub_review()
 
-    assert await review_persona(lane=LANE, persona_id="akao", now=_NOW) is None
+    assert await _tick(_NOW) is None
     assert runner.runs == [], "读到了别的泳道的日记"
-    assert await read_latest_persona_version(lane="prod", persona_id="akao") is None
+    assert await CHAIN.latest(lane="prod", persona_id="akao") is None
 
 
 @pytest.mark.integration
@@ -485,9 +494,9 @@ async def test_the_new_version_lands_only_on_this_lane(review_db, stub_review):
     await _a_week_of_pages()
     stub_review("coe 里改出来的一版。")
 
-    await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    await _tick(_NOW)
 
-    assert await read_latest_persona_version(lane="prod", persona_id="akao") is None, (
+    assert await CHAIN.latest(lane="prod", persona_id="akao") is None, (
         "coe 里跑实验改出来的人设当场生效在 prod 的她身上了"
     )
 
@@ -497,112 +506,186 @@ async def test_sisters_do_not_share_a_week(review_db, stub_review):
     await _a_week_of_pages("akao")
     stub_review("赤尾这一版。")
 
-    await review_persona(lane=LANE, persona_id="akao", now=_NOW)
+    await _tick(_NOW)
 
-    assert await read_latest_persona_version(lane=LANE, persona_id="ayana") is None
+    assert await CHAIN.latest(lane=LANE, persona_id="ayana") is None
 
 
 # --------------------------------------------------------------------------
-# 七 · 接进那条钟
+# 七 · 她的回看队列和那条钟
 # --------------------------------------------------------------------------
+
+
+async def test_each_sister_has_a_review_queue_the_clock_signals_every_five_minutes(app_host):
+    """persona_review 插件给三姐妹每人登记一条回看队列（占用上限 900 秒），回看的钟每 5 分钟给它发一个信号；
+    每个信号都排队（``QUEUE_EACH``）。它和她的轮次、她的日记都不在一条队列上。忘了登记的症状是
+    静默的：模块写好了、测试全绿，而线上一版都不会有。"""
+    from app.host import Coalesce
+    from app.living.persona_review.review import write_due_review
+    from tests.living.conftest import her_residents
+
+    host = await app_host("agent-service")
+    queues = {r.name: r.detail["turns"] for r in host.registered() if r.kind == "turns"}
+    wakes = [
+        r
+        for r in host.registered()
+        if r.kind == "wake" and r.detail["source"].name == "persona-review"
+    ]
+
+    assert sorted(
+        (w.plugin, w.detail["turns"].participant, w.detail["turns"].line, w.detail["every"])
+        for w in wakes
+    ) == sorted(
+        ("persona_review", p, "persona-review", dt.timedelta(minutes=5)) for p in her_residents()
+    )
+    for w in wakes:
+        assert w.detail["turns"] is queues[f"{w.detail['turns'].participant}/persona-review"]
+        assert w.detail["turns"].hold_limit == dt.timedelta(seconds=900)
+        assert w.detail["source"].coalesce is Coalesce.QUEUE_EACH
+        assert w.detail["source"].run.func is write_due_review
+        assert isinstance(w.detail["source"].run.keywords["persona"], PersonaChain)
 
 
 @pytest.mark.integration
-async def test_the_tick_reviews_each_of_them(review_db, stub_review, monkeypatch):
-    """忘了挂钟的症状是静默的：模块写好了、测试全绿，而线上一版都不会有。"""
-    from app.living import persona_review as review_mod
+async def test_one_tick_reviews_each_of_them(review_db, stub_review, app_host, monkeypatch):
+    """钟的一拍同时送到三个人的回看队列上（宿主的钟就是这样发的），三个人各回看各的那一周。"""
+    import asyncio
 
     for who in ("akao", "ayana", "chinagi"):
         await _a_week_of_pages(who)
     stub_review("这一周。")
+    monkeypatch.setenv("LANE", LANE)
+    monkeypatch.setattr("app.host.host.now_cst", lambda: _NOW)
 
-    monkeypatch.setattr(review_mod, "living_lane", lambda: LANE)
-    monkeypatch.setattr(review_mod, "now_cst", lambda: _NOW)
-
-    await persona_review_tick.__wrapped__(
-        review_mod.PersonaReviewTick(ts=_NOW.isoformat())
+    host = await app_host("agent-service")
+    await asyncio.gather(
+        *(
+            r.detail["turns"].take(r.detail["source"], Signal(at=_NOW))
+            for r in host.registered()
+            if r.kind == "wake" and r.detail["source"].name == "persona-review"
+        )
     )
 
     for who in ("akao", "ayana", "chinagi"):
-        latest = await read_latest_persona_version(lane=LANE, persona_id=who)
+        latest = await CHAIN.latest(lane=LANE, persona_id=who)
         assert latest is not None and latest.source == "review", (
             f"{who} 没有这一周的版本 —— 那条钟没把三个人都推到"
         )
 
 
 @pytest.mark.integration
-async def test_one_sister_blowing_up_does_not_take_the_others_down(
-    review_db, stub_review, monkeypatch
+async def test_a_review_that_waited_behind_a_stuck_one_is_written_when_it_gets_her(
+    review_db, stub_review
 ):
-    """一个人炸不拖累另两个，异常也不往上抛（往上抛就是整拍失败）。"""
-    from app.living import persona_review as review_mod
+    """前一次回看挂住了（模型调用卡住，最长占着 15 分钟），06:30 那一拍排在后面，06:46 才轮到。
+    这一版是 06:46 写下的，记的就是这一刻，不是那一拍敲响的 06:30。"""
+    import asyncio
 
-    for who in ("akao", "ayana", "chinagi"):
-        await _a_week_of_pages(who)
+    await _a_week_of_pages("akao")
     stub_review("这一周。")
+    clock = [_at(6, 30)]
+    reviews = her_queue("akao", "persona-review", clock=lambda: clock[0])
 
-    real = review_mod.review_persona
+    async with her_round_runs(reviews):  # 挂住的那一次
+        tick = asyncio.create_task(reviews.take(_reviews(), Signal(at=_at(6, 30))))
+        await settled()
+        clock[0] = _at(6, 46)
+    await tick
 
-    async def blow_up_on_ayana(*, lane, persona_id, now):
-        if persona_id == "ayana":
-            raise RuntimeError("模型这一轮炸了")
-        return await real(lane=lane, persona_id=persona_id, now=now)
-
-    monkeypatch.setattr(review_mod, "review_persona", blow_up_on_ayana)
-    monkeypatch.setattr(review_mod, "living_lane", lambda: LANE)
-    monkeypatch.setattr(review_mod, "now_cst", lambda: _NOW)
-
-    await persona_review_tick.__wrapped__(
-        review_mod.PersonaReviewTick(ts=_NOW.isoformat())
-    )
-
-    for who in ("akao", "chinagi"):
-        assert await read_latest_persona_version(lane=LANE, persona_id=who) is not None
-    assert await read_latest_persona_version(lane=LANE, persona_id="ayana") is None
+    latest = await CHAIN.latest(lane=LANE, persona_id="akao")
+    assert latest is not None and latest.source == "review"
+    assert dt.datetime.fromisoformat(latest.written_at) == _at(6, 46)
 
 
 @pytest.mark.integration
-async def test_the_tick_payload_is_a_single_ts_field():
-    """挂时间源的 Data 多一个必填字段 = 每一拍 ValidationError 直接杀 Pod。"""
-    from app.living.persona_review import PersonaReviewTick
-    from app.runtime.data import key_fields
+async def test_a_review_whose_tick_was_in_the_window_runs_even_if_it_gets_her_after(
+    review_db, stub_review
+):
+    """窗口是 [06:00, 08:00)。07:59 那一拍还在窗口里，排在挂住的那一次后面，08:10 才轮到：
+    已经过了窗口，这一版照样写，记的是轮到时的 08:10。窗口按那一拍响的时刻判，只管这一拍要不要
+    去试；按轮到时的钟判的话，这一拍就不写了。"""
+    import asyncio
 
-    assert set(PersonaReviewTick.model_fields) == {"ts"}
-    assert set(key_fields(PersonaReviewTick)) == {"ts"}
+    assert (PERSONA_REVIEW_FROM, PERSONA_REVIEW_UNTIL) == (dt.time(6, 0), dt.time(8, 0))
+    await _a_week_of_pages("akao")
+    stub_review("这一周。")
+    clock = [_at(7, 59)]
+    reviews = her_queue("akao", "persona-review", clock=lambda: clock[0])
 
+    async with her_round_runs(reviews):  # 挂住的那一次
+        tick = asyncio.create_task(reviews.take(_reviews(), Signal(at=_at(7, 59))))
+        await settled()
+        clock[0] = _at(8, 10)
+    await tick
 
-def test_the_clock_is_declared_in_the_living_wiring():
-    """挂没挂上按生产 wiring 的注册表核对，不是"我记得挂了"。
-
-    reload 手法同 ``tests/wiring/test_outbound_wiring.py``：根 conftest 的 autouse
-    fixture 每个用例前后都清 ``WIRING_REGISTRY``，所以这里重跑一次模块体，看
-    ``wire(...)`` 到底注册出了什么。
-    """
-    import importlib
-
-    from app.living.persona_review import (
-        PERSONA_REVIEW_TICK_SECONDS,
-        PersonaReviewTick,
-        persona_review_tick,
+    latest = await CHAIN.latest(lane=LANE, persona_id="akao")
+    assert latest is not None and latest.source == "review", (
+        "排在窗口末尾的那一拍轮到时过了窗口，这一周的回看没写"
     )
-    from app.runtime.placement import clear_bindings
-    from app.runtime.wire import WIRING_REGISTRY, clear_wiring
+    assert dt.datetime.fromisoformat(latest.written_at) == _at(8, 10)
 
-    # 先 import 再清再 reload —— 顺序同 ``tests/wiring/test_outbound_wiring.py``。
-    # 反过来的话，这个进程里还没 import 过 ``app.wiring.living`` 时 import 本身会跑
-    # 一遍模块体、reload 再跑一遍，注册表里就是两条同样的边。
-    module = importlib.import_module("app.wiring.living")
-    clear_wiring()
-    clear_bindings()
-    importlib.reload(module)
 
-    wires = [w for w in WIRING_REGISTRY if w.data_type is PersonaReviewTick]
-    assert len(wires) == 1, (
-        "app.wiring.living 里没有 PersonaReviewTick 那条钟 —— 模块写好了、"
-        "测试全绿，而线上一版都不会有"
-    )
-    (wire,) = wires
-    assert [(s.kind, s.params) for s in wire.sources] == [
-        ("interval", {"seconds": float(PERSONA_REVIEW_TICK_SECONDS)})
-    ]
-    assert wire.consumers == [persona_review_tick]
+@pytest.mark.integration
+async def test_a_tick_before_the_window_does_not_review_even_if_it_gets_her_inside(
+    review_db, stub_review
+):
+    """反过来也按那一拍响的时刻判：05:55 那一拍不在窗口里，排在挂住的那一次后面、06:01 才轮到，
+    也不写。"""
+    import asyncio
+
+    await _a_week_of_pages("akao")
+    runner = stub_review("这一周。")
+    clock = [_at(5, 55)]
+    reviews = her_queue("akao", "persona-review", clock=lambda: clock[0])
+
+    async with her_round_runs(reviews):  # 挂住的那一次
+        tick = asyncio.create_task(reviews.take(_reviews(), Signal(at=_at(5, 55))))
+        await settled()
+        clock[0] = _at(6, 1)
+
+    assert await tick is None
+    assert runner.runs == [], "窗口之前响的那一拍叫了模型"
+    assert await CHAIN.latest(lane=LANE, persona_id="akao") is None
+
+
+@pytest.mark.integration
+async def test_every_tick_waits_its_turn_behind_a_stuck_review(review_db, stub_review):
+    """每一拍都排队：两拍都排在挂住的那一次后面，各自轮到时再判本周写过没有。第一拍写下这一版，
+    第二拍看见本周已经写了。"""
+    import asyncio
+
+    await _a_week_of_pages("akao")
+    runner = stub_review("这一周。")
+    reviews = her_queue("akao", "persona-review", clock=clock_at(_at(6, 40)))
+
+    async with her_round_runs(reviews):  # 挂住的那一次
+        ticks = [
+            asyncio.create_task(reviews.take(_reviews(), Signal(at=_at(6, m))))
+            for m in (30, 35)
+        ]
+        await settled()
+        assert [t.done() for t in ticks] == [False, False], "有一拍没排上就被打发走了"
+
+    first, second = await asyncio.gather(*ticks)
+    assert first is not None and first.source == "review"
+    assert second is None
+    assert len(runner.runs) == 1
+
+
+@pytest.mark.integration
+async def test_a_week_not_reviewed_by_sunday_is_given_up(review_db, stub_review):
+    """这一周的回看一直没写成（整周的窗口都没跑上）：过了周日这一周就放弃。下周一回看的是刚过去
+    的那一周，不回头补更早的那一周。"""
+    await _a_week_of_pages("akao")  # 08-31 ～ 09-06，本该在 09-07 那一周里回看
+    next_week = dt.date(2026, 9, 7)
+    for i in range(7):
+        day = next_week + dt.timedelta(days=i)
+        await _page("akao", day, f"{day.strftime('%m-%d')} 那页：下一周的事。")
+    runner = stub_review("下一周的这一版。")
+
+    got = await _tick(dt.datetime(2026, 9, 14, 6, 30, tzinfo=_CST))
+
+    assert got is not None and got.source == "review"
+    assert "下一周的事" in runner.material
+    assert "这天：拍了几张" not in runner.material, "过了周日还在回看那一周"
+    assert len(runner.runs) == 1

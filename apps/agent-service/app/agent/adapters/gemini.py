@@ -3,10 +3,10 @@
 Symmetric to the OpenAI adapter (T2) but for Gemini's *native* wire, served by
 the ``google-genai`` SDK (``google.genai.Client``). It keeps Gemini's two
 native edges the OpenAI-compat gateway would blur: **multimodal** image parts
-and **thinking** (the model's exposed thoughts). The three ``ModelClient``
+and **thinking** (the model's exposed thoughts). The two ``ModelClient``
 methods map onto one generate-content shape each: ``complete``
-(``generate_content``), ``stream`` (``generate_content_stream``), ``structured``
-(``response_mime_type=application/json`` + ``response_schema`` → dict).
+(``generate_content``), ``structured`` (``response_mime_type=application/json``
++ ``response_schema`` → dict).
 
 neutral ↔ wire translation decisions
 ------------------------------------
@@ -34,9 +34,8 @@ part (see ``_tool_result_to_content``).
 ``thinking_config.include_thoughts=True``. Inbound, the whole model turn is
 taken down as a *sequence* (``Message.turn_parts``): thoughts, spoken text and
 function calls in the order they came back, each keeping the opaque
-``thought_signature`` that rode on it. A thought stays out of visible content
-(it surfaces as ``StreamChunk.reasoning`` while streaming), but it is NOT
-dropped: the next request resends the sequence verbatim
+``thought_signature`` that rode on it. A thought stays out of visible content,
+but it is NOT dropped: the next request resends the sequence verbatim
 (``_model_turn_parts``), because Google requires a stateless caller to return
 every thought block unaltered — the signatures are what the model continues its
 reasoning from.
@@ -48,13 +47,11 @@ we synthesise a stable one and remember name↔id so the following
 ``function_response`` can name its call). ``automatic_function_calling.disable``
 is set: the SDK must NOT execute tools — the Agent layer owns the ReAct loop.
 
-**finish_reason.** Gemini ``FinishReason`` → neutral: ``SAFETY`` / ``RECITATION``
-→ ``content_filter``, ``MAX_TOKENS`` → ``length``, ``STOP`` → ``stop``; function
-calls are surfaced as ``tool_call`` chunks, not via finish_reason.
-
 **Retry off** (``HttpRetryOptions(attempts=1)``): retry is the Agent layer's
-sole responsibility (spec). **Proxy**: ``use_proxy`` providers route the genai
-http client through ``settings.forward_proxy_url`` (sync + async client args).
+sole responsibility (spec). **Deadline**: the SDK sends requests with no timeout
+at all, so every wait on it runs under ``answer_deadline`` (``app.agent.client``).
+**Proxy**: ``use_proxy`` providers route the genai http client through
+``settings.forward_proxy_url`` (sync + async client args).
 **Trace**: every call wraps a ``generation_span`` (always — see
 ``app.agent.trace``).
 """
@@ -66,19 +63,17 @@ import json
 import logging
 import mimetypes
 import uuid
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 from google import genai
 from google.genai import types
 
-from app.agent.client import ModelClient, register_adapter
+from app.agent.client import ModelClient, answer_deadline, register_adapter
 from app.agent.neutral import (
     ContentBlock,
     Message,
     Role,
-    StreamChunk,
     ToolCall,
     ToolDef,
     TurnPart,
@@ -88,20 +83,6 @@ from app.agent.trace import generation_span
 from app.infra.config import settings
 
 logger = logging.getLogger(__name__)
-
-
-# Gemini FinishReason → neutral StreamChunk.finish_reason. Unmapped reasons
-# (LANGUAGE / OTHER / BLOCKLIST / ...) fall through to "stop": the turn ended,
-# the loop should not treat them as a filter/length signal.
-_FINISH_REASON_MAP: dict[str, str] = {
-    "STOP": "stop",
-    "MAX_TOKENS": "length",
-    "SAFETY": "content_filter",
-    "RECITATION": "content_filter",
-    "PROHIBITED_CONTENT": "content_filter",
-    "SPII": "content_filter",
-    "IMAGE_SAFETY": "content_filter",
-}
 
 
 # What a picture that can't be retrieved reads as on the wire. Same wording as
@@ -128,26 +109,6 @@ class GeminiAdapter(ModelClient):
         self._model = model_name
         http_options = self._build_http_options(base_url, use_proxy, api_version)
         self._client = genai.Client(api_key=api_key, http_options=http_options)
-
-    # ------------------------------------------------------------------
-    # native web search capability
-    # ------------------------------------------------------------------
-
-    @property
-    def supports_native_web_search(self) -> bool:
-        """Only Gemini 3 can co-host native google search with custom tools.
-
-        Gemini 2.5's native grounding and custom function declarations can't
-        live in the same request, and main chat always carries custom tools, so
-        2.5 (and non-Gemini) report ``False``. The model name is normalised
-        (drop a ``models/`` prefix, lower-case) before the ``gemini-3`` check;
-        anything unrecognised stays ``False`` (fail-closed — better to fall back
-        to ``search_web`` than send a request the provider would reject).
-        """
-        name = self._model.strip().lower()
-        if name.startswith("models/"):
-            name = name[len("models/") :]
-        return name.startswith("gemini-3")
 
     # ------------------------------------------------------------------
     # construction helpers
@@ -178,7 +139,7 @@ class GeminiAdapter(ModelClient):
         return types.HttpOptions(**opts)
 
     # ------------------------------------------------------------------
-    # ModelClient: complete (non-streaming)
+    # ModelClient: complete
     # ------------------------------------------------------------------
 
     async def complete(
@@ -189,12 +150,10 @@ class GeminiAdapter(ModelClient):
         **kwargs: Any,
     ) -> Message:
         kwargs.pop("session_id", None)  # prompt-cache control param; not a Gemini arg
-        native_search = kwargs.pop("native_web_search", False)
         contents, system_instruction = await self._to_wire_contents(messages)
         config = self._build_config(
             system_instruction=system_instruction,
             tools=tools,
-            native_web_search=native_search,
             **kwargs,
         )
 
@@ -204,81 +163,16 @@ class GeminiAdapter(ModelClient):
             input=_contents_for_trace(contents),
             model_parameters=_model_parameters(kwargs),
         ) as span:
-            response = await self._client.aio.models.generate_content(
-                model=self._model, contents=contents, config=config
-            )
+            async with answer_deadline(self._model):
+                response = await self._client.aio.models.generate_content(
+                    model=self._model, contents=contents, config=config
+                )
             message = _response_to_message(response)
             span.update(
                 output=message.to_dict(),
                 usage_details=_usage_details(response),
             )
         return message
-
-    # ------------------------------------------------------------------
-    # ModelClient: stream
-    # ------------------------------------------------------------------
-
-    async def stream(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolDef] | None = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[StreamChunk]:
-        kwargs.pop("session_id", None)  # prompt-cache control param; not a Gemini arg
-        native_search = kwargs.pop("native_web_search", False)
-        contents, system_instruction = await self._to_wire_contents(messages)
-        config = self._build_config(
-            system_instruction=system_instruction,
-            tools=tools,
-            native_web_search=native_search,
-            **kwargs,
-        )
-
-        with generation_span(
-            name=self._model,
-            model=self._model,
-            input=_contents_for_trace(contents),
-            model_parameters=_model_parameters(kwargs),
-        ) as span:
-            text_parts: list[str] = []
-            tool_calls: list[ToolCall] = []
-            usage: dict[str, int] | None = None
-
-            try:
-                stream = await self._client.aio.models.generate_content_stream(
-                    model=self._model, contents=contents, config=config
-                )
-                async for chunk in stream:
-                    # Gemini reports cumulative usage_metadata per chunk; keep
-                    # the latest one that said anything so the final tally lands
-                    # on the span (token accounting must match the non-streaming
-                    # complete() path). A chunk whose usage object reported no
-                    # field at all is skipped rather than allowed to overwrite a
-                    # real tally with nothing.
-                    chunk_usage = _usage_details(chunk)
-                    if chunk_usage:
-                        usage = chunk_usage
-                    for out in _chunk_to_neutral(chunk):
-                        if out.text:
-                            text_parts.append(out.text)
-                        if out.tool_call is not None:
-                            tool_calls.append(out.tool_call)
-                        yield out
-            finally:
-                # However this stream ends — drained, raising, or abandoned by a
-                # consumer that stops pulling (render_chat_turn does exactly that
-                # on a content_filter chunk) — the tokens already reported are
-                # what the call cost. Recording only after a clean drain loses
-                # the whole call: no tokens, and no "the provider reported
-                # nothing" either.
-                span.update(
-                    output={
-                        "text": "".join(text_parts),
-                        "tool_calls": [tc.to_dict() for tc in tool_calls],
-                    },
-                    usage_details=usage,
-                )
 
     # ------------------------------------------------------------------
     # ModelClient: structured
@@ -307,9 +201,10 @@ class GeminiAdapter(ModelClient):
             input=_contents_for_trace(contents),
             model_parameters=_model_parameters(kwargs),
         ) as span:
-            response = await self._client.aio.models.generate_content(
-                model=self._model, contents=contents, config=config
-            )
+            async with answer_deadline(self._model):
+                response = await self._client.aio.models.generate_content(
+                    model=self._model, contents=contents, config=config
+                )
             text = _join_text(response) or "{}"
             data = json.loads(text)
             span.update(output=data, usage_details=_usage_details(response))
@@ -324,7 +219,6 @@ class GeminiAdapter(ModelClient):
         *,
         system_instruction: str | None,
         tools: list[ToolDef] | None,
-        native_web_search: bool = False,
         response_mime_type: str | None = None,
         response_schema: dict[str, Any] | None = None,
         **kwargs: Any,
@@ -339,28 +233,12 @@ class GeminiAdapter(ModelClient):
         }
         if system_instruction is not None:
             cfg["system_instruction"] = system_instruction
-        # Custom function tools and Gemini's native google search co-exist as two
-        # separate Tool entries (Gemini 3 supports both in one request). Only the
-        # runtime turns native_web_search on, and only for main chat on Gemini 3.
-        tool_list: list[types.Tool] = []
         if tools:
-            tool_list.append(
+            cfg["tools"] = [
                 types.Tool(
                     function_declarations=[_tool_to_declaration(t) for t in tools]
                 )
-            )
-        if native_web_search:
-            tool_list.append(types.Tool(google_search=types.GoogleSearch()))
-            # Gemini 3 rejects a built-in tool (google search) combined with
-            # function declarations unless server-side tool invocations are
-            # explicitly enabled, 400-ing otherwise ("Please enable
-            # tool_config.include_server_side_tool_invocations ..."). Set it only
-            # on the native-search path so every other request is unchanged.
-            cfg["tool_config"] = types.ToolConfig(
-                include_server_side_tool_invocations=True
-            )
-        if tool_list:
-            cfg["tools"] = tool_list
+            ]
         if response_mime_type is not None:
             cfg["response_mime_type"] = response_mime_type
         if response_schema is not None:
@@ -674,7 +552,7 @@ def _tool_to_declaration(tool: ToolDef) -> types.FunctionDeclaration:
 
 
 def _response_to_message(response: Any) -> Message:
-    """A non-streaming Gemini response → neutral assistant Message.
+    """A Gemini response → neutral assistant Message.
 
     The response parts are taken down **as a sequence**: thoughts, spoken text
     and function calls keep the order and the boundaries they arrived in, and
@@ -708,59 +586,6 @@ def _response_to_message(response: Any) -> Message:
     return Message.from_model_turn(parts, tool_calls)
 
 
-def _chunk_to_neutral(chunk: Any) -> list[StreamChunk]:
-    """One streaming Gemini chunk → a list of neutral StreamChunks.
-
-    Each chunk carries the signature of the part it came from, so the ReAct
-    loop can rebuild the streamed turn with its signatures intact.
-
-    The part boundaries inside one wire chunk are known *here* and nowhere
-    above: this loop is walking the provider's parts, while the loop rebuilding
-    the turn only ever sees a flat run of chunks. So every part after the first
-    one this chunk emits is marked ``starts_part`` — two parts that arrived in
-    one chunk stay two parts, whatever their signatures look like. The first one
-    is left unmarked: it may be the continuation of a part the previous chunk
-    opened, and that is the one boundary this layer genuinely cannot see.
-    """
-    out: list[StreamChunk] = []
-    emitted = 0
-    for part in _candidate_parts(chunk):
-        fc = getattr(part, "function_call", None)
-        if fc is not None:
-            out.append(
-                StreamChunk(
-                    tool_call=_function_call_to_neutral(fc, _part_signature(part)),
-                    starts_part=emitted > 0,
-                )
-            )
-            emitted += 1
-            continue
-        text = getattr(part, "text", None)
-        signature = _part_signature(part)
-        if not text and signature is None:
-            continue
-        if getattr(part, "thought", False):
-            out.append(
-                StreamChunk(
-                    reasoning=text or "",
-                    signature=signature,
-                    starts_part=emitted > 0,
-                )
-            )
-        else:
-            out.append(
-                StreamChunk(
-                    text=text or "", signature=signature, starts_part=emitted > 0
-                )
-            )
-        emitted += 1
-
-    finish = _finish_reason(chunk)
-    if finish is not None:
-        out.append(StreamChunk(finish_reason=finish))
-    return out
-
-
 def _candidate_parts(response: Any) -> list[Any]:
     candidates = getattr(response, "candidates", None) or []
     if not candidates:
@@ -791,18 +616,6 @@ def _function_call_to_neutral(fc: Any, signature: bytes | None = None) -> ToolCa
 def _part_signature(part: Any) -> bytes | None:
     """The opaque ``thought_signature`` Gemini attaches to a functionCall part."""
     return getattr(part, "thought_signature", None)
-
-
-def _finish_reason(response: Any) -> str | None:
-    candidates = getattr(response, "candidates", None) or []
-    if not candidates:
-        return None
-    raw = getattr(candidates[0], "finish_reason", None)
-    if raw is None:
-        return None
-    # FinishReason may arrive as an enum (has .name) or a plain string.
-    key = getattr(raw, "name", None) or str(raw)
-    return _FINISH_REASON_MAP.get(key, "stop")
 
 
 def _join_text(response: Any) -> str:

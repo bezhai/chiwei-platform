@@ -29,8 +29,8 @@ import pytest
 
 from app.agent.tools import search as search_mod
 from app.capabilities.web_search import SearchHit
-from app.living import web as web_mod
-from app.living.web import (
+from app.living.web import online as web_mod
+from app.living.web.online import (
     BROWSE_COUNT,
     SEARCH_COUNT,
     WEB_TOOLS,
@@ -454,11 +454,11 @@ async def test_neither_hand_works_outside_one_of_her_moments(wire_web):
 def test_neither_hand_ever_asks_her_how_long_something_takes():
     """真人对「多久」没有内感受。问她要一个时长就是把生活切成日程表。
 
-    ``tests/living/test_moment.py`` 对 ``MOMENT_TOOLS`` 有同一条；这两只手自己也守
+    ``tests/living/test_moment.py`` 对她一轮的整份工具（``resident`` 的 tools）有同一条；这两只手自己也守
     一遍，改坏了在本文件就该红。
     """
     banned = ("minute", "duration", "how_long", "seconds", "until", "hour")
-    for t in WEB_TOOLS:
+    for t in [s.tool for s in WEB_TOOLS]:
         for pname in t.definition.parameters.get("properties", {}):
             assert not any(b in pname.lower() for b in banned), (
                 f"{t.name} 的参数 {pname} 在问她一个时长 —— 她换的是一件事"
@@ -472,18 +472,18 @@ def test_neither_hand_can_be_mistaken_for_looking_at_her_phone():
     口语上也叫「刷手机」，两者一旦在她眼里糊成一件，她想看谁发来的消息时会去刷网页，
     或者反过来。名字里不带 phone，说明书里各自指回对方。
     """
-    names = {t.name for t in WEB_TOOLS}
+    names = {s.tool.name for s in WEB_TOOLS}
 
     assert all("phone" not in n for n in names), f"名字会跟看手机撞上：{names}"
-    for t in WEB_TOOLS:
+    for t in [s.tool for s in WEB_TOOLS]:
         assert "look_at_phone" in t.definition.description, (
             f"{t.name} 的说明书里没把「手机上谁给你发了什么」指回 look_at_phone"
         )
 
 
 def test_both_hands_are_handed_over_as_one_set():
-    """两只手一起交出去 —— 汇进 ``MOMENT_TOOLS`` 的是这一份，不是散着的两个。"""
-    assert WEB_TOOLS == [search_online, browse_online]
+    """两只手一起交出去 —— 登记进她的一轮的是这一份，不是散着的两个。"""
+    assert [s.tool for s in WEB_TOOLS] == [search_online, browse_online]
 
 
 def test_nothing_she_looks_up_survives_past_this_moment():
@@ -493,7 +493,7 @@ def test_nothing_she_looks_up_survives_past_this_moment():
     回事。这里长出一张表就意味着有个东西替她把「看过的东西」留了下来，而留什么该由
     她自己记（``keep_in_mind``）。
     """
-    from app.runtime.data import Data
+    from app.data.schema import Data
 
     tables = [
         name
@@ -503,14 +503,33 @@ def test_nothing_she_looks_up_survives_past_this_moment():
     assert tables == [], f"上网这两只手长出了库：{tables}"
 
 
-def test_both_hands_are_ones_she_actually_has():
+async def test_both_hands_are_ones_she_actually_has(resident):
     """这两只手要真在她的工具集里。
 
     没挂上去是**静默失败**：模块写好了、这个文件里的用例全绿，但她的工具列表
     里没有它们，于是永远不会调。同款用例见 ``test_phone.py`` 的
     ``test_finding_someone_is_one_of_the_hands_she_actually_has``。
     """
-    from app.living.moment import MOMENT_TOOLS
+    assert search_online in [t.value.tool for t in resident.tools], (
+        "她手里没有上网查这只手"
+    )
+    assert browse_online in [t.value.tool for t in resident.tools], (
+        "她手里没有刷一批这只手"
+    )
 
-    assert search_online in MOMENT_TOOLS, "她手里没有上网查这只手"
-    assert browse_online in MOMENT_TOOLS, "她手里没有刷一批这只手"
+
+async def test_the_web_plugin_declares_both_hands_as_material(app_host):
+    """web 插件登记这两只手，查回来的东西是读到的材料（过了 ``material_minutes`` 换成一句占位），
+    不结束这一轮；它不交出也不要任何服务。"""
+    host = await app_host("agent-service")
+    mine = [r for r in host.registered() if r.plugin == "web"]
+
+    assert [(r.kind, r.name) for r in mine] == [
+        ("tool", "search_online"),
+        ("tool", "browse_online"),
+    ]
+    assert [(r.detail["spec"].trim, r.detail["spec"].ends_round) for r in mine] == [
+        ("material", False),
+        ("material", False),
+    ]
+    assert [r.detail["spec"].tool for r in mine] == [search_online, browse_online]

@@ -22,7 +22,7 @@ from sqlalchemy.future import select
 from sqlalchemy.sql import text
 
 from app.data.models import CommonMessage
-from app.runtime.db import auto_tx, current_session
+from app.data.tx import auto_tx, current_session
 
 __all__ = [
     "find_unread_summary",
@@ -384,7 +384,7 @@ async def find_newest_unread_summons(
 # 里遇不到这个分支：那儿每一条未读都在叫她，``calling`` 一直管得住。
 #
 # **"她有没有水位"直接从游标参数读**（``:after_ms > 0``）：从没打开过是
-# :data:`app.living.phone.NEVER_LOOKED`，也就是 ``(0, '')``，而真实消息的
+# :data:`app.living.phone.handset.NEVER_LOOKED`，也就是 ``(0, '')``，而真实消息的
 # ``event_time`` 是毫秒纪元、恒为正。第一次打开因此照旧落在最新那条上 —— 换成"最早
 # 那条未读"的话，她点开一个攒了几千条的群会落在几个月前的第一条上。
 #
@@ -819,7 +819,7 @@ async def find_file_items_in_conversations(
 
     ``who`` / ``by_owner`` 走 :data:`_WHO_AND_OWNER` 那一份共用定义（"这个人在她眼里
     是谁"这件事全模块只算一次）。这条查询今天的调用方
-    （:func:`app.living.reading.files_sent_to`）只读 ``who``；``by_owner`` 在这里是
+    （:func:`app.living.reading.files.files_sent_to`）只读 ``who``；``by_owner`` 在这里是
     **共用定义的一部分**，不是这条查询自己要的。
     """
     async with auto_tx():
@@ -845,7 +845,7 @@ async def find_file_items_in_conversations(
 #   * :data:`_SAID_BY_HER` 取反 —— 她自己说了多少不说明有人在找她。**群里也要**：
 #     她 @ 了自己另一个 bot 的话，那不是有人在叫她。
 #   * ``scope = 'direct'`` 或 :data:`_NAMED_HER` —— 这一条就是
-#     :mod:`app.living.nudge` 论证过的那两条客观事实。
+#     :mod:`app.living.life.nudge` 论证过的那两条客观事实。
 #   * :data:`_STILL_IN_THE_CONVERSATION` —— 撤回掉的那条在渠道上已经没了，"有人叫过
 #     她"这件事跟着没了。
 #
@@ -944,7 +944,7 @@ async def count_summons_since(
 #
 # 计数题没有便宜的答法。它没有时间范围可言，下界只能凑一个 ``event_time > 0``，而
 # ``0`` 不是边界：planner 拿不到有效范围，只能整表扫一遍再 hash join 回那几十条会话
-# （prod 实测 2026-09-05，这条规则在 :mod:`app.living.whitelist` 上原本就是这么问的：
+# （prod 实测 2026-09-05，这条规则在 :mod:`app.living.phone.whitelist` 上原本就是这么问的：
 # akao 名下 69 条私聊，Parallel Seq Scan 扫满 308 万行、101197 个 buffer 里 98788 个
 # 是磁盘读、**960ms**）。是非题数到第 ``:at_least`` 条就能停，每条会话各走一次
 # ``idx_common_message_conversation_time``：同一批数据 1175 个 buffer 全部命中缓存、
@@ -967,7 +967,7 @@ async def count_summons_since(
 #
 #   * 没有 ``mention``：这里问的不是"谁在叫她"，私聊里没人 @ 她，别人说的每一条都算数。
 #     所以群传进来时数的是群里所有人说的话，不是点名的那些 —— "这条规则只给私聊"是业务
-#     口径，住在调用方那边（:mod:`app.living.whitelist`）。
+#     口径，住在调用方那边（:mod:`app.living.phone.whitelist`）。
 #   * 没有时间下界：问的是"这个人跟她聊过多少"，不是"最近多少"。凑一个 ``event_time > 0``
 #     进来既挡不住任何行（毫秒时间戳没有非正数，prod 实测 0 行），也换不来更好的计划
 #     （实测带不带它同样走 ``idx_common_message_conversation_time``、同样 1175 个

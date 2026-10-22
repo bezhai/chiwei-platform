@@ -25,8 +25,8 @@ from pathlib import Path
 import pytest
 
 from app.capabilities.sandbox import OUTPUT_CUT_MARK, SandboxResult
-from app.living import guides as guides_mod
-from app.living.guides import (
+from app.living.guides import at_hand as guides_mod
+from app.living.guides.at_hand import (
     GUIDE_TOOLS,
     GUIDES_VAR,
     guides_she_can_read,
@@ -344,7 +344,7 @@ async def test_a_cut_result_reaches_her_with_the_notice_still_on_it(
     capped = "x" * 40 + f"\n\n……（后面还有 96000 {OUTPUT_CUT_MARK} —— 略）"
     sandbox(stdout=capped, dropped=96_000)
 
-    with caplog.at_level(logging.INFO, logger="app.living.guides"):
+    with caplog.at_level(logging.INFO, logger="app.living.guides.at_hand"):
         async with in_a_moment("akao", finishes=False):
             out = await run_a_script.invoke({"command": "python3 -c ..."})
 
@@ -366,7 +366,7 @@ async def test_a_guide_whose_preprocessing_flooded_leaves_a_trace_too(
     shelf(bangumi=_BANGUMI)
     sandbox(stdout=f"usage: ...\n……（后面还有 70000 {OUTPUT_CUT_MARK} —— 略）")
 
-    with caplog.at_level(logging.INFO, logger="app.living.guides"):
+    with caplog.at_level(logging.INFO, logger="app.living.guides.at_hand"):
         async with in_a_moment("akao", finishes=False):
             body = await read_a_guide.invoke({"which": "bangumi"})
 
@@ -386,7 +386,7 @@ def test_both_hands_tell_her_the_output_can_be_cut():
     不说的话她会把截过的那一段当成完整结果，然后基于一个不完整的东西往下做事 ——
     跟 ``app.living.day_page`` 里那条"留白她会以为材料被截断了"是同一类。
     """
-    for t in GUIDE_TOOLS:
+    for t in [s.tool for s in GUIDE_TOOLS]:
         assert "太长会被截掉" in t.definition.description, (
             f"{t.name} 没告诉她输出可能不全"
         )
@@ -414,7 +414,7 @@ def test_neither_hand_ever_asks_her_how_long_something_takes():
     """真人对「多久」没有内感受。``tests/living/test_moment.py`` 对整份工具集有同一
     条；这两只手自己也守一遍，改坏了在本文件就该红。"""
     banned = ("minute", "duration", "how_long", "seconds", "until", "hour")
-    for t in GUIDE_TOOLS:
+    for t in [s.tool for s in GUIDE_TOOLS]:
         for pname in t.definition.parameters.get("properties", {}):
             assert not any(b in pname.lower() for b in banned), (
                 f"{t.name} 的参数 {pname} 在问她一个时长"
@@ -428,7 +428,7 @@ def test_neither_description_claims_a_limit_that_is_not_real():
     —— 说明里的 Python 脚本自己发 HTTP 照样通，那三份说明就靠这条才成立。写一条不
     存在的限制，她会因此不去跑本来跑得通的东西。
     """
-    for t in GUIDE_TOOLS:
+    for t in [s.tool for s in GUIDE_TOOLS]:
         assert "无网络" not in t.definition.description, (
             f"{t.name} 的说明书里写着一条不存在的限制"
         )
@@ -442,26 +442,55 @@ def test_the_hand_that_runs_things_points_back_at_the_guides():
 
 
 def test_both_hands_are_handed_over_as_one_set():
-    assert GUIDE_TOOLS == [read_a_guide, run_a_script]
+    assert [s.tool for s in GUIDE_TOOLS] == [read_a_guide, run_a_script]
 
 
-def test_both_hands_are_ones_she_actually_has():
-    """没挂进 ``MOMENT_TOOLS`` 是静默失败：本文件全绿，而她这一轮里根本没有这两只手。"""
-    from app.living.moment import MOMENT_TOOLS
-
-    assert read_a_guide in MOMENT_TOOLS, "她手里没有读说明这只手"
-    assert run_a_script in MOMENT_TOOLS, "她手里没有跑脚本这只手"
+async def test_both_hands_are_ones_she_actually_has(resident):
+    """没登记进她的一轮（清单 ``resident`` 的工具） 是静默失败：本文件全绿，而她这一轮里根本没有这两只手。"""
+    assert read_a_guide in [t.value.tool for t in resident.tools], (
+        "她手里没有读说明这只手"
+    )
+    assert run_a_script in [t.value.tool for t in resident.tools], (
+        "她手里没有跑脚本这只手"
+    )
 
 
 def test_the_list_variable_is_named_the_same_everywhere():
     """变量名没有编译期校验：改一个字，Langfuse 那边就原样渲染成 ``{{...}}`` 给她看。
 
-    所以名字只在这里定义一次，moment 那侧引它，不各写一遍字面量。
+    所以名字只在这里定义一次，guides 插件登记的那一段引它，不各写一遍字面量。
     """
-    from app.living import moment as moment_mod
-
     assert GUIDES_VAR == "guides_you_can_read"
-    assert moment_mod.GUIDES_VAR is GUIDES_VAR
+
+
+async def test_the_guides_plugin_places_both_hands_and_the_list_in_her_round(app_host):
+    """guides 插件登记两只手（读回来的说明和跑出来的结果都是材料）和她一轮 prompt 里「手边能读的
+    说明」那一段：变量只有这一个，值在一轮开始取齐 prompt 时现算（注册表每 30 秒热加载）。"""
+    from app.agent.round import Round
+
+    host = await app_host("agent-service")
+    mine = [r for r in host.registered() if r.plugin == "guides"]
+
+    assert [(r.kind, r.name) for r in mine] == [
+        ("tool", "read_a_guide"),
+        ("tool", "run_a_script"),
+        ("segment", "living_life_moment/guides"),
+    ]
+    assert [r.detail["spec"].trim for r in mine[:2]] == ["material", "material"]
+    segment = mine[2].detail["segment"]
+    assert segment.prompt_id == "living_life_moment/guides"
+    assert segment.variables == (GUIDES_VAR,)
+    her_round = Round(
+        app="agent-service",
+        lane="coe-living",
+        participant="akao",
+        profile="resident",
+        round_id="2026-07-25T14:00+08:00",
+        now=None,
+        reason="常规节奏",
+        due=None,
+    )
+    assert await segment.values(her_round) == {GUIDES_VAR: guides_she_can_read()}
 
 
 def test_nothing_she_reads_or_runs_survives_past_this_moment():
@@ -470,7 +499,7 @@ def test_nothing_she_reads_or_runs_survives_past_this_moment():
     这里长出一张表就意味着有个东西替她把「读过什么」留了下来，而留什么该由她自己记
     （``keep_in_mind``）。
     """
-    from app.runtime.data import Data
+    from app.data.schema import Data
 
     tables = [
         name

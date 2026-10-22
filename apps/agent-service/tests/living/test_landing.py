@@ -31,11 +31,12 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from app.data import session as session_mod
+from app.data.persist import insert_append, select_latest
+from app.data.tx import current_session, tx
 from app.infra.cst_time import CST
-from app.living.landing import LandingTick, reconcile_landings, reconcile_recalls
-from app.living.mouth import STATE_CLAIMED, STATE_HANDED_OFF, SpokenOutbound
-from app.runtime.persist import insert_append, select_all_versions, select_latest
+from app.living.speaking.landing import reconcile_landings, reconcile_recalls
+from app.living.speaking.mouth import STATE_CLAIMED, STATE_HANDED_OFF, SpokenOutbound
+from tests.data.read_back import all_versions
 
 LANE = "coe-living"
 _CONV = uuid.uuid5(uuid.NAMESPACE_OID, "conv-dm-bezhai-akao")
@@ -50,7 +51,7 @@ def _ms(moment: dt.datetime) -> int:
 
 
 def _derived(seed: str) -> str:
-    """跟 :func:`app.living.mouth.send_message` 同款：uuid 的 **hex**，没有短横。"""
+    """跟 :meth:`app.living.speaking.mouth.Mouth.send_message` 同款：uuid 的 **hex**，没有短横。"""
     return uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
 
 
@@ -104,7 +105,8 @@ async def _the_channel_wrote(
     QQ 的行、加列之前的存量行都长这样）。
     """
     message_id = uuid.uuid4()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message "
@@ -131,7 +133,8 @@ async def _the_channel_wrote(
 
 async def _the_channel_recalled_it(message_id: uuid.UUID, *, at: dt.datetime) -> None:
     """投递方真把那一行撤掉之后填上 ``recalled_at``。**撤失败不填。**"""
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_message SET recalled_at = :at "
@@ -227,10 +230,10 @@ async def test_landing_does_not_disturb_the_claim_it_rides_on(living_db):
 
     "交出去了、结果未知"和"渠道上确实落地了"是两件事，而且**两件都真**：进程崩在
     写记忆之前，她就是不记得自己说过这句话。用一个投递状态盖掉 ``claimed``，
-    :func:`app.living.mouth.unsettled_outbound` 就再也捞不出这一条，那个"她可能不
+    :func:`app.living.speaking.mouth.unsettled_outbound` 就再也捞不出这一条，那个"她可能不
     记得"的事实从此没人看得见。
     """
-    from app.living.mouth import unsettled_outbound
+    from app.living.speaking.mouth import unsettled_outbound
 
     outbound_id = _derived("claimed-but-landed")
     await _she_spoke(outbound_id=outbound_id, state=STATE_CLAIMED)
@@ -260,7 +263,7 @@ async def test_the_claim_row_is_kept_as_history_not_rewritten(living_db):
 
     assert await reconcile_landings(lane=LANE) == 1
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], versions
@@ -285,7 +288,7 @@ async def test_a_send_that_has_not_landed_yet_waits_for_the_next_tick(living_db)
     await _she_spoke(outbound_id=outbound_id)
 
     assert await reconcile_landings(lane=LANE) == 0
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1], "对不上账却写了一版"
@@ -309,7 +312,7 @@ async def test_reconciling_again_changes_nothing(living_db):
     assert await reconcile_landings(lane=LANE) == 1
     assert await reconcile_landings(lane=LANE) == 0, "补过的又补了一遍"
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], (
@@ -330,7 +333,7 @@ async def test_a_lost_race_is_left_for_the_next_tick_not_forced_through(
     ``expected_current_ver`` 整个删掉，这条用例照样绿：它验的只是"看不看返回值"，
     没验"版本号真的挡住了谁"。
     """
-    from app.living import landing as landing_mod
+    from app.living.speaking import landing as landing_mod
 
     outbound_id = _derived("lost-race")
     await _she_spoke(outbound_id=outbound_id, state=STATE_CLAIMED)
@@ -363,7 +366,7 @@ async def test_a_lost_race_is_left_for_the_next_tick_not_forced_through(
     assert await reconcile_landings(lane=LANE) == 0, (
         "CAS 输了却报成补上了 —— 返回值没被看，或者版本号根本没挡住"
     )
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [(v.ver, v.state) for v in versions] == [
@@ -450,26 +453,36 @@ async def test_another_lane_is_none_of_this_lane_business(living_db):
 # ---------------------------------------------------------------------------
 
 
-def test_the_landing_clock_carries_nothing_but_a_timestamp():
-    """单字段 ``ts``：框架源循环固定按 ``data_type(ts=<iso>)`` 造 payload，多一个
-    必填字段就是每一拍 ValidationError 直接杀 Pod。顺带也是"钟当不了信箱"那条。
-    """
-    assert set(LandingTick.model_fields) == {"ts"}, sorted(LandingTick.model_fields)
+async def _the_clock_ticks(app_host, monkeypatch) -> None:
+    """对账那条钟响一拍：agent-service 的宿主上 speaking 插件登记的那条钟，交回的工作跑完。进程部署在
+    :data:`LANE` 上。"""
+    monkeypatch.setenv("LANE", LANE)
+    host = await app_host("agent-service")
+    (clock,) = [r for r in host.registered() if r.kind == "clock" and r.name == "landing"]
+    await clock.detail["tick"](_at(21, 35))
+
+
+async def test_the_landing_clock_is_registered_by_the_speaking_plugin(app_host):
+    """忘了登记的症状是静默的：账永远对不上，而她那边一切照常。"""
+    host = await app_host("agent-service")
+
+    clocks = [r for r in host.registered() if r.kind == "clock"]
+
+    assert [(c.plugin, c.name, c.detail["seconds"]) for c in clocks] == [
+        ("speaking", "landing", 300.0)
+    ]
 
 
 @pytest.mark.integration
 async def test_the_tick_reconciles_the_lane_this_process_is_deployed_on(
-    living_db, monkeypatch
+    living_db, app_host, monkeypatch
 ):
-    """钟不携带泳道 —— 节点自己从进程环境读，跟另外四条钟同一个分工。"""
-    from app.living import landing as landing_mod
-
+    """钟不携带泳道：对的是登记这条钟的进程所在的泳道。"""
     outbound_id = _derived("via-the-clock")
     await _she_spoke(outbound_id=outbound_id)
     message_id = await _the_channel_wrote(outbound_id=outbound_id, at=_at(21, 31))
 
-    monkeypatch.setattr(landing_mod, "living_lane", lambda: LANE)
-    await landing_mod.landing_tick(LandingTick(ts=_at(21, 35).isoformat()))
+    await _the_clock_ticks(app_host, monkeypatch)
 
     row = await select_latest(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
@@ -547,7 +560,7 @@ async def test_a_recall_the_channel_has_not_done_yet_waits_for_the_next_tick(
     await _she_spoke(outbound_id=outbound_id, took_back_at=_at(21, 33))
 
     assert await reconcile_recalls(lane=LANE) == 0
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1], "渠道还没撤掉却写了一版"
@@ -581,7 +594,7 @@ async def test_taking_back_one_row_of_several_is_not_the_whole_thing(living_db):
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert row.recalled_at is None
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1], "只撤掉一半却往版本链上写了一版"
@@ -654,7 +667,7 @@ async def test_confirming_a_recall_leaves_every_other_axis_alone(living_db):
 
     assert await reconcile_recalls(lane=LANE) == 1
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], versions
@@ -682,7 +695,7 @@ async def test_reconciling_recalls_again_changes_nothing(living_db):
     assert await reconcile_recalls(lane=LANE) == 1
     assert await reconcile_recalls(lane=LANE) == 0, "确认过的又补了一遍"
 
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], (
@@ -722,7 +735,7 @@ async def test_a_lost_recall_race_is_left_for_the_next_tick(living_db, monkeypat
     下一拍必须**重读最新一版**再补：拿 v1 硬写的话，落地那两列会被抹回 NULL ——
     库里从此说"这次开口没落地"，而它明明落地了，全程零报错。
     """
-    from app.living import landing as landing_mod
+    from app.living.speaking import landing as landing_mod
 
     outbound_id = _derived("recall-lost-race")
     message_id = await _the_channel_wrote(outbound_id=outbound_id, at=_at(21, 31))
@@ -748,7 +761,7 @@ async def test_a_lost_recall_race_is_left_for_the_next_tick(living_db, monkeypat
     assert await reconcile_recalls(lane=LANE) == 0, (
         "CAS 输了却报成补上了 —— 返回值没被看，或者版本号根本没挡住"
     )
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": outbound_id}
     )
     assert [(v.ver, v.recalled_at) for v in versions] == [(1, None), (2, None)], (
@@ -771,14 +784,12 @@ async def test_a_lost_recall_race_is_left_for_the_next_tick(living_db, monkeypat
 
 @pytest.mark.integration
 async def test_the_tick_brings_back_both_the_landing_and_the_recall(
-    living_db, monkeypatch
+    living_db, app_host, monkeypatch
 ):
     """一条钟两件事：同一拍里落地补上、撤回也确认上。
 
     不为撤回另起一条钟 —— 它追的是同一条 id、同一批记录，节奏也没有另一套理由。
     """
-    from app.living import landing as landing_mod
-
     landing_only = _derived("tick-landing-only")
     recalled = _derived("tick-recalled")
     landing_row = await _the_channel_wrote(outbound_id=landing_only, at=_at(21, 31))
@@ -793,8 +804,7 @@ async def test_the_tick_brings_back_both_the_landing_and_the_recall(
     )
     await _the_channel_recalled_it(recalled_row, at=_at(21, 34))
 
-    monkeypatch.setattr(landing_mod, "living_lane", lambda: LANE)
-    await landing_mod.landing_tick(LandingTick(ts=_at(21, 35).isoformat()))
+    await _the_clock_ticks(app_host, monkeypatch)
 
     landed = await select_latest(
         SpokenOutbound, {"lane": LANE, "outbound_id": landing_only}

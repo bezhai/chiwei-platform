@@ -1,0 +1,251 @@
+"""world 收件箱的处理：送来的消息先收下，一轮处理收件箱里所有还没经过一轮的消息，一次只跑一轮。
+
+**为什么不是一条消息一轮。** 三姐妹每一轮都给 world 发一条汇总，姐妹聊天时 world 几乎一轮接
+一轮，每一轮都把同一份历史整个读一遍。world 跑着的时候到的、同时到的几条汇总合进一轮，这份
+开销只花一次（2026-10-06 定）。代价是一轮的输入里有好几条消息，主 agent 和感知判断看到的是这一
+轮的全部，每条带着发件人和时间（:func:`app.world.core.main_agent.run_inbox_round`）。
+
+**一次投递怎么处理**（:meth:`Rounds.receive`，就是 world 收件箱的处理函数）：
+
+1. 交给登记过的收件处理收下（``world_intake``，:meth:`app.world.core.intake.Intakes.take_in`，按消息 id
+   去重）；
+2. 某一轮已经处理完了的（:func:`app.world.core.pending.is_handled`），跳过；
+3. 收进还没经过一轮的消息里（:func:`app.world.core.pending.add`，记在私有卷上）；
+4. 不叫醒 world 的消息到这里就算处理完了：它不单独起一轮，等下一轮一起看；
+5. 别的等"下一轮"跑完：这一轮成功，这次投递就处理完了；失败，这次投递就算处理失败，原样交给
+   通信机制重试（最新的自定醒来不限次数，:func:`app.world.core.wake.retry_latest_wake_without_limit`）。
+   等着的时候前面那一轮失败、把这条消息放弃了（见下面"放弃"），这次投递也算处理失败：它没被
+   处理过，不能确认掉，再投来时重新收下。
+
+**"下一轮"是 world 的轮次队列上的一个轮次。** world 的一轮一轮排在宿主给它的一条轮次队列上
+（:class:`app.host.Turns`，参与者 ``world``；收件箱只在拿着卷的写锁的那个进程里消费，见
+:mod:`app.world.core`），同一时刻只有一轮在跑。叫醒 world 的每一次投递是这条队列上的一个信号，
+来源是 world 收件箱（:attr:`Rounds.source`，``world-inbox``），合并方式是 ``JOIN_NEXT``：一轮在跑的
+时候到的那几次投递，第一次领头去排队、由它来跑下一轮，后面的并进同一个下一轮、等它的结果。轮到
+这一批时（:meth:`Rounds._due`）先问通信机制哪些处理完的消息已经记下了成功（最多
+:data:`SETTLED_QUERY_TIMEOUT`，见下面"处理完"），问完才不再让新到的投递并进来：问的那段时间里到的
+投递也属于这一轮，和它一起成功或失败。然后读出还没经过一轮的全部消息——不只是这一批投递带来的，
+也有不叫醒的、以及之前失败的轮里留下的、投递还在重试的——一起跑；不再并进来之后到的，等再下一轮。
+所以一轮进行中到的几条在下一轮里一起出现，只跑一轮，它们各自的投递不再各起一轮。开始之前还会把
+成了旧消息的自定醒来拿掉（排着的时候前一轮定了新的时刻）。这一批投递送来的消息要是都不在剩下的
+里面了（成了旧的醒来，或者排着的时候前一轮已经把它处理完了），这一轮就不跑：旧的醒来、已经处理完
+的消息不叫醒 world，剩下的那些等它们自己的投递，或者下一次真正要一轮的投递。这一轮的时刻不在这里
+读，在这个来源开始跑这一轮时读（:meth:`Rounds._run_round`，这一轮的 id 也在那时生成），所以问通信
+机制那一步跨过了整分钟，这一轮眼前的【现在】是问完之后的时刻。
+
+**自定醒来是不是旧的，只在轮到这一批时判断，不在投递一到就判断。** 状态里的最新唤醒只在两处改：
+一轮收尾时（这一轮的 ``wake.next`` 调 :func:`app.world.core.wake.set_next_wake`，这一轮在
+队列上跑），和收件箱开始消费之前的启动补醒（:func:`app.world.core.wake.wake_on_start`）。``set_next_wake``
+先发后记：新的醒来排出去、broker 确认、通信机制记完账之后才记成最新唤醒，这一段里新时刻要是已经
+到了，那条醒来会先送到。投递一到就判，这时状态还落后一步，它就会被当成旧消息确认掉，状态随后记的
+却正是它——world 再也不醒。轮到这一批的时候没有哪一轮在收尾，状态不会落后：送到的醒来比状态新，
+只可能是排它的那一轮在"记下来"之前就失败了，那它确实是旧的。不能为了这个改成先记后发：记了没排
+出去的唤醒，就是一个不会来的醒来。
+
+**一条消息什么时候算处理完。** 带着它的那一轮跑完了（主 agent 定了下次醒来、上下文存下、新的醒来
+排出去之后），才记成处理完（:func:`app.world.core.pending.handled`），等它的那几次投递这时才处理成功。
+这条记录留到通信机制把它的投递成功记下来为止，每一轮开始前问一次、删掉已经记下来的（为什么不能
+在处理函数返回时删、文件有多大，见 :mod:`app.world.core.pending`）。
+一轮失败或者被取消，这一轮带着的消息都还在还没经过一轮的那些里，之后的一轮照样带上；等它的投递
+全部算处理失败，各自重试，不会有一次投递把没跑完的消息当成处理完了确认掉。领头的那次投递在这一批
+不再并进新投递之前就被取消了（进程在停、超时），并进来的投递同样算处理失败，不会一直等一轮没人会跑
+的。跟着等的投递拿到的失败是 :class:`RoundFailed`，文字说的是带着它的那一轮怎么没跑完。之后某一轮
+已经处理完了它，它的重试再来就在第 2 步跳过。
+
+**一直跑不完的消息放弃。** 一轮因为异常没跑完，这一轮带着的每条记一次失败；一条消息失败的轮数跟
+通信机制给一次投递的处理次数（world 收件箱的 :attr:`~app.host.Inbox.attempt_limit`）一样多，就从还没
+经过一轮的里拿掉，之后的轮不再带它（:func:`app.world.core.pending.failed`，world 自己排的醒来除外）。
+这是防一条每次都让一轮跑不完的消息（比如模型拒收它的内容）把之后的每一轮都拖住；一条消息一轮时，
+它的投递处理四次失败就进死信，world 照常往下跑，这里是同一个上限。放弃只是拿掉：它之后再有投递
+（死信重放、它自己还没用完的重试）就重新收下、重新数，下一轮照样带上；不叫醒的消息没有死信，
+放弃时那条 error 里的整条消息是唯一能照着重做的东西，重做要换新的消息 id（原 id 送到时就记成
+处理成功了，按原 id 重发会被通信机制挡掉，见 :mod:`app.world.core.pending`）。代价是这几轮里同时
+在等的别的消息也各记了失败，失败的原因要是出在别处（模型那边临时出错），它们会跟着被放弃——跟一条消息一轮时那几条
+各自的投递四次失败、进死信是一回事，它们的重试和死信重放照样把它们带回来。一轮超过时限算失败；
+进程在停、一轮被取消，不算失败。
+
+**一次投递最多等多久**（:func:`delivery_timeout`）：前面正在跑的一轮，加上带着它的这一轮。
+一轮的时限由这里管（``round_timeout``，超过就取消、算这一轮失败），收件箱的处理时限按这个放长，
+占位租约随之放长，所以等着的投递不会被当成"前一个进程死了"接管。这段时间里投递一直没确认：它
+加上领取和记结果的余量，要放进通信机制给一次投递的期限
+（:data:`app.messaging.receiving.DELIVERY_DEADLINE`，比 broker 等确认的时限短；放不进去开设收件箱时
+就拒绝），所以一轮的时限不能太长（见 :data:`app.world.core.main_agent.ROUND_TIMEOUT`）。代价在进程
+直接死掉的时候：它拿着的投递被 broker 重投给下一个进程，下一个进程要等那份占位租约过期才接手，现在最长约 22 分钟
+（一轮 10 分钟乘二，加两次各一分钟的余量）。正常停下、通道被关掉都不受影响：被取消时先放开
+占位，重投的那一份马上有人接；它赶在放开落下之前来领的，隔一秒左右再看一次就接上。
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Protocol
+
+from app.agent.prompts import PromptConfigError
+from app.host import Batch, Coalesce, Inbox, JoinedTurnFailed, Signal, Turns, WakeSource
+from app.infra.cst_time import now_cst
+from app.messaging.message import Message
+from app.world.agents import is_own_wake
+from app.world.core import pending
+from app.world.core.wake import is_stale_wake
+from app.world.services import Intake
+
+logger = logging.getLogger(__name__)
+
+
+class RunRound(Protocol):
+    """跑一轮：带着判出来的这一轮（:class:`InboxRound`），用来源开始跑它时定下的 id 和时刻。"""
+
+    def __call__(
+        self, due: InboxRound, *, round_id: str, now: datetime
+    ) -> Awaitable[None]: ...
+
+
+# 一次投递等完两轮之后，把结果交回通信机制还要一点时间（记成处理完、排重试）。
+_SETTLING = timedelta(minutes=1)
+
+def delivery_timeout(round_timeout: timedelta) -> timedelta:
+    """一次投递最多处理多久：前面正在跑的一轮，加上带着它的这一轮，再加上把结果交回通信机制的时间。
+    world 收件箱的处理时限按它声明；``round_timeout`` 是一轮的时限。"""
+    return 2 * round_timeout + _SETTLING
+
+
+# 每一轮开始前问通信机制"哪些处理完的消息已经记下了成功"，最多等多久
+# （:meth:`Rounds._forget_settled`）。正常是一条走索引的查询，几毫秒就回来；库那边卡住时，它占着
+# world 的轮次队列，这一轮和排在后面的投递全都跟着等。等不到就按"这次没查到"处理：记录留着，这一轮
+# 照常跑，下一轮再问。一次投递最多经过两次这一步，加起来远小于 :data:`_SETTLING`。
+SETTLED_QUERY_TIMEOUT = timedelta(seconds=10)
+
+
+class RoundFailed(RuntimeError):
+    """带着这条消息的那一轮没跑完：这次投递算处理失败，按通信机制的重试再来。"""
+
+
+@dataclass(frozen=True)
+class InboxRound:
+    """轮到这一批时判出来要跑的一轮：带着的消息，按到达的先后。"""
+
+    # 为什么跑这一轮，记进日志。
+    reason: str
+    messages: tuple[Message, ...]
+
+
+class Rounds:
+    """world 的一轮接一轮。``run`` 带着判出来的这一轮（:class:`InboxRound`，消息按到达的先后）跑
+    一轮，失败就抛异常。
+
+    ``turns`` 是 world 的轮次队列，world 插件从宿主拿（``ctx.turns``）；``take_in`` 是收件处理
+    （``world_intake`` 的 :meth:`~app.world.core.intake.Intakes.take_in`），每次投递先交给它；
+    ``inbox`` 是 world 的收件箱（``ctx.inbox`` 交回的 :class:`~app.host.Inbox`）：一轮开始前问它哪些
+    处理完的消息已经记下了成功，一条消息失败多少轮放弃也按它的处理次数。"""
+
+    def __init__(
+        self,
+        run: RunRound,
+        *,
+        round_timeout: timedelta,
+        turns: Turns,
+        take_in: Intake,
+        inbox: Inbox,
+    ) -> None:
+        self._run = run
+        self._round_timeout = round_timeout
+        self._turns = turns
+        self._take_in = take_in
+        self._inbox = inbox
+        self.source: WakeSource[InboxRound, None] = WakeSource(
+            "world-inbox", Coalesce.JOIN_NEXT, self._due, self._run_round
+        )
+
+    async def receive(self, message: Message) -> None:
+        """world 收件箱的处理函数：收下这条消息，要叫醒 world 的就等一轮把它处理完。"""
+        await self._take_in(message)
+        if pending.is_handled(message.message_id):
+            logger.info(
+                "world: message %s was handled by an earlier round; skipped",
+                message.message_id,
+            )
+            return
+        pending.add(message)
+        if not message.wakes_recipient:
+            logger.info(
+                "world: message %s does not wake world; the next round takes it",
+                message.message_id,
+            )
+            return
+        try:
+            await self._turns.take(self.source, Signal(at=now_cst(), key=message.message_id))
+        except JoinedTurnFailed as joined:
+            failure = joined.__cause__
+            raise RoundFailed(
+                f"the round that took this message did not finish: "
+                f"{type(failure).__name__}: {failure}"
+            ) from failure
+        if not pending.is_handled(message.message_id) and not is_own_wake(message):
+            # 它在等的时候，正在跑的那一轮失败、把它放弃了：这次投递不能当成处理完。算处理失败，
+            # 通信机制再投时重新收下（自定醒来不会被放弃，没处理就是成了旧的、被拿掉了）。
+            raise RoundFailed(
+                f"message {message.message_id} was given up while this delivery waited"
+            )
+
+    async def _due(
+        self, participant: str, batch: Batch, clock: Callable[[], datetime]
+    ) -> InboxRound | None:
+        """轮到这一批时：先问通信机制、再不让新到的投递并进来，然后带上还没经过一轮的全部消息。
+        这一批投递送来的消息都已经不在里面了（成了旧的醒来、已经被前一轮处理完，或者被放弃了），
+        这一轮就不跑。不读钟：这一轮的时刻在一轮开始时读。"""
+        await self._forget_settled()
+        woken_by = [signal.key for signal in batch.close()]
+        delivered = set(woken_by)
+        waiting = pending.read()
+        stale = [m for m in waiting if is_stale_wake(m)]
+        if stale:
+            pending.drop(m.message_id for m in stale)
+            logger.info(
+                "world: wake(s) %s were replaced while waiting; left out",
+                ", ".join(m.message_id for m in stale),
+            )
+        taking = [m for m in waiting if m not in stale]
+        if not any(m.message_id in delivered for m in taking):
+            return None
+        return InboxRound(reason=f"woken by {', '.join(woken_by)}", messages=tuple(taking))
+
+    async def _forget_settled(self) -> None:
+        """问通信机制：记着处理完的那些里，哪些的投递成功已经记下来了，删掉它们的记录。问不到、
+        或者 :data:`SETTLED_QUERY_TIMEOUT` 之内没有回音，就都留着，下一轮再问。"""
+        recorded = pending.recorded()
+        if not recorded:
+            return
+        try:
+            async with asyncio.timeout(SETTLED_QUERY_TIMEOUT.total_seconds()):
+                settled = await self._inbox.succeeded(recorded)
+        except Exception:
+            logger.warning(
+                "world: could not ask messaging which of %d handled message(s) are settled; "
+                "keeping their records until the next round",
+                len(recorded),
+                exc_info=True,
+            )
+            return
+        pending.forget(settled)
+
+    async def _run_round(self, due: InboxRound) -> None:
+        """带着这一轮的消息跑一轮：这一刻读钟、生成这一轮的 id（每次尝试一个新的，只用于成本和
+        日志），交给 ``run``。跑完记成处理完，没跑完给每条记一次失败；因为段落配置错误没跑完的不记。"""
+        now, round_id = now_cst(), uuid.uuid4().hex
+        taking = list(due.messages)
+        ids = [m.message_id for m in taking]
+        try:
+            async with asyncio.timeout(self._round_timeout.total_seconds()):
+                await self._run(due, round_id=round_id, now=now)
+        except PromptConfigError:
+            # 配置错误不是这些消息的问题：不给它们记失败，配置错多久也不放弃哪一条（设计第 5 节
+            # 问题 3）。投递照样按通信机制重试；每次重试重新取段落，修好之后的下一轮全部带上。
+            raise
+        except Exception:
+            pending.failed(ids, give_up_at=self._inbox.attempt_limit)
+            raise
+        pending.handled(taking)

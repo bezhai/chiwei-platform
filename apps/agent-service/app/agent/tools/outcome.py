@@ -8,21 +8,28 @@ module defines:
 * :class:`ToolOutcomeError` — pydantic model serialized into the
   ``ToolMessage`` content LLM sees.
 * :class:`ToolInvalidArgs` / :class:`ToolNotFound` — typed exceptions
-  that ``@tool_error`` (see ``_common.py``) raises internally before
-  converting to the outcome dict.
+  that :func:`tool_error` raises internally before converting to the
+  outcome dict.
+* :func:`tool_error` — the decorator every tool wears: it turns a tool's
+  failure into a :class:`ToolOutcomeError` dict the LLM sees.
 
 Failures that are *not* business-semantic (timeout / rate-limit /
-upstream 5xx) propagate out of ``@tool_error`` and are handled by wire
-``on_error`` policies (contract §1 forbids node-level on_error).
+upstream 5xx) propagate out of ``@tool_error`` to the caller.
 
-Contract reference: ``docs/guides/dataflow-node-contract.md`` §4.7 + §4.8.
+The rules are described in ``docs/guides/plugin-host.md`` (section 6, tools and failures).
 """
 
 from __future__ import annotations
 
+import functools
+import logging
 from typing import Any, Literal
 
 from pydantic import BaseModel
+
+from app.capabilities.errors import CapabilityInvalidArg, CapabilityNotFound
+
+logger = logging.getLogger(__name__)
 
 
 class ToolOutcomeError(BaseModel):
@@ -92,8 +99,101 @@ class ToolNotFound(Exception):
         self.detail = dict(detail) if detail else {}
 
 
+def tool_error(error_message: str):
+    """Decorator: route tool failures (``docs/guides/plugin-host.md``, section 6).
+
+    Every failure surfaces to the LLM as a ``ToolOutcomeError`` dict —
+    no exception escapes the wrapper. The agent turn stays alive even
+    when a single tool call goes wrong; the LLM gets to decide whether
+    to retry, change strategy, or tell the user the tool isn't working.
+
+    Routing table:
+
+    * ``CapabilityInvalidArg`` → ``ToolOutcomeError(kind="invalid_args")``
+    * ``CapabilityNotFound``   → ``ToolOutcomeError(kind="not_found")``
+    * any other ``Exception``  → ``ToolOutcomeError(kind="tool_error")``
+      with ``detail["original_error_type"]`` set so the LLM can reason
+      about it. Hotfix 2026-05-13 — previously this branch propagated
+      and killed the whole agent turn (trace
+      9b5a451cd00ccf735427cbb2059a95fb).
+
+    ``BaseException`` subclasses (``CancelledError`` /
+    ``KeyboardInterrupt`` / ``SystemExit``) deliberately do NOT get
+    wrapped; they signal shutdown / cancellation and must travel up so
+    the runtime can unwind cleanly.
+
+    Success values pass through unchanged.
+    """
+
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except CapabilityInvalidArg as exc:
+                logger.warning(
+                    "%s: invalid args — %s (meta=%s)",
+                    func.__name__,
+                    exc,
+                    exc.meta,
+                )
+                typed = ToolInvalidArgs(str(exc), detail=exc.meta or None)
+                return ToolOutcomeError(
+                    kind="invalid_args",
+                    message=f"{error_message}: {typed.message}"
+                    if error_message
+                    else typed.message,
+                    detail=typed.detail or None,
+                ).model_dump()
+            except CapabilityNotFound as exc:
+                logger.warning(
+                    "%s: resource not found — %s (meta=%s)",
+                    func.__name__,
+                    exc,
+                    exc.meta,
+                )
+                typed = ToolNotFound(str(exc), detail=exc.meta or None)
+                return ToolOutcomeError(
+                    kind="not_found",
+                    message=f"{error_message}: {typed.message}"
+                    if error_message
+                    else typed.message,
+                    detail=typed.detail or None,
+                ).model_dump()
+            except Exception as exc:
+                # Catch-all to keep the agent turn alive. Log with
+                # exc_info so the technical detail survives in
+                # observability while the LLM gets a structured outcome.
+                logger.warning(
+                    "%s: tool failure — %s",
+                    func.__name__,
+                    exc,
+                    exc_info=True,
+                )
+                message = (
+                    f"{error_message}: {exc}" if error_message else str(exc)
+                )
+                return ToolOutcomeError(
+                    kind="tool_error",
+                    message=message,
+                    detail={"original_error_type": type(exc).__name__},
+                ).model_dump()
+
+        return wrapper
+
+    return decorator
+
+
 __all__ = [
     "ToolInvalidArgs",
     "ToolNotFound",
     "ToolOutcomeError",
+    "tool_error",
 ]
+
+
+# What her agents and world's answer a tool call whose arguments do not fit its tool with
+# (``AgentSpec.bad_arguments``: the tool's name and the binding error are filled in). The loop
+# feeds it back so the model fixes the arguments and calls again in the same run; the wording is
+# theirs, the generic dispatch only fills it in.
+BAD_ARGUMENTS = "工具 {tool} 参数绑定失败：{error}。请检查该工具的参数定义，修正参数后重新调用。"

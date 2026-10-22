@@ -12,11 +12,11 @@
 **判据是"逐字通道"，不是"谁写的"。**
 
   * 转义的是第三方能决定确切字节的那些：真人的昵称、群名、文件名、消息正文、网页
-    标题 / 链接 / 摘要、图片站的标题、外部数据源交回来的那句话。
+    标题 / 链接 / 摘要、图片站的标题。
   * 不转义的是经过模型的那些：她自己说的话、姐姐说的话、日页、读完一本书留下的印象。
     那些字节是某个模型写出来的，第三方最多只能"劝"它去写；而一旦模型能被劝着写出任
     意字节，转义也拦不住下一步（它可以被劝着写别的）。那条路上要挡的是输出审计，不
-    是转义。判断和理由写在 :func:`app.living.records.esc` 上。
+    是转义。判断和理由写在 :func:`app.living.common.esc` 上。
 
 这个文件里的用例都是同一个形状：把 :data:`POISON` 塞进一个第三方真的能写的字段，
 然后看她眼前那段文本里还有没有一个不是这套代码自己写的 ``<``。
@@ -29,14 +29,9 @@ import re
 import pytest
 from sqlalchemy import text
 
-from app.data import session as session_mod
-from app.living.phone import (
-    look_at_phone,
-    look_through_your_phone,
-    look_up_contact,
-    phone_envelope,
-)
-from tests.living.conftest import glance_text
+from app.agent.tooling import Tool
+from app.data.tx import current_session, tx
+from tests.living.conftest import glance_text, her_phone, her_reader
 from tests.living.test_phone import (
     _DM,
     _GROUP,
@@ -44,6 +39,7 @@ from tests.living.test_phone import (
     _at,
     _incoming,
     _seed_world,
+    _unread_now,
     pictures,  # noqa: F401 — 形参名就是 fixture 名
 )
 
@@ -53,6 +49,11 @@ from tests.living.test_pictures_tools import (  # noqa: F401 — 形参名就是
     her_hands,
     pictures_db,
 )
+
+PHONE = her_phone()
+look_at_phone = Tool(PHONE.look_at_phone)
+look_through_your_phone = Tool(PHONE.look_through_your_phone)
+look_up_contact = Tool(PHONE.look_up_contact)
 
 # 第三方写进一个没转义的字段之后，她眼前就会多出的那一段。**两部分各有各的用处**：
 #
@@ -79,7 +80,7 @@ _A_TAG = re.compile(r"<(?:msg|who) ([^>]*?)/?>")
 
 # 属性只允许长这一种样子：``名字="值"``，**值由双引号包着**。
 #
-# 这条判据是 :func:`app.living.records.esc` **不转撇号**的前提：单引号只在属性用单引号
+# 这条判据是 :func:`app.living.common.esc` **不转撇号**的前提：单引号只在属性用单引号
 # 包的时候才危险（``from='…'`` 里一个 ``'`` 就闭掉了值、后面那截成了控制属性），而这
 # 套代码所有属性都是双引号写死的。以后有人改成单引号，这条在这儿红 —— 而它不依赖用例
 # 数据里有没有撇号，看的是**印出来的属性长什么样**。
@@ -91,7 +92,7 @@ LANE = "coe-living"
 @pytest.fixture
 async def reading_db(living_db):
     """手机那几张表 + "读到哪了" 那一张 —— 可读清单每一行都要问一句"读到哪了"。"""
-    from app.living.reading import FileRead
+    from app.living.reading.files import FileRead
     from tests.runtime.conftest import migrate
 
     await migrate(FileRead, living_db)
@@ -109,7 +110,7 @@ def assert_only_our_own_markup(seen: str, *, where: str) -> None:
        "有没有一个我们没写的标签"。以后新加一处把外面来的字串摆到她眼前、但忘了转义
        的地方，只要那个字串里带尖括号就在这儿红，不必先想到它会被拿来伪造什么。
     4. **印出来的每个属性都是 ``名字="值"``** —— 见 :data:`_AN_ATTRIBUTE`：这是
-       :func:`app.living.records.esc` 不转撇号的那个前提，钉在这儿。
+       :func:`app.living.common.esc` 不转撇号的那个前提，钉在这儿。
     """
     assert POISON_MARK in seen, (
         f"用例前提没成立：{where} 里根本没有这个字段的内容，这条用例什么都没验到。"
@@ -135,7 +136,7 @@ def assert_attributes_are_double_quoted(seen: str, *, where: str) -> None:
     """她眼前每个标签上的属性都是 ``名字="值"``，值由**双引号**包着。
 
     单独拎出来是因为它验的不是"外面那段进没进来"，而是**我们自己印出来的东西长什么
-    样** —— :func:`app.living.records.esc` 不转撇号的全部依据就是这一条。所以不带
+    样** —— :func:`app.living.common.esc` 不转撇号的全部依据就是这一条。所以不带
     ``POISON`` 的用例也调得动它。
     """
     for attrs in _A_TAG.findall(seen):
@@ -143,7 +144,7 @@ def assert_attributes_are_double_quoted(seen: str, *, where: str) -> None:
         assert rest == "", (
             f"{where} 里有个标签的属性不是 名字=\"值\" 这个形状："
             f"剩下 {rest!r}（整段属性是 {attrs!r}）。\n"
-            f"``app.living.records.esc`` 不转撇号，靠的就是所有属性都用双引号包 —— "
+            f"``app.living.common.esc`` 不转撇号，靠的就是所有属性都用双引号包 —— "
             f"改成单引号的话，一个昵称里的撇号就能闭掉属性值。"
         )
 
@@ -163,7 +164,7 @@ async def test_a_display_name_cannot_carry_markup_into_anything_she_reads(
     )
 
     # 信封先读：``look_at_phone`` 跑完这一轮会把未读读掉，之后信封上就没有这个人了。
-    envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelope = await _unread_now(_at(21, 35))
     async with in_a_moment("akao", now=_at(21, 35)):
         seen = glance_text(await look_at_phone.invoke({"channel_id": str(_DM)}))
         found = await look_up_contact.invoke({"name": "bezhai"})
@@ -194,7 +195,8 @@ async def test_a_group_name_cannot_carry_markup_into_the_conversation_list(
 ):
     """群名同理 —— 它在列表上待在 ``「」`` 里，不转义就能自己起一行。"""
     await _seed_world()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_conversation SET display_name = :t "
@@ -244,7 +246,8 @@ async def test_a_group_name_cannot_carry_markup_into_anything_she_reads(
     living_db, in_a_moment, pinned
 ):
     await _seed_world()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_conversation SET display_name = :t "
@@ -258,7 +261,7 @@ async def test_a_group_name_cannot_carry_markup_into_anything_she_reads(
         sender_name="路人",
     )
 
-    envelope = await phone_envelope(lane=LANE, persona_id="akao", now=_at(21, 35))
+    envelope = await _unread_now(_at(21, 35))
     async with in_a_moment("akao", now=_at(21, 35)):
         seen = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
         found = await look_up_contact.invoke({"name": "路人"})
@@ -287,7 +290,7 @@ async def test_a_file_name_cannot_carry_markup_into_her_reading_list(
     reading_db, in_a_moment
 ):
     """**这是最短的一条路**：不用改昵称、不用进群，给文件起个名字发过来就行。"""
-    from app.living.reading import look_for_something_to_read
+    look_for_something_to_read = Tool(her_reader().look_for_something_to_read)
 
     await _seed_world()
     await _incoming(
@@ -305,10 +308,11 @@ async def test_a_sender_name_and_a_group_name_stay_out_of_her_reading_list(
     reading_db, in_a_moment, pinned
 ):
     """清单上还有两样外面来的：谁发的（昵称）、发在哪（会话名）。"""
-    from app.living.reading import look_for_something_to_read
+    look_for_something_to_read = Tool(her_reader().look_for_something_to_read)
 
     await _seed_world()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "UPDATE common_conversation SET display_name = :t "
@@ -337,7 +341,7 @@ async def test_the_reask_that_spreads_same_named_files_escapes_them_too(
     reading_db, in_a_moment
 ):
     """同名多份时摊开候选那一段同样是她眼前的文本。"""
-    from app.living.reading import read_a_bit
+    read_a_bit = Tool(her_reader().read_a_bit)
 
     await _seed_world()
     for i in range(2):
@@ -370,8 +374,8 @@ async def test_what_the_internet_says_cannot_carry_markup_into_her_feed(
     in_a_moment, monkeypatch
 ):
     from app.capabilities.web_search import SearchHit
-    from app.living import web as web_mod
-    from app.living.web import browse_online
+    from app.living.web import online as web_mod
+    from app.living.web.online import browse_online
 
     async def poisoned(query, *, count=5):
         return [
@@ -394,8 +398,8 @@ async def test_what_a_search_brings_back_cannot_carry_markup_either(
     in_a_moment, monkeypatch
 ):
     """带着问题查那条路交回来的是 ``search_web`` 拼好的一段，同样来自网页。"""
-    from app.living import web as web_mod
-    from app.living.web import search_online
+    from app.living.web import online as web_mod
+    from app.living.web.online import search_online
 
     class _Search:
         async def invoke(self, args):
@@ -418,12 +422,14 @@ async def test_what_a_search_brings_back_cannot_carry_markup_either(
 async def test_an_image_title_from_the_internet_cannot_carry_markup(
     pictures_db, in_a_moment, her_hands  # noqa: F811 — 形参名就是 fixture 名
 ):
+    from app.agent.tooling import Tool
     from app.capabilities.image_search import ImageHit
-    from app.living.pictures import (
-        find_a_picture_online,
-        look_at_a_picture,
-        look_through_your_pictures,
-    )
+    from app.living.pictures.album import Album
+
+    album = Album()
+    find_a_picture_online = Tool(album.find_a_picture_online)
+    look_at_a_picture = Tool(album.look_at_a_picture)
+    look_through_your_pictures = Tool(album.look_through_your_pictures)
 
     her_hands.hits = [
         ImageHit(
@@ -444,38 +450,40 @@ async def test_an_image_title_from_the_internet_cannot_carry_markup(
 
 
 # ---------------------------------------------------------------------------
-# 感知：外面那五样是外部数据源逐字交回来的
+# 别人发给她的：落到她眼前时一样不带结构
+#
+# 别人做了什么、说了什么，只从她的收件箱进来（:mod:`app.living.household.received`）。她每一轮读到的、
+# 日记材料里摆的，是同一个样子（:func:`app.living.household.received.received_line`），这一处转义就管住
+# 两头。
 # ---------------------------------------------------------------------------
 
 
-def test_what_the_world_reports_cannot_carry_markup_into_what_she_perceived():
-    """``look_outside`` 把天气 / 番名逐字拼进 ``Happening.content``。
+def test_a_received_message_cannot_carry_markup_into_her_round():
+    """别的参与者发给她的消息落到她眼前时不能带结构。
 
-    那五个源在外面，交回来什么就是什么 —— 这条是 ``perceived_line`` 上唯一一个第三方
-    真的能决定字节的通道，姐姐说的话和她自己说的话都不是。
+    正文由发送方写下：world 和姐妹那边是模型，人工参与者那边是人，哪一种都不归她管，
+    所以无条件转义。
     """
-    from app.living.happening import Perceived, perceived_line
-    from app.living.place import Reach
-    from app.living.records import KIND_ACT, MEDIUM_IN_PERSON, WORLD_ACTOR
+    from app.living.household.received import ReceivedMessage, render_received
 
-    line = perceived_line(
-        Perceived(
-            seq=1,
-            happening_id="outside:2026-07-25",
-            actor=WORLD_ACTOR,
-            place="家",
-            kind=KIND_ACT,
-            medium=MEDIUM_IN_PERSON,
-            occurred_at=dt.datetime(2026, 7, 25, 8, tzinfo=dt.UTC),
-            audience=(),
-            reach=Reach.SAME_PLACE,
-            directed=False,
-            content=f"外面晴，今天更新：{POISON}",
-        ),
-        me="akao",
+    now = dt.datetime(2026, 7, 25, 21, 30, tzinfo=dt.UTC)
+    text_ = render_received(
+        [
+            ReceivedMessage(
+                lane=LANE,
+                persona_id="ayana",
+                message_id=sender,
+                sender=sender,
+                body=f"窗外下起了雨，{POISON}",
+                message_time=now,
+                wakes_recipient=True,
+            )
+            for sender in ("world", "operator")
+        ],
+        now=now,
     )
 
-    assert_only_our_own_markup(line, where="这段时间你感知到的")
+    assert_only_our_own_markup(text_, where="这段时间传到你这里的")
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +505,7 @@ def test_the_escape_is_defined_in_exactly_one_place():
 
     offenders: dict[str, list[str]] = {}
     for path in sorted(Path(living_pkg.__file__).parent.rglob("*.py")):
-        if path.name == "records.py":   # 定义处
+        if path.name == "common.py":   # 定义处
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         used = sorted(
@@ -518,7 +526,7 @@ def test_the_escape_is_defined_in_exactly_one_place():
 
     assert offenders == {}, (
         f"这些地方自己转义了一遍，而转义只允许有一处定义"
-        f"（app.living.records.esc）：{offenders}"
+        f"（app.living.common.esc）：{offenders}"
     )
 
 
@@ -528,10 +536,10 @@ def test_the_escape_is_defined_in_exactly_one_place():
 #
 # 沙箱**没有网络命名空间隔离**（``apps/sandbox-worker`` 只有命令黑名单 + tempdir +
 # 资源限制），说明里那几个脚本正是靠这一点才成立 —— Python 里发 HTTP 不受那条黑名单
-# 管。所以"脚本抓一个网页、把内容 print 出来"跟 :func:`app.living.web.browse_online`
+# 管。所以"脚本抓一个网页、把内容 print 出来"跟 :func:`app.living.web.online.browse_online`
 # 是同一条通道：那几个字节由网页那边决定，逐字进她眼前。
 #
-# 转义落在 ``guides.py`` 这一侧，**不落在 capability 里** —— 那个 capability 还被
+# 转义落在 ``guides/at_hand.py`` 这一侧，**不落在 capability 里** —— 那个 capability 还被
 # ``render_skill`` 用着，而说明正文是主人自己写在 NFS 上的 markdown，整段转义会把他的
 # 正文糟蹋掉。
 
@@ -539,8 +547,8 @@ def test_the_escape_is_defined_in_exactly_one_place():
 @pytest.mark.integration
 async def test_what_a_script_prints_cannot_carry_markup(in_a_moment, monkeypatch):
     from app.capabilities.sandbox import SandboxResult
-    from app.living import guides as guides_mod
-    from app.living.guides import run_a_script
+    from app.living.guides import at_hand as guides_mod
+    from app.living.guides.at_hand import run_a_script
 
     async def printed_poison(*, command, skill_name=""):
         return SandboxResult(exit_code=0, stdout=f"抓回来的：{POISON}", stderr="")
@@ -559,8 +567,8 @@ async def test_what_a_script_fails_with_cannot_carry_markup_either(
 ):
     """跑挂那条路把 stdout 和 stderr 一起交回去，两股都是外面来的。"""
     from app.capabilities.sandbox import SandboxResult
-    from app.living import guides as guides_mod
-    from app.living.guides import run_a_script
+    from app.living.guides import at_hand as guides_mod
+    from app.living.guides.at_hand import run_a_script
 
     async def blew_up(*, command, skill_name=""):
         return SandboxResult(
@@ -612,7 +620,7 @@ def test_the_four_characters_that_must_stay_escaped():
     ``&`` 那一个最容易被当成多余：不转的话，别人原样写一个 ``&lt;msg`` 进来，她读到的
     就是 ``&lt;msg`` —— 而模型读实体是认得的，等于把 ``<`` 递到了她眼前。
     """
-    from app.living.records import esc
+    from app.living.common import esc
 
     assert esc('<') == "&lt;"
     assert esc('>') == "&gt;"

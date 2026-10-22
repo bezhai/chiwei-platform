@@ -10,7 +10,7 @@
     一行都不写、返回 ``False``。落地即新一版，旧版留作可查历史。
   - serialise → PG → deserialise → model 必须 lossless（signature / 多模态不丢）。
   - **存储层不做任何裁剪**：交多少存多少，原样读回来。裁剪只有一处，在
-    :mod:`app.living.continuity`。
+    :mod:`app.agent.continuity`。
 
 集成测试（真实 Postgres，testcontainers）：整个正确性故事是写出新版本、
 ``select_latest`` 取最新全文、CAS 拦住过期写、跨 session 不串——mock pg 等于什么都没测。
@@ -31,8 +31,9 @@ from app.agent.neutral import (
     TurnPart,
 )
 from app.agent.session import load_session, replace_session
+from app.data.persist import insert_append, select_latest
 from app.domain.session_transcript import SessionTranscript
-from app.runtime.persist import insert_append, select_all_versions, select_latest
+from tests.data.read_back import all_versions
 from tests.runtime.conftest import migrate
 
 pytestmark = pytest.mark.integration
@@ -87,7 +88,7 @@ async def test_each_write_is_a_new_version_and_latest_is_the_whole_transcript(
     third = [*second, Message(role=Role.USER, content="c")]
     await replace_session(sid, third, expected_ver=2)
 
-    versions = await select_all_versions(SessionTranscript, {"session_id": sid})
+    versions = await all_versions(SessionTranscript, {"session_id": sid})
     assert [v.ver for v in versions] == [1, 2, 3]
 
     latest = await select_latest(SessionTranscript, {"session_id": sid})
@@ -200,7 +201,7 @@ async def test_the_store_never_trims_what_it_is_handed(session_db):
     """存储层不裁剪，这是"裁剪只有一处"的存储侧断言。
 
     旧实现在这里有两条上限（200 条 / 256 KiB），行为是丢最老的 + 记一行警告、返回值
-    看不出来。裁剪归 :mod:`app.living.continuity` 一处管之后，这一层交多少存多少。
+    看不出来。裁剪归 :mod:`app.agent.continuity` 一处管之后，这一层交多少存多少。
     """
     sid = "coe-x:akao:2026-06-04"
     filler = "x" * 4096

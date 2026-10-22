@@ -86,3 +86,33 @@ describe('auditMiddleware：gatewayAudit 五键提升到落库 params 顶层', (
     expect(params.after).toEqual({ enabled: false });
   });
 });
+
+// world 记录的写和删由路由自己先落审计、再补记结果（routes/world-records.ts）。路由标了
+// auditWritten 的请求，中间件不再写第二条；没标的照旧写。
+describe('auditMiddleware：路由自己落过审计的请求不再写第二条', () => {
+  it('标了 auditWritten 的不写，没标的照旧写', async () => {
+    savedRows.length = 0;
+    const { Hono } = await import('hono');
+    const app = new Hono();
+    app.use('*', auditMiddleware);
+    app.put('/dashboard/api/ops/world/records/document', (c) => {
+      c.set('auditWritten' as never, true as never);
+      return c.json({ ok: true });
+    });
+    app.post('/dashboard/api/ops/messaging/send', (c) => c.json({ ok: true }));
+
+    await app.request('/dashboard/api/ops/world/records/document', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: 'x.md', text: 'y' }),
+    });
+    expect(savedRows.length).toBe(0);
+
+    await app.request('/dashboard/api/ops/messaging/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sender: 'a', recipient: 'b', body: 'c' }),
+    });
+    expect(savedRows.length).toBe(1);
+  });
+});

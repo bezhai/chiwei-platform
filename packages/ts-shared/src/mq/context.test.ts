@@ -2,7 +2,7 @@
 //
 // 这是 rabbitmq.ts::publish 注入侧（rabbitmq.test.ts 覆盖）的对侧：写入什么格式，
 // 这里就必须按同样的格式读回来。归一规则必须与 agent-service
-// app/runtime/propagation.py 的 _coerce 完全一致，否则同一条消息在 TS worker 和
+// app/infra/propagation.py 的 _coerce 完全一致，否则同一条消息在 TS worker 和
 // Python 服务里会解出两个不同的 lane。
 
 import { describe, it, expect } from 'bun:test';

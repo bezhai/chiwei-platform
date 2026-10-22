@@ -1,6 +1,6 @@
 """主动发 message_id 前缀的跨语言线格式契约（生产方这一侧）。
 
-``proactive:<uuid>`` 这个形状由本服务产出（app/living/mouth.py 拼出来），由
+``proactive:<uuid>`` 这个形状由本服务产出（app/living/speaking/mouth.py 拼出来），由
 lark-service（TS）的出站投递剥掉前缀取 uuid 落进 ``common_message.agent_outbound_id``。
 前缀是两边共同的约定，但两边各写各的字面量 —— 只改一边不会有任何测试变红：
 投递方静默认不出主动消息，那次开口在库里永久失联，全程零报错。
@@ -38,8 +38,8 @@ def test_prefix_matches_contract():
 def test_the_two_spellings_of_one_outbound_id_are_the_same_value():
     """32 位 hex 和标准 uuid 是**同一个值的两种写法**，不是两个编号。
 
-    她眼前只会出现 hex 那一种（``app/living/snapshot.py`` 印「你刚做过、说过」，
-    ``app/living/phone.py`` 印她打开的会话里自己那几行），而库里
+    她眼前只会出现 hex 那一种（``app/living/her_records/`` 印「你刚做过、说过」，
+    ``app/living/phone/`` 印她打开的会话里自己那几行），而库里
     ``common_message.agent_outbound_id`` 是 uuid 列、存的是带短横那一种。中间那步换算
     错了不会报错：她照抄的编号查不到任何行，撤回只会说"没有这条"，看不出是写法错了。
     """

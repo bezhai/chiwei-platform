@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -12,9 +11,8 @@ from inner_shared.middlewares.context_propagation import (
 
 from app.api.middleware import HeaderContextMiddleware, PrometheusMiddleware
 from app.api.routes import router as api_router
-from app.data.bootstrap import ensure_business_schema
-from app.infra.config import settings
-from app.runtime.outbox_dispatcher import dispatcher_loop
+from app.host import Host
+from app.infra.config import current_app, settings
 
 load_dotenv()
 setup_logging(log_dir="/logs/agent-service", log_file="app.log")
@@ -24,117 +22,35 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifecycle — init resources, start consumers, teardown."""
-    # Phase 2: ensure business schema exists before any downstream operation
-    # (RabbitMQ topology, sources, consumers)
-    await ensure_business_schema()
+    """Start the plugins of the app this process serves; stop them at shutdown.
 
+    The app is ``APP_NAME`` (PaaS injects it per Deployment), and its plugins are the ones its
+    manifest lists (:data:`app.deployment.APPS` names the manifest's module): only those modules
+    are imported, so one app's process loads none
+    of the other's code. The plugin host (:mod:`app.host`) runs every startup phase, the schema,
+    the broker (when one is configured), the routes on this app, the background tasks and the
+    clocks, and stops them in the shutdown order. The middlewares, ``/metrics`` and ``/health``
+    are set on the app at import, below.
+    """
+    app_name = current_app()
     logger.info("shared pkg loaded: %s", shared_hello())
 
-    # Wire up the dataflow graph + register runtime-internal trigger wire
-    # + (when MQ is configured) pre-declare durable topology so this
-    # producer-side process can emit() to downstream worker queues
-    # before the worker pods have had a chance to declare them.
-    # See app/runtime/bootstrap.py for the contract.
-    from app.runtime.bootstrap import prepare_for_run
-
-    await prepare_for_run(
-        "agent-service",
-        declare_topology=bool(settings.rabbitmq_url),
+    host = Host.for_app(app_name)
+    await host.start(
+        http=app,
+        schema=True,
+        mq=bool(settings.rabbitmq_url),
+        clocks=True,
+        tasks=True,
     )
-
-    # Migrate schema BEFORE start_consumers — durable consumers (e.g. the
-    # world/life event mailbox + intent edges) need their data tables to
-    # exist before the source loops start delivering.
-    from app.runtime.engine import Runtime
-
-    runtime_for_sources = Runtime(
-        app_name="agent-service",
-        migrate_schema_on_run=False,  # we drive migrate explicitly below
+    logger.info(
+        "app %s started: plugins %s", app_name, ", ".join(p.name for p in host.plugins)
     )
-    await runtime_for_sources.migrate_schema()
-
-    # Load skill definitions
-    import os
-    from pathlib import Path
-
-    from app.skills.registry import SkillRegistry, skill_reload_loop
-
-    skills_dir = Path(
-        os.environ.get(
-            "SKILLS_DIR", str(Path(__file__).parent / "skills" / "definitions")
-        )
-    )
-    SkillRegistry.load_all(skills_dir)
-
-    # Start hot-reload loop
-    reload_task = asyncio.create_task(skill_reload_loop(skills_dir))
-
-    # Start MQ consumers (only when RabbitMQ is configured)
-    if settings.rabbitmq_url:
-        # Phase 2: post-safety 改走 runtime durable consumer。旧
-        # start_post_consumer 删除（替代为 wire(PostSafetyRequest)
-        # .to(run_post_safety).durable()）；runtime 自动按 placement.bind
-        # 过滤启动属于本 app 的 consumer。
-        from app.runtime.debounce import start_debounce_consumers
-        from app.runtime.durable import start_consumers
-
-        await start_consumers(app_name="agent-service")
-        logger.info("Runtime durable consumers started for agent-service")
-        await start_debounce_consumers(app_name="agent-service")
-        logger.info("Runtime debounce consumers started for agent-service")
-
-    from app.runtime.http_source import register_http_sources
-
-    register_http_sources(app)
-    logger.info("dataflow http sources registered")
-
-    # Phase 4: start cron / interval / mq source loops + watchdog.
-    # Must run AFTER register_http_sources so HTTP routes are in place.
-    await runtime_for_sources.start_source_loops()
-    logger.info("dataflow source loops started")
-
-    # Phase 7b Gap 8: outbox dispatcher (HTTP process entry).
-    # Dual-entry with Runtime.run() (worker process entry) — both must
-    # drain the outbox so mutations from either process are forwarded.
-    outbox_task = asyncio.create_task(dispatcher_loop(), name="outbox_dispatcher")
 
     yield
 
-    # Phase 7b Gap 8: stop outbox dispatcher before tearing down consumers
-    # so any in-flight emit() calls can still complete.
-    outbox_task.cancel()
-    try:
-        await outbox_task
-    except asyncio.CancelledError:
-        pass
-
-    # Phase 4: stop source loops first; in-progress sources can still
-    # emit() to durable consumers cleanly because consumers are still alive.
-    logger.info("dataflow source loops stopping")
-    await runtime_for_sources.stop_source_loops()
-
-    # Phase 2: stop runtime durable consumers cleanly before tearing
-    # down RabbitMQ connection (otherwise late deliveries race with close).
-    if settings.rabbitmq_url:
-        from app.runtime.debounce import stop_debounce_consumers
-        from app.runtime.durable import stop_consumers
-
-        await stop_debounce_consumers()
-        await stop_consumers()
-
-    # Cancel skill reload task
-    reload_task.cancel()
-    try:
-        await reload_task
-    except asyncio.CancelledError:
-        pass
-
-    # Close RabbitMQ connection
-    if settings.rabbitmq_url:
-        from app.infra.rabbitmq import mq
-
-        await mq.close()
+    logger.info("app %s stopping", app_name)
+    await host.stop()
 
 
 app = FastAPI(lifespan=lifespan)

@@ -13,6 +13,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, NamedTuple
 
 import aio_pika
+import aiormq
 from aio_pika import DeliveryMode, ExchangeType, Message
 from aio_pika.abc import AbstractIncomingMessage
 
@@ -26,6 +27,19 @@ logger = logging.getLogger(__name__)
 EXCHANGE_NAME = "post_processing"
 DLX_NAME = "post_processing_dlx"
 DLQ_NAME = "dead_letters"
+# isolated 队列的死信：每条泳道一条，prod 也是自己一条（见 ``Route.isolated``）。
+ISOLATED_DEAD_LETTERS = "isolated_dead_letters"
+
+# x-delayed-message 的 x-delay 是 int32 毫秒（约 24.8 天）。超过这个数 broker 不接受，
+# 需要更长延时的使用方自己分段（通信机制的定时送达就是这么做的）。
+X_DELAY_MAX_MS = 2_147_483_647
+
+# broker 等一条投递被确认最多多久（RabbitMQ 的 ``consumer_timeout``）：超过就关掉这条投递所在的整个
+# 通道，通道上正在处理的别的投递一起被取消、放回队列。我们没有改它：prod 和 chiwei-test 的 broker
+# 都是 rabbitmq 4.0 镜像（``infra/k8s/infra-services/rabbitmq/deployment.yaml``、
+# ``infra/test-env/docker-compose.yaml``），没有配置这一项，用的是默认的 30 分钟。通信机制给一次投递
+# 的期限压在它之下（:data:`app.messaging.receiving.DELIVERY_DEADLINE`）。
+BROKER_ACK_TIMEOUT_MS = 1_800_000
 
 # Non-prod queues auto-expire after 24 h of inactivity
 _NON_PROD_EXPIRES_MS = 86_400_000
@@ -37,9 +51,19 @@ _LANE_FALLBACK_TTL_MS = 10_000
 # Routes — one queue + routing-key pair per logical stage
 # ---------------------------------------------------------------------------
 class Route(NamedTuple):
+    """一条队列 + 它在主交换机上的 routing key。
+
+    ``isolated=True`` 的队列只属于一条泳道、一个拥有者：
+      * 没有消费者时不转回 prod（不设 TTL 回退）；
+      * 闲置不过期（不设 x-expires）；
+      * 死信进它自己那条泳道的 ``ISOLATED_DEAD_LETTERS``，不进各泳道共用的 ``dead_letters``；
+      * 只由拥有者经 ``declare_route`` 声明，发布时从不顺带创建它——队列不存在就说明
+        拥有者没开设，发布方要自己先判断（``queue_exists``）。
+    """
+
     queue: str
     rk: str
-    lane_fallback: bool = True   # debounce route 用 False；默认 True 不破坏现有 Route("queue", "rk") 调用
+    isolated: bool = False
 
 
 CHAT_RESPONSE = Route("chat_response", "chat.response")
@@ -64,11 +88,7 @@ RECALL = Route("recall", "action.recall")
 # 上意味着泳道的回复由另一个渠道发出去，比不弹严重得多。
 def channel_route(base: Route, channel: str) -> Route:
     """Return ``base`` partitioned by ``channel``."""
-    return Route(
-        queue=f"{base.queue}_{channel}",
-        rk=f"{base.rk}.{channel}",
-        lane_fallback=base.lane_fallback,
-    )
+    return Route(queue=f"{base.queue}_{channel}", rk=f"{base.rk}.{channel}")
 
 
 # 已知 channel 是一份显式清单，不动态发现：动态发现意味着队列可能压根没被声明，
@@ -117,9 +137,8 @@ def channel_route_for(base_queue: str, channel: str) -> Route:
 def channel_route_for_payload(base_queue: str, payload: Any) -> Route:
     """Resolve the partitioned Route for ``base_queue`` off the payload's channel.
 
-    分区队列的 rk 只有消息自己知道，所以一律现算。出站（sink dispatch）和 DLQ 重放
-    共用这一条规则 —— 重放要是照着 base 名发，消息会落在一条没有消费者的队列上静默
-    滞留，而审计写着 published 成功。
+    分区队列的 rk 只有消息自己知道，所以一律现算（出站 app.infra.outbound.publish 用它）：
+    照着 base 名发，消息会落在一条没有消费者的队列上静默滞留。
 
     缺 channel / 未注册的 channel 一律抛，不挑默认值：猜错的下场是回复从另一个渠道
     发出去，比明确失败糟得多。
@@ -133,56 +152,20 @@ def channel_route_for_payload(base_queue: str, payload: Any) -> Route:
     return channel_route_for(base_queue, channel)
 
 
-# runtime_delayed_trigger queues (Phase 7a Gap 9.1.2): one per origin
-# APP_NAME so an envelope published from agent-service is consumed only
-# by an agent-service runtime (preserving emit()'s in-process / cross-
-# process fan-out decisions which depend on APP_NAME). Lane queues use
-# lane_fallback=False so a feat-x lane envelope never spills into prod.
-# （vectorize-worker 随 v4 记忆整机删除，已无任何节点，不再注册。）
-KNOWN_APPS_FOR_DELAYED_TRIGGER = ["agent-service"]
-DELAYED_TRIGGER_ROUTES = [
-    Route(
-        queue=f"runtime_delayed_trigger_{app}",
-        rk=f"runtime.delayed_trigger.{app}",
-        lane_fallback=False,
-    )
-    for app in KNOWN_APPS_FOR_DELAYED_TRIGGER
-]
-
-
-def trigger_route_for(app: str) -> Route:
-    """Return the runtime_delayed_trigger Route for ``app``.
-
-    Caller MUST pass an app from KNOWN_APPS_FOR_DELAYED_TRIGGER; an
-    unknown app would publish to a queue that no consumer subscribes
-    to and the envelope would never fire.
-    """
-    if app not in KNOWN_APPS_FOR_DELAYED_TRIGGER:
-        raise ValueError(
-            f"app={app!r} not in KNOWN_APPS_FOR_DELAYED_TRIGGER "
-            f"({KNOWN_APPS_FOR_DELAYED_TRIGGER}); update the list in "
-            f"app/infra/rabbitmq.py to register a new origin app."
-        )
-    for r in DELAYED_TRIGGER_ROUTES:
-        if r.queue == f"runtime_delayed_trigger_{app}":
-            return r
-    raise RuntimeError(f"trigger route for {app!r} not registered")  # unreachable
-
 # ALL_ROUTES 身兼两职，删东西之前先看清是哪一职：
 #
 #   声明面   declare_topology 遍历它建队列 + 绑定
-#   注册面   Sink.mq(name) / Source.mq(name) 的合法队列名从它来
-#            （compile_graph 的 known_queues、sink_dispatch._route_by_queue、
-#            dlq_admin 的重放目标查表）
+#   注册面   ctx.outbound(T, name) 的合法队列名从它来
+#            （app.infra.outbound.register 的查表）
 #
 # base 的 chat_response / recall 在声明面上已经是死的：出站早就按 channel 分区，
 # 生产者只发 chat.response.{channel} / action.recall.{channel}，消费者也只订
 # {queue}_{channel}，两条 base 队列没有生产者也没有消费者。
 #
-# 但它们在注册面上是活的：wiring 里写的是 Sink.mq("chat_response") /
-# Sink.mq("recall")，**base 名就是逻辑 sink 的标识**，真实 rk 由 _dispatch_mq_sink
-# 按 payload 的 channel 现算（channel_route_for）。从 ALL_ROUTES 里摘掉它们，
-# compile_graph 会在启动时直接 GraphError（"queue not in ALL_ROUTES"），进程起不来。
+# 但它们在注册面上是活的：插件登记的是 ctx.outbound(..., "chat_response") /
+# ctx.outbound(..., "recall")，**base 名就是逻辑出站队列的标识**，真实 rk 由
+# app.infra.outbound.publish 按 payload 的 channel 现算（channel_route_for）。从 ALL_ROUTES
+# 里摘掉它们，登记时就 ValueError（"no route in ALL_ROUTES declares that queue"），进程起不来。
 #
 # 所以这两条留着，代价是两条空队列。要真正去掉得先把注册面从声明面里拆出来。
 #
@@ -193,7 +176,6 @@ ALL_ROUTES = [
     CHAT_RESPONSE,
     RECALL,
     *CHANNEL_ROUTES,
-    *DELAYED_TRIGGER_ROUTES,
 ]
 
 # ---------------------------------------------------------------------------
@@ -205,7 +187,7 @@ MessageHandler = Callable[[AbstractIncomingMessage], Coroutine[Any, Any, None]]
 def current_lane() -> str | None:
     """Return current lane (None means prod).
 
-    contract-allowed None (§4.8): "no lane" is a normal value (prod),
+    contract-allowed None: "no lane" is a normal value (prod),
     not a failure. The middleware-import try/except handles the worker
     path where contextvars aren't installed; ENV ``LANE`` is the
     fallback. No upstream call here.
@@ -232,22 +214,25 @@ def _lane_rk(base: str, lane: str | None) -> str:
 
 
 def _build_queue_args(prod_rk: str, lane: str | None,
-                     lane_fallback: bool = True) -> dict[str, Any]:
+                     isolated: bool = False) -> dict[str, Any]:
     """Build queue arguments.
 
+    - isolated queues (any lane, prod included): dead-letter straight into the
+      lane's own ``ISOLATED_DEAD_LETTERS`` queue via the default exchange; no
+      TTL fallback, no idle expiry
     - prod queues: dead-letter to DLX
-    - lane queues with lane_fallback=True: TTL -> main exchange with prod
-      routing-key (fallback), plus auto-expire after 24 h idle
-    - lane queues with lane_fallback=False: keep DLX (异常 nack 仍要进
-      dead_letters), but no ttl-back-to-prod (long-delay messages 留在
-      自己 lane 上等到期；codex review round-1 M5 + round-5 H1)
+    - lane queues: TTL -> main exchange with prod routing-key (fallback),
+      plus auto-expire after 24 h idle
     """
+    if isolated:
+        return {
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": lane_queue(ISOLATED_DEAD_LETTERS, lane),
+        }
     extra: dict[str, Any] = {}
     if lane:
         extra["x-expires"] = _NON_PROD_EXPIRES_MS
     if not lane:
-        return {"x-dead-letter-exchange": DLX_NAME, **extra}
-    if not lane_fallback:
         return {"x-dead-letter-exchange": DLX_NAME, **extra}
     return {
         "x-message-ttl": _LANE_FALLBACK_TTL_MS,
@@ -255,6 +240,29 @@ def _build_queue_args(prod_rk: str, lane: str | None,
         "x-dead-letter-routing-key": prod_rk,
         **extra,
     }
+
+
+def dead_letter_origin(headers: dict[str, Any] | None) -> Route | None:
+    """一条被 broker 送进死信的 isolated 消息原本要去哪：队列名和完整 routing key。
+
+    读 broker 自己加的 ``x-death`` 头（最近一次死信那一项）。读到的队列名和 routing key
+    都带着泳道后缀。读不全就返回 ``None``——不猜目的地。这是头里写的东西，不是可以直接
+    发过去的地方：重放方要自己确认它属于本部署的泳道。
+    """
+    deaths = (headers or {}).get("x-death")
+    if not isinstance(deaths, list) or not deaths:
+        return None
+    latest = deaths[0]
+    if not isinstance(latest, dict):
+        return None
+    queue = latest.get("queue")
+    rks = latest.get("routing-keys")
+    if not isinstance(queue, str) or not isinstance(rks, list) or not rks:
+        return None
+    rk = rks[0].decode() if isinstance(rks[0], bytes) else rks[0]
+    if not isinstance(rk, str) or not rk:
+        return None
+    return Route(queue, rk, isolated=True)
 
 
 # ---------------------------------------------------------------------------
@@ -323,38 +331,59 @@ class _RabbitMQ:
             q = await self._channel.declare_queue(
                 lane_queue(route.queue, lane),
                 durable=True,
-                arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
+                arguments=_build_queue_args(
+                    route.rk, lane, isolated=route.isolated
+                ),
             )
             await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
         logger.info("RabbitMQ topology declared (lane=%s)", lane or "prod")
 
-    async def declare_route(self, route: Route) -> None:
+    async def declare_route(
+        self,
+        route: Route,
+        lane: str | None = ...,  # type: ignore[assignment]
+    ) -> None:
         """Declare a single route's queue + binding on the main exchange.
 
-        Used by the dataflow runtime to register durable wires dynamically on
-        top of the existing lane-aware topology (DLX, lane-TTL fallback, lazy
-        lane-queue declare all continue to work). ``declare_topology()`` still
+        Used by messaging to declare its queues (inboxes, question queues, the
+        scheduled queue) on top of the existing lane-aware topology (DLX,
+        lane-TTL fallback, lazy lane-queue declare all continue to work). ``declare_topology()`` still
         owns the static ``ALL_ROUTES`` list; this method is its per-route
         sibling so new routes can plug in without amending that list.
 
-        Reads ``route.lane_fallback`` (default True for prod compatibility) to
-        decide whether the lane queue gets x-message-ttl-back-to-prod fallback.
-        debounce routes set ``lane_fallback=False`` so 300s delays don't get
-        short-circuited to prod (spec §3.4.4 / codex review round-5 H1).
+        *lane* defaults to ``current_lane()``; pass it explicitly (``None`` for
+        prod) when the queue belongs to the process's deployment lane rather
+        than to whatever request happens to be in context. An isolated route
+        also gets its lane's dead-letter queue declared first, so a message it
+        dead-letters always has somewhere to land.
         """
         if self._channel is None or self._exchange is None:
             raise RuntimeError("must call connect() + declare_topology() first")
-        lane = current_lane()
+        if lane is ...:
+            lane = current_lane()
+        if lane == "prod":
+            lane = None
+        if route.isolated:
+            await self._channel.declare_queue(
+                lane_queue(ISOLATED_DEAD_LETTERS, lane), durable=True, arguments=None
+            )
         q = await self._channel.declare_queue(
             lane_queue(route.queue, lane),
             durable=True,
-            arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
+            arguments=_build_queue_args(
+                route.rk, lane, isolated=route.isolated
+            ),
         )
         await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
 
     async def _ensure_lane_queue(self, route: Route, lane: str) -> None:
-        """Lazily declare a lane queue on first publish (reads route.lane_fallback)."""
+        """Lazily declare a lane queue on first publish.
+
+        Isolated routes are skipped: only their owner declares them.
+        """
+        if route.isolated:
+            return
         cache_key = f"{route.queue}_{lane}"
         if cache_key in self._declared_lane_queues:
             return
@@ -363,7 +392,9 @@ class _RabbitMQ:
         q = await self._channel.declare_queue(
             lane_queue(route.queue, lane),
             durable=True,
-            arguments=_build_queue_args(route.rk, lane, route.lane_fallback),
+            arguments=_build_queue_args(
+                route.rk, lane, isolated=route.isolated
+            ),
         )
         await q.bind(self._exchange, routing_key=_lane_rk(route.rk, lane))
         self._declared_lane_queues.add(cache_key)
@@ -415,15 +446,13 @@ class _RabbitMQ:
     ) -> bool:
         """Publish with broker publish-confirm; return True iff broker ack-ed.
 
-        Used by the durable retry transport (Gap 7.2) and emit_delayed
-        durable path (Gap 9). Caller decides on False — DLQ-fallback for
-        retry, or raise for emit_delayed.
+        Used by messaging (:func:`app.messaging.broker.publish`). Caller decides on False.
 
         aio-pika channels default to ``publisher_confirms=True`` so the
         underlying ``exchange.publish`` already awaits broker confirm. We
         wrap with a hard timeout + broad exception catch so a transient
-        network blip never raises out into the durable handler (which
-        already owns ack/nack semantics via ``message.process``).
+        network blip never raises out into the caller, which owns what to do
+        with an unconfirmed publish.
         """
         import asyncio
 
@@ -471,6 +500,49 @@ class _RabbitMQ:
             )
             return False
 
+    async def queue_exists(self, name: str) -> bool:
+        """Whether queue ``name`` exists on the broker, without creating it.
+
+        A passive declare of a missing queue makes the broker close the channel
+        it ran on, so the check runs on a throwaway channel and never touches
+        the shared publisher channel.
+        """
+        if self._connection is None:
+            raise RuntimeError("must call connect() first")
+        channel = await self._connection.channel()
+        try:
+            await channel.declare_queue(name, passive=True)
+            return True
+        except aiormq.exceptions.ChannelNotFoundEntity:
+            return False
+        finally:
+            if not channel.is_closed:
+                await channel.close()
+
+    async def open_channel(
+        self, prefetch_count: int = 10
+    ) -> aio_pika.abc.AbstractChannel:
+        """A dedicated channel for one consumer, so its back-pressure (prefetch)
+        and its failures stay away from the shared publisher channel."""
+        if self._connection is None:
+            raise RuntimeError("must call connect() first")
+        channel = await self._connection.channel()
+        await channel.set_qos(prefetch_count=prefetch_count)
+        return channel
+
+    async def declare_private_queue(
+        self,
+        channel: aio_pika.abc.AbstractChannel,
+        route: Route,
+        lane: str | None,
+    ) -> aio_pika.abc.AbstractQueue:
+        """A server-named, exclusive, auto-delete queue on ``channel``, bound to
+        the main exchange at ``route.rk`` (lane-suffixed). It lives exactly as
+        long as this connection — for replies addressed to this one process."""
+        queue = await channel.declare_queue(exclusive=True, auto_delete=True)
+        await queue.bind(EXCHANGE_NAME, routing_key=_lane_rk(route.rk, lane))
+        return queue
+
     async def consume(
         self, queue_name: str, callback: MessageHandler
     ) -> tuple[Any, str]:
@@ -495,19 +567,3 @@ class _RabbitMQ:
 
 # Module-level instance
 mq = _RabbitMQ()
-
-
-async def basic_get(queue: str, *, no_ack: bool = False):
-    """Phase 7b Gap 12: blocking basic.get for DLQ replay.
-
-    Returns aio_pika.IncomingMessage or None if queue is empty. Caller is
-    responsible for ack()/nack(requeue=...) on the returned message.
-
-    Uses the shared ``mq._channel`` — caller must ensure ``mq.connect()``
-    has been called before invoking this helper (same precondition as all
-    other ``mq`` operations).
-    """
-    if mq._channel is None:
-        raise RuntimeError("must call mq.connect() first")
-    queue_obj = await mq._channel.declare_queue(queue, passive=True)
-    return await queue_obj.get(timeout=5, fail=False, no_ack=no_ack)

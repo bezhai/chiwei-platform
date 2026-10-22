@@ -1,0 +1,5 @@
+<identity>
+你是{{persona_name}}。
+
+{{persona_core}}
+</identity>

@@ -20,12 +20,16 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from app.data import session as session_mod
+from app.data.tx import current_session, tx
 from app.domain.chat_dataflow import PROACTIVE_MESSAGE_ID_PREFIX
-from app.living.mouth import _SEND_CHECK_TIMEOUT_S, send_message
-from app.living.records import MEDIUM_GROUP_CHAT, MEDIUM_PHONE
-from app.living.snapshot import recent_own_happenings
-from app.living.whereabouts import note_whereabouts
+from app.living.her_records import book as book_mod
+from app.living.her_records.deeds import recent_own_happenings
+from app.living.her_records.whereabouts import note_whereabouts
+from app.living.services import MEDIUM_GROUP_CHAT, MEDIUM_PHONE
+from app.living.speaking.mouth import _SEND_CHECK_TIMEOUT_S
+from tests.living.conftest import RESIDENTS, her_mouth
+
+send_message = her_mouth()
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -53,9 +57,10 @@ async def _somebody_called_her(
 ) -> None:
     """真人在这条会话里叫了她一声（私聊里任意一条就算，群里要点她的名）。
 
-    判据跟 nudge 那条钟同一份，见 :mod:`app.living.whitelist`。
+    判据跟 nudge 那条钟同一份，见 :mod:`app.living.phone.whitelist`。
     """
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message (common_message_id, channel,"
@@ -84,11 +89,12 @@ async def mouth_db(living_db):
     """两个 bot 身份、一条私聊、一个群、一个不是她的群 —— 嘴要发的地址都在这儿。
 
     私聊和群里各有一条**有人在叫她**的消息：白名单收窄之后"bot 还在这个会话里"不再
-    等于"她看得见它"（:mod:`app.living.whitelist`），一条动静都没有的会话她根本发不
+    等于"她看得见它"（:mod:`app.living.phone.whitelist`），一条动静都没有的会话她根本发不
     出去。这几条消息不改变下面任何一条用例要验的东西 —— 她没看过它们，所以既不进她
     开口前读的那段上下文，也不影响出站的任何一样。
     """
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_user (common_user_id, channel, display_name) "
@@ -135,22 +141,22 @@ async def mouth_db(living_db):
 @pytest.fixture
 def spoken(monkeypatch):
     """接住嘴吐出去的 ``ChatResponseSegment``，不真的发 MQ。"""
-    from app.living import mouth as mouth_mod
+    from app.living.speaking import mouth as mouth_mod
 
     out: list = []
 
     async def fake_emit(data):
         out.append(data)
 
-    monkeypatch.setattr(mouth_mod, "emit", fake_emit)
+    monkeypatch.setattr(mouth_mod, "publish", fake_emit)
     return out
 
 
 @pytest.fixture
 def guard(monkeypatch):
     """交出去之前那一关的替身。默认放行，而且是**判过之后**放行的。"""
-    from app.capabilities.output_safety import OutputVerdict
-    from app.living import mouth as mouth_mod
+    from app.living.speaking import mouth as mouth_mod
+    from app.living.speaking.output_safety import OutputVerdict
 
     class FakeGuard:
         def __init__(self) -> None:
@@ -303,29 +309,6 @@ async def test_a_group_message_is_recorded_as_a_group_message(
     assert h.medium == MEDIUM_GROUP_CHAT
 
 
-@pytest.mark.integration
-async def test_what_she_texts_is_not_overheard_by_the_sister_next_to_her(
-    mouth_db, in_a_moment, spoken, guard
-):
-    """手机隔着设备：坐在她旁边的姐姐也看不见那些字。"""
-    from app.living.happening import read_perceived_by
-
-    await note_whereabouts(
-        lane=LANE, persona_id="akao", moment_id="m1", place="家/客厅",
-        doing="翻胶片", noted_at=_at(21),
-    )
-    await note_whereabouts(
-        lane=LANE, persona_id="ayana", moment_id="m1", place="家/客厅",
-        doing="看书", noted_at=_at(21),
-    )
-
-    async with in_a_moment("akao"):
-        await send_message.invoke({"what": "问问他", "channel_id": str(_DM)})
-
-    heard = await read_perceived_by(lane=LANE, persona_id="ayana")
-    assert heard.items == []
-
-
 # --------------------------------------------------------------------------
 # 四 · 发不出去就说发不出去
 # --------------------------------------------------------------------------
@@ -395,13 +378,17 @@ async def test_a_handoff_that_blew_up_is_unknown_not_a_confirmed_failure(
     重复打扰真人比少一条更糟，所以这一格跟"崩在 emit 和收口之间"完全同一档：行停在
     ``claimed``（可查、不重发）、不留记忆、如实告诉她不知道到没到。
     """
-    from app.living import mouth as mouth_mod
-    from app.living.mouth import STATE_CLAIMED, latest_outbound, unsettled_outbound
+    from app.living.speaking import mouth as mouth_mod
+    from app.living.speaking.mouth import (
+        STATE_CLAIMED,
+        latest_outbound,
+        unsettled_outbound,
+    )
 
     async def boom(_data):
         raise RuntimeError("MQ 连不上")
 
-    monkeypatch.setattr(mouth_mod, "emit", boom)
+    monkeypatch.setattr(mouth_mod, "publish", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -413,7 +400,7 @@ async def test_a_handoff_that_blew_up_is_unknown_not_a_confirmed_failure(
     assert await recent_own_happenings(lane=LANE, persona_id="akao") == [], (
         "结果不知道却记成说过了 —— 她从此不会再说这句话"
     )
-    row = await latest_outbound(lane=LANE, moment_id=ctx.features["living_moment"])
+    row = await latest_outbound(lane=LANE, moment_id=ctx.round_id)
     assert row is not None and row.state == STATE_CLAIMED, (
         "emit 抛错被判成「确定没发出去」了 —— 那就允许自动重试，而 broker 可能已经"
         f"收件，真人会收到两条。拿到：{row}"
@@ -432,12 +419,12 @@ async def test_she_is_told_the_outcome_is_unknown_not_told_to_try_again(
     "再试一次"是在指挥她 —— 重不重说是她的决定，不是系统按的按钮。而"发出去了"是
     编的：这一格根本不知道。所以只剩一条路：**如实说不知道**。
     """
-    from app.living import mouth as mouth_mod
+    from app.living.speaking import mouth as mouth_mod
 
     async def boom(_data):
         raise RuntimeError("MQ 连不上")
 
-    monkeypatch.setattr(mouth_mod, "emit", boom)
+    monkeypatch.setattr(mouth_mod, "publish", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -462,7 +449,7 @@ async def test_a_blown_up_handoff_is_never_handed_off_again_in_the_same_seam(
     mouth_db, in_a_moment, spoken, guard, monkeypatch
 ):
     """同一轮里再说同一句 —— 不再交第二次。第一条可能已经躺在 broker 里了。"""
-    from app.living import mouth as mouth_mod
+    from app.living.speaking import mouth as mouth_mod
 
     attempts: list = []
 
@@ -470,7 +457,7 @@ async def test_a_blown_up_handoff_is_never_handed_off_again_in_the_same_seam(
         attempts.append(data)
         raise RuntimeError("MQ 连不上")
 
-    monkeypatch.setattr(mouth_mod, "emit", boom)
+    monkeypatch.setattr(mouth_mod, "publish", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -497,7 +484,7 @@ async def test_the_next_seam_is_a_new_seam_so_she_can_say_it_again(
     这个决定回到了她手里，而不是系统替她按重试按钮。这条推理必须在代码里真的成立，
     所以这里把它跑一遍。
     """
-    from app.living import mouth as mouth_mod
+    from app.living.speaking import mouth as mouth_mod
 
     attempts: list = []
     broker_down = {"yes": True}
@@ -508,7 +495,7 @@ async def test_the_next_seam_is_a_new_seam_so_she_can_say_it_again(
             raise RuntimeError("MQ 连不上")
         spoken.append(data)
 
-    monkeypatch.setattr(mouth_mod, "emit", flaky)
+    monkeypatch.setattr(mouth_mod, "publish", flaky)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -545,13 +532,12 @@ async def test_a_crash_after_handoff_leaves_a_row_that_says_so(
     但没确认完，可能已经送到、她可能不记得"，用 :func:`unsettled_outbound` 一句
     SQL 就能捞出来。
     """
-    from app.living import mouth as mouth_mod
-    from app.living.mouth import STATE_CLAIMED, unsettled_outbound
+    from app.living.speaking.mouth import STATE_CLAIMED, unsettled_outbound
 
     async def boom(**_kw):
         raise RuntimeError("记这一步崩了")
 
-    monkeypatch.setattr(mouth_mod, "record_happening", boom)
+    monkeypatch.setattr(book_mod, "record_happening", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -580,15 +566,14 @@ async def test_an_unsettled_send_is_never_handed_off_a_second_time(
     一条"照样成立 —— 这条用例要守的防重路径**一次都没被执行过**。所以下面断言的是
     第二次拿到「已经认领过、不再发」那句正常回话，不是一个被吞掉的异常。
     """
-    from app.living import mouth as mouth_mod
-    from app.living.mouth import STATE_CLAIMED, SpokenOutbound, latest_outbound
-    from app.runtime.persist import select_all_versions
+    from app.living.speaking.mouth import STATE_CLAIMED, SpokenOutbound, latest_outbound
+    from tests.data.read_back import all_versions
 
     async def boom(**_kw):
         raise RuntimeError("记这一步崩了")
 
-    real_record_happening = mouth_mod.record_happening
-    monkeypatch.setattr(mouth_mod, "record_happening", boom)
+    real_record_happening = book_mod.record_happening
+    monkeypatch.setattr(book_mod, "record_happening", boom)
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
         doing="翻胶片", noted_at=_at(21),
@@ -597,7 +582,7 @@ async def test_an_unsettled_send_is_never_handed_off_a_second_time(
         await send_message.invoke({"what": _SAID, "channel_id": str(_DM)})
     assert len(spoken) == 1
 
-    monkeypatch.setattr(mouth_mod, "record_happening", real_record_happening)
+    monkeypatch.setattr(book_mod, "record_happening", real_record_happening)
     async with in_a_moment("akao", moment_id=_MOMENT):
         again = await send_message.invoke(
             {"what": _SAID, "channel_id": str(_DM)}
@@ -616,7 +601,7 @@ async def test_an_unsettled_send_is_never_handed_off_a_second_time(
     assert row.state == STATE_CLAIMED, (
         f"第二次调用把这条记录往前推了 —— 它该在防重那一步就返回。拿到：{row}"
     )
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": row.outbound_id}
     )
     assert [v.ver for v in versions] == [1], (
@@ -635,7 +620,7 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
 ):
     """对账钟抢在收口之前追了一版 —— 收口要合到那一版上，不是被它挤掉。
 
-    :mod:`app.living.landing` 那条钟是这条认领链上的**第二个写者**。时序是可达的：
+    :mod:`app.living.speaking.landing` 那条钟是这条认领链上的**第二个写者**。时序是可达的：
 
       1. ``send_message`` 写 v1 认领、把话交出去；
       2. 渠道那边落了账；
@@ -649,15 +634,14 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
     所以这里把那一拍真的插进认领和收口之间 —— 造出真实的版本链，而不是让替身报一
     个假的 CAS 失败。
     """
-    from app.living import mouth as mouth_mod
-    from app.living.landing import reconcile_landings
-    from app.living.mouth import (
+    from app.living.speaking.landing import reconcile_landings
+    from app.living.speaking.mouth import (
         STATE_HANDED_OFF,
         SpokenOutbound,
         latest_outbound,
         unsettled_outbound,
     )
-    from app.runtime.persist import select_all_versions
+    from tests.data.read_back import all_versions
 
     # 「投递方在公共层落下的那一行」只在 test_landing 里定义一次，这边照用。
     from tests.living.test_landing import _the_channel_wrote
@@ -667,7 +651,7 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
         doing="翻胶片", noted_at=_at(21),
     )
 
-    real_record_happening = mouth_mod.record_happening
+    real_record_happening = book_mod.record_happening
     landed: list[uuid.UUID] = []
 
     async def the_channel_lands_and_the_clock_ticks(**kw):
@@ -682,7 +666,7 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
         assert await reconcile_landings(lane=LANE) == 1, "对账那一拍没补上落地标识"
 
     monkeypatch.setattr(
-        mouth_mod, "record_happening", the_channel_lands_and_the_clock_ticks
+        book_mod, "record_happening", the_channel_lands_and_the_clock_ticks
     )
 
     async with in_a_moment("akao", moment_id=_MOMENT):
@@ -704,7 +688,7 @@ async def test_a_send_reconciled_before_it_settles_still_gets_settled(
         "收口把对账补上的落地标识覆盖掉了 —— 那一版记的是已知事实，不能被抹回 NULL"
     )
     assert row.landed_at == _at(21, 31), "落地时刻被收口顺手改了"
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": row.outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2, 3], (
@@ -730,10 +714,10 @@ async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
     条缝，它是一次要等的模型调用），版本链真的往前走了一版，不是让替身报一个假的
     失败。
     """
-    from app.capabilities.output_safety import OutputVerdict
-    from app.living import mouth as mouth_mod
-    from app.living.mouth import SpokenOutbound, latest_outbound
-    from app.runtime.persist import select_all_versions
+    from app.living.speaking import mouth as mouth_mod
+    from app.living.speaking.mouth import SpokenOutbound, latest_outbound
+    from app.living.speaking.output_safety import OutputVerdict
+    from tests.data.read_back import all_versions
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
@@ -768,7 +752,7 @@ async def test_losing_the_claim_race_does_not_hand_the_same_words_off_twice(
         "同一句话落了两条记忆 —— 她下一轮会以为自己说了两遍"
     )
     row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": row.outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], (
@@ -800,8 +784,8 @@ async def test_a_sent_line_comes_back_as_its_handle_not_its_words(
     mouth_db, in_a_moment, spoken, guard
 ):
     """发出去了：回执里是这条的撤回编号，印法跟她在「你刚做过、说过」里见到的一样。"""
-    from app.living.happening import own_line
-    from app.living.mouth import latest_outbound
+    from app.living.her_records.deeds import own_line
+    from app.living.speaking.mouth import latest_outbound
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
@@ -818,7 +802,7 @@ async def test_a_sent_line_comes_back_as_its_handle_not_its_words(
         f"回执里没有这条的撤回编号。拿到：{outcome!r}"
     )
     (h,) = await recent_own_happenings(lane=LANE, persona_id="akao")
-    assert f"［{row.outbound_id}］" in own_line(h), (
+    assert f"［{row.outbound_id}］" in own_line(h, residents=RESIDENTS), (
         "回执和「你刚做过、说过」印出来的不是同一个形状 —— 她会以为那是两种编号"
     )
 
@@ -832,7 +816,7 @@ async def test_saying_it_again_in_the_same_round_hands_back_the_same_handle(
     这一格提前返回，没走到收口那一步，编号只能从认领表上那条记录派生。三种结局照样
     分得开：这里说的是"已经说出去了"，不是"发出去了"。
     """
-    from app.living.mouth import latest_outbound
+    from app.living.speaking.mouth import latest_outbound
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
@@ -875,8 +859,8 @@ async def test_words_that_do_not_pass_never_reach_anyone(
     她主动开口没有实时性压力（不像真人在等一条流式回复），所以这一关放得进"交出去
     之前"。放在之后就只剩"先发后撤"，而那意味着真人已经看见了。
     """
-    from app.capabilities.output_safety import OutputVerdict
-    from app.living.mouth import latest_outbound
+    from app.living.speaking.mouth import latest_outbound
+    from app.living.speaking.output_safety import OutputVerdict
 
     guard.verdict = OutputVerdict(
         ok=False, reason="output_unsafe", detail="confidence=0.9"
@@ -943,7 +927,7 @@ async def test_being_stopped_does_not_burn_the_id_for_that_sentence(
     认领是从 ``(moment_id, 她那句话)`` 派生的：被拦时如果占住了，同一轮里再说同一件
     事就会撞上"你已经说过了"，而那是假话 —— 她一个字都没说出去。
     """
-    from app.capabilities.output_safety import OutputVerdict
+    from app.living.speaking.output_safety import OutputVerdict
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
@@ -998,7 +982,7 @@ async def test_a_guard_that_could_not_judge_does_not_make_her_go_quiet(
     """
     import logging
 
-    from app.capabilities.output_safety import OutputVerdict
+    from app.living.speaking.output_safety import OutputVerdict
 
     guard.verdict = OutputVerdict(ok=True, checked=False)
     await note_whereabouts(
@@ -1030,7 +1014,7 @@ def test_taking_it_back_is_its_own_axis_not_a_third_state():
     压进 ``state`` 就会用一个"撤回了"盖掉 ``claimed``，:func:`unsettled_outbound`
     从此捞不出它，"她可能不记得自己说过"这件事再没人看得见。
     """
-    from app.living.mouth import SpokenOutbound
+    from app.living.speaking.mouth import SpokenOutbound
 
     fields = SpokenOutbound.model_fields
     assert "took_back_at" in fields, "她按下撤回那一刻"
@@ -1048,7 +1032,7 @@ def test_the_take_back_axis_refuses_a_clockless_instant():
 
     import pydantic
 
-    from app.living.mouth import STATE_HANDED_OFF, SpokenOutbound
+    from app.living.speaking.mouth import STATE_HANDED_OFF, SpokenOutbound
 
     base = {
         "lane": LANE, "outbound_id": "x" * 32, "ver": 1, "persona_id": "akao",
@@ -1071,8 +1055,8 @@ async def test_a_line_that_lost_the_claim_race_is_not_counted_as_unchecked(
     """
     import logging
 
-    from app.capabilities.output_safety import OutputVerdict
-    from app.living import mouth as mouth_mod
+    from app.living.speaking import mouth as mouth_mod
+    from app.living.speaking.output_safety import OutputVerdict
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
@@ -1114,7 +1098,7 @@ async def test_being_stopped_over_and_over_never_leaks_a_line(
     守的是那条路的另一端：只要每次都判不合格，就一次都不会漏出去。**这里没有重试
     预算**，因为"还要不要再说一次"是她的判断；能保证的是每个候选都被判过。
     """
-    from app.capabilities.output_safety import OutputVerdict
+    from app.living.speaking.output_safety import OutputVerdict
 
     guard.verdict = OutputVerdict(ok=False, reason="output_unsafe")
     await note_whereabouts(
@@ -1148,10 +1132,11 @@ async def test_a_conversation_out_of_sight_is_refused_even_though_her_bot_is_in_
     """bot 还在那个群里、但没人叫她 —— 她发不出去。
 
     这是白名单主闸在嘴这一侧的样子：她能发的严格等于她能看见的那些会话
-    （:func:`app.living.phone.reachable_conversations`），而不是"bot 还在的那些"。
+    （:func:`app.living.phone.handset.reachable_conversations`），而不是"bot 还在的那些"。
     """
     quiet = uuid.uuid5(uuid.NAMESPACE_OID, "conv-group-nobody-calls-her")
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_conversation"
@@ -1187,7 +1172,7 @@ async def test_sending_checks_where_her_bot_is_right_now_not_the_settled_list(
     提，读一份这一轮开头的快照等于这道保护不存在 —— bot 半路被移出会话，她还会照着过
     期的判断把话交出去。
     """
-    from app.living.phone import reachable_conversations
+    from app.living.phone.handset import reachable_conversations
 
     async with in_a_moment("akao"):
         settled = {
@@ -1196,7 +1181,8 @@ async def test_sending_checks_where_her_bot_is_right_now_not_the_settled_list(
         }
         assert str(_DM) in settled, "用例前提没成立：这条私聊本该在名单里"
 
-        async with session_mod.get_session() as s:
+        async with tx():
+            s = current_session()
             await s.execute(
                 text(
                     "DELETE FROM common_bot_presence"
@@ -1226,7 +1212,7 @@ async def test_she_can_still_answer_a_line_that_slid_out_of_the_window_mid_momen
     "刚看完那条私聊、正要回"的中途发现那条会话没了 —— 而消息还挂在真人眼前。
     """
     from app.data.queries.messages import count_summons_since
-    from app.living.phone import reachable_conversations
+    from app.living.phone.handset import reachable_conversations
 
     async with in_a_moment("akao"):
         settled = {
@@ -1236,7 +1222,8 @@ async def test_she_can_still_answer_a_line_that_slid_out_of_the_window_mid_momen
         assert str(_DM) in settled, "用例前提没成立：这条私聊本该在名单里"
 
         # 把让它进名单的那条消息删掉 —— 现在重算的话它一档都够不着。
-        async with session_mod.get_session() as s:
+        async with tx():
+            s = current_session()
             await s.execute(
                 text(
                     "DELETE FROM common_message"
@@ -1278,7 +1265,7 @@ _NO_PICTURE_OUTBOUND_ID = "1f5ab29326e0548b83eebb0d8f54fa24"
 @pytest.fixture
 def a_picture(mouth_db):
     """造一张"她做过的图"。默认是这条泳道上、她自己名下的那种。"""
-    from app.living.pictures import remember_a_picture
+    from app.living.pictures.album import remember_a_picture
 
     async def make(
         *,
@@ -1440,7 +1427,7 @@ async def test_a_send_without_pictures_derives_exactly_the_id_it_always_did(
     写死的快照（见 :data:`_NO_PICTURE_OUTBOUND_ID`）：改坏了的症状是认领表在历史
     记录上全部失效，而不是任何一条报错。
     """
-    from app.living.mouth import latest_outbound
+    from app.living.speaking.mouth import latest_outbound
 
     await note_whereabouts(
         lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
@@ -1463,6 +1450,34 @@ async def test_a_send_without_pictures_derives_exactly_the_id_it_always_did(
 
 
 @pytest.mark.integration
+async def test_a_send_with_pictures_derives_exactly_the_id_it_always_did(
+    mouth_db, in_a_moment, spoken, guard, a_picture
+):
+    """带图那条路的 id 也写死：泳道、她、这一轮的身份、会话、张数、每张的文件名（按她给的
+    顺序）、原话，用带图的那个命名空间。她这一轮的身份的写法改了，这个值就变。"""
+    from app.living.speaking.mouth import latest_outbound
+
+    one = await a_picture(file_name="temp/tos_one.jpg")
+    two = await a_picture(file_name="temp/tos_two.jpg")
+    await note_whereabouts(
+        lane=LANE, persona_id="akao", moment_id="m1", place="家/我房间",
+        doing="翻胶片", noted_at=_at(21),
+    )
+
+    async with in_a_moment("akao", moment_id=_MOMENT):
+        await send_message.invoke(
+            {
+                "what": "两张一起给他",
+                "channel_id": str(_DM),
+                "pictures": [two.picture_id, one.picture_id],
+            }
+        )
+
+    row = await latest_outbound(lane=LANE, moment_id=_MOMENT)
+    assert row.outbound_id == "3e0b8806ad6155b5b82c53136c065d20"
+
+
+@pytest.mark.integration
 async def test_a_handle_that_is_not_hers_never_gets_sent(
     mouth_db, in_a_moment, spoken, guard, a_picture
 ):
@@ -1475,7 +1490,7 @@ async def test_a_handle_that_is_not_hers_never_gets_sent(
     取不到就整条不发，**绝不跳过那一张把剩下的发出去** —— 她说的是"把这几张给他
     看"，少一张的那条消息不是她要发的那条。
     """
-    from app.living.mouth import latest_outbound
+    from app.living.speaking.mouth import latest_outbound
 
     mine = await a_picture(file_name="temp/tos_mine.jpg")
     sisters = await a_picture(file_name="temp/tos_ayana.jpg", persona_id="ayana")
@@ -1537,12 +1552,12 @@ async def test_the_handle_she_copies_off_her_own_list_is_the_one_this_accepts(
 ):
     """印出去的那串和认回来的那串必须是同一串。
 
-    看图那边印给她的是 ``pic=<id>``（:func:`app.living.pictures._handle_of`），它的
+    看图那边印给她的是 ``pic=<id>``（:func:`app.living.pictures.album._handle_of`），它的
     docstring 反复对她说"原样抄回来"。两边各写一遍解析的话，印的是 ``pic=<id>``、认
     的是裸 id，她照做就撞死路 —— ``read_a_bit`` 在 coe-living 上实测踩过这个坑，而这
     次她收到的还不是"没找到"，是"这不是你做过的图"，等于系统告诉她自己的记录是假的。
     """
-    from app.living.pictures import _handle_of
+    from app.living.pictures.album import _handle_of
 
     pic = await a_picture(file_name="temp/tos_matcha_cat.jpg")
     await note_whereabouts(

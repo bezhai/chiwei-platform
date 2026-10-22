@@ -244,15 +244,15 @@ spec:
             summary: "RabbitMQ 业务队列 {{ $labels.queue }} consumer 断开"
             description: "关键业务队列 {{ $labels.queue }} 的 consumer 已断开超过 1 分钟。"
 
-        # RabbitMQ - DLQ 进消息（fail-to-DLQ 设计，进 DLQ 即需 operator 介入）
+        # RabbitMQ - dead_letters 里有消息：prod 队列的消费方拒收了消息（目前主要是渠道服务拒收的出站消息）
         - alert: DeadLettersBacklog
           expr: rabbitmq_queue_messages_ready{namespace="prod", queue="dead_letters"} > 0
           for: 1m
           labels:
             severity: critical
           annotations:
-            summary: "dead_letters 队列有消息待处理"
-            description: "{{ $value }} 条消息已进入 DLQ，需根据 docs/superpowers/runbooks/2026-04-dlq-replay.md 排查并决定 replay 或丢弃。"
+            summary: "dead_letters 队列里有消息"
+            description: "dead_letters 里有 {{ $value }} 条消息：prod 队列的消费方拒收后经 DLX 进来的，目前主要是渠道服务拒收的出站消息（chat_response_* / recall_*）。消息会一直留在这里，仓库里没有查看或重放它们的工具。拒收原因查渠道服务的日志：飞书 make logs APP=lark-outbound，QQ make logs APP=chat-response-worker。"
 
         # chat_response 队列积压超过 20s（10s 是泳道 fallback TTL，20s 说明 prod consumer 也没在消费）
         - alert: ChatResponseQueueBacklog

@@ -22,7 +22,6 @@ from app.infra.rabbitmq import (
     ALL_ROUTES,
     CHANNEL_PARTITIONED_ROUTES,
     CHAT_RESPONSE,
-    DELAYED_TRIGGER_ROUTES,
     DLX_NAME,
     EXCHANGE_NAME,
     KNOWN_CHANNELS,
@@ -111,7 +110,7 @@ class TestContractVectorPythonSide:
     @pytest.mark.parametrize("case", CONTRACT["cases"], ids=_case_id)
     def test_queue_args(self, case: dict[str, Any]):
         route = channel_route(_base_route(case["base"]), case["channel"])
-        args = _build_queue_args(route.rk, case["lane"], route.lane_fallback)
+        args = _build_queue_args(route.rk, case["lane"])
         assert args == case["expect"]["queue_args"]
 
     def test_exchange_names_match(self):
@@ -132,11 +131,6 @@ class TestContractVectorPythonSide:
             != channel_route(CHAT_RESPONSE, second).rk
         )
 
-    def test_lane_fallback_inherited_from_base(self):
-        assert channel_route(CHAT_RESPONSE, "lark").lane_fallback is True
-        base_no_fallback = CHAT_RESPONSE._replace(lane_fallback=False)
-        assert channel_route(base_no_fallback, "lark").lane_fallback is False
-
 
 class TestKnownChannelsRegistry:
     """已知 channel 是一份显式清单，不动态发现 —— 队列没被声明是静默失败。"""
@@ -154,9 +148,9 @@ class TestKnownChannelsRegistry:
                 assert route in ALL_ROUTES, f"{route.queue} would never be declared"
 
     def test_partitioned_base_names_stay_registered(self):
-        # base 名是 Sink.mq("chat_response") / Sink.mq("recall") 的标识：不在
-        # ALL_ROUTES 里 compile_graph 就会在启动时 GraphError，进程起不来。真实 rk
-        # 由 dispatch 按 payload 的 channel 现算，跟这两条 Route 的 rk 无关。
+        # base 名是 ctx.outbound(..., "chat_response") / ctx.outbound(..., "recall") 的标识：
+        # 不在 ALL_ROUTES 里，登记时就 ValueError，进程起不来。真实 rk 由
+        # app.infra.outbound.publish 按 payload 的 channel 现算，跟这两条 Route 的 rk 无关。
         assert CHAT_RESPONSE in ALL_ROUTES
         assert RECALL in ALL_ROUTES
 
@@ -179,8 +173,8 @@ class TestChannelRouteFor:
             channel_route_for("chat_response", "")
 
     def test_queue_that_is_not_channel_partitioned_raises(self):
-        # 一条真实存在、但只有单一 Route 的队列（不按 channel 分区）。
-        single = DELAYED_TRIGGER_ROUTES[0].queue
+        # 一条真实存在、但只有单一 Route 的队列（不按 channel 分区）：某个渠道自己那条。
+        single = CHANNEL_PARTITIONED_ROUTES["chat_response"]["lark"].queue
         with pytest.raises(ValueError) as excinfo:
             channel_route_for(single, "lark")
         assert single in str(excinfo.value)

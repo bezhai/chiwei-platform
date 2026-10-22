@@ -22,20 +22,24 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from app.data import session as session_mod
-from app.living.happening import record_happening
-from app.living.mouth import (
+from app.agent.round import current_round
+from app.data.persist import insert_append, select_latest
+from app.data.tx import current_session, tx
+from app.living.her_records import book as book_mod
+from app.living.her_records.deeds import recent_own_happenings, record_happening
+from app.living.her_records.whereabouts import note_whereabouts
+from app.living.services import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
+from app.living.speaking.mouth import (
     STATE_CLAIMED,
     STATE_HANDED_OFF,
     SpokenOutbound,
     latest_outbound,
-    send_message,
 )
-from app.living.records import KIND_ACT, KIND_SPEECH, MEDIUM_PHONE
-from app.living.snapshot import read_snapshot, recent_own_happenings
-from app.living.takeback import take_back_message
-from app.living.whereabouts import note_whereabouts
-from app.runtime.persist import insert_append, select_all_versions, select_latest
+from tests.data.read_back import all_versions
+from tests.living.conftest import her_mouth, her_taking_back, own_records
+
+send_message = her_mouth()
+take_back_message = her_taking_back()
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -62,11 +66,12 @@ async def takeback_db(living_db):
     顺带建上 ``LooseEnd``：下面那条「快照印出来的编号能撤掉那一条」要真的读一次
     快照，而快照第二层读的就是它。
     """
-    from app.living.loose_ends import LooseEnd
+    from app.living.loose_ends.threads import LooseEnd
     from tests.runtime.conftest import migrate
 
     await migrate(LooseEnd, living_db)
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_user (common_user_id, channel, display_name) "
@@ -110,27 +115,27 @@ async def takeback_db(living_db):
 @pytest.fixture
 def recalls(monkeypatch):
     """接住撤回请求，不真的投 MQ。"""
-    from app.living import takeback as takeback_mod
+    from app.living.speaking import takeback as takeback_mod
 
     out: list = []
 
     async def fake_emit(data):
         out.append(data)
 
-    monkeypatch.setattr(takeback_mod, "emit", fake_emit)
+    monkeypatch.setattr(takeback_mod, "publish", fake_emit)
     return out
 
 
 @pytest.fixture
 def her_mouth(monkeypatch):
-    """让 :func:`app.living.mouth.send_message` 真的跑完，但不碰模型、不投 MQ。
+    """让 :meth:`app.living.speaking.mouth.Mouth.send_message` 真的跑完，但不碰模型、不投 MQ。
 
     只有要**真的走一遍她开口那条路**的用例需要它（快照印的编号、回执印的编号各一条）：
     ``happening_id`` 由嘴自己拼、快照和回执各自解析、撤回自己收 —— 中间任何一处各写
     一份拼接规则，它们就红。
     """
-    from app.capabilities.output_safety import OutputVerdict
-    from app.living import mouth as mouth_mod
+    from app.living.speaking import mouth as mouth_mod
+    from app.living.speaking.output_safety import OutputVerdict
 
     sent: list = []
 
@@ -140,7 +145,7 @@ def her_mouth(monkeypatch):
     async def fake_audit(said: str, *, timeout_s: float | None = None):
         return OutputVerdict(ok=True)
 
-    monkeypatch.setattr(mouth_mod, "emit", fake_emit)
+    monkeypatch.setattr(mouth_mod, "publish", fake_emit)
     monkeypatch.setattr(mouth_mod, "audit_output", fake_audit)
     return sent
 
@@ -207,7 +212,8 @@ async def _somebody_said_something(*, at: dt.datetime) -> None:
     的那几条用例用，别塞进 ``takeback_db``：本文件其余用例正好跑在"这条会话不在名单里"
     的状态上，那是撤回不跟随白名单的实证。
     """
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "INSERT INTO common_message (common_message_id, channel,"
@@ -305,13 +311,13 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
     快照那段只在她自己的话不在眼前的那一轮才印（一天的第一轮、上一轮没存下来），所以
     这里取的是那一轮的渲染。
 
-    这里走的是真的那条路 —— 嘴发一条（``happening_id`` 由 :mod:`app.living.mouth`
-    自己拼）、快照把编号印出来（:mod:`app.living.snapshot` 自己解析）、撤回按等值
-    收（:mod:`app.living.takeback` 自己查）。三处任何一处各写一份拼接规则，这条就红。
+    这里走的是真的那条路 —— 嘴发一条（``happening_id`` 由 :mod:`app.living.speaking.mouth`
+    自己拼）、快照把编号印出来（:mod:`app.living.common` 自己解析）、撤回按等值
+    收（:mod:`app.living.speaking.takeback` 自己查）。三处任何一处各写一份拼接规则，这条就红。
     """
     await _she_is_home()
     # 她要**发**这一条，所以这条私聊得在她视野里 —— 撤回不过白名单闸，开口过
-    # （:mod:`app.living.whitelist`）。真人刚说过一句就够了。
+    # （:mod:`app.living.phone.whitelist`）。真人刚说过一句就够了。
     await _somebody_said_something(at=_at(21, 0))
 
     async with in_a_moment("akao", moment_id=_MOMENT):
@@ -320,10 +326,7 @@ async def test_the_handle_the_snapshot_showed_her_takes_back_that_message(
         )
         assert isinstance(said, str), f"她这条没发出去，后面无从谈起。拿到：{said!r}"
 
-        shown = await read_snapshot(
-            lane=LANE, persona_id="akao", after_seq=0, now=_at(21, 30)
-        )
-        rendered = shown.render_state(her_words_in_view=False)
+        rendered = await own_records().recent_section(current_round())
         handles = re.findall(r"［([^］]+)］", rendered)
         assert len(handles) == 1, (
             f"快照没把她刚发出去那条的编号印出来（或者印了不止一个）—— "
@@ -469,7 +472,7 @@ async def test_the_ledger_is_written_only_after_the_recall_is_handed_off(
     反过来的话，台账写下了而撤回没发出去 —— 她下一轮看台账以为自己撤过了，那句话
     还好端端留在会话里。
     """
-    from app.living import takeback as takeback_mod
+    from app.living.speaking import takeback as takeback_mod
 
     await _she_is_home()
     spoke = await _she_spoke()
@@ -478,7 +481,7 @@ async def test_the_ledger_is_written_only_after_the_recall_is_handed_off(
     async def emit_and_look(data):
         seen_at_handoff.append((await _latest(spoke)).took_back_at)
 
-    monkeypatch.setattr(takeback_mod, "emit", emit_and_look)
+    monkeypatch.setattr(takeback_mod, "publish", emit_and_look)
 
     async with in_a_moment("akao", moment_id=_MOMENT):
         await take_back_message.invoke({"message_id": spoke.outbound_id})
@@ -513,7 +516,7 @@ async def test_the_ledger_records_when_she_pressed_it_without_touching_the_other
     assert row.state == STATE_HANDED_OFF, (
         f"撤回把认领状态改了 —— 那是另一根轴。拿到：{row.state!r}"
     )
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": spoke.outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2], (
@@ -531,12 +534,12 @@ async def test_a_recall_that_never_went_out_leaves_the_ledger_alone(
     条消息会打扰真人；撤回重复投是幂等的（删一条已经删掉的消息，真人一个字都看不到），
     所以这边把"没撤成"如实说出来、台账留空，她想再撤就再撤。
     """
-    from app.living import takeback as takeback_mod
+    from app.living.speaking import takeback as takeback_mod
 
     async def boom(_data):
         raise RuntimeError("MQ 连不上")
 
-    monkeypatch.setattr(takeback_mod, "emit", boom)
+    monkeypatch.setattr(takeback_mod, "publish", boom)
     await _she_is_home()
     spoke = await _she_spoke()
 
@@ -553,7 +556,7 @@ async def test_a_recall_that_never_went_out_leaves_the_ledger_alone(
     )
     assert (
         len(
-            await select_all_versions(
+            await all_versions(
                 SpokenOutbound, {"lane": LANE, "outbound_id": spoke.outbound_id}
             )
         )
@@ -573,7 +576,7 @@ async def test_a_ledger_write_that_fails_after_the_handoff_is_not_reported_as_a_
     台账写不下的后果是这条记录不完整（可查、可补）；报成失败的后果是她相信那句话还
     留在会话里 —— 后者严重得多。
     """
-    from app.living import takeback as takeback_mod
+    from app.living.speaking import takeback as takeback_mod
 
     async def boom(*_a, **_kw):
         raise RuntimeError("库连不上")
@@ -601,12 +604,11 @@ async def test_losing_the_version_race_merges_onto_the_latest_version(
     最新一版、把自己那根轴合上去 —— 拿手里那份过期的重写，会把对账已经补上的落地
     标识抹掉，而那是已知事实。
     """
-    from app.living import takeback as takeback_mod
 
     await _she_is_home()
     spoke = await _she_spoke()
     landed_id = str(uuid.uuid5(uuid.NAMESPACE_OID, "the-channel-wrote-this-row"))
-    real_record_happening = takeback_mod.record_happening
+    real_record_happening = book_mod.record_happening
 
     async def the_clock_ticks_first(**kw):
         """记忆那一步之后、写台账之前：对账钟追了一版上去。"""
@@ -626,7 +628,7 @@ async def test_losing_the_version_race_merges_onto_the_latest_version(
             == 1
         )
 
-    monkeypatch.setattr(takeback_mod, "record_happening", the_clock_ticks_first)
+    monkeypatch.setattr(book_mod, "record_happening", the_clock_ticks_first)
 
     async with in_a_moment("akao", moment_id=_MOMENT):
         outcome = await take_back_message.invoke({"message_id": spoke.outbound_id})
@@ -640,7 +642,7 @@ async def test_losing_the_version_race_merges_onto_the_latest_version(
         "把对账补上的落地标识抹回 NULL 了 —— 那一版记的是已知事实"
     )
     assert row.landed_at == _at(21, 1), "落地时刻被撤回顺手改了"
-    versions = await select_all_versions(
+    versions = await all_versions(
         SpokenOutbound, {"lane": LANE, "outbound_id": spoke.outbound_id}
     )
     assert [v.ver for v in versions] == [1, 2, 3], (
@@ -663,7 +665,7 @@ async def test_taking_it_back_lands_as_its_own_happening_and_leaves_the_old_one_
     改历史还会破坏 ``seq`` 的连续前缀：读侧的游标推到"本次读到的最大 seq"，被改写的
     那一行不会因此再被读一遍。
     """
-    from app.living.records import OUTBOUND_HAPPENING_PREFIX
+    from app.living.services import OUTBOUND_HAPPENING_PREFIX
 
     await _she_is_home()
     spoke = await _she_spoke()
@@ -671,7 +673,6 @@ async def test_taking_it_back_lands_as_its_own_happening_and_leaves_the_old_one_
         lane=LANE,
         happening_id=f"{OUTBOUND_HAPPENING_PREFIX}{spoke.outbound_id}",
         actor="akao",
-        place="家/我房间",
         kind=KIND_SPEECH,
         content=_SAID,
         occurred_at=_at(21, 0),
@@ -758,10 +759,10 @@ async def test_she_is_told_the_outcome_comes_later_not_that_it_is_already_gone(
 # --------------------------------------------------------------------------
 
 
-def test_the_take_back_hand_is_in_her_hands():
-    from app.living.moment import MOMENT_TOOLS
-
-    assert take_back_message in MOMENT_TOOLS, "她手里没有撤回这只手"
+async def test_the_take_back_hand_is_in_her_hands(resident):
+    assert "take_back_message" in [t.value.tool.name for t in resident.tools], (
+        "她手里没有撤回这只手"
+    )
 
 
 def test_taking_something_back_takes_the_message_id_she_was_shown():
@@ -807,7 +808,7 @@ async def test_she_can_take_back_a_line_in_a_conversation_out_of_sight(
     takeback_db, in_a_moment, recalls
 ):
     """掉出白名单、但 bot 还在那个会话里 —— 撤得了。"""
-    from app.living.phone import reachable_conversations
+    from app.living.phone.handset import reachable_conversations
 
     line = await _she_spoke()
     await _she_is_home()
@@ -835,7 +836,8 @@ async def test_she_cannot_take_back_a_line_from_a_conversation_her_bot_left(
     """
     line = await _she_spoke()
     await _she_is_home()
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             text(
                 "DELETE FROM common_bot_presence"

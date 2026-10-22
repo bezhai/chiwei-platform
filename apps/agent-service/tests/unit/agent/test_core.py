@@ -4,33 +4,55 @@ Covers the Agent layer over the neutral ``ModelClient`` (no langchain /
 create_agent / CallbackHandler):
   - Agent.run(): returns final neutral Message, retry on transient errors,
     prompt compilation + message threading, recursion_limit passthrough.
-  - Agent.stream(): forwards neutral StreamChunks, no retry after first yield.
   - Agent.extract(): structured output validated into a Pydantic model.
-  - AgentConfig as frozen dataclass.
+  - What an AgentSpec decides: model (fixed or from Dynamic Config), budget of
+    model calls, retries, model kwargs; the session comes from the Call.
 
 The ReAct loop control flow itself is de-risked separately in
 ``test_react_loop.py`` against a scripted fake ModelClient; here we mock the
 loop functions / model client to assert the Agent's own responsibilities.
 """
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from openai import APITimeoutError
 from pydantic import BaseModel
 
-from app.agent.core import Agent, AgentConfig
-from app.agent.context import AgentContext
-from app.agent.neutral import Message, Role, StreamChunk
+from app.agent.contracts import AgentSpec, FromConfig, ToolSpec
+from app.agent.core import Agent
+from app.agent.neutral import Message, Role
+from app.agent.round import Call, open_call
+from app.infra.propagation import Context
 
 pytestmark = pytest.mark.unit
 
-# Reusable test configs
-_CFG = AgentConfig("test_prompt", "test-model", "test-agent")
-_EXTRACT_CFG = AgentConfig(
-    "relationship_filter", "relationship-model", "relationship-filter"
+# Reusable test specs
+_CFG = AgentSpec(
+    segments=("test_prompt",), model="test-model", trace_name="test-agent", max_retries=2
 )
-_NO_PROMPT_CFG = AgentConfig("", "guard-model", "guard")
+_EXTRACT_CFG = AgentSpec(
+    segments=("relationship_filter",),
+    model="relationship-model",
+    trace_name="relationship-filter",
+    max_retries=2,
+)
+
+
+def _specs(*tools) -> list[ToolSpec]:
+    """The tools, declared the way a plugin declares them (none ends the round)."""
+    return [ToolSpec(t, trim="kept") for t in tools]
+
+
+def _call(spec: AgentSpec = _CFG) -> Call:
+    """A call of ``spec`` without a session, named after its one prompt."""
+    return open_call(spec.segments[0], spec, lane="prod")
+
+
+def _call_in(session: str, spec: AgentSpec = _CFG) -> Call:
+    """A call of ``spec`` whose session is ``session``."""
+    return Call(agent=spec.segments[0], session=session, round=None)
 
 
 # ---------------------------------------------------------------------------
@@ -38,23 +60,38 @@ _NO_PROMPT_CFG = AgentConfig("", "guard-model", "guard")
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def mock_prompt():
-    """Mock Langfuse prompt (text prompt)."""
-    prompt = MagicMock()
-    prompt.type = "text"
-    prompt.compile.return_value = "You are a helpful assistant."
-    return prompt
+class _Prompts:
+    """Stands in for a resolved ``PromptSet``: renders ``system`` for any agent and records each
+    render (the agent, the values given at the call)."""
+
+    def __init__(self) -> None:
+        self.system = [Message(role=Role.SYSTEM, content="You are a helpful assistant.")]
+        self.rendered: list[tuple[str, dict | None]] = []
+
+    def messages(self, agent, values=None):
+        self.rendered.append((agent, None if values is None else dict(values)))
+        return list(self.system)
+
+    def versions(self, agent):
+        return [(agent, "production", 1)]
+
+    def prompts(self, agent):
+        return ()
+
+
+# What every call in this module renders from; mock_deps empties it per test.
+_PROMPTS = _Prompts()
 
 
 @pytest.fixture()
-def mock_deps(mock_prompt):
-    """Patch build_model_client, get_prompt, compile_to_messages, and the root span.
+def mock_deps():
+    """Patch build_model_client and the root span; the prompt set is :data:`_PROMPTS`.
 
     The root span is patched to a no-op so tracing/langfuse never reaches the
-    network in unit tests. ``compile_to_messages`` returns a neutral SYSTEM
-    message by default.
+    network in unit tests. The prompt set renders a neutral SYSTEM message by
+    default.
     """
+    _PROMPTS.__init__()
     model = AsyncMock()
     model.complete = AsyncMock(
         return_value=Message(role=Role.ASSISTANT, content="hello")
@@ -73,27 +110,17 @@ def mock_deps(mock_prompt):
             new_callable=AsyncMock,
             return_value=model,
         ) as mock_build,
-        patch(
-            "app.agent.core.get_prompt",
-            return_value=mock_prompt,
-        ) as mock_get_prompt,
-        patch(
-            "app.agent.core.compile_to_messages",
-            return_value=[Message(role=Role.SYSTEM, content="You are a helpful assistant.")],
-        ) as mock_compile,
         patch("app.agent.core._root_span", _noop_span),
     ):
         yield {
             "build_model_client": mock_build,
-            "get_prompt": mock_get_prompt,
-            "compile_to_messages": mock_compile,
+            "prompts": _PROMPTS,
             "model": model,
-            "prompt": mock_prompt,
         }
 
 
 # ---------------------------------------------------------------------------
-# AgentConfig
+# root span
 # ---------------------------------------------------------------------------
 
 
@@ -145,167 +172,13 @@ class TestRootSpanRobustness:
                 entered = True
             assert entered
 
-    def test_tool_span_reparents_under_current_generation(self):
-        """A tool span attaches to the model call that requested it: the
-        generation's TraceContext (parent_span_id) so it nests under that
-        generation, not flat under the agent root."""
-        from app.agent import core
 
-        fake_ctx = {"trace_id": "a" * 32, "parent_span_id": "b" * 16}
-        client = MagicMock()
-        with (
-            patch.object(core, "_get_trace_client", return_value=client),
-            patch.object(core, "current_generation_context", return_value=fake_ctx),
-        ):
-            with core._tool_span(name="recall", input={}):
-                pass
-        kwargs = client.start_as_current_span.call_args.kwargs
-        assert kwargs.get("trace_context") == fake_ctx
+class TestRootSpanTraceName:
+    """A root span starts a trace of its own unless it is opened inside another
+    span; ``update_trace`` decides whether it names the trace and sets its input
+    (the output check runs inside her round's tool and leaves her trace alone)."""
 
-    def test_tool_span_no_reparent_without_generation(self):
-        from app.agent import core
-
-        client = MagicMock()
-        with (
-            patch.object(core, "_get_trace_client", return_value=client),
-            patch.object(core, "current_generation_context", return_value=None),
-        ):
-            with core._tool_span(name="recall", input={}):
-                pass
-        kwargs = client.start_as_current_span.call_args.kwargs
-        assert kwargs.get("trace_context") is None
-
-
-class TestRootSpanTurnTrace:
-    """Root span attaches the active turn's langfuse trace, so the guard
-    extracts and the main stream of one (message_id, persona_id) turn land in
-    ONE trace instead of separate top-level traces."""
-
-    def test_root_span_attaches_turn_trace_context(self):
-        from app.agent import core
-        from app.agent.trace import current_turn_trace_id, turn_trace
-
-        client = MagicMock()
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with turn_trace("msg-1:persona-2"):
-                expected_tid = current_turn_trace_id()
-                with core._root_span(name="main", input=[], update_trace=False):
-                    pass
-        kwargs = client.start_as_current_span.call_args.kwargs
-        assert kwargs.get("trace_context") == {"trace_id": expected_tid}
-
-    def test_root_span_no_trace_context_outside_turn(self):
-        from app.agent import core
-
-        client = MagicMock()
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with core._root_span(name="main", input=[], update_trace=False):
-                pass
-        kwargs = client.start_as_current_span.call_args.kwargs
-        assert kwargs.get("trace_context") is None
-
-    def test_two_root_spans_same_turn_share_trace_id(self):
-        """Anti-false-positive (codex T1 必改 3 at the root layer): a guard
-        root span and a main root span opened under the SAME turn attach to the
-        SAME trace_id — real unification, not each opening its own trace."""
-        from app.agent import core
-        from app.agent.trace import turn_trace
-
-        client = MagicMock()
-        seen = []
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with turn_trace("msg-5:persona-1"):
-                with core._root_span(
-                    name="pre-nsfw-check", input=[], update_trace=False
-                ):
-                    pass
-                seen.append(
-                    client.start_as_current_span.call_args.kwargs.get("trace_context")
-                )
-                with core._root_span(name="main", input=[], update_trace=True):
-                    pass
-                seen.append(
-                    client.start_as_current_span.call_args.kwargs.get("trace_context")
-                )
-        assert seen[0] is not None
-        assert seen[0] == seen[1]
-        assert seen[0]["trace_id"]
-
-
-class TestTurnTraceUnifiedName:
-    """In a unified turn trace the guards / main / post-safety are separate root
-    spans on ONE trace; langfuse names the whole trace after whichever root span
-    is ingested LAST (post-safety, since it runs last). Every root span instead
-    writes the SAME trace-level name so the trace name is stable. Crucially the
-    per-span OBSERVATION names stay distinct — trace name and span name are
-    independent langfuse fields, so unifying the trace name must not pollute the
-    sub-span names."""
-
-    def test_guard_root_span_keeps_span_name_sets_unified_trace_name(self):
-        from app.agent import core
-        from app.agent.trace import TURN_TRACE_NAME, turn_trace
-
-        client = MagicMock()
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with turn_trace("msg-1:persona-2"):
-                with core._root_span(
-                    name="pre-nsfw-check", input=[{"x": 1}], update_trace=False
-                ):
-                    pass
-        # the OBSERVATION/span name is preserved — NOT polluted to the trace name
-        assert (
-            client.start_as_current_span.call_args.kwargs["name"] == "pre-nsfw-check"
-        )
-        # the TRACE-level name is the unified turn name
-        kw = client.update_current_trace.call_args.kwargs
-        assert kw["name"] == TURN_TRACE_NAME
-        # a guard does NOT own the trace input
-        assert kw.get("input") is None
-
-    def test_main_root_span_sets_unified_name_and_owns_input(self):
-        from app.agent import core
-        from app.agent.trace import TURN_TRACE_NAME, turn_trace
-
-        client = MagicMock()
-        chat_input = [{"role": "user", "content": "hi"}]
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with turn_trace("msg-1:persona-2"):
-                with core._root_span(
-                    name="main", input=chat_input, update_trace=True
-                ):
-                    pass
-        # span name preserved
-        assert client.start_as_current_span.call_args.kwargs["name"] == "main"
-        kw = client.update_current_trace.call_args.kwargs
-        assert kw["name"] == TURN_TRACE_NAME
-        # main owns the trace input (the chat), so the trace top reads the turn
-        assert kw["input"] == chat_input
-
-    def test_two_turn_root_spans_write_same_trace_name(self):
-        """The fix's invariant: main (runs first) and post-safety (ingested last)
-        both write TURN_TRACE_NAME, so order no longer decides the trace name."""
-        from app.agent import core
-        from app.agent.trace import TURN_TRACE_NAME, turn_trace
-
-        client = MagicMock()
-        names: list = []
-        client.update_current_trace.side_effect = lambda **kw: names.append(
-            kw.get("name")
-        )
-        with patch.object(core, "_get_trace_client", return_value=client):
-            with turn_trace("msg-9:persona-3"):
-                with core._root_span(name="main", input=[], update_trace=True):
-                    pass
-                with core._root_span(
-                    name="post-safety-check", input=[], update_trace=False
-                ):
-                    pass
-        assert names == [TURN_TRACE_NAME, TURN_TRACE_NAME]
-
-    def test_outside_turn_keeps_span_name_as_trace_name(self):
-        """No turn → unchanged: update_trace=True still names the trace after the
-        span (world-engine / post-safety-without-turn become their own
-        traces named after themselves)."""
+    def test_update_trace_names_the_trace_after_the_span(self):
         from app.agent import core
 
         client = MagicMock()
@@ -316,7 +189,7 @@ class TestTurnTraceUnifiedName:
         assert kw["name"] == "world-engine"
         assert kw["input"] == [1]
 
-    def test_outside_turn_no_update_when_update_trace_false(self):
+    def test_no_update_when_update_trace_false(self):
         from app.agent import core
 
         client = MagicMock()
@@ -417,7 +290,11 @@ class TestRootSpanLaneAttributes:
         client = MagicMock()
         with (
             patch.object(core, "_get_trace_client", return_value=client),
-            patch.object(core, "get_lane", return_value="ppe-lf"),
+            patch.object(
+                core,
+                "current_context",
+                return_value=Context(trace_id=None, lane="ppe-lf"),
+            ),
             patch.object(core, "current_deployment_lane", return_value=None),
         ):
             with core._root_span(name="main", input=[], update_trace=True):
@@ -441,7 +318,11 @@ class TestRootSpanLaneAttributes:
         client = MagicMock()
         with (
             patch.object(core, "_get_trace_client", return_value=client),
-            patch.object(core, "get_lane", return_value=None),
+            patch.object(
+                core,
+                "current_context",
+                return_value=Context(trace_id=None, lane=None),
+            ),
             patch.object(core, "current_deployment_lane", return_value="coe-lf"),
         ):
             with core._root_span(name="world", input=[], update_trace=True):
@@ -457,7 +338,11 @@ class TestRootSpanLaneAttributes:
         client = MagicMock()
         with (
             patch.object(core, "_get_trace_client", return_value=client),
-            patch.object(core, "get_lane", return_value=None),
+            patch.object(
+                core,
+                "current_context",
+                return_value=Context(trace_id=None, lane=None),
+            ),
             patch.object(core, "current_deployment_lane", return_value=None),
         ):
             with core._root_span(name="main", input=[], update_trace=False):
@@ -468,144 +353,109 @@ class TestRootSpanLaneAttributes:
         assert kw["metadata"]["laneSource"] == "default"
 
 
-class TestRunSessionPlumbing:
-    """The session_id rides on AgentContext (the existing per-run context) so no
-    new public parameter is needed; chat passes a context without a session and
-    is unaffected, while world/life pass a context carrying their daily session
-    id."""
+class TestRootSpanAppAttributes:
+    """The ``app:`` tag and ``metadata.app`` name the App this process runs as
+    (``APP_NAME``, injected by PaaS per Deployment). One image runs both the
+    agent-service and the world App; a world round's trace must not be filed
+    under ``app:agent-service``."""
 
-    async def test_run_threads_context_session_id_to_root_span(self, mock_deps):
+    @staticmethod
+    def _trace_kwargs() -> dict:
+        from app.agent import core
+
+        client = MagicMock()
+        with (
+            patch.object(core, "_get_trace_client", return_value=client),
+            patch.object(
+                core,
+                "current_context",
+                return_value=Context(trace_id=None, lane=None),
+            ),
+            patch.object(core, "current_deployment_lane", return_value=None),
+        ):
+            with core._root_span(name="world-round", input=[], update_trace=True):
+                pass
+        return client.update_current_trace.call_args.kwargs
+
+    def test_world_process_tags_its_traces_as_world(self, monkeypatch):
+        monkeypatch.setenv("APP_NAME", "world")
+
+        kw = self._trace_kwargs()
+
+        assert "app:world" in kw["tags"]
+        assert "app:agent-service" not in kw["tags"]
+        assert kw["metadata"]["app"] == "world"
+
+    def test_agent_service_process_keeps_app_agent_service(self, monkeypatch):
+        monkeypatch.setenv("APP_NAME", "agent-service")
+
+        kw = self._trace_kwargs()
+
+        assert kw["tags"][0] == "app:agent-service"
+        assert kw["metadata"]["app"] == "agent-service"
+
+    def test_unset_app_name_falls_back_to_the_default_app(self, monkeypatch):
+        monkeypatch.delenv("APP_NAME", raising=False)
+
+        kw = self._trace_kwargs()
+
+        assert kw["tags"][0] == "app:agent-service"
+        assert kw["metadata"]["app"] == "agent-service"
+
+
+class TestRunSessionPlumbing:
+    """The session rides on the Call its caller opened: the root span tags the
+    trace with it, and an agent without a session leaves the trace's session
+    untouched."""
+
+    async def test_run_threads_the_calls_session_to_root_span(self, mock_deps):
         captured: dict = {}
         from contextlib import contextmanager
 
         @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None):
+        def _spy_span(*, name, input, update_trace, session_id=None, prompts=()):
             captured["session_id"] = session_id
             yield MagicMock()
 
         with patch("app.agent.core._root_span", _spy_span):
             await Agent(_CFG).run(
                 messages=[Message(role=Role.USER, content="hi")],
-                context=AgentContext(
-                    persona_id="luna", session_id="prod:luna:2026-06-04"
-                ),
+                call=_call_in("prod:luna:2026-06-04"), prompts=_PROMPTS,
             )
         assert captured["session_id"] == "prod:luna:2026-06-04"
 
-    async def test_run_without_context_passes_none_session(self, mock_deps):
+    async def test_run_without_a_session_passes_none(self, mock_deps):
         captured: dict = {}
         from contextlib import contextmanager
 
         @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None):
-            captured["session_id"] = session_id
-            yield MagicMock()
-
-        with patch("app.agent.core._root_span", _spy_span):
-            await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")])
-        assert captured["session_id"] is None
-
-    async def test_run_context_without_session_passes_none(self, mock_deps):
-        """The chat path: AgentContext built without session_id → no session."""
-        captured: dict = {}
-        from contextlib import contextmanager
-
-        @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None):
+        def _spy_span(*, name, input, update_trace, session_id=None, prompts=()):
             captured["session_id"] = session_id
             yield MagicMock()
 
         with patch("app.agent.core._root_span", _spy_span):
             await Agent(_CFG).run(
-                messages=[Message(role=Role.USER, content="hi")],
-                context=AgentContext(message_id="m", chat_id="c", persona_id="luna"),
+                messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS
             )
         assert captured["session_id"] is None
 
-    async def test_stream_threads_context_session_id_to_root_span(self, mock_deps):
-        captured: dict = {}
-        from contextlib import contextmanager
-
-        @contextmanager
-        def _spy_span(*, name, input, update_trace, session_id=None):
-            captured["session_id"] = session_id
-            yield MagicMock()
-
-        async def fake_stream(messages, *, tools=None, **kwargs):
-            yield StreamChunk(text="hi")
-            yield StreamChunk(finish_reason="stop")
-
-        mock_deps["model"].stream = fake_stream
-        with patch("app.agent.core._root_span", _spy_span):
-            async for _ in Agent(_CFG).stream(
-                messages=[Message(role=Role.USER, content="hi")],
-                context=AgentContext(session_id="prod:world:2026-06-04"),
-            ):
-                pass
-        assert captured["session_id"] == "prod:world:2026-06-04"
-
-
 class TestModelCacheSessionId:
-    """The trace session_id (run arg or context) is forwarded to model.complete /
-    model.stream as the prompt-cache key, so the azure adapter can wire it into
-    the gateway's session cache header. None when there is no session (adapter
-    no-ops), keeping the chat / stateless path unchanged."""
+    """The call's session is forwarded to model.complete as the
+    prompt-cache key, so the azure adapter can wire it into the gateway's
+    session cache header. None when there is no session (adapter no-ops)."""
 
-    async def test_run_forwards_context_session_id_to_model(self, mock_deps):
+    async def test_run_forwards_the_calls_session_to_model(self, mock_deps):
         await Agent(_CFG).run(
             [Message(role=Role.USER, content="hi")],
-            context=AgentContext(session_id="prod:world:2026-06-04"),
+            call=_call_in("prod:world:2026-06-04"), prompts=_PROMPTS,
         )
         kw = mock_deps["model"].complete.call_args.kwargs
         assert kw.get("session_id") == "prod:world:2026-06-04"
 
     async def test_run_without_session_forwards_none(self, mock_deps):
-        await Agent(_CFG).run([Message(role=Role.USER, content="hi")])
+        await Agent(_CFG).run([Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS)
         kw = mock_deps["model"].complete.call_args.kwargs
         assert kw.get("session_id") is None
-
-    async def test_stream_forwards_context_session_id_to_model(self, mock_deps):
-        captured: dict = {}
-
-        async def fake_stream(messages, *, tools=None, **kwargs):
-            captured.update(kwargs)
-            yield StreamChunk(text="hi")
-            yield StreamChunk(finish_reason="stop")
-
-        mock_deps["model"].stream = fake_stream
-        async for _ in Agent(_CFG).stream(
-            [Message(role=Role.USER, content="hi")],
-            context=AgentContext(session_id="prod:world:2026-06-04"),
-        ):
-            pass
-        assert captured.get("session_id") == "prod:world:2026-06-04"
-
-
-class TestAgentConfig:
-    def test_frozen(self):
-        cfg = AgentConfig("p", "m", "t")
-        with pytest.raises(AttributeError):
-            cfg.prompt_id = "x"  # type: ignore[misc]
-
-    def test_defaults(self):
-        assert AgentConfig("p", "m").trace_name is None
-
-    def test_native_web_search_defaults_false(self):
-        """New opt-in field defaults off, so every existing config is unaffected."""
-        assert AgentConfig("p", "m").native_web_search is False
-
-    def test_native_web_search_opt_in(self):
-        """A config may declare it wants native web search."""
-        assert AgentConfig("p", "m", native_web_search=True).native_web_search is True
-
-    def test_replace(self):
-        from dataclasses import replace
-
-        cfg = AgentConfig("p", "m", "t")
-        new = replace(cfg, model_id="new")
-        assert new.model_id == "new"
-        assert cfg.model_id == "m"
-
 
 # ---------------------------------------------------------------------------
 # run()
@@ -616,13 +466,13 @@ class TestRun:
     async def test_returns_final_message(self, mock_deps):
         result = await Agent(_CFG).run(
             messages=[Message(role=Role.USER, content="hi")],
-            prompt_vars={"name": "test"},
+            values={"name": "test"}, call=_call(), prompts=_PROMPTS,
         )
         assert isinstance(result, Message)
         assert result.text() == "hello"
 
     async def test_builds_model_client_from_config_model_id(self, mock_deps):
-        await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")])
+        await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS)
         mock_deps["build_model_client"].assert_awaited_once_with("test-model")
 
     async def test_tooldefs_passed_to_model(self, mock_deps):
@@ -637,8 +487,8 @@ class TestRun:
             """
             return ""
 
-        await Agent(_CFG, tools=[my_tool]).run(
-            messages=[Message(role=Role.USER, content="hi")]
+        await Agent(_CFG, tools=_specs(my_tool)).run(
+            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS
         )
         # the model saw the tool's neutral ToolDef
         tools = mock_deps["model"].complete.await_args.kwargs["tools"]
@@ -646,65 +496,77 @@ class TestRun:
         assert tools[0].name == "my_tool"
 
     async def test_no_tools_passes_none(self, mock_deps):
-        await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")])
+        await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS)
         tools = mock_deps["model"].complete.await_args.kwargs["tools"]
         assert tools is None
 
     async def test_model_kwargs_forwarded_to_complete(self, mock_deps):
         # model_kwargs (e.g. reasoning_effort=low for the safety guard) must
         # reach the model call — dropping them is a silent behaviour regression.
-        await Agent(_CFG, model_kwargs={"reasoning_effort": "low"}).run(
-            messages=[Message(role=Role.USER, content="hi")]
+        spec = replace(_CFG, model_kwargs={"reasoning_effort": "low"})
+        await Agent(spec).run(
+            messages=[Message(role=Role.USER, content="hi")], call=_call(spec), prompts=_PROMPTS
         )
         kwargs = mock_deps["model"].complete.await_args.kwargs
         assert kwargs["reasoning_effort"] == "low"
 
-    async def test_compiles_prompt_via_langfuse(self, mock_deps):
+    async def test_renders_the_calls_agent_from_its_prompt_set(self, mock_deps):
         await Agent(_CFG).run(
             messages=[Message(role=Role.USER, content="hi")],
-            prompt_vars={"key": "val"},
+            values={"key": "val"}, call=_call(), prompts=_PROMPTS,
         )
-        mock_deps["compile_to_messages"].assert_called_once()
-        call_kwargs = mock_deps["compile_to_messages"].call_args.kwargs
-        assert call_kwargs["key"] == "val"
-        assert "currDate" in call_kwargs
-        assert "currTime" in call_kwargs
+        assert mock_deps["prompts"].rendered == [("test_prompt", {"key": "val"})]
 
-    async def test_curr_time_injected_in_cst(self, mock_deps):
-        """全局注入的 currTime / currDate 是 CST（不再 naive 系统时间）。
+    async def test_model_and_budget_from_dynamic_config_are_read_at_the_call(
+        self, mock_deps, monkeypatch
+    ):
+        from inner_shared.dynamic_config import dynamic_config
 
-        旧 bug：``datetime.now().strftime(...)`` 是 naive，容器 TZ 不确定（可能
-        UTC），喂给每条 prompt 的"现在"跟 world/life 的 CST 时刻差 8 小时。改成
-        显式 CST。钉死 now：真实 UTC 12:30 → CST 20:30、CST 日期 2026-06-03。
-        """
-        import datetime as _dt
+        from app.agent.neutral import ToolCall
+        from app.agent.tooling import tool
 
-        from app.infra import cst_time
+        @tool
+        async def loop_tool() -> str:
+            """loops."""
+            return "again"
 
-        class _FixedDateTime(_dt.datetime):
-            @classmethod
-            def now(cls, tz=None):
-                base = cls(2026, 6, 3, 12, 30, 45, tzinfo=_dt.timezone.utc)
-                return (
-                    base.astimezone(tz) if tz is not None
-                    else base.replace(tzinfo=None)
-                )
-
-        with patch.object(cst_time, "datetime", _FixedDateTime):
-            await Agent(_CFG).run(messages=[Message(role=Role.USER, content="hi")])
-
-        call_kwargs = mock_deps["compile_to_messages"].call_args.kwargs
-        assert call_kwargs["currTime"] == "20:30:45", (
-            f"currTime 该是 CST（UTC 12:30:45 → CST 20:30:45），实际 {call_kwargs['currTime']!r}"
+        config = {"npc_model": "", "main_model": "main-model", "budget": "2"}
+        monkeypatch.setattr(
+            dynamic_config, "get", lambda k, default="": config.get(k, default)
         )
-        assert call_kwargs["currDate"] == "2026-06-03"
+        spec = AgentSpec(
+            segments=("p",),
+            model=FromConfig(keys=("npc_model", "main_model"), default="fallback"),
+            trace_name="t",
+            recursion_limit=FromConfig(keys=("budget",), default=12),
+        )
+        mock_deps["model"].complete = AsyncMock(
+            return_value=Message(
+                role=Role.ASSISTANT,
+                content="",
+                tool_calls=[ToolCall(id="c", name="loop_tool", arguments={})],
+            )
+        )
+        await Agent(spec, tools=_specs(loop_tool)).run(
+            messages=[Message(role=Role.USER, content="go")], call=_call(spec), prompts=_PROMPTS
+        )
+        mock_deps["build_model_client"].assert_awaited_once_with("main-model")
+        assert mock_deps["model"].complete.call_count == 3
+
+    async def test_no_time_is_put_into_the_prompt(self, mock_deps):
+        """The prompt gets the values its caller gives and nothing else: no ``currDate`` /
+        ``currTime`` (no template declares them, and the strict check would refuse them)."""
+        await Agent(_CFG).run(
+            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS
+        )
+        assert mock_deps["prompts"].rendered == [("test_prompt", None)]
 
     async def test_prompt_messages_prepended(self, mock_deps):
-        mock_deps["compile_to_messages"].return_value = [
+        mock_deps["prompts"].system = [
             Message(role=Role.SYSTEM, content="sys prompt"),
         ]
         user_msg = Message(role=Role.USER, content="hi")
-        await Agent(_CFG).run(messages=[user_msg])
+        await Agent(_CFG).run(messages=[user_msg], call=_call(), prompts=_PROMPTS)
 
         sent = mock_deps["model"].complete.await_args.args[0]
         assert sent[0].role == Role.SYSTEM
@@ -719,8 +581,7 @@ class TestRun:
             ]
         )
         result = await Agent(_CFG).run(
-            messages=[Message(role=Role.USER, content="hi")],
-            max_retries=2,
+            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS,
         )
         assert result.text() == "retry ok"
         assert mock_deps["model"].complete.call_count == 2
@@ -731,26 +592,25 @@ class TestRun:
         )
         with pytest.raises(APITimeoutError):
             await Agent(_CFG).run(
-                messages=[Message(role=Role.USER, content="hi")],
-                max_retries=2,
+                messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS,
             )
         assert mock_deps["model"].complete.call_count == 2
 
-    async def test_passes_context_to_tool_dispatch(self, mock_deps):
-        from app.agent.runtime_context import get_context
-        from app.agent.tooling import tool
+    async def test_tools_run_in_the_call_being_run(self, mock_deps):
         from app.agent.neutral import ToolCall
+        from app.agent.round import current_call
+        from app.agent.tooling import tool
 
         seen: dict = {}
 
         @tool
         async def ctx_tool(x: str) -> str:
-            """Reads context.
+            """Reads its call.
 
             Args:
                 x: in.
             """
-            seen["persona"] = get_context().persona_id
+            seen["call"] = current_call()
             return "done"
 
         # first completion requests the tool, second finishes
@@ -764,313 +624,91 @@ class TestRun:
                 Message(role=Role.ASSISTANT, content="ok"),
             ]
         )
-        ctx = AgentContext(message_id="m", chat_id="c", persona_id="luna")
-        await Agent(_CFG, tools=[ctx_tool]).run(
+        call = _call()
+        await Agent(_CFG, tools=_specs(ctx_tool)).run(
+            messages=[Message(role=Role.USER, content="go")], call=call, prompts=_PROMPTS
+        )
+        assert seen["call"] is call
+
+    @pytest.mark.parametrize("ends_round", [True, False])
+    async def test_whether_a_tool_ends_the_run_is_what_its_declaration_says(
+        self, mock_deps, ends_round
+    ):
+        from app.agent.neutral import ToolCall
+        from app.agent.tooling import tool
+
+        never_ran = "（没有执行）"
+
+        @tool
+        async def finish() -> str:
+            """Finish."""
+            return "done"
+
+        mock_deps["model"].complete = AsyncMock(
+            side_effect=[
+                Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="c1", name="finish", arguments={}),
+                        ToolCall(id="c2", name="finish", arguments={}),
+                    ],
+                ),
+                Message(role=Role.ASSISTANT, content="还在。"),
+            ]
+        )
+        sink: list[Message] = []
+        await Agent(
+            _CFG,
+            tools=[ToolSpec(finish, trim="kept", ends_round=ends_round)],
+            never_ran=never_ran,
+        ).run(
             messages=[Message(role=Role.USER, content="go")],
-            context=ctx,
-        )
-        assert seen["persona"] == "luna"
-
-
-# ---------------------------------------------------------------------------
-# stream()
-# ---------------------------------------------------------------------------
-
-
-class TestStream:
-    async def test_yields_chunks(self, mock_deps):
-        async def fake_stream(messages, *, tools=None, **kwargs):
-            for c in [StreamChunk(text="he"), StreamChunk(text="llo"),
-                      StreamChunk(finish_reason="stop")]:
-                yield c
-
-        mock_deps["model"].stream = fake_stream
-
-        collected = []
-        async for chunk in Agent(_CFG).stream(
-            messages=[Message(role=Role.USER, content="hi")],
-        ):
-            collected.append(chunk)
-
-        texts = [c.text for c in collected if c.text]
-        assert "".join(texts) == "hello"
-
-    async def test_no_retry_after_tokens_yielded(self, mock_deps):
-        call_count = 0
-
-        async def failing_stream(messages, *, tools=None, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            yield StreamChunk(text="partial")
-            raise APITimeoutError(request=MagicMock())
-
-        mock_deps["model"].stream = failing_stream
-
-        with pytest.raises(APITimeoutError):
-            async for _ in Agent(_CFG).stream(
-                messages=[Message(role=Role.USER, content="hi")],
-                max_retries=3,
-            ):
-                pass
-
-        assert call_count == 1  # no retry after yield
-
-    async def test_retries_before_first_token(self, mock_deps):
-        call_count = 0
-
-        async def failing_then_ok(messages, *, tools=None, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise APITimeoutError(request=MagicMock())
-                yield  # pragma: no cover
-            yield StreamChunk(text="ok")
-            yield StreamChunk(finish_reason="stop")
-
-        mock_deps["model"].stream = failing_then_ok
-
-        collected = []
-        async for chunk in Agent(_CFG).stream(
-            messages=[Message(role=Role.USER, content="hi")],
-            max_retries=3,
-        ):
-            collected.append(chunk)
-
-        assert call_count == 2  # first attempt failed, second succeeded
-        assert "".join(c.text or "" for c in collected) == "ok"
-
-
-# ---------------------------------------------------------------------------
-# native web search — runtime decision: when main chat runs on a Gemini-3
-# model and the dynamic flag is on, drop the ``search_web`` tool and signal the
-# model to use its native google search instead. Any condition false → the tool
-# list and the model call are byte-for-byte unchanged (no native signal).
-# ---------------------------------------------------------------------------
-
-_NATIVE_CFG = AgentConfig("main", "main-chat-model", "main", native_web_search=True)
-
-
-def _search_web_tool():
-    from app.agent.tooling import tool
-
-    @tool
-    async def search_web(query: str) -> str:
-        """Search the web.
-
-        Args:
-            query: the query.
-        """
-        return "results"
-
-    return search_web
-
-
-def _other_tool():
-    from app.agent.tooling import tool
-
-    @tool
-    async def draw_picture(prompt: str) -> str:
-        """Draw a picture.
-
-        Args:
-            prompt: the prompt.
-        """
-        return "drawn"
-
-    return draw_picture
-
-
-@pytest.fixture()
-def flag_on():
-    """Patch the dynamic flag ``main_chat_native_web_search`` → True."""
-    with patch("app.agent.core.dynamic_config") as dc:
-        dc.get_bool.return_value = True
-        yield dc
-
-
-@pytest.fixture()
-def flag_off():
-    with patch("app.agent.core.dynamic_config") as dc:
-        dc.get_bool.return_value = False
-        yield dc
-
-
-class TestNativeWebSearchDecision:
-    """The three conditions (cfg opt-in AND model supports AND flag on) plus a
-    'search_web is actually present' guard gate the swap. The swap drops
-    search_web from the tools the model sees and forwards native_web_search=True;
-    otherwise the tools and the model call are unchanged and no signal leaks."""
-
-    async def test_run_all_conditions_true_drops_search_web_and_signals(
-        self, mock_deps, flag_on
-    ):
-        mock_deps["model"].supports_native_web_search = True
-        search_web, other = _search_web_tool(), _other_tool()
-        await Agent(_NATIVE_CFG, tools=[search_web, other]).run(
-            messages=[Message(role=Role.USER, content="今天天气")]
-        )
-        kw = mock_deps["model"].complete.await_args.kwargs
-        tool_names = [t.name for t in (kw["tools"] or [])]
-        assert "search_web" not in tool_names
-        assert "draw_picture" in tool_names
-        assert kw.get("native_web_search") is True
-        # the flag was consulted with the documented key + safe default
-        flag_on.get_bool.assert_called_once_with(
-            "main_chat_native_web_search", default=False
+            call=_call(),
+            prompts=_PROMPTS,
+            transcript_sink=sink,
         )
 
-    async def test_run_model_unsupported_keeps_search_web_no_signal(
-        self, mock_deps, flag_on
+        answered = [m.text() for m in sink if m.role is Role.TOOL]
+        if ends_round:
+            assert mock_deps["model"].complete.await_count == 1
+            assert answered == ["done", never_ran]
+        else:
+            assert mock_deps["model"].complete.await_count == 2
+            assert answered == ["done", "done"]
+
+    async def test_a_kept_run_whose_tool_ends_the_round_is_given_what_the_rest_is_answered_with(
+        self, mock_deps
     ):
-        mock_deps["model"].supports_native_web_search = False
-        search_web, other = _search_web_tool(), _other_tool()
-        await Agent(_NATIVE_CFG, tools=[search_web, other]).run(
-            messages=[Message(role=Role.USER, content="今天天气")]
-        )
-        kw = mock_deps["model"].complete.await_args.kwargs
-        tool_names = [t.name for t in (kw["tools"] or [])]
-        assert "search_web" in tool_names
-        assert "native_web_search" not in kw
-        # short-circuit: an unsupported model never reaches the (blocking) flag read
-        flag_on.get_bool.assert_not_called()
+        """The calls after the one that ends the round are answered in the participant's words,
+        which a run that is kept (the history stores it) needs: running it without them is a code
+        error. A run that is not kept leaves them unanswered; nothing reads them."""
+        from app.agent.neutral import ToolCall
+        from app.agent.tooling import tool
 
-    async def test_run_flag_off_keeps_search_web_no_signal(
-        self, mock_deps, flag_off
-    ):
-        mock_deps["model"].supports_native_web_search = True
-        search_web, other = _search_web_tool(), _other_tool()
-        await Agent(_NATIVE_CFG, tools=[search_web, other]).run(
-            messages=[Message(role=Role.USER, content="今天天气")]
-        )
-        kw = mock_deps["model"].complete.await_args.kwargs
-        tool_names = [t.name for t in (kw["tools"] or [])]
-        assert "search_web" in tool_names
-        assert "native_web_search" not in kw
+        @tool
+        async def finish() -> str:
+            """Finish."""
+            return "done"
 
-    async def test_run_cfg_not_opted_in_keeps_search_web_no_signal(
-        self, mock_deps, flag_on
-    ):
-        # world/life/guard configs never declare native_web_search → even a
-        # Gemini-3 model with the flag on must not trigger the swap.
-        mock_deps["model"].supports_native_web_search = True
-        search_web, other = _search_web_tool(), _other_tool()
-        await Agent(_CFG, tools=[search_web, other]).run(
-            messages=[Message(role=Role.USER, content="hi")]
-        )
-        kw = mock_deps["model"].complete.await_args.kwargs
-        tool_names = [t.name for t in (kw["tools"] or [])]
-        assert "search_web" in tool_names
-        assert "native_web_search" not in kw
-        # short-circuit: a non-opted agent never reaches the (blocking) flag read
-        flag_on.get_bool.assert_not_called()
-
-    async def test_run_no_search_web_present_does_not_signal(
-        self, mock_deps, flag_on
-    ):
-        # opted in, model supports, flag on — but the agent never mounted
-        # search_web → must NOT enable native search for free (cost guard).
-        mock_deps["model"].supports_native_web_search = True
-        other = _other_tool()
-        await Agent(_NATIVE_CFG, tools=[other]).run(
-            messages=[Message(role=Role.USER, content="hi")]
-        )
-        kw = mock_deps["model"].complete.await_args.kwargs
-        tool_names = [t.name for t in (kw["tools"] or [])]
-        assert tool_names == ["draw_picture"]
-        assert "native_web_search" not in kw
-
-    async def test_non_native_agent_with_flag_present_is_byte_for_byte(
-        self, mock_deps, flag_on
-    ):
-        # A world/life-style agent (not opted in) on this path must call the
-        # model exactly as before: tools unchanged, no native signal, even when
-        # the global flag happens to be on.
-        mock_deps["model"].supports_native_web_search = True
-        search_web = _search_web_tool()
-        await Agent(_CFG, tools=[search_web]).run(
-            messages=[Message(role=Role.USER, content="hi")]
-        )
-        kw = mock_deps["model"].complete.await_args.kwargs
-        assert [t.name for t in (kw["tools"] or [])] == ["search_web"]
-        assert "native_web_search" not in kw
-
-    async def test_stream_all_conditions_true_drops_search_web_and_signals(
-        self, mock_deps, flag_on
-    ):
-        captured: dict = {}
-
-        async def fake_stream(messages, *, tools=None, **kwargs):
-            captured["tools"] = tools
-            captured["kwargs"] = kwargs
-            yield StreamChunk(text="hi")
-            yield StreamChunk(finish_reason="stop")
-
-        mock_deps["model"].stream = fake_stream
-        mock_deps["model"].supports_native_web_search = True
-        search_web, other = _search_web_tool(), _other_tool()
-        async for _ in Agent(_NATIVE_CFG, tools=[search_web, other]).stream(
-            messages=[Message(role=Role.USER, content="今天天气")]
-        ):
-            pass
-        tool_names = [t.name for t in (captured["tools"] or [])]
-        assert "search_web" not in tool_names
-        assert "draw_picture" in tool_names
-        assert captured["kwargs"].get("native_web_search") is True
-
-    async def test_stream_flag_off_keeps_search_web_no_signal(
-        self, mock_deps, flag_off
-    ):
-        captured: dict = {}
-
-        async def fake_stream(messages, *, tools=None, **kwargs):
-            captured["tools"] = tools
-            captured["kwargs"] = kwargs
-            yield StreamChunk(text="hi")
-            yield StreamChunk(finish_reason="stop")
-
-        mock_deps["model"].stream = fake_stream
-        mock_deps["model"].supports_native_web_search = True
-        search_web = _search_web_tool()
-        async for _ in Agent(_NATIVE_CFG, tools=[search_web]).stream(
-            messages=[Message(role=Role.USER, content="今天天气")]
-        ):
-            pass
-        assert [t.name for t in (captured["tools"] or [])] == ["search_web"]
-        assert "native_web_search" not in captured["kwargs"]
-
-
-# ---------------------------------------------------------------------------
-# empty prompt_id guard
-# ---------------------------------------------------------------------------
-
-
-class TestEmptyPromptGuard:
-    async def test_run_rejects_empty_prompt_id(self, mock_deps):
-        with pytest.raises(ValueError, match="non-empty prompt_id"):
-            await Agent(_NO_PROMPT_CFG).run(
-                messages=[Message(role=Role.USER, content="hi")]
+        mock_deps["model"].complete = AsyncMock(
+            return_value=Message(
+                role=Role.ASSISTANT,
+                content="",
+                tool_calls=[
+                    ToolCall(id="c1", name="finish", arguments={}),
+                    ToolCall(id="c2", name="finish", arguments={}),
+                ],
             )
-
-    async def test_stream_rejects_empty_prompt_id(self, mock_deps):
-        with pytest.raises(ValueError, match="non-empty prompt_id"):
-            async for _ in Agent(_NO_PROMPT_CFG).stream(
-                messages=[Message(role=Role.USER, content="hi")]
-            ):
-                pass
-
-    async def test_extract_allows_empty_prompt_id(self, mock_deps):
-        """Guard agents have empty prompt_id and only use extract()."""
-
-        class Out(BaseModel):
-            v: str
-
-        mock_deps["model"].structured = AsyncMock(return_value={"v": "ok"})
-
-        result = await Agent(_NO_PROMPT_CFG).extract(
-            Out, messages=[Message(role=Role.USER, content="test")]
         )
-        assert result.v == "ok"
-        mock_deps["get_prompt"].assert_not_called()
+        agent = Agent(_CFG, tools=[ToolSpec(finish, trim="kept", ends_round=True)])
+        go = [Message(role=Role.USER, content="go")]
+
+        with pytest.raises(ValueError):
+            await agent.run(go, call=_call(), prompts=_PROMPTS, transcript_sink=[])
+        assert mock_deps["model"].complete.await_count == 0
+        await agent.run(go, call=_call(), prompts=_PROMPTS)
+        assert mock_deps["model"].complete.await_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1101,8 +739,8 @@ class TestRecursionLimit:
                 tool_calls=[ToolCall(id="c", name="loop_tool", arguments={"x": "v"})],
             )
         )
-        await Agent(_CFG, tools=[loop_tool]).run(
-            messages=[Message(role=Role.USER, content="go")]
+        await Agent(_CFG, tools=_specs(loop_tool)).run(
+            messages=[Message(role=Role.USER, content="go")], call=_call(), prompts=_PROMPTS
         )
         # 6 turns with tools, then one toolless call so the run ends on what the
         # assistant says instead of on a tool-call turn with no text.
@@ -1122,7 +760,7 @@ class TestRecursionLimit:
             """
             return "again"
 
-        cfg = AgentConfig("p", "m", "t", recursion_limit=4)
+        cfg = AgentSpec(segments=("p",), model="m", trace_name="t", recursion_limit=4)
         mock_deps["model"].complete = AsyncMock(
             return_value=Message(
                 role=Role.ASSISTANT,
@@ -1130,8 +768,8 @@ class TestRecursionLimit:
                 tool_calls=[ToolCall(id="c", name="loop_tool", arguments={"x": "v"})],
             )
         )
-        await Agent(cfg, tools=[loop_tool]).run(
-            messages=[Message(role=Role.USER, content="go")]
+        await Agent(cfg, tools=_specs(loop_tool)).run(
+            messages=[Message(role=Role.USER, content="go")], call=_call(cfg), prompts=_PROMPTS
         )
         assert mock_deps["model"].complete.call_count == 5
         assert mock_deps["model"].complete.call_args.kwargs["tools"] is None
@@ -1155,7 +793,7 @@ class TestExtract:
         result = await Agent(_EXTRACT_CFG).extract(
             Score,
             messages=[Message(role=Role.USER, content="rate this")],
-            prompt_vars={"key": "val"},
+            values={"key": "val"}, call=_call(_EXTRACT_CFG), prompts=_PROMPTS,
         )
 
         assert isinstance(result, Score)
@@ -1169,23 +807,24 @@ class TestExtract:
         mock_deps["model"].structured = AsyncMock(return_value={"name": "x"})
 
         await Agent(_EXTRACT_CFG).extract(
-            Score, messages=[Message(role=Role.USER, content="t")]
+            Score, messages=[Message(role=Role.USER, content="t")], call=_call(_EXTRACT_CFG), prompts=_PROMPTS
         )
         schema = mock_deps["model"].structured.await_args.kwargs["schema"]
         assert "properties" in schema
         assert "name" in schema["properties"]
 
     async def test_extract_forwards_model_kwargs(self, mock_deps):
-        # the safety guard configures Agent(..., model_kwargs={"reasoning_effort":
-        # "low"}) and only calls extract — the kwargs must reach structured().
+        # the safety guard's spec carries model_kwargs={"reasoning_effort": "low"}
+        # and only calls extract — the kwargs must reach structured().
         class Out(BaseModel):
             v: str
 
         mock_deps["model"].structured = AsyncMock(return_value={"v": "ok"})
 
-        await Agent(
-            _EXTRACT_CFG, model_kwargs={"reasoning_effort": "low"}
-        ).extract(Out, messages=[Message(role=Role.USER, content="t")])
+        spec = replace(_EXTRACT_CFG, model_kwargs={"reasoning_effort": "low"})
+        await Agent(spec).extract(
+            Out, messages=[Message(role=Role.USER, content="t")], call=_call(spec), prompts=_PROMPTS
+        )
         kwargs = mock_deps["model"].structured.await_args.kwargs
         assert kwargs["reasoning_effort"] == "low"
 
@@ -1202,25 +841,10 @@ class TestExtract:
 
         result = await Agent(_EXTRACT_CFG).extract(
             Result,
-            messages=[Message(role=Role.USER, content="test")],
-            max_retries=2,
+            messages=[Message(role=Role.USER, content="test")], call=_call(_EXTRACT_CFG), prompts=_PROMPTS,
         )
         assert result.ok is True
         assert mock_deps["model"].structured.call_count == 2
-
-    async def test_extract_skips_prompt_when_empty(self, mock_deps):
-        """Guard agents have empty prompt_id — extract should not call get_prompt."""
-
-        class Out(BaseModel):
-            v: str
-
-        mock_deps["model"].structured = AsyncMock(return_value={"v": "ok"})
-
-        await Agent(_NO_PROMPT_CFG).extract(
-            Out,
-            messages=[Message(role=Role.USER, content="test")],
-        )
-        mock_deps["get_prompt"].assert_not_called()
 
     async def test_extract_with_chat_prompt_messages_prepended(self, mock_deps):
         """Chat prompt should produce multiple messages prepended to input."""
@@ -1228,14 +852,14 @@ class TestExtract:
         class Out(BaseModel):
             v: str
 
-        mock_deps["compile_to_messages"].return_value = [
+        mock_deps["prompts"].system = [
             Message(role=Role.SYSTEM, content="You are a guard."),
             Message(role=Role.USER, content="Check: test input"),
         ]
         mock_deps["model"].structured = AsyncMock(return_value={"v": "ok"})
 
         await Agent(_EXTRACT_CFG).extract(
-            Out, messages=[Message(role=Role.USER, content="more")]
+            Out, messages=[Message(role=Role.USER, content="more")], call=_call(_EXTRACT_CFG), prompts=_PROMPTS
         )
 
         sent = mock_deps["model"].structured.await_args.args[0]
@@ -1244,21 +868,13 @@ class TestExtract:
         assert sent[1].role == Role.USER
         assert sent[2].text() == "more"
 
-    async def test_extract_threads_session_id_to_root_span(self):
-        """``extract(session_id=...)`` tags the langfuse trace's session.
-
-        async-internal structured judgments (e.g. world 在场匹配) want their trace
-        grouped into an actor's day session, exactly like ``run`` / ``stream``.
-        ``_root_span`` already supports ``session_id``; ``extract`` must thread it
-        through (None by default keeps the status quo — no session tag).
-        """
+    async def test_extract_threads_the_calls_session_to_root_span(self, mock_deps):
+        """An extract whose call has a session tags the langfuse trace's session,
+        exactly like ``run``; a call without one leaves it untouched."""
         from contextlib import contextmanager
 
         class Out(BaseModel):
             v: str
-
-        model = AsyncMock()
-        model.structured = AsyncMock(return_value={"v": "ok"})
 
         captured: dict = {}
 
@@ -1267,18 +883,11 @@ class TestExtract:
             captured.update(kwargs)
             yield MagicMock()
 
-        with (
-            patch(
-                "app.agent.core.build_model_client",
-                new_callable=AsyncMock,
-                return_value=model,
-            ),
-            patch("app.agent.core._root_span", _capturing_span),
-        ):
-            await Agent(_NO_PROMPT_CFG).extract(
+        with patch("app.agent.core._root_span", _capturing_span):
+            await Agent(_EXTRACT_CFG).extract(
                 Out,
                 messages=[Message(role=Role.USER, content="t")],
-                session_id="coe-t2:world:2026-06-16",
+                call=_call_in("coe-t2:world:2026-06-16", _EXTRACT_CFG), prompts=_PROMPTS,
             )
 
         assert captured.get("session_id") == "coe-t2:world:2026-06-16"
@@ -1293,7 +902,7 @@ class TestTranscriptSink:
     """``Agent.run`` reads and writes no store. A caller that keeps a continuous
     context passes the prior messages in ``messages`` and gets this round's new
     messages back through ``transcript_sink``, so it decides when and with what
-    else the round is persisted (``app.living.continuity``)."""
+    else the round is persisted (``app.agent.continuity``)."""
 
     async def test_sink_collects_tool_call_result_and_final_reply(self, mock_deps):
         from app.agent.neutral import ToolCall, TurnPart
@@ -1327,9 +936,9 @@ class TestTranscriptSink:
             ]
         )
         produced: list[Message] = []
-        result = await Agent(_CFG, tools=[world_tool]).run(
+        result = await Agent(_CFG, tools=_specs(world_tool)).run(
             messages=[Message(role=Role.USER, content="醒了")],
-            transcript_sink=produced,
+            transcript_sink=produced, call=_call(), prompts=_PROMPTS,
         )
 
         assert result.text() == "这一轮做完了"
@@ -1344,7 +953,7 @@ class TestTranscriptSink:
         assert produced[1].tool_call_id == "c1"
 
     async def test_prior_messages_are_fed_to_the_model_in_order(self, mock_deps):
-        mock_deps["compile_to_messages"].return_value = [
+        mock_deps["prompts"].system = [
             Message(role=Role.SYSTEM, content="sys"),
         ]
         await Agent(_CFG).run(
@@ -1352,7 +961,7 @@ class TestTranscriptSink:
                 Message(role=Role.USER, content="上一轮醒"),
                 Message(role=Role.ASSISTANT, content="上一轮说的"),
                 Message(role=Role.USER, content="这一轮醒"),
-            ]
+            ], call=_call(), prompts=_PROMPTS
         )
         sent = mock_deps["model"].complete.await_args.args[0]
         assert [m.text() for m in sent] == [
@@ -1364,7 +973,7 @@ class TestTranscriptSink:
 
     async def test_without_a_sink_the_run_is_unchanged(self, mock_deps):
         result = await Agent(_CFG).run(
-            messages=[Message(role=Role.USER, content="hi")]
+            messages=[Message(role=Role.USER, content="hi")], call=_call(), prompts=_PROMPTS
         )
         assert result.text() == "hello"
 
@@ -1385,7 +994,6 @@ class TestTranscriptSink:
         with patch("asyncio.sleep", new_callable=AsyncMock):
             await Agent(_CFG).run(
                 messages=[Message(role=Role.USER, content="醒了")],
-                transcript_sink=produced,
-                max_retries=2,
+                transcript_sink=produced, call=_call(), prompts=_PROMPTS,
             )
         assert [m.text() for m in produced] == ["第二次成了"]

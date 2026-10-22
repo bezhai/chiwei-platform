@@ -1,6 +1,7 @@
 """分层裁剪 —— 她的上下文在固定时刻按两档时长裁，全程不做总结。
 
-这个文件钉 :mod:`app.living.continuity` 裁剪那一半的每一条：
+这个文件从她这一侧钉裁剪（机制在基础层 :mod:`app.agent.continuity`，她的阈值和
+分类表在 :mod:`app.living.life.moment`）：
 
   1. **分类表覆盖全部工具**：加一只手不分类就跑不过，不会静默落进某一档；
   2. **时间语义按明确截止线验**：整点清理下"保留 1 小时"实际是 1–2 小时，用例
@@ -18,29 +19,29 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import logging
+from dataclasses import replace
 
 import pytest
 
-from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
-from app.living.continuity import (
-    CHECKPOINT_HEAD,
-    DEFAULT_TRIM_POLICY,
-    GAP_HEAD,
-    KEPT_TOOLS,
-    MATERIAL_TOOLS,
-    MATERIAL_TRIMMED,
-    PICTURE_TRIMMED,
+from app.agent.continuity import (
     TrimPolicy,
+    continues_unbroken,
     estimate_tokens,
-    holds_her_recent_words,
-    load_moment_transcript,
-    load_trim_policy,
-    moment_transcript_id,
     next_transcript,
     trim_for_round,
 )
-from app.living.moment import MOMENT_TOOLS, run_moment
+from app.agent.neutral import ContentBlock, Message, Role, ToolCall, TurnPart
+from app.agent.session import load_session
+from app.living.life.moment import HISTORY_KEY, MOMENT_TRIM_POLICY
+from app.manifests.history import HISTORY_TEXTS
+from tests.living.conftest import regular_round
 from tests.living.test_moment import moment_db, stub_moment  # noqa: F401
+
+CHECKPOINT_HEAD = HISTORY_TEXTS.checkpoint_head.partition("{at}")[0]
+GAP_HEAD = HISTORY_TEXTS.gap_head.partition("{at}")[0]
+MATERIAL_TRIMMED = HISTORY_TEXTS.material_trimmed
+PICTURE_TRIMMED = HISTORY_TEXTS.picture_trimmed
+
 
 LANE = "coe-living"
 _CST = dt.timezone(dt.timedelta(hours=8))
@@ -55,7 +56,19 @@ _PNG = (
     ).decode()
 )
 
-POLICY = TrimPolicy(
+# 阈值搬到业务层**之前**线上跑的那一套。那五个 Dynamic Config key 线上一条都没配
+# （2026-09-29 查管理接口全量，跨全部泳道），所以当时每一轮拿到的就是这五个数。
+#
+# 本文件的默认策略就用它，等价性也以它为基准：搬完之后两侧各自那份跑出来的结果，
+# 必须跟拿这一份跑出来的逐条相同（见第七节）。
+# 她的手里落进"素材"那一档的几只（每只在各自模块里声明 ``trim``，
+# :func:`test_what_she_reads_is_material` 对照她这一轮登记的声明）。其余都是"留着"。
+HER_MATERIAL = frozenset(
+    {"look_around", "search_online", "browse_online", "read_a_guide", "run_a_script"}
+)
+
+
+BEFORE_THE_MOVE = TrimPolicy(
     material_minutes=60,
     own_minutes=240,
     cleanup_minutes=60,
@@ -105,14 +118,18 @@ def _round(
     at: dt.datetime,
     *produced: Message,
     state: str = "手上：你在家/客厅，正在发呆。",
-    policy: TrimPolicy = POLICY,
+    policy: TrimPolicy = BEFORE_THE_MOVE,
+    material_tools: frozenset[str] = HER_MATERIAL,
 ) -> list[Message]:
     """跑一轮：先按这一刻裁一遍历史，再把这一轮的输入和产出接上去。
 
-    两步的顺序跟 :func:`app.living.moment.run_moment` 一样 —— 裁在模型调用之前，
+    两步的顺序跟 :func:`app.living.life.moment.run_due_moment` 一样 —— 裁在模型调用之前，
     存下去的就是喂进去的那份加上这一轮。
     """
-    kept = trim_for_round(history, now=at, state=state, policy=policy)
+    kept = trim_for_round(
+        history, now=at, state=state, policy=policy, material_tools=material_tools,
+        texts=HISTORY_TEXTS,
+    )
     return next_transcript(
         kept, [_stim(f"现在 {at:%H:%M}。"), *produced], policy=policy
     )
@@ -123,7 +140,8 @@ def _play(
     start: dt.datetime,
     until: dt.datetime,
     events: dict[str, list[Message]] | None = None,
-    policy: TrimPolicy = POLICY,
+    policy: TrimPolicy = BEFORE_THE_MOVE,
+    material_tools: frozenset[str] = HER_MATERIAL,
     step: int = 10,
 ) -> list[Message]:
     """照她真实的节奏一轮一轮跑过去：默认每 10 分钟一个「继续」。
@@ -135,7 +153,9 @@ def _play(
     at = start
     while at <= until:
         produced = (events or {}).get(f"{at:%H:%M}") or [_said("继续")]
-        ctx = _round(ctx, at, *produced, policy=policy)
+        ctx = _round(
+            ctx, at, *produced, policy=policy, material_tools=material_tools
+        )
         at += dt.timedelta(minutes=step)
     return ctx
 
@@ -159,25 +179,22 @@ def _images(messages: list[Message]) -> list[ContentBlock]:
 # ---------------------------------------------------------------------------
 
 
-def test_every_tool_she_has_is_classified():
-    """她手上 20 只手，每一只都要明确落进"素材"或"留着"其中一档。
+async def test_what_she_reads_is_material(resident):
+    """她手上每一只手都声明了自己落进"素材"还是"留着"（``ToolSpec.trim`` 是必填的，漏不掉）。
+    素材那一档恰好是读到的东西：环顾四周的回答、搜索和信息流、说明书、命令的输出。
 
-    漏分类的那只会落进默认档，而默认档是哪一档取决于实现细节 —— 一只带图片句柄的
-    新工具静默落进"素材"，就是她拿着一个失效的句柄去发图。
+    一只带图片句柄的新工具静默落进"素材"，就是她拿着一个失效的句柄去发图。
     """
-    every = {t.name for t in MOMENT_TOOLS}
-    assert MATERIAL_TOOLS | KEPT_TOOLS == every, (
-        f"没分类的：{every - (MATERIAL_TOOLS | KEPT_TOOLS)}；"
-        f"分类表里多出来的：{(MATERIAL_TOOLS | KEPT_TOOLS) - every}"
-    )
-    assert not (MATERIAL_TOOLS & KEPT_TOOLS)
+    declared = {t.name for t in resident.tools if t.value.trim == "material"}
+    assert declared == HER_MATERIAL
 
 
-def test_the_tools_that_hand_her_a_handle_are_all_kept():
+async def test_the_tools_that_hand_her_a_handle_are_all_kept(resident):
     """返回里带句柄的那几只，一只都不能在素材那一档。
 
     ``pic=`` / ``file=`` / ``channel_id=`` 是她后面调别的工具要原样抄回去的凭据。
     """
+    kept = {t.name for t in resident.tools if t.value.trim == "kept"}
     for name in (
         "draw_a_picture",
         "find_a_picture_online",
@@ -192,7 +209,7 @@ def test_the_tools_that_hand_her_a_handle_are_all_kept():
         # ``before=``（往前翻唯一的入口）。
         "look_at_phone",
     ):
-        assert name in KEPT_TOOLS, f"{name} 的返回里有她后面还要用的东西"
+        assert name in kept, f"{name} 的返回里有她后面还要用的东西"
 
 
 # ---------------------------------------------------------------------------
@@ -424,8 +441,8 @@ def test_a_picture_never_outlives_its_signed_url():
     一个 moment 间隔。这一条钉的是这两个数加起来仍然小于签名寿命 —— 谁把周期往上调，
     这里先炸，而不是上线以后每一轮都在同一个地方抛错。
     """
-    from app.living.continuity import MAX_CLEANUP_MINUTES, PICTURE_URL_MINUTES
-    from app.living.moment import DEFAULT_LIFE_MOMENT_MINUTES
+    from app.agent.continuity import MAX_CLEANUP_MINUTES, PICTURE_URL_MINUTES
+    from app.living.life.moment import DEFAULT_LIFE_MOMENT_MINUTES
 
     assert MAX_CLEANUP_MINUTES + DEFAULT_LIFE_MOMENT_MINUTES < PICTURE_URL_MINUTES
 
@@ -563,9 +580,17 @@ async def test_folded_checkpoints_still_encode_as_a_valid_gemini_request():
         _said("没回"),
     )
     ctx = next_transcript(
-        trim_for_round(ctx, now=_at(13, 35), state="缺口那会儿", policy=POLICY, lost_last_round=True),
+        trim_for_round(
+            ctx,
+            now=_at(13, 35),
+            state="缺口那会儿",
+            policy=BEFORE_THE_MOVE,
+            material_tools=HER_MATERIAL,
+            lost_last_round=True,
+            texts=HISTORY_TEXTS,
+        ),
         [_stim("现在 13:35。"), _call("say", "c3"), _result("c3", "记下了。"), _said("嗯")],
-        policy=POLICY,
+        policy=BEFORE_THE_MOVE,
     )
     ctx = _round(ctx, _at(14, 5), _said("继续"), state="14:05 那会儿")
     assert [m.text() for m in _markers(ctx)[:-1]] == [
@@ -634,7 +659,7 @@ def test_no_state_is_laid_down_between_two_cleanups():
 def test_the_first_round_of_a_day_starts_from_her_state():
     """一天的第一轮历史是空的 —— 那一下也要立一根界桩。
 
-    每轮的刺激只送新发生的事（:func:`app.living.moment.run_moment`），全量状态只从界桩
+    每轮的刺激只送新发生的事（:func:`app.living.life.moment.run_due_moment`），全量状态只从界桩
     来。历史空的时候不立，她这一轮就不知道自己在哪、在做什么、心里挂着什么 —— 跨过
     04:00 的第一轮、以及重启之后的第一轮，都是这个形状。
     """
@@ -699,8 +724,10 @@ def test_a_gap_marker_also_folds_the_checkpoints_before_it():
         ctx,
         now=_at(14, 35),
         state="手上：14:35 那会儿的样子。",
-        policy=POLICY,
+        policy=BEFORE_THE_MOVE,
+        material_tools=HER_MATERIAL,
         lost_last_round=True,
+        texts=HISTORY_TEXTS,
     )
 
     first, gap = _markers(fed)
@@ -720,11 +747,13 @@ def test_a_later_cleanup_folds_the_gap_marker_too():
             ctx,
             now=_at(14, 35),
             state="手上：14:35 那会儿的样子。",
-            policy=POLICY,
+            policy=BEFORE_THE_MOVE,
+            material_tools=HER_MATERIAL,
             lost_last_round=True,
+            texts=HISTORY_TEXTS,
         ),
         [_stim("现在 14:35。"), _said("继续")],
-        policy=POLICY,
+        policy=BEFORE_THE_MOVE,
     )
     ctx = _round(ctx, _at(15, 5), _said("继续"), state="手上：15:05 那会儿的样子。")
 
@@ -744,14 +773,14 @@ def test_her_recent_words_are_in_view_only_when_the_history_carries_on_unbroken(
     """
     ctx = _round([], _at(14, 5), _said("我去洗澡了"))
 
-    assert holds_her_recent_words(ctx, lost_last_round=False)
-    assert not holds_her_recent_words(ctx, lost_last_round=True), (
+    assert continues_unbroken(ctx, lost_last_round=False, texts=HISTORY_TEXTS)
+    assert not continues_unbroken(ctx, lost_last_round=True, texts=HISTORY_TEXTS), (
         "上一轮没存下来：那一轮说过的话比眼前剩下的都新，却不在眼前"
     )
-    assert not holds_her_recent_words([], lost_last_round=False), (
-        "一天的第一轮 / 重启：眼前什么都没有"
+    assert not continues_unbroken([], lost_last_round=False, texts=HISTORY_TEXTS), (
+        "第一次跑 / 清过库：眼前什么都没有"
     )
-    assert not holds_her_recent_words(ctx[1:], lost_last_round=False), (
+    assert not continues_unbroken(ctx[1:], lost_last_round=False, texts=HISTORY_TEXTS), (
         "硬顶把界桩全裁掉了：剩下的那一截说不清是从哪儿接上的"
     )
 
@@ -771,7 +800,14 @@ def test_a_transcript_stored_before_folding_existed_folds_at_the_next_cleanup():
     ]
     history = [m for marker in stacked for m in (marker, _said("继续"))]
 
-    fed = trim_for_round(history, now=_at(14, 5), state="新状态", policy=POLICY)
+    fed = trim_for_round(
+        history,
+        now=_at(14, 5),
+        state="新状态",
+        policy=BEFORE_THE_MOVE,
+        material_tools=HER_MATERIAL,
+        texts=HISTORY_TEXTS,
+    )
 
     assert [m.text() for m in _markers(fed)[:-1]] == [
         _header(CHECKPOINT_HEAD, _at(hour)) for hour in (11, 12, 13)
@@ -799,7 +835,7 @@ def test_the_hard_cap_trims_to_the_target_and_leaves_a_line_in_the_log(caplog):
     """撞上硬顶就裁到目标值，而且绝不静默。"""
     policy = _tiny_cap(cap=600, target=300)
     ctx: list[Message] = []
-    with caplog.at_level(logging.WARNING, logger="app.living.continuity"):
+    with caplog.at_level(logging.WARNING, logger="app.agent.continuity"):
         for i in range(12):
             ctx = _round(
                 ctx,
@@ -816,11 +852,45 @@ def test_the_hard_cap_never_eats_this_round(caplog):
     """哪怕这一轮自己就超了，这一轮的东西也必须原样留下来。"""
     policy = _tiny_cap(cap=50, target=20)
     huge = _said("这一轮她说了很长一段，" + "字" * 2000)
-    with caplog.at_level(logging.ERROR, logger="app.living.continuity"):
+    with caplog.at_level(logging.ERROR, logger="app.agent.continuity"):
         ctx = _round([], _at(14, 5), huge, policy=policy)
 
     assert huge.text() in _texts(ctx)
     assert any("硬顶" in r.message for r in caplog.records), caplog.text
+
+
+def test_a_round_that_blew_past_the_cap_is_cut_back_before_the_next_model_call():
+    """一轮自己就撑爆硬顶，下一轮**喂给模型之前**必须先裁回顶以下。
+
+    上面那条（"哪怕这一轮自己就超了也原样留下来"）是对的：丢掉刚发生的事等于这一轮
+    白跑。但那一份紧接着就是下一轮的历史，而它大到会让模型请求当场失败 —— 失败就不
+    提交，下一轮读到同一份，再立一根**时刻是当下**的界桩，那一代的年龄永远是 0，两档
+    时长一条都够不着。日界清零没了之后这是个谁也走不出来的循环。
+
+    所以硬顶在模型调用之前也要判一次。判在这里恢复才不依赖"下一轮得先成功提交一次"。
+    """
+    policy = _tiny_cap(cap=600, target=300)
+    blown = _round([], _at(14), _said("这一轮她说了很长一段，" + "字" * 2000), policy=policy)
+    assert estimate_tokens(blown) > policy.hard_cap_tokens, (
+        "前提没成立：这一份根本没撑爆硬顶，这条用例什么都没验"
+    )
+
+    fed = trim_for_round(
+        blown,
+        now=_at(16),
+        state="手上：你在家/客厅，正在发呆。",
+        policy=policy,
+        material_tools=HER_MATERIAL,
+        texts=HISTORY_TEXTS,
+    )
+
+    assert estimate_tokens(fed) <= policy.hard_cap_tokens, (
+        f"喂给模型的那份还是 {estimate_tokens(fed)} token —— 这一拍会在模型那步炸掉，"
+        f"炸了就不提交，下一拍原样再来一次"
+    )
+    assert any(CHECKPOINT_HEAD in t for t in _texts(fed)), (
+        "连这一轮刚立的界桩都被兜底裁掉了 —— 那她眼前一句「你现在」都没有"
+    )
 
 
 def test_the_hard_cap_drops_whole_groups():
@@ -870,85 +940,272 @@ def test_what_she_thought_counts_toward_the_estimate():
 
 
 # ---------------------------------------------------------------------------
-# 七 · 阈值全部走动态配置
+# 七 · 她那份策略写在她自己的模块里
+#
+# 基础层（:mod:`app.agent.continuity`）只给形状和裁剪动作，她那份阈值写死在 moment
+# 模块里。基础层自己不留阈值、不给默认值那一条在 ``tests/agent/test_continuity.py``。
+# 这一节验三样：
+#
+#   1. **等价**：阈值搬到业务层之后，同一份历史、同一时刻、同一状态下，喂进模型的那一份
+#      和落盘的那一份跟搬之前逐条相同。四条边界各走一遍。值本身另钉一条，因为整点清理
+#      下裁剪结果对分钟级的差别不敏感；
+#   2. **读的是自己那个名字**：她这一轮裁剪和收尾各一次，两次读的都是 moment 模块里那份；
+#   3. **约束**：原来那个运行时校验函数表达的五条约束，原样钉在这份常量上。
 # ---------------------------------------------------------------------------
 
-
-class _FakeConfig:
-    def __init__(self, values: dict[str, int]) -> None:
-        self.values = values
-        self.asked: list[str] = []
-
-    def get_int(self, key: str, *, default: int = 0) -> int:
-        self.asked.append(key)
-        return self.values.get(key, default)
+# 拿来验素材那一档的那只手，必须在她自己的素材表里。
+_MATERIAL_TOOL = "search_online"
 
 
-async def test_every_threshold_comes_from_dynamic_config(monkeypatch):
-    """五个阈值运行时都能改，一个都不写死在源码里。"""
-    from app.living import continuity as mod
+def _replay_both(
+    *,
+    start: dt.datetime,
+    until: dt.datetime,
+    events: dict[str, list[Message]] | None = None,
+    policy: TrimPolicy,
+    material_tools: frozenset[str],
+    step: int = 10,
+) -> list[tuple[list[Message], list[Message]]]:
+    """照真实节奏跑过去，每一轮**喂进模型的那份**和**落盘的那份**都收下来。
 
-    fake = _FakeConfig(
-        {
-            mod.MATERIAL_MINUTES_KEY: 30,
-            mod.OWN_MINUTES_KEY: 120,
-            mod.CLEANUP_MINUTES_KEY: 20,
-            mod.HARD_CAP_TOKENS_KEY: 90_000,
-            mod.TRIM_TARGET_TOKENS_KEY: 40_000,
-        }
-    )
-    monkeypatch.setattr(mod, "dynamic_config", fake)
+    :func:`_play` 只交回最后落盘的那一份，而等价承诺覆盖的是两份 —— 喂进去的那份
+    要是变了，她眼前的东西就变了，哪怕存下来的最终一样。
+    """
+    rounds: list[tuple[list[Message], list[Message]]] = []
+    ctx: list[Message] = []
+    at = start
+    while at <= until:
+        produced = (events or {}).get(f"{at:%H:%M}") or [_said("继续")]
+        fed = trim_for_round(
+            ctx,
+            now=at,
+            state="手上：你在家/客厅，正在发呆。",
+            policy=policy,
+            material_tools=material_tools,
+            texts=HISTORY_TEXTS,
+        )
+        stored = next_transcript(
+            fed, [_stim(f"现在 {at:%H:%M}。"), *produced], policy=policy
+        )
+        rounds.append((fed, stored))
+        ctx = stored
+        at += dt.timedelta(minutes=step)
+    return rounds
 
-    policy = await load_trim_policy()
-    assert policy == TrimPolicy(
-        material_minutes=30,
-        own_minutes=120,
-        cleanup_minutes=20,
-        hard_cap_tokens=90_000,
-        trim_target_tokens=40_000,
-    )
-    assert set(fake.asked) == {
-        mod.MATERIAL_MINUTES_KEY,
-        mod.OWN_MINUTES_KEY,
-        mod.CLEANUP_MINUTES_KEY,
-        mod.HARD_CAP_TOKENS_KEY,
-        mod.TRIM_TARGET_TOKENS_KEY,
+
+def _verbatim(rounds: list[tuple[list[Message], list[Message]]]) -> list[list[dict]]:
+    """逐条比对用的形状：``to_replay_dict`` 是无损的，签名也在里面。"""
+    return [[m.to_replay_dict() for m in half] for both in rounds for half in both]
+
+
+def _boundary_rounds(
+    boundary: str, *, policy: TrimPolicy
+) -> list[tuple[list[Message], list[Message]]]:
+    """四条边界各自的那段历史。跑法只由 ``policy`` 决定，两次调用只换它。"""
+    read_it = [
+        _call(_MATERIAL_TOOL, "c1"),
+        _result("c1", "读到的那一段：抹茶店周一休息"),
+        _said("知道了"),
+    ]
+    plans = {
+        # 跨过素材那道线、没跨整组那道：载荷换成短语，调用和结果都还在
+        "素材折叠": {
+            "start": _at(13, 0),
+            "until": _at(15, 0),
+            "events": {"13:30": read_it},
+        },
+        # 跨过整组那道线：调用和它的全部结果一起走
+        "整组丢弃": {
+            "start": _at(13, 0),
+            "until": _at(18, 0),
+            "events": {"13:30": read_it},
+        },
+        # 跨过一个清理点：界桩插进去，往后那一段从它起算
+        "界桩插入": {
+            "start": _at(13, 50),
+            "until": _at(14, 10),
+            "events": None,
+        },
+        # 撑爆硬顶：线上离它很远，只能在这儿造出来。每段写死一个不同的开头，
+        # 兜底把最老那一段丢掉这件事才有得断言。
+        "token 硬顶": {
+            "start": _at(14, 0),
+            "until": _at(14, 30),
+            "events": {
+                "14:00": [_said("第一段，" + "很长" * 35_000)],
+                "14:10": [_said("第二段，" + "很长" * 35_000)],
+                "14:20": [_said("第三段，" + "很长" * 35_000)],
+                "14:30": [_said("第四段，" + "很长" * 35_000)],
+            },
+        },
     }
+    return _replay_both(
+        **plans[boundary], policy=policy, material_tools=HER_MATERIAL
+    )
 
 
-async def test_nothing_configured_is_the_documented_default(monkeypatch):
-    from app.living import continuity as mod
-
-    monkeypatch.setattr(mod, "dynamic_config", _FakeConfig({}))
-    assert await load_trim_policy() == DEFAULT_TRIM_POLICY
+def _assert_boundary_was_hit(
+    boundary: str,
+    rounds: list[tuple[list[Message], list[Message]]],
+    *,
+    policy: TrimPolicy,
+) -> None:
+    """这段历史真的走到那条边界上了 —— 不然下面那句"两份相同"什么都没验。"""
+    stored = rounds[-1][1]
+    joined = "".join(_texts(stored))
+    if boundary == "素材折叠":
+        assert MATERIAL_TRIMMED in joined, "载荷没被换成短语"
+        assert any(m.tool_calls for m in stored), "调用本身也走了，那是整组丢弃"
+    elif boundary == "整组丢弃":
+        assert not any(m.tool_calls for m in stored), "调用还在，没走到整组那道线"
+        assert MATERIAL_TRIMMED not in joined
+        assert _orphans(stored) == []
+    elif boundary == "界桩插入":
+        assert sum(1 for t in _texts(stored) if CHECKPOINT_HEAD in t) == 2, (
+            "该有两根：一根是空历史那一下，一根是跨 14:00 那一下"
+        )
+    elif boundary == "token 硬顶":
+        assert "第一段" not in joined, "最老那一段还在，硬顶没兜住"
+        assert estimate_tokens(stored) <= policy.hard_cap_tokens
+    else:  # pragma: no cover - 参数写错时当场炸
+        raise AssertionError(boundary)
 
 
 @pytest.mark.parametrize(
-    "bad",
-    [
-        {"living_context_own_minutes": 30},  # 她自己的话比素材还短
-        {"living_context_cleanup_minutes": 0},
-        {"living_context_cleanup_minutes": 600},  # 比签名寿命还长，图片会烂在里面
-        {"living_context_trim_target_tokens": 300_000},  # 目标比硬顶还大
-        {"living_context_material_minutes": -1},
-    ],
+    "boundary", ["素材折叠", "整组丢弃", "界桩插入", "token 硬顶"]
 )
-async def test_a_threshold_that_cannot_hold_falls_back(monkeypatch, bad, caplog):
-    """配脏了就退回默认值并说一声，不拿一个自相矛盾的策略去裁她的记忆。"""
-    from app.living import continuity as mod
+def test_moving_the_thresholds_changes_nothing_that_reaches_her(boundary):
+    """搬完之后喂进去的那份和落盘的那份跟搬之前逐条相同，四条边界各走一遍。
 
-    monkeypatch.setattr(mod, "dynamic_config", _FakeConfig(bad))
-    with caplog.at_level(logging.WARNING, logger="app.living.continuity"):
-        assert await load_trim_policy() == DEFAULT_TRIM_POLICY
-    assert caplog.records
+    基准是 :data:`BEFORE_THE_MOVE`（搬之前线上每一轮实际拿到的那五个数）。先确认这段
+    历史真的走到了那条边界上，再逐条比 —— 不然"两份相同"可能只是两边都什么也没裁。
+    """
+    before = _boundary_rounds(boundary, policy=BEFORE_THE_MOVE)
+    _assert_boundary_was_hit(boundary, before, policy=BEFORE_THE_MOVE)
+
+    after = _boundary_rounds(boundary, policy=MOMENT_TRIM_POLICY)
+    assert _verbatim(after) == _verbatim(before)
 
 
-def test_the_defaults_are_the_shape_the_design_asked_for():
-    assert DEFAULT_TRIM_POLICY.material_minutes == 60
-    assert DEFAULT_TRIM_POLICY.own_minutes == 240
-    assert DEFAULT_TRIM_POLICY.cleanup_minutes == 60
-    assert DEFAULT_TRIM_POLICY.hard_cap_tokens == 200_000
-    assert DEFAULT_TRIM_POLICY.trim_target_tokens == 100_000
+def test_her_numbers_did_not_change_in_the_move():
+    """她那五个数跟搬之前完全一致 —— 那一次只换位置，不调值。
+
+    上面那几条比的是**裁剪结果**，而整点清理下结果对分钟级的差别不敏感：把
+    ``own_minutes`` 从 240 改成 239，裁出来逐条一模一样。所以值本身在这里单独钉一遍。
+    往后要调她的阈值，改的就是这一条。
+    """
+    assert MOMENT_TRIM_POLICY == BEFORE_THE_MOVE
+
+
+# ---------------------------------------------------------------------------
+# 她这一轮读的是她自己那个名字
+# ---------------------------------------------------------------------------
+
+
+def _spy_on_the_policy(monkeypatch, module) -> dict[str, list[TrimPolicy]]:
+    """记下这个模块裁剪和收尾**各自**实际传进去的那份策略，按调用点分开收。
+
+    **分开收是必须的。** 合成一张单子的话，"只有裁剪走到了、收尾没走到"跟"两处都
+    走到了"长得一模一样（``all`` 对少了一项的单子照样成立），而收尾那次漏掉策略的
+    症状是落盘的那一份按另一套裁 —— 喂进去的和存下来的从此不是同一份前缀。
+    """
+    used: dict[str, list[TrimPolicy]] = {"trim": [], "next": []}
+    real_trim = module.trim_for_round
+    real_next = module.next_transcript
+
+    def trim(history, **kwargs):
+        used["trim"].append(kwargs["policy"])
+        return real_trim(history, **kwargs)
+
+    def nxt(history, produced, **kwargs):
+        used["next"].append(kwargs["policy"])
+        return real_next(history, produced, **kwargs)
+
+    monkeypatch.setattr(module, "trim_for_round", trim)
+    monkeypatch.setattr(module, "next_transcript", nxt)
+    return used
+
+
+def _assert_read_it_at_both_call_sites(
+    used: dict[str, list[TrimPolicy]], expected: TrimPolicy, *, whose: str
+) -> None:
+    """裁剪和收尾**各一次**，两次拿到的都是 ``expected`` 那个对象。
+
+    ``is`` 而不是 ``==``：替身跟原件逐项相等，值比不出"读的到底是哪个名字"。
+    """
+    counted = {site: len(seen) for site, seen in used.items()}
+    assert counted == {"trim": 1, "next": 1}, (
+        f"{whose}这一轮裁剪和收尾该各走一次，实际是 {counted}"
+    )
+    assert used["trim"][0] is expected, f"{whose}裁剪那次读的不是它自己那份"
+    assert used["next"][0] is expected, f"{whose}收尾那次读的不是它自己那份"
+
+
+@pytest.mark.integration
+async def test_her_round_trims_by_her_own_policy(
+    moment_db, stub_moment, monkeypatch, resident
+):
+    """她这一轮裁剪和收尾各一次，两次读的都是清单 ``resident`` 的 ``history`` 那份，而它就是
+    **moment 模块里那个名字**。
+
+    她那份换成一个同值但不同一的替身：断言的是换进去的那个对象，所以"她拿的是别处
+    的一份"会红。
+    """
+    from app.agent import round as round_mod
+
+    assert resident.profile.history.policy is MOMENT_TRIM_POLICY
+    hers = replace(MOMENT_TRIM_POLICY)  # 同值，不同对象
+    resident.profile = replace(
+        resident.profile, history=replace(resident.profile.history, policy=hers)
+    )
+    used = _spy_on_the_policy(monkeypatch, round_mod)
+
+    stub_moment(said="继续")
+    await regular_round(resident, "akao", _at(13, 50))
+
+    _assert_read_it_at_both_call_sites(used, hers, whose="她")
+
+
+# ---------------------------------------------------------------------------
+# 约束：原来那个运行时校验表达的五条，一条不增一条不减
+# ---------------------------------------------------------------------------
+
+
+def test_both_windows_are_positive():
+    """一 · 素材档和整组档两个时长都是正数。"""
+    policy = MOMENT_TRIM_POLICY
+    assert policy.material_minutes > 0
+    assert policy.own_minutes > 0
+
+
+def test_the_own_window_is_not_shorter_than_the_material_one():
+    """二 · 整组档**不小于**素材档 —— 不是严格大于，两个数相等是允许的。
+
+    比素材短的话，载荷已经换掉的那一组会比调用先走，留下没有结果的调用。
+    """
+    policy = MOMENT_TRIM_POLICY
+    assert policy.own_minutes >= policy.material_minutes
+
+
+def test_the_cleanup_period_stays_inside_the_bound():
+    """三 · 清理周期落在 1 到上限之间（上限是基建层那条从图片地址寿命派生的事实）。"""
+    from app.agent.continuity import MAX_CLEANUP_MINUTES
+
+    policy = MOMENT_TRIM_POLICY
+    assert 0 < policy.cleanup_minutes <= MAX_CLEANUP_MINUTES
+
+
+def test_the_cap_and_the_target_are_positive():
+    """四 · 硬顶和裁剪目标都是正数。"""
+    policy = MOMENT_TRIM_POLICY
+    assert policy.hard_cap_tokens > 0
+    assert policy.trim_target_tokens > 0
+
+
+def test_the_target_is_strictly_below_the_cap():
+    """五 · 裁剪目标**严格**小于硬顶，不然撞顶之后裁不下去。"""
+    policy = MOMENT_TRIM_POLICY
+    assert policy.trim_target_tokens < policy.hard_cap_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -958,30 +1215,23 @@ def test_the_defaults_are_the_shape_the_design_asked_for():
 
 @pytest.mark.integration
 async def test_a_cleanup_lands_in_the_stored_transcript(
-    moment_db, stub_moment, monkeypatch
+    moment_db, stub_moment, resident
 ):
     """真跑三个 moment 跨过一个清理点：存下来的那一份里状态重铺过、素材换成了短语。
 
     第二个 moment 立起第一根界桩，第三个才有得算年龄 —— 这就是一天头几轮的样子。
     """
-    from app.living import moment as moment_mod
-
-    async def fixed_policy() -> TrimPolicy:
-        return POLICY
-
-    monkeypatch.setattr(moment_mod, "load_trim_policy", fixed_policy)
-
     stub_moment(("look_around", {}), said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(13, 50))
+    await regular_round(resident, "akao", _at(13, 50))
 
     stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(14, 0))
+    await regular_round(resident, "akao", _at(14, 0))
 
     stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(15, 10))
+    await regular_round(resident, "akao", _at(15, 10))
 
-    tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(15, 10))
-    stored, _ver = await load_moment_transcript(tid)
+    tid = HISTORY_KEY.format(lane=LANE, participant="akao")
+    stored, _ver = await load_session(tid)
     joined = "\n".join(_texts(stored))
 
     assert MATERIAL_TRIMMED in joined, "look_around 的返回是素材，跨过清理点该换掉"
@@ -991,48 +1241,39 @@ async def test_a_cleanup_lands_in_the_stored_transcript(
 
 @pytest.mark.integration
 async def test_a_picture_is_gone_before_she_is_fed_again(
-    moment_db, stub_moment, monkeypatch
+    moment_db, stub_moment, resident
 ):
     """停机跨过签名寿命再起来：喂给模型的那份里已经没有图片块了。
 
     裁剪如果只发生在收尾，这条路永远走不到 —— adapter 会在模型请求之前拿 403 抛错，
     每一轮都炸在同一个地方，收尾轮不上。所以裁必须在喂之前。
     """
-    from app.data.session import get_session
-    from app.living import moment as moment_mod
-    from app.living.continuity import commit_moment_transcript
-
-    async def fixed_policy() -> TrimPolicy:
-        return POLICY
-
-    monkeypatch.setattr(moment_mod, "load_trim_policy", fixed_policy)
+    from app.agent.continuity import commit_transcript
 
     # 先塞一段带图片的历史，模拟上一个进程 13:00 那一轮画过一张
-    tid = moment_transcript_id(lane=LANE, persona_id="akao", now=_at(13, 0))
+    tid = HISTORY_KEY.format(lane=LANE, participant="akao")
 
-    async with get_session() as s:
-        await commit_moment_transcript(
-            tid,
-            [
-                _stim("现在 13:00。"),
-                _call("draw_a_picture", "c1"),
-                _result(
-                    "c1",
-                    [
-                        ContentBlock.from_text("你画出来了：「晚霞」 pic=abc123"),
-                        ContentBlock.from_image_url(
-                            {"url": "https://tos.example/signed?expires=1"}
-                        ),
-                    ],
-                ),
-                _said("画完了"),
-            ],
-            expected_ver=0,
-            session=s,
-        )
+    await commit_transcript(
+        tid,
+        [
+            _stim("现在 13:00。"),
+            _call("draw_a_picture", "c1"),
+            _result(
+                "c1",
+                [
+                    ContentBlock.from_text("你画出来了：「晚霞」 pic=abc123"),
+                    ContentBlock.from_image_url(
+                        {"url": "https://tos.example/signed?expires=1"}
+                    ),
+                ],
+            ),
+            _said("画完了"),
+        ],
+        expected_ver=0,
+    )
 
     runner = stub_moment(said="继续")
-    await run_moment(lane=LANE, persona_id="akao", now=_at(15, 10))
+    await regular_round(resident, "akao", _at(15, 10))
 
     fed = runner.runs[0][0]
     assert _images(fed) == [], "过期地址在模型看到它之前就该没了"
@@ -1143,7 +1384,7 @@ def test_trimming_the_pictures_changes_the_content_and_nothing_else():
     """
     from dataclasses import fields
 
-    from app.living.continuity import _without_pictures
+    from app.agent.continuity import _without_pictures
 
     call = ToolCall(
         id="p1",
@@ -1165,7 +1406,7 @@ def test_trimming_the_pictures_changes_the_content_and_nothing_else():
         ],
     )
 
-    trimmed = _without_pictures(message)
+    trimmed = _without_pictures(message, PICTURE_TRIMMED)
 
     assert [b.type for b in trimmed.content] == ["text", "text"]
     assert trimmed.content[1].text == PICTURE_TRIMMED
@@ -1173,3 +1414,132 @@ def test_trimming_the_pictures_changes_the_content_and_nothing_else():
         if f.name == "content":
             continue
         assert getattr(trimmed, f.name) == getattr(message, f.name), f.name
+
+
+# ---------------------------------------------------------------------------
+# 九 · 跨天：日界没了之后，裁剪是唯一的收敛保证
+#
+# 上下文原来按生活日切，凌晨 4 点清空 —— 那一刀同时干了两件事：控制增长，和"她每天
+# 重新开始"。第二件不是想要的性质（一个人不会每天早上忘掉昨天正在想的事），所以键上的
+# 日期去掉了，loop 一直连着。
+#
+# 代价是**第一件事从此只剩裁剪一条路**：清零原来是唯一一次保证前缀重建的时刻，裁剪写
+# 错了不会有每日自愈，症状是上下文只增不减，直到撞上模型的 context 上限、每一拍都在
+# 同一个地方抛错。所以这一节验的是"连着跑好几天之后它仍然收敛"，不是顺带。
+# ---------------------------------------------------------------------------
+
+
+def _days(start: dt.datetime, days: int, *, policy: TrimPolicy = BEFORE_THE_MOVE) -> list[Message]:
+    """连着跑 ``days`` 天，每天每 10 分钟一轮，中途穿插素材和图片。"""
+    ctx: list[Message] = []
+    at = start
+    end = start + dt.timedelta(days=days)
+    n = 0
+    while at < end:
+        if n % 18 == 0:  # 每 3 小时读一次网页
+            produced = [
+                _call("browse_online", f"b{n}", url="https://x"),
+                _result(f"b{n}", "网页正文" * 200),
+                _said("读到了点东西"),
+            ]
+        else:
+            produced = [_said("继续")]
+        ctx = _round(ctx, at, *produced, policy=policy)
+        at += dt.timedelta(minutes=10)
+        n += 1
+    return ctx
+
+
+def test_running_for_days_does_not_grow_without_bound():
+    """连着跑五天，上下文不该比跑一天大到哪儿去 —— 没有日界之后这条只能靠裁剪。"""
+    one = _days(_at(9), 1)
+    five = _days(_at(9), 5)
+
+    assert estimate_tokens(five) <= BEFORE_THE_MOVE.hard_cap_tokens
+    assert estimate_tokens(five) < estimate_tokens(one) * 2, (
+        f"一天 {estimate_tokens(one)} token，五天 {estimate_tokens(five)} —— "
+        "它在按天累积，裁剪没有收敛"
+    )
+
+
+def test_crossing_four_in_the_morning_still_leaves_a_usable_context():
+    """跨过 04:00 那一轮不再清零，但界桩、配对、编码都得照旧成立。"""
+    ctx = _play(start=_at(2, 0, day=25), until=_at(6, 0, day=25))
+
+    assert _orphans(ctx) == [], "跨过 04:00 之后留下了没有结果的调用"
+    assert any(CHECKPOINT_HEAD in t for t in _texts(ctx)), "一根界桩都没有"
+
+
+def test_what_she_said_yesterday_is_gone_by_today():
+    """跨天不再清零，不等于昨天的话一直留着 —— 四小时那条线照旧生效。"""
+    ctx = _play(
+        start=_at(20, 0, day=25),
+        until=_at(6, 0, day=26),
+        events={"20:00": [_said("我昨晚正想着祭典的事")]},
+    )
+
+    assert "我昨晚正想着祭典的事" not in "\n".join(_texts(ctx))
+
+
+def test_what_she_said_an_hour_ago_survives_crossing_four_in_the_morning():
+    """而刚说过的那句必须活着穿过 04:00 —— 这正是去掉日界要换来的东西。
+
+    这条和上一条是一对：只验"昨天的没了"的话，一个"每次跨 04:00 就清空"的实现
+    照样能通过。
+    """
+    ctx = _play(
+        start=_at(3, 0, day=26),
+        until=_at(5, 0, day=26),
+        events={"03:00": [_said("我正想着祭典的事")]},
+    )
+
+    assert "我正想着祭典的事" in "\n".join(_texts(ctx))
+
+
+def test_the_first_round_on_the_new_key_lays_her_state_down():
+    """部署那一下旧键上的历史接不过来 —— 新键第一次读到的是空的。
+
+    这跟"一天的第一轮"走的是同一条路：历史空就立一根界桩，把她此刻的状态铺进去。
+    所以这次切换的代价正好是"一次冷启动"，跟她过去每天早上 04:00 经历的那一次一样，
+    不需要为它写一次性的搬运代码。
+    """
+    ctx = _round([], _at(14, 20), _said("继续"), state="手上：你在家/客厅，正在发呆。")
+
+    assert CHECKPOINT_HEAD in ctx[0].text()
+    assert "手上：你在家/客厅，正在发呆。" in ctx[0].text()
+
+
+def test_which_returns_are_material_comes_from_the_caller():
+    """哪些工具的返回算素材由**调用方**给，不是裁剪层写死的。
+
+    写死的话下一个接上这套裁剪的调用方，它那几只手一只都不在表里 —— 全部走默认档、
+    完整保留 240 分钟，并且没有任何报错。
+
+    这条拿同一段历史跑两遍，只换分类表：``search_online`` 在表里就该褪成那句短语，
+    不在表里就该原样留着。写死的实现过不了后半段。
+    """
+    material = {
+        "13:30": [
+            _call("search_online", "c1"),
+            _result("c1", "搜到这些：抹茶店周一休息"),
+            _said("知道了"),
+        ]
+    }
+
+    faded = _play(start=_at(13, 0), until=_at(15, 0), events=material)
+    intact = _play(
+        start=_at(13, 0),
+        until=_at(15, 0),
+        events=material,
+        material_tools=frozenset({"browse_online"}),  # 这张表里没有 search_online
+    )
+
+    def payload(ctx):
+        got = [m for m in ctx if m.role is Role.TOOL and m.tool_call_id == "c1"]
+        assert len(got) == 1, "调用还在保留期内，它的结果这条消息就必须还在"
+        return got[0].text()
+
+    assert payload(faded) == MATERIAL_TRIMMED
+    assert payload(intact) == "搜到这些：抹茶店周一休息", (
+        "换了分类表结果没变 —— 那张表是写死的"
+    )

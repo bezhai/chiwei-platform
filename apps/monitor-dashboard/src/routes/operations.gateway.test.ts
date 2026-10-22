@@ -20,6 +20,11 @@ const calls: Array<{
 }> = [];
 let nextResponse: unknown = {};
 
+// bun 的 mock.module 换掉的是整个模块，所以要把 '../paas-client' 原有的导出带上、
+// 只覆盖这里要拦的两个 client。否则别的测试文件从 '../paas-client' 取别的导出时，
+// 会在某些执行顺序下直接报 Export not found。
+const actualPaasClient = await import('../paas-client');
+
 mock.module('../paas-client', () => {
   const record = (method: string) => async (
     path: string,
@@ -41,6 +46,7 @@ mock.module('../paas-client', () => {
     return nextResponse;
   };
   return {
+    ...actualPaasClient,
     paasClient: {
       get: record('GET'),
       post: record('POST'),

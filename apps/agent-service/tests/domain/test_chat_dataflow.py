@@ -1,13 +1,8 @@
-"""ChatResponseSegment Data 类字段合约。
-
-ChatTrigger / ChatRequest 随 chat_request 队列一起删了：她不从队列拿消息，
-每次醒来直接查 ``common_message``、自己决定要不要开口（见 ``app.living``）。
-这个模块现在只剩她开口那一侧的契约。
-"""
+"""ChatResponseSegment Data 类字段合约：她开口那一侧发出去的报文。"""
 import pytest
 from pydantic import ValidationError
 
-from app.runtime.data import key_fields
+from app.data.schema import key_fields
 
 
 def test_chat_response_segment_dedup_keys_and_lane():
@@ -35,7 +30,7 @@ def test_chat_response_segment_is_transient():
 # （lark-service 的 src/lark/outbound/render.test.ts 钉着这条）——写进正文的引用要么
 # 原样当文字发出去、要么让渠道拒收整条消息。图只能有自己的字段。而字段里存的是对象
 # 存储的**永久句柄**（file_name），不是地址：预签名地址 1.5 小时就死，队列却可能隔
-# 很久才投到（泳道队列 TTL 降级、DLQ 重投），签名必须在最靠近发送的那一刻由投递侧
+# 很久才投到（泳道队列 TTL 降级、消费方停着），签名必须在最靠近发送的那一刻由投递侧
 # 现签。
 
 
@@ -65,7 +60,7 @@ def test_a_segment_without_pictures_carries_an_empty_list_not_none():
 # 「漏传 channel」静默变成飞书：一条 QQ 消息会被记成 lark、回复投进飞书出站
 # 队列，QQ 用户收不到回复，全程不报错。sink dispatch 的 fail-closed 校验跑在
 # pydantic 填完默认值之后，拦不住。所以三个 Data 一律必填，缺就在反序列化处
-# 报 ValidationError（MQ 入口 → 消息进 DLQ，可查），不猜。
+# 报 ValidationError，不猜。
 
 
 def test_chat_response_segment_channel_is_required():
@@ -84,15 +79,3 @@ def test_chat_response_segment_payload_without_channel_fails_validation():
         ChatResponseSegment.model_validate(old)
 
 
-def test_the_chat_request_payload_contracts_are_gone():
-    """``chat_request`` 那条队列的报文契约不该再存在。
-
-    ``ChatTrigger`` 是它的入口 body，``ChatRequest`` 是 fan-out 之后的 per-persona
-    请求。队列没了，这两条 Data 也就没有任何生产者和消费者 —— 留着的话，下一个人
-    会以为"接一下就能用"，而那正是「chat 是嘴，没有耳朵」要挡住的东西
-    （见 ``tests/living/test_no_inbound.py``）。
-    """
-    import app.domain.chat_dataflow as chat_dataflow
-
-    assert not hasattr(chat_dataflow, "ChatTrigger")
-    assert not hasattr(chat_dataflow, "ChatRequest")

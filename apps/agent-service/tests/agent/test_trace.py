@@ -150,142 +150,26 @@ def test_generation_span_swallows_end_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# turn-trace contextvar — unify one (message_id, persona_id) turn's Agent
-# root spans into ONE langfuse trace (guards + main), opt-in per turn node.
+# under_last_generation —— 在它里面开的 span 挂在最近一次模型调用下面：工具在模型
+# 调用结束之后才派发，那个 generation 已经结束了，但仍能当父节点。
 # ---------------------------------------------------------------------------
 
-from app.agent.trace import current_turn_trace_id, turn_trace  # noqa: E402
+from app.agent.trace import under_last_generation  # noqa: E402
 
 
-def test_current_turn_trace_id_none_outside_turn():
-    assert current_turn_trace_id() is None
+async def test_a_span_opened_under_the_last_generation_hangs_under_it(
+    tracer, exported_spans
+):
+    with tracer.start_as_current_span("root"):
+        with generation_span(name="llm", model="m", input=[]):
+            pass
+        with under_last_generation(), tracer.start_as_current_span("tool") as tool:
+            pass
 
-
-def test_current_turn_trace_id_deterministic_within_turn():
-    with turn_trace("msg-1:persona-7"):
-        a = current_turn_trace_id()
-        b = current_turn_trace_id()
-    assert a is not None
-    assert a == b
-
-
-def test_turn_trace_different_seed_different_id():
-    with turn_trace("msg-1:persona-7"):
-        a = current_turn_trace_id()
-    with turn_trace("msg-1:persona-8"):
-        c = current_turn_trace_id()
-    assert a != c
-
-
-def test_turn_trace_resets_on_exit():
-    with turn_trace("msg-1:persona-7"):
-        assert current_turn_trace_id() is not None
-    assert current_turn_trace_id() is None
-
-
-def test_same_seed_across_scopes_yields_same_id():
-    """The unification invariant: run_pre_safety and chat_node compute the same
-    seed independently from (message_id, persona_id) → same langfuse trace_id,
-    so guards and main land in one trace."""
-    with turn_trace("msg-9:persona-3"):
-        guard_tid = current_turn_trace_id()
-    with turn_trace("msg-9:persona-3"):
-        main_tid = current_turn_trace_id()
-    assert guard_tid == main_tid
-
-
-async def test_turn_trace_propagates_through_fan_out_wait():
-    """Guards run via fan_out_wait (ensure_future child tasks). The turn seed set
-    before the fan-out must reach those tasks so each guard's Agent root span
-    attaches to the turn trace, not a separate top-level trace."""
-    from app.capabilities.concurrency import fan_out_wait
-
-    seen: list[str | None] = []
-
-    async def _probe() -> None:
-        seen.append(current_turn_trace_id())
-
-    with turn_trace("msg-7:persona-2"):
-        expected = current_turn_trace_id()
-        await fan_out_wait([_probe(), _probe()], timeout_s=5.0)
-
-    assert expected is not None
-    assert seen == [expected, expected]
-
-
-# ---------------------------------------------------------------------------
-# model-call generation context: re-parent tool spans under the generation
-# that requested them (tool dispatched after the generation span has closed,
-# but parent_span_id is still valid).
-# ---------------------------------------------------------------------------
-
-from app.agent.trace import (  # noqa: E402
-    _capture_current_span_context,
-    current_generation_context,
-)
-
-
-def test_capture_current_span_context_inside_and_outside_span():
-    from opentelemetry import trace as ot
-    from opentelemetry.sdk.trace import TracerProvider
-
-    assert _capture_current_span_context() is None  # no active span
-    tracer = TracerProvider().get_tracer("test")
-    with tracer.start_as_current_span("gen"):
-        cap = _capture_current_span_context()
-        assert cap is not None
-        assert set(cap) == {"trace_id", "parent_span_id"}
-        assert len(cap["trace_id"]) == 32  # langfuse 32-hex trace id
-        assert len(cap["parent_span_id"]) == 16  # OTel 16-hex span id
-    assert _capture_current_span_context() is None  # reverts after the span
-    # capture and TraceContext shape line up so it can be passed straight through
-    _ = ot.format_span_id  # imported symbol used by the helper
-
-
-def test_current_generation_context_none_by_default():
-    assert current_generation_context() is None
-
-
-# ---------------------------------------------------------------------------
-# make_session_id — deterministic langfuse session id keyed by
-# (lane, actor, date). A persona's whole day of thinking groups into one
-# session so we can read a single role's "stream of consciousness" for a day.
-# ---------------------------------------------------------------------------
-
-from app.agent.trace import make_session_id  # noqa: E402
-
-
-def test_make_session_id_stable_for_same_inputs():
-    a = make_session_id("prod", "world", "2026-06-04")
-    b = make_session_id("prod", "world", "2026-06-04")
-    assert a == b
-
-
-def test_make_session_id_changes_across_days():
-    today = make_session_id("prod", "world", "2026-06-04")
-    tomorrow = make_session_id("prod", "world", "2026-06-05")
-    assert today != tomorrow
-
-
-def test_make_session_id_differs_per_actor():
-    world = make_session_id("prod", "world", "2026-06-04")
-    luna = make_session_id("prod", "luna", "2026-06-04")
-    assert world != luna
-
-
-def test_make_session_id_differs_per_lane():
-    prod = make_session_id("prod", "world", "2026-06-04")
-    coe = make_session_id("coe-x", "world", "2026-06-04")
-    assert prod != coe
-
-
-def test_make_session_id_is_readable():
-    """A human reading langfuse should recognise the session: the lane, actor,
-    and date are visible in the id, not opaquely hashed away."""
-    sid = make_session_id("prod", "world", "2026-06-04")
-    assert "prod" in sid
-    assert "world" in sid
-    assert "2026-06-04" in sid
+    [generation] = exported_spans.get_finished_spans()
+    assert tool.parent is not None
+    assert tool.parent.span_id == generation.context.span_id
+    assert tool.get_span_context().trace_id == generation.context.trace_id
 
 
 # ---------------------------------------------------------------------------
@@ -457,3 +341,124 @@ async def test_collect_usage_collector_inherited_by_create_task_child(
     assert usage["input"] == 11
     assert usage["total"] == 11
     assert usage["calls"] == 1
+
+
+# ---------------------------------------------------------------------------
+# separate_trace —— 一个 agent 在工具里调另一个 agent 时，里面那个另起一条 trace
+# ---------------------------------------------------------------------------
+
+import opentelemetry.trace as otel_trace  # noqa: E402
+from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+
+from app.agent.trace import separate_trace  # noqa: E402
+
+
+@pytest.fixture
+def tracer():
+    """一个本地的 OTel tracer：不碰全局 provider，span 照样进当前上下文。"""
+    return TracerProvider().get_tracer("test")
+
+
+def test_separate_trace_starts_spans_outside_the_current_trace(tracer):
+    with tracer.start_as_current_span("outer") as outer:
+        with separate_trace():
+            assert not otel_trace.get_current_span().get_span_context().is_valid
+            with tracer.start_as_current_span("inner") as inner:
+                pass
+        assert otel_trace.get_current_span() is outer
+
+    assert inner.parent is None
+    assert inner.get_span_context().trace_id != outer.get_span_context().trace_id
+
+
+async def test_separate_trace_leaves_the_outer_model_call_as_it_was(
+    tracer, exported_spans
+):
+    """里面看不到外面那次模型调用；离开之后，外面那一轮接下来的工具 span 仍然挂在它自己的
+    模型调用下面，而不是里面那次。"""
+    with tracer.start_as_current_span("outer"):
+        with generation_span(name="outer-llm", model="m", input=[]):
+            pass
+
+        with separate_trace():
+            with under_last_generation(), tracer.start_as_current_span(
+                "inner-tool"
+            ) as inner_tool:
+                pass
+            with generation_span(name="inner-llm", model="m", input=[]):
+                pass
+
+        with under_last_generation(), tracer.start_as_current_span(
+            "outer-tool"
+        ) as outer_tool:
+            pass
+
+    generations = {s.name: s for s in exported_spans.get_finished_spans()}
+    assert inner_tool.parent is None
+    assert outer_tool.parent is not None
+    assert outer_tool.parent.span_id == generations["outer-llm"].context.span_id
+
+
+# ---------------------------------------------------------------------------
+# rendered_from —— 作用域里开的 generation 关联这次调用编译的 prompt；另起的 trace
+# 不带外面那一轮的 prompt 进去，离开之后外面那一轮照旧关联它自己的。
+# ---------------------------------------------------------------------------
+
+from langfuse._client.attributes import LangfuseOtelSpanAttributes  # noqa: E402
+from langfuse.api import Prompt_Text  # noqa: E402
+from langfuse.model import TextPromptClient  # noqa: E402
+
+from app.agent.trace import rendered_from  # noqa: E402
+
+
+def _text_prompt(name: str) -> TextPromptClient:
+    return TextPromptClient(
+        Prompt_Text(
+            name=name, version=1, prompt="段落。", config={}, labels=["production"], tags=[]
+        )
+    )
+
+
+async def test_a_model_call_links_its_prompt_only_when_it_is_rendered_from_one(
+    exported_spans,
+):
+    """A generation links one prompt; one rendered from several segments links none of them, or
+    that segment's use would read as the whole prompt's."""
+    core, order = _text_prompt("world_round/core"), _text_prompt("world_round/order")
+    with rendered_from((core, order)):
+        with generation_span(name="segmented-llm", model="m", input=[]):
+            pass
+    with rendered_from((core,)):
+        with generation_span(name="single-llm", model="m", input=[]):
+            pass
+
+    linked = {
+        s.name: s.attributes.get(LangfuseOtelSpanAttributes.OBSERVATION_PROMPT_NAME)
+        for s in exported_spans.get_finished_spans()
+    }
+    assert linked == {"segmented-llm": None, "single-llm": "world_round/core"}
+
+
+async def test_separate_trace_does_not_carry_the_outer_prompt_in(exported_spans):
+    world_round = TextPromptClient(
+        Prompt_Text(
+            name="world_round",
+            version=3,
+            prompt="你是这个世界。",
+            config={},
+            labels=["production"],
+            tags=[],
+        )
+    )
+    with rendered_from((world_round,)):
+        with separate_trace():
+            with generation_span(name="inner-llm", model="m", input=[]):
+                pass
+        with generation_span(name="outer-llm", model="m", input=[]):
+            pass
+
+    linked = {
+        s.name: s.attributes.get(LangfuseOtelSpanAttributes.OBSERVATION_PROMPT_NAME)
+        for s in exported_spans.get_finished_spans()
+    }
+    assert linked == {"inner-llm": None, "outer-llm": "world_round"}

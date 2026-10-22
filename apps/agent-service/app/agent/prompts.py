@@ -1,25 +1,69 @@
-"""Langfuse prompt management.
+"""Langfuse prompts, fetched together for a round and rendered strictly.
 
-Thin wrapper around the Langfuse SDK providing:
-  - ``get_prompt``   — fetch a cached Langfuse prompt object (with lane routing)
+**A set of prompts is resolved once** (:meth:`PromptSet.resolve`): every segment the given agents
+are made of is fetched (the lane's own label first outside prod, production when the lane has
+none), each segment once however many agents list it, one after another in a worker thread since
+the SDK's fetch blocks, and checked: the variables its template declares must be exactly the ones
+its plugin gives (:attr:`app.agent.contracts.Segment.variables`). One missing or one too many is
+a configuration error (:class:`PromptConfigError`), raised before any model is called; only what
+the template declares counts, ``{{...}}`` inside a value is text.
+A segment whose values are worked out from the round (``Segment.values``) gets them here.
+
+**A switched-off plugin's segments are left out** (spec decision 8): a segment given as its plugin
+registered it (:class:`app.agent.round.Placed`, as a round's profile and an assembled agent give
+them) whose plugin is switched off for the round (``Round.switched_off``), or for a call outside
+any round (what its caller passes), is not fetched, not checked and not rendered; its agents are
+rendered from the rest of their segments, in their order. A segment given on its own (a call that
+builds its one segment itself) belongs to no plugin that can be switched off.
+
+**Rendering** (:meth:`PromptSet.messages`): an agent's text segments are compiled in its order
+and joined by a blank line into one SYSTEM message, so splitting a prompt at a blank line between
+two sections and rendering the pieces gives back the same text byte for byte. A chat prompt is a
+segment of its own and compiles into its messages by role. Values known only at the call (what the
+output check judges) are given there; they must be exactly the variables of the segments that do
+not work theirs out from the round.
+
+**Where a set is resolved.** A participant's round resolves its main agent's and its sub-agents'
+segments once, after its input is put together and before its first model call (the round keeps
+them, ``Round.prompts``); a call made outside any round (a diary page, a look back, a stretch of
+reading, an answer) resolves its own when it starts. A prompt released while a round runs is
+rendered from the next round on.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from langfuse import Langfuse
-from langfuse.model import TextPromptClient
+from langfuse.model import ChatPromptClient, PromptClient, TextPromptClient
 
+from app.agent.contracts import AgentSpec, Segment
 from app.agent.neutral import Message, Role
-from app.api.middleware import get_lane
 from app.infra.config import settings
+from app.infra.metrics import get_or_create_counter
+from app.infra.propagation import current_context
+
+if TYPE_CHECKING:
+    from app.agent.round import Placed, Round
 
 logger = logging.getLogger(__name__)
 
 _client: Langfuse | None = None
 _PROMPT_CACHE_TTL_SECONDS: int = 10
+
+# The label Langfuse serves when none is asked for.
+PRODUCTION = "production"
+
+PROMPT_CONFIG_ERRORS = get_or_create_counter(
+    "prompt_config_errors_total",
+    "Segments whose template does not declare exactly the variables their plugin gives; the "
+    "round or call that resolved them failed before any model call",
+    ["prompt", "label", "participant"],
+)
 
 
 def _get_client() -> Langfuse:
@@ -34,35 +78,31 @@ def _get_client() -> Langfuse:
     return _client
 
 
-def get_prompt(
-    prompt_id: str,
-    *,
-    label: str | None = None,
-    cache_ttl_seconds: int = _PROMPT_CACHE_TTL_SECONDS,
-) -> Any:
-    """Fetch a Langfuse prompt with SDK-level caching and lane routing.
+def _fetch(prompt_id: str) -> tuple[PromptClient, str]:
+    """The prompt ``prompt_id`` this process renders, and the label it was served under.
 
-    For non-prod lanes, first attempts ``label=lane``; on failure, falls back
-    to the production label.
+    Outside prod the lane's own label is tried first; a lane with no label of its own falls back
+    to production. Blocking: the SDK makes a network round trip on a cold cache, and on every
+    fetch of a lane with no label of its own (the miss is not cached), so it is called in a
+    worker thread (:meth:`PromptSet.resolve`), which sees the lane bound on the loop.
     """
-    lane = get_lane() or settings.lane
-    effective_label = label
-
-    if not effective_label and lane and lane != "prod":
+    lane = current_context().lane or settings.lane
+    if lane and lane != "prod":
         try:
-            return _get_client().get_prompt(
-                prompt_id, label=lane, cache_ttl_seconds=cache_ttl_seconds
+            prompt = _get_client().get_prompt(
+                prompt_id, label=lane, cache_ttl_seconds=_PROMPT_CACHE_TTL_SECONDS
             )
+            return prompt, lane
         except Exception:
             logger.debug(
                 "prompt %s has no lane label=%s, fallback to production",
                 prompt_id,
                 lane,
             )
-
-    return _get_client().get_prompt(
-        prompt_id, label=effective_label, cache_ttl_seconds=cache_ttl_seconds
+    prompt = _get_client().get_prompt(
+        prompt_id, label=None, cache_ttl_seconds=_PROMPT_CACHE_TTL_SECONDS
     )
+    return prompt, PRODUCTION
 
 
 _ROLE_MAP: dict[str, Role] = {
@@ -88,3 +128,186 @@ def compile_to_messages(prompt: Any, **variables: Any) -> list[Message]:
         )
         for m in prompt.compile(**variables)
     ]
+
+
+class PromptConfigError(Exception):
+    """A segment's template does not declare exactly the variables its plugin gives.
+
+    ``missing`` are the ones the plugin gives and the template does not declare; ``unexpected``
+    the ones the template declares and no plugin gives. Raised by :meth:`PromptSet.resolve`, so a
+    round that meets it calls no model, runs no tool, records no cost and commits nothing.
+    """
+
+    def __init__(
+        self,
+        *,
+        segment: str,
+        prompt_id: str,
+        label: str,
+        version: int,
+        missing: frozenset[str],
+        unexpected: frozenset[str],
+    ) -> None:
+        self.segment = segment
+        self.prompt_id = prompt_id
+        self.label = label
+        self.version = version
+        self.missing = missing
+        self.unexpected = unexpected
+        super().__init__(
+            f"segment {segment!r}: prompt {prompt_id!r} (label {label!r}, version {version}) "
+            f"does not declare {sorted(missing)} and declares {sorted(unexpected)} that no "
+            f"plugin gives"
+        )
+
+
+@dataclass(frozen=True)
+class _Resolved:
+    """One segment as this set renders it: the prompt fetched for it, the label it was served
+    under, and its values when they were worked out from the round."""
+
+    segment: Segment
+    prompt: PromptClient
+    label: str
+    values: Mapping[str, str] | None
+
+
+def _declared(prompt: PromptClient) -> frozenset[str]:
+    return frozenset(prompt.variables)
+
+
+class PromptSet:
+    """The prompts some agents render, at one fixed version each (see the module docstring)."""
+
+    def __init__(self, by_agent: Mapping[str, tuple[_Resolved, ...]]) -> None:
+        self._by_agent = dict(by_agent)
+
+    @classmethod
+    async def resolve(
+        cls,
+        agents: Mapping[str, AgentSpec],
+        segments: Mapping[str, Segment | Placed[Segment]],
+        round: Round | None,
+        *,
+        participant: str | None = None,
+        switched_off: frozenset[str] = frozenset(),
+    ) -> PromptSet:
+        """Fetch and check every segment of ``agents`` (by name) that is not left out (see the
+        module docstring): a plugin is switched off when the round's ``switched_off`` names it, or,
+        for a call outside any round, ``switched_off``. A template that does not declare exactly
+        its segment's variables raises :class:`PromptConfigError`, after an ERROR log line and a
+        count of ``prompt_config_errors_total`` for the participant the set is resolved for: the
+        round's, or ``participant`` for a call outside any round. A segment nobody registered, a
+        chat prompt listed with other segments, values worked out from the round when there is no
+        round, or ``switched_off`` given with a round (which has its own), is a code error
+        (``ValueError``)."""
+        if round is not None and switched_off:
+            raise ValueError(
+                "a round's switched-off plugins are its own (Round.switched_off); "
+                "switched_off is for a call outside any round"
+            )
+        off = round.switched_off if round is not None else switched_off
+        resolved: dict[str, _Resolved] = {}
+        by_agent: dict[str, tuple[_Resolved, ...]] = {}
+        for agent, spec in agents.items():
+            names = []
+            for name in spec.segments:
+                try:
+                    given = segments[name]
+                except KeyError:
+                    raise ValueError(
+                        f"agent {agent!r} lists segment {name!r}, which nobody registered"
+                    ) from None
+                if isinstance(given, Segment):
+                    segment = given
+                elif given.plugin in off:
+                    continue
+                else:
+                    segment = given.value
+                names.append(name)
+                if name in resolved:
+                    continue
+                prompt, label = await asyncio.to_thread(_fetch, segment.prompt_id)
+                wanted, declared = frozenset(segment.variables), _declared(prompt)
+                if declared != wanted:
+                    error = PromptConfigError(
+                        segment=name,
+                        prompt_id=segment.prompt_id,
+                        label=label,
+                        version=prompt.version,
+                        missing=wanted - declared,
+                        unexpected=declared - wanted,
+                    )
+                    who = round.participant if round is not None else participant
+                    PROMPT_CONFIG_ERRORS.labels(
+                        prompt=segment.prompt_id, label=label, participant=who or ""
+                    ).inc()
+                    logger.error(
+                        "prompt configuration error for %s, agent %r: %s; nothing is called, "
+                        "run or committed, the next attempt fetches the segments again",
+                        who or "-",
+                        agent,
+                        error,
+                    )
+                    raise error
+                values = None
+                if segment.values is not None:
+                    if round is None:
+                        raise ValueError(
+                            f"segment {name!r} works its values out from a round; "
+                            f"agent {agent!r} is resolved outside one"
+                        )
+                    values = dict(await segment.values(round))
+                    if frozenset(values) != wanted:
+                        raise ValueError(
+                            f"segment {name!r} worked out {sorted(values)}, "
+                            f"not its variables {sorted(wanted)}"
+                        )
+                resolved[name] = _Resolved(segment, prompt, label, values)
+            parts = [resolved[name] for name in names]
+            if len(parts) > 1 and any(
+                isinstance(p.prompt, ChatPromptClient) for p in parts
+            ):
+                raise ValueError(
+                    f"agent {agent!r}: a chat prompt is a segment of its own, "
+                    f"not one of {list(spec.segments)}"
+                )
+            by_agent[agent] = tuple(parts)
+        return cls(by_agent)
+
+    def messages(
+        self, agent: str, values: Mapping[str, str] | None = None
+    ) -> list[Message]:
+        """``agent``'s prompt, compiled. ``values`` are the variables known only at the call; they
+        must be exactly those of the segments that did not work theirs out from the round."""
+        parts = self._by_agent[agent]
+        given = dict(values or {})
+        expected = {v for p in parts if p.values is None for v in p.segment.variables}
+        if set(given) != expected:
+            raise ValueError(
+                f"agent {agent!r} is given {sorted(given)} at the call; "
+                f"its segments need {sorted(expected)}"
+            )
+        if len(parts) == 1 and isinstance(parts[0].prompt, ChatPromptClient):
+            (chat,) = parts
+            return compile_to_messages(chat.prompt, **self._values_of(chat, given))
+        texts = [p.prompt.compile(**self._values_of(p, given)) for p in parts]
+        return [Message(role=Role.SYSTEM, content="\n\n".join(texts))]
+
+    @staticmethod
+    def _values_of(part: _Resolved, given: Mapping[str, str]) -> dict[str, str]:
+        if part.values is not None:
+            return dict(part.values)
+        return {name: given[name] for name in part.segment.variables}
+
+    def versions(self, agent: str) -> list[tuple[str, str, int]]:
+        """``(prompt_id, label, version)`` of each of ``agent``'s segments, in its order."""
+        return [
+            (p.segment.prompt_id, p.label, p.prompt.version)
+            for p in self._by_agent[agent]
+        ]
+
+    def prompts(self, agent: str) -> tuple[PromptClient, ...]:
+        """The prompts ``agent`` is rendered from, one per segment in its order: what its model
+        calls are rendered from (:func:`app.agent.trace.rendered_from`)."""
+        return tuple(p.prompt for p in self._by_agent[agent])

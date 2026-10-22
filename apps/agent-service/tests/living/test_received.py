@@ -1,0 +1,526 @@
+"""她收到的消息：三姐妹的收件箱只存储，她下一轮醒来时才读。
+
+收件处理只做一件事：按 (泳道, 人, 消息 id) 存一行，存和去重是同一条语句。通信机制的投递是
+至少一次，world 会带着原来的 id 重发没发完的告知，所以同一条到两遍、存到一半进程没了，都是
+正常运转里会发生的事——这里逐一走一遍。
+"""
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import logging
+from types import SimpleNamespace
+
+import pytest
+
+from app.data.persist import fetch_all, fetch_value, from_row
+from app.data.tx import current_session, tx
+from app.living.household import received as received_mod
+from app.living.household.received import (
+    ReceivedMessage,
+    render_received,
+    unread_received,
+)
+from app.living.residents import names as names_mod
+from app.living.residents.names import PersonaNames
+from app.messaging.message import Kind, Message, new_message
+from app.messaging.receiving import INBOX_REGISTRY, inbox
+from tests.living.conftest import Calls, her_mailbox, receive, regular_round
+
+# 真 broker（带延时插件）+ 通信机制那几张表，跟 ``tests/messaging`` 用同一份。
+from tests.messaging.conftest import (  # noqa: F401 — 形参名就是 fixture 名
+    broker,
+    delayed_broker,
+    messaging_db,
+)
+
+LANE = "coe-living"
+_CST = dt.timezone(dt.timedelta(hours=8))
+_NAMES = {"akao": "赤尾", "ayana": "绫奈", "chinagi": "千凪"}
+
+
+def _at(hour: int, minute: int = 0) -> dt.datetime:
+    return dt.datetime(2026, 7, 25, hour, minute, tzinfo=_CST)
+
+
+class _Crash(Exception):
+    """存储那一步出事：进程在这一刻没了，或者库连不上。"""
+
+
+@pytest.fixture
+async def inboxes(living_db, monkeypatch):
+    """三姐妹的收件箱已经按人设表开好（跟线上开始接收时同一个函数）。"""
+    monkeypatch.setenv("LANE", LANE)
+
+    async def find_persona(persona_id: str):
+        return SimpleNamespace(persona_id=persona_id, display_name=_NAMES[persona_id])
+
+    monkeypatch.setattr(names_mod, "find_persona", find_persona)
+    await her_mailbox(PersonaNames(tuple(_NAMES))).open_inboxes(inbox)
+    return living_db
+
+
+def _from(
+    sender: str,
+    body: str,
+    *,
+    to: str = "绫奈",
+    at: dt.datetime | None = None,
+    message_id: str | None = None,
+    kind: Kind = Kind.MESSAGE,
+    wakes_her: bool = True,
+) -> Message:
+    return new_message(
+        sender=sender,
+        recipient=to,
+        body=body,
+        kind=kind,
+        time=at or _at(21, 30),
+        message_id=message_id,
+        wakes_recipient=wakes_her,
+    )
+
+
+async def _stored(persona_id: str = "ayana", *, lane: str = LANE) -> list[ReceivedMessage]:
+    rows = await fetch_all(
+        "SELECT * FROM data_received_message "
+        "WHERE lane = :l AND persona_id = :p ORDER BY created_at",
+        l=lane,
+        p=persona_id,
+    )
+    return [from_row(ReceivedMessage, r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 收件箱
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_each_resident_has_an_inbox_under_her_name_that_takes_no_questions(inboxes):
+    assert sorted(INBOX_REGISTRY) == sorted(_NAMES.values())
+    for spec in INBOX_REGISTRY.values():
+        assert spec.on_message.func is received_mod.receive
+        assert spec.on_message.keywords["residents"].by_persona == _NAMES
+        assert spec.on_question is None, "这一期她还不回答谁的提问"
+
+
+@pytest.mark.integration
+async def test_a_message_is_stored_for_the_resident_it_was_sent_to(inboxes):
+    message = _from("world", "窗外下起了雨。", at=_at(21, 41))
+
+    await receive(message)
+
+    (row,) = await _stored("ayana")
+    assert (row.lane, row.persona_id, row.message_id) == (LANE, "ayana", message.message_id)
+    assert (row.sender, row.body, row.message_time) == ("world", "窗外下起了雨。", _at(21, 41))
+    assert row.wakes_recipient is True
+    assert await _stored("akao") == []
+
+
+@pytest.mark.integration
+async def test_whether_a_message_wakes_her_is_stored_as_the_sender_said(inboxes):
+    """发件方说了不叫醒的，她的收件记录里就记着不叫醒；提前叫醒她的那条钟看的就是这一列。"""
+    quiet = _from("world", "窗外的雨小了一点。", at=_at(21, 41), wakes_her=False)
+
+    await receive(quiet)
+
+    (row,) = await _stored("ayana")
+    assert (row.message_id, row.wakes_recipient) == (quiet.message_id, False)
+
+
+@pytest.mark.integration
+async def test_the_same_message_delivered_twice_is_stored_once(inboxes):
+    message = _from("world", "窗外下起了雨。")
+
+    await receive(message)
+    await receive(message)
+
+    assert len(await _stored()) == 1
+
+
+@pytest.mark.integration
+async def test_a_crash_before_the_row_is_written_loses_nothing(inboxes, monkeypatch):
+    """存之前出事：这次处理失败，通信机制会再投；再投的那一次照常存下。"""
+    real = received_mod.insert_idempotent
+
+    async def crash(*args, **kwargs):
+        raise _Crash("写之前没了")
+
+    monkeypatch.setattr(received_mod, "insert_idempotent", crash)
+    message = _from("world", "窗外下起了雨。")
+    with pytest.raises(_Crash):
+        await receive(message)
+    assert await _stored() == []
+
+    monkeypatch.setattr(received_mod, "insert_idempotent", real)
+    await receive(message)
+
+    assert [r.message_id for r in await _stored()] == [message.message_id]
+
+
+@pytest.mark.integration
+async def test_a_crash_after_the_row_is_written_duplicates_nothing(inboxes, monkeypatch):
+    """存下之后、确认之前出事：通信机制会再投同一条，再投的那一次不会多存一行。"""
+    real = received_mod.insert_idempotent
+
+    async def write_then_crash(*args, **kwargs):
+        await real(*args, **kwargs)
+        raise _Crash("写完、还没确认就没了")
+
+    monkeypatch.setattr(received_mod, "insert_idempotent", write_then_crash)
+    message = _from("world", "窗外下起了雨。")
+    with pytest.raises(_Crash):
+        await receive(message)
+
+    monkeypatch.setattr(received_mod, "insert_idempotent", real)
+    await receive(message)
+
+    assert [r.message_id for r in await _stored()] == [message.message_id]
+
+
+@pytest.mark.integration
+async def test_a_not_delivered_notice_is_logged_not_stored(inboxes, caplog):
+    """她不定时发消息，"没有送达"的告知不该出现；真来了也不是她的经历，只留一条日志。"""
+    notice = _from("绫奈", "你定的那条没有送达。", to="绫奈", kind=Kind.NOT_DELIVERED)
+
+    with caplog.at_level(logging.WARNING, logger=received_mod.__name__):
+        await receive(notice)
+
+    assert await _stored() == []
+    assert notice.message_id in caplog.text
+
+
+@pytest.mark.integration
+async def test_a_message_for_a_name_she_does_not_go_by_fails_and_is_retried(inboxes):
+    """收件人不是三姐妹之一：收件箱是按这份对照开的，到这里只能是哪里错了。失败交给通信机制
+    重试、最后进死信，不能悄悄存到谁名下或者丢掉。"""
+    with pytest.raises(RuntimeError, match="赤尾酱"):
+        await receive(_from("world", "下雨了。", to="赤尾酱"))
+    assert await _stored("akao") == []
+
+
+# ---------------------------------------------------------------------------
+# 她下一轮读到：按消息自带的时间排，只把放进这一轮的那几条记成看过
+# ---------------------------------------------------------------------------
+
+
+def test_world_reads_as_what_she_perceives_and_anyone_else_carries_a_name():
+    """world 发来的是她察觉到的事，不标是谁说的；别人发来的带着发送方的名字。"""
+    def item(sender: str, body: str, at: dt.datetime) -> ReceivedMessage:
+        return ReceivedMessage(
+            lane=LANE,
+            persona_id="ayana",
+            message_id=f"{sender}-{at:%H%M}",
+            sender=sender,
+            body=body,
+            message_time=at,
+            wakes_recipient=True,
+        )
+
+    shown = render_received(
+        [
+            item("world", "窗外下起了雨。", _at(21, 25)),
+            item("千凪", "姐姐，饭好了。", _at(21, 26)),
+            item("world", "楼下有人按门铃。", dt.datetime(2026, 7, 24, 23, 50, tzinfo=_CST)),
+        ],
+        now=_at(21, 30),
+    )
+
+    assert shown == (
+        "这段时间传到你这里的：\n"
+        "- 21:25 CST 窗外下起了雨。\n"
+        "- 21:26 CST 千凪：姐姐，饭好了。\n"
+        "- 07-24 23:50 CST 楼下有人按门铃。"
+    )
+    assert render_received([], now=_at(21, 30)) == "这段时间传到你这里的：（没有）"
+
+
+@pytest.mark.integration
+async def test_unread_messages_come_in_the_order_they_happened_not_the_order_they_arrived(
+    inboxes,
+):
+    """world 的告知和姐妹的话走两条路，后到的可能先发生。"""
+    later = _from("千凪", "姐姐，饭好了。", at=_at(21, 28))
+    earlier = _from("world", "窗外下起了雨。", at=_at(21, 20))
+    await receive(later)
+    await receive(earlier)
+
+    unread = await unread_received(lane=LANE, persona_id="ayana")
+
+    assert [m.message_id for m in unread] == [earlier.message_id, later.message_id]
+
+
+@pytest.mark.integration
+async def test_a_round_takes_the_oldest_few_and_leaves_the_rest_for_the_next(inboxes):
+    messages = [_from("world", f"第 {i} 件事。", at=_at(21, i)) for i in (3, 1, 2)]
+    for m in messages:
+        await receive(m)
+
+    unread = await unread_received(lane=LANE, persona_id="ayana", limit=2)
+
+    assert [m.body for m in unread] == ["第 1 件事。", "第 2 件事。"]
+
+
+@pytest.fixture
+async def her_round(inboxes, monkeypatch, models):
+    """绫奈的一轮：真的常规节奏那一轮，只有模型那一步是替身（:class:`tests.living.conftest.Calls`）：
+    ``prompts`` 记下每一轮新摆到她眼前的那条，``meanwhile`` 在模型那一步做点什么，``fail`` 让模型
+    那一步失败。"""
+    from app.living.life import moment as moment_mod
+    from app.living.life.moment import DEFAULT_LIFE_MOMENT_MINUTES, LifeMoment
+    from app.living.loose_ends.threads import LooseEnd
+    from app.living.persona import chain as persona_mod
+    from tests.runtime.conftest import migrate
+
+    for cls in (LooseEnd, LifeMoment):
+        await migrate(cls, inboxes)
+
+    async def find_persona(persona_id: str):
+        return SimpleNamespace(display_name="绫奈", persona_core="她在念初二。")
+
+    async def fixed_minutes() -> int:
+        return DEFAULT_LIFE_MOMENT_MINUTES
+
+    monkeypatch.setattr(persona_mod, "find_persona", find_persona)
+    monkeypatch.setattr(moment_mod, "life_moment_minutes", fixed_minutes)
+    runner = Calls()
+    models[moment_mod.LIFE_MOMENT_PROMPT_ID] = runner.client
+    return runner
+
+
+async def _her_round(resident, at: dt.datetime):
+    return await regular_round(resident, "ayana", at)
+
+
+@pytest.mark.integration
+async def test_what_she_received_is_in_her_next_round_once(her_round, resident):
+    rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
+    dinner = _from("千凪", "姐姐，饭好了。", at=_at(21, 26))
+    await receive(rain)
+    await receive(dinner)
+
+    await _her_round(resident, _at(21, 30))
+    await _her_round(resident, _at(21, 40))
+
+    first, second = her_round.prompts
+    assert "- 21:25 CST 窗外下起了雨。\n- 21:26 CST 千凪：姐姐，饭好了。" in first
+    assert "这段时间传到你这里的：（没有）" in second, (
+        f"看过的又摆了一遍：\n{second}"
+    )
+    assert await unread_received(lane=LANE, persona_id="ayana") == []
+
+
+@pytest.mark.integration
+async def test_a_round_that_fails_shows_them_again(her_round, resident):
+    """她跑失败的那一轮里看到的消息，下一轮再给她看一次：没跑完就不算看过。"""
+    rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
+    await receive(rain)
+
+    her_round.fail = RuntimeError("这一轮的模型调用失败了")
+    with pytest.raises(RuntimeError, match="模型调用失败"):
+        await _her_round(resident, _at(21, 30))
+    her_round.fail = None
+    await _her_round(resident, _at(21, 31))
+
+    assert len(her_round.prompts) == 2
+    assert all("窗外下起了雨。" in seen for seen in her_round.prompts)
+    assert await unread_received(lane=LANE, persona_id="ayana") == []
+
+
+@pytest.mark.integration
+async def test_a_landing_that_fails_halfway_through_the_read_marks_keeps_none_of_them(
+    her_round, monkeypatch, resident
+):
+    """这一轮收尾的那个事务里，看过的记了一条、记第二条时失败：已经写下的那一条和这一轮的
+    ``LifeMoment`` 一起回滚，三条下一轮原样再摆一遍。只回滚一半的话，那一条就成了"看过"，
+    可这一轮并没有落地，她下一轮再也看不到它。"""
+    messages = [_from("world", f"第 {i} 件事。", at=_at(21, 20 + i)) for i in range(3)]
+    for m in messages:
+        await receive(m)
+
+    real = received_mod.insert_idempotent
+    marked: list[str] = []
+
+    async def fails_on_the_second_mark(obj):
+        if marked:
+            raise _Crash("记到第二条时库断了")
+        await real(obj)
+        marked.append(obj.message_id)
+
+    monkeypatch.setattr(received_mod, "insert_idempotent", fails_on_the_second_mark)
+    with pytest.raises(_Crash):
+        await _her_round(resident, _at(21, 30))
+    monkeypatch.setattr(received_mod, "insert_idempotent", real)
+    assert marked == [messages[0].message_id], "前提没造出来：第一条要在失败之前写进那个事务"
+
+    moments = await fetch_value(
+        "SELECT count(*) FROM data_life_moment WHERE lane = :l AND persona_id = :p",
+        l=LANE,
+        p="ayana",
+    )
+    reads = await fetch_value(
+        f"SELECT count(*) FROM {received_mod._READ_TABLE} WHERE lane = :l", l=LANE
+    )
+    assert (moments, reads) == (0, 0), "这一轮没落地，可它的记录或者看过的记录留下了"
+
+    await _her_round(resident, _at(21, 31))
+
+    again = her_round.prompts[-1]
+    assert all(m.body in again for m in messages), f"没落地那一轮的消息没再摆出来：\n{again}"
+    assert await unread_received(lane=LANE, persona_id="ayana") == []
+
+
+@pytest.mark.integration
+async def test_what_arrives_while_she_is_in_a_round_stays_unread_for_the_next(
+    her_round, resident
+):
+    """这一轮跑着的时候新到的消息，这一轮没给她看，就不能跟着记成看过。"""
+    rain = _from("world", "窗外下起了雨。", at=_at(21, 25))
+    doorbell = _from("world", "楼下有人按门铃。", at=_at(21, 31))
+    await receive(rain)
+
+    async def it_arrives():
+        await receive(doorbell)
+
+    her_round.meanwhile = it_arrives
+    await _her_round(resident, _at(21, 30))
+    her_round.meanwhile = None
+
+    assert [m.message_id for m in await unread_received(lane=LANE, persona_id="ayana")] == [
+        doorbell.message_id
+    ]
+    await _her_round(resident, _at(21, 40))
+
+    first, second = her_round.prompts
+    assert "窗外下起了雨。" in first and "楼下有人按门铃。" not in first
+    assert "楼下有人按门铃。" in second and "窗外下起了雨。" not in second
+
+
+# ---------------------------------------------------------------------------
+# 走一遍真的通信机制：world 按名字发给她
+# ---------------------------------------------------------------------------
+
+
+async def _named_in_the_persona_table(living_db) -> None:
+    """三姐妹的名字写进人设表，进程还没读过：开始接收时才按它开收件箱，跟线上一样。"""
+    from app.data.models import Base, BotPersona
+
+    async with living_db.begin() as conn:
+        await conn.run_sync(
+            lambda c: Base.metadata.create_all(c, tables=[BotPersona.__table__])
+        )
+    async with tx():
+        s = current_session()
+        for persona_id, name in _NAMES.items():
+            s.add(
+                BotPersona(
+                    persona_id=persona_id,
+                    display_name=name,
+                    persona_core="",
+                    persona_lite="",
+                    default_reply_style="",
+                    error_messages={},
+                )
+            )
+
+
+@pytest.mark.integration
+async def test_world_reaches_her_by_name_and_a_resend_is_stored_once(
+    broker, messaging_db, living_db, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+):
+    """名字从人设表来，收件箱在开始接收时按名字开好；world 发给"绫奈"的那条存到 ayana 名下，
+    带着同一个 id 重发一次（world 补发没发完的告知就是这样）也只有一行。"""
+    from app.living.common import living_lane
+    from app.messaging.lifecycle import start_messaging
+    from app.messaging.receiving import inboxes_at_start
+    from app.messaging.sending import send
+    from tests.messaging.helpers import eventually, outcomes_become
+
+    await _named_in_the_persona_table(living_db)
+    inboxes_at_start(her_mailbox(PersonaNames(tuple(_NAMES))).open_inboxes)
+    await start_messaging()
+    delivery = await send(sender="world", recipient="绫奈", body="窗外下起了雨。")
+
+    assert delivery.delivered
+    assert await outcomes_become(delivery.message_id, ["sending", "delivered"]) == [
+        "sending",
+        "delivered",
+    ]
+
+    async def stored() -> list[str]:
+        rows = await fetch_all(
+            "SELECT persona_id FROM data_received_message "
+            "WHERE lane = :l AND message_id = :m",
+            l=living_lane(),
+            m=delivery.message_id,
+        )
+        return [r["persona_id"] for r in rows]
+
+    await eventually(stored)
+    resent = await send(
+        sender="world",
+        recipient="绫奈",
+        body="窗外下起了雨。",
+        message_id=delivery.message_id,
+    )
+    assert resent.delivered
+    await outcomes_become(
+        delivery.message_id, ["sending", "delivered", "sending", "delivered"]
+    )
+    await asyncio.sleep(1.0)  # 让重发的那一份被处理完
+    assert await stored() == ["ayana"]
+
+
+@pytest.mark.integration
+async def test_a_quiet_message_stays_quiet_through_a_scheduled_hop_and_a_failed_store(
+    broker, messaging_db, living_db, monkeypatch  # noqa: F811 — 形参名就是 fixture 名
+):
+    """world 定时发给她一条不叫醒的：到点前分段再排、到点转交，第一次存的时候出事、通信机制
+    重投——每一步都重新发布信封，存进她收件记录的还是不叫醒。"""
+    from datetime import UTC, datetime, timedelta
+
+    from app.living.common import living_lane
+    from app.messaging import broker as messaging_broker
+    from app.messaging import receiving
+    from app.messaging.lifecycle import start_messaging
+    from app.messaging.receiving import inboxes_at_start
+    from app.messaging.retry import RetryPolicy
+    from app.messaging.sending import send_at
+    from tests.messaging.helpers import eventually
+
+    monkeypatch.setattr(messaging_broker, "DELAY_LIMIT_MS", 600)
+    monkeypatch.setattr(
+        receiving,
+        "PROCESSING_RETRY",
+        RetryPolicy(n=3, backoff="linear", base_delay_ms=200, max_delay_ms=500, lease_ms=60_000),
+    )
+    real = received_mod.insert_idempotent
+    attempts: list[int] = []
+
+    async def crash_the_first_time(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise _Crash("第一次存的时候没了")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(received_mod, "insert_idempotent", crash_the_first_time)
+    await _named_in_the_persona_table(living_db)
+    inboxes_at_start(her_mailbox(PersonaNames(tuple(_NAMES))).open_inboxes)
+    await start_messaging()
+
+    message_id = await send_at(
+        sender="world",
+        recipient="绫奈",
+        body="窗外的雨小了一点。",
+        at=datetime.now(UTC) + timedelta(seconds=1.5),
+        wakes_recipient=False,
+    )
+
+    async def stored() -> list[ReceivedMessage]:
+        return await _stored("ayana", lane=living_lane())
+
+    await eventually(stored, timeout=15)
+    (row,) = await stored()
+    assert (row.message_id, row.wakes_recipient) == (message_id, False)
+    assert len(attempts) == 2, "前提没造出来：要有一次存失败、重投之后才存下"

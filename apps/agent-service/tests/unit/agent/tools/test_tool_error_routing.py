@@ -4,7 +4,7 @@
 
 * ``CapabilityInvalidArg``  → caught, returned as ``ToolOutcomeError(kind="invalid_args")`` dict (LLM-visible)
 * ``CapabilityNotFound``    → caught, returned as ``ToolOutcomeError(kind="not_found")`` dict (LLM-visible)
-* ``CapabilityTimeout``     → propagated (wire ``on_error`` decides)
+* ``CapabilityTimeout``     → propagated
 * ``CapabilityRateLimited`` → propagated
 * ``CapabilityCallFailed``  → propagated
 * anything else             → propagated (no swallow)
@@ -15,16 +15,14 @@ from __future__ import annotations
 
 import pytest
 
-from app.agent.tools._common import tool_error
-from app.agent.tools.outcome import ToolOutcomeError
-from app.capabilities._errors import (
+from app.agent.tools.outcome import ToolOutcomeError, tool_error
+from app.capabilities.errors import (
     CapabilityCallFailed,
     CapabilityInvalidArg,
     CapabilityNotFound,
     CapabilityRateLimited,
     CapabilityTimeout,
 )
-
 
 # ---------------------------------------------------------------------------
 # LLM-visible: invalid_args

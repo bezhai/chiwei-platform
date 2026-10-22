@@ -26,6 +26,9 @@ export function deriveAction(method: string, path: string): string {
     [/^\/api\/ops\/builds\/[^/]+\/latest$/, 'ops.builds.read'],
     [/^\/api\/ops\/db-query$/, 'ops.db-query'],
     [/^\/api\/ops\/lane-bindings$/, method === 'GET' ? 'ops.lane-bindings.read' : method === 'POST' ? 'ops.lane-bindings.create' : 'ops.lane-bindings.delete'],
+    // world 的记录：动作名里不放记录路径（变长、多段），路径进 params.record_path。
+    [/^\/api\/ops\/world\/records$/, 'ops.world-records.list'],
+    [/^\/api\/ops\/world\/records\/document$/, method === 'PUT' ? 'ops.world-records.write' : method === 'DELETE' ? 'ops.world-records.delete' : 'ops.world-records.read'],
     [/^\/api\/ops\/trigger-diary$/, 'ops.trigger-diary'],
     [/^\/api\/ops\/trigger-weekly-review$/, 'ops.trigger-weekly-review'],
     [/^\/api\/audit-logs$/, 'audit-logs.read'],
@@ -115,19 +118,23 @@ export const auditMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
       Object.assign(params, stashed);
     }
 
-    // Fire-and-forget audit write
-    try {
-      const repo = AppDataSource.getRepository(AuditLog);
-      await repo.save({
-        caller,
-        action,
-        params: Object.keys(params).length ? params : null,
-        result,
-        error_message: errorMessage,
-        duration_ms: duration,
-      });
-    } catch (auditErr) {
-      console.error('Failed to write audit log:', auditErr);
+    // Fire-and-forget audit write. A route that wrote its own row before acting
+    // (world record writes: routes/world-records.ts) marks auditWritten, and this
+    // middleware does not write a second one for it.
+    if (!c.get('auditWritten')) {
+      try {
+        const repo = AppDataSource.getRepository(AuditLog);
+        await repo.save({
+          caller,
+          action,
+          params: Object.keys(params).length ? params : null,
+          result,
+          error_message: errorMessage,
+          duration_ms: duration,
+        });
+      } catch (auditErr) {
+        console.error('Failed to write audit log:', auditErr);
+      }
     }
   }
 };

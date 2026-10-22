@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import pytest
 
+from app.data.schema import key_fields
 from app.domain.thinking_cost import (
     ThinkingTokensSpent,
     record_round_cost,
     record_thinking_tokens,
 )
-from app.runtime.data import key_fields
-from app.runtime.persist import select_all_versions
+from tests.data.read_back import all_versions
 from tests.runtime.conftest import migrate
 
 # collect_usage 累计 dict 的形态（input/output/total/cache_read_input_tokens/calls）。
@@ -68,7 +68,7 @@ async def test_record_then_read_back_all_token_dims(thinking_cost_db):
         observed_at="2026-06-07T12:30:00+08:00",
     )
 
-    rows = await select_all_versions(
+    rows = await all_versions(
         ThinkingTokensSpent, {"lane": "coe-t", "actor": "akao", "round_id": "r1"}
     )
     assert len(rows) == 1
@@ -98,7 +98,7 @@ async def test_record_is_idempotent_on_natural_key(thinking_cost_db):
             observed_at="2026-06-07T08:00:00+08:00",
         )
 
-    rows = await select_all_versions(
+    rows = await all_versions(
         ThinkingTokensSpent,
         {"lane": "coe-t", "actor": "world", "round_id": "round-dup"},
     )
@@ -119,10 +119,10 @@ async def test_lane_isolation_on_thinking_tokens(thinking_cost_db):
         cached_tokens=0, model_calls=1, observed_at="2026-06-07T08:00:00+08:00",
     )
 
-    prod = await select_all_versions(
+    prod = await all_versions(
         ThinkingTokensSpent, {"lane": "prod", "actor": "world", "round_id": "r"}
     )
-    coe = await select_all_versions(
+    coe = await all_versions(
         ThinkingTokensSpent, {"lane": "coe-t", "actor": "world", "round_id": "r"}
     )
     assert prod[0].total_tokens == 110
@@ -143,10 +143,10 @@ async def test_actor_isolation_on_thinking_tokens(thinking_cost_db):
         cached_tokens=0, model_calls=1, observed_at="2026-06-07T08:00:00+08:00",
     )
 
-    world = await select_all_versions(
+    world = await all_versions(
         ThinkingTokensSpent, {"lane": "coe-t", "actor": "world", "round_id": "r"}
     )
-    akao = await select_all_versions(
+    akao = await all_versions(
         ThinkingTokensSpent, {"lane": "coe-t", "actor": "akao", "round_id": "r"}
     )
     assert world[0].total_tokens == 220
@@ -170,7 +170,7 @@ async def test_record_round_cost_maps_usage_dict_to_token_dims(thinking_cost_db)
         observed_at="2026-06-07T12:30:00+08:00",
     )
 
-    rows = await select_all_versions(
+    rows = await all_versions(
         ThinkingTokensSpent, {"lane": "coe-t", "actor": "akao", "round_id": "r1"}
     )
     assert len(rows) == 1

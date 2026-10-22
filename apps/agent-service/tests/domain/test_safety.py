@@ -4,13 +4,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from app.data.schema import key_fields
 from app.domain.safety import (
     PostSafetyRequest,
     PreSafetyRequest,
     PreSafetyVerdict,
     Recall,
 )
-from app.runtime.data import key_fields
 
 
 def test_pre_safety_request_is_transient():

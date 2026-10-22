@@ -8,14 +8,13 @@
 只是每天凌晨把刚过去那一天摆给她，让她**另写**一页 —— 跟 :mod:`app.living.loose_ends`
 同一个性质：她自己写下的那一层。
 
-六件必须真的成立，各占一节：
+五件必须真的成立，各占一节：
 
   * **生活日不是日历日**。凌晨三点还醒着的时候，那是昨天的延续，不是新的一天。
   * **一天只写一页，写不成就不写**。页存在本身就是"这天复盘过了"的权威 —— 不另设
     标记列（旧实现在这上面炸过一次，改了七处才收住）。
-  * **摆给她的是她的那一天**，不是全世界的那一天：够不着的事她本来就不知道，日记里
-    不该冒出来。
-  * **她自己做的事必须在里面**。感知那条路抑制回声，照抄过来的话她的一天里只有别人。
+  * **摆给她的是她自己的经历**：她做过的事、说过的话，加上那一天传到她这里的消息，按
+    发生的先后排。别人做了什么，只有传到她这里的那一部分才算她知道。
   * **注入的那一页严格早于当前生活日**。她凌晨写下的那页是"刚过去那天"的，如果同一
     天里又被当成"你的昨天"喂回去，她会把今天当成昨天过。
   * **写页那一轮看得见上一页**，不然每一页都是孤立的一天，链断在第二天。
@@ -26,27 +25,38 @@ import datetime as dt
 
 import pytest
 
-from app.agent.neutral import Message, Role
-from app.living.day_page import (
+from app.agent.round import Round
+from app.host import Signal
+from app.living.day_page.pages import (
     DAY_PAGE_FROM,
     DAY_PAGE_UNTIL,
     LivingDayPage,
     day_material,
-    day_page_tick,
     living_day_bounds,
     living_day_of,
     read_day_page,
     read_day_page_before,
     read_day_pages_between,
-    write_day_page,
 )
-from app.living.happening import record_happening
-from app.living.loose_ends import LooseEnd
-from app.living.records import KIND_ACT, KIND_SPEECH
-from app.living.snapshot import read_snapshot
-from app.living.whereabouts import note_whereabouts
+from app.living.her_records.deeds import record_happening
+from app.living.her_records.whereabouts import note_whereabouts
+from app.living.household.received import ReceivedMessage
+from app.living.loose_ends.threads import LooseEnd
+from app.living.services import KIND_ACT, KIND_SPEECH, MEDIUM_IN_PERSON, MEDIUM_PHONE
+from tests.living.conftest import (
+    Calls,
+    clock_at,
+    her_diary,
+    her_mailbox,
+    her_queue,
+    her_round_runs,
+    own_records,
+    settled,
+)
 
 LANE = "coe-living"
+HER_RECORDS = own_records()
+RECEIVED = her_mailbox(her_records=HER_RECORDS)
 _CST = dt.timezone(dt.timedelta(hours=8))
 
 # 被复盘的那一个生活日：2026-07-25 04:00 → 2026-07-26 04:00。
@@ -57,6 +67,36 @@ def _on(day: int, hour: int, minute: int = 0) -> dt.datetime:
     return dt.datetime(2026, 7, day, hour, minute, tzinfo=_CST)
 
 
+def _day_pages():
+    """日记这个唤醒来源，跟 day_page 插件给她登记的一样（:mod:`app.living.day_page`）：「她是谁」从
+    persona 服务取，传到她这里的从 received 服务取。"""
+    from app.living.day_page import day_page_wake
+
+    return day_page_wake(LANE, her_diary(HER_RECORDS, RECEIVED))
+
+
+def _her_round(now: dt.datetime) -> Round:
+    """她在 ``now`` 那一轮（只有"上一次写下的那一天"那一段要用的那几样）。"""
+    return Round(
+        app="agent-service",
+        lane=LANE,
+        participant="akao",
+        profile="resident",
+        round_id=now.isoformat(timespec="minutes"),
+        now=now,
+        reason="常规节奏",
+        due=None,
+    )
+
+
+async def _tick(at: dt.datetime, persona_id: str = "akao") -> LivingDayPage | None:
+    """日记的钟在 ``at`` 响的一拍：送到她一条新的日记队列上（一个刚起来的进程），轮到她时钟
+    也停在 ``at``。交回写下的那一页，这一拍不写就是 ``None``。"""
+    return await her_queue(persona_id, "day-page", clock=clock_at(at)).take(
+        _day_pages(), Signal(at=at)
+    )
+
+
 @pytest.fixture
 async def page_db(living_db):
     from tests.runtime.conftest import migrate
@@ -65,41 +105,25 @@ async def page_db(living_db):
     return living_db
 
 
-class FakePage:
-    """替身：这一轮她写下的那一页是钉死的，只有模型那一步是假的。"""
-
-    def __init__(self, said: str = "今天拍完了那卷胶片。") -> None:
-        self.said = said
-        self.runs: list[tuple[list[Message], dict]] = []
-
-    async def run(self, messages, **kwargs):
-        self.runs.append((messages, kwargs))
-        return Message(role=Role.ASSISTANT, content=self.said)
-
-    @property
-    def material(self) -> str:
-        """最后一轮真的摆到她眼前的那段文字。"""
-        return "\n".join(m.content for m in self.runs[-1][0])
-
-
 @pytest.fixture
-def stub_page(monkeypatch):
-    """装一个替身 + 一份不碰真库的 persona。"""
+def stub_page(monkeypatch, models):
+    """装一个模型替身（这一轮她写下的那一页是钉死的，:class:`tests.living.conftest.Calls`）+ 一份
+    不碰真库的 persona。替身的 ``material`` 是最后一轮真的摆到她眼前的那段文字。"""
     from types import SimpleNamespace
 
-    from app.living import day_page as page_mod
-    from app.living import persona as persona_mod
+    from app.living.day_page import pages as page_mod
+    from app.living.persona import chain as persona_mod
 
     async def fake_find_persona(persona_id: str):
         return SimpleNamespace(display_name="赤尾", persona_core="她拍胶片、泡抹茶店。")
 
-    # 打在 ``app.living.persona`` 上：日记这一轮不自己查主表，那两个变量由那个模块
+    # 打在 ``app.living.persona.chain`` 上：日记这一轮不自己查主表，那两个变量由那个模块
     # 一处组装（版本链优先，这里链是空的，落到 persona_core 这一层）。
     monkeypatch.setattr(persona_mod, "find_persona", fake_find_persona)
 
-    def install(said: str = "今天拍完了那卷胶片。") -> FakePage:
-        runner = FakePage(said)
-        monkeypatch.setattr(page_mod, "build_day_page_runner", lambda: runner)
+    def install(said: str = "今天拍完了那卷胶片。") -> Calls:
+        runner = Calls(said=said)
+        models[page_mod.DAY_PAGE_PROMPT_ID] = runner.client
         return runner
 
     return install
@@ -121,28 +145,46 @@ async def _happened(
     content: str,
     at: dt.datetime,
     *,
-    place: str = "家/客厅",
     to=(),
     kind: str = KIND_SPEECH,
+    medium: str = MEDIUM_IN_PERSON,
 ):
     return await record_happening(
         lane=LANE,
         happening_id=f"{actor}:{at.isoformat()}:{content[:8]}",
         actor=actor,
-        place=place,
         kind=kind,
         content=content,
         occurred_at=at,
         audience=list(to),
+        medium=medium,
+    )
+
+
+async def _received(
+    persona: str, sender: str, body: str, at: dt.datetime, *, wakes_her: bool = True
+) -> None:
+    """一条传到她这里的消息，跟收件箱存下的一样（:func:`app.living.household.received.receive`）。"""
+    from app.data.persist import insert_idempotent
+
+    await insert_idempotent(
+        ReceivedMessage(
+            lane=LANE,
+            persona_id=persona,
+            message_id=f"{persona}:{at.isoformat()}:{body[:8]}",
+            sender=sender,
+            body=body,
+            message_time=at,
+            wakes_recipient=wakes_her,
+        )
     )
 
 
 async def _a_day_worth_of_stuff() -> None:
-    """三姐妹都在客厅，那一天发生过几件事。"""
-    for who in ("akao", "ayana"):
-        await _stand(who, "家/客厅", _on(25, 6))
+    """赤尾那一天：自己做了一件事，绫奈当面跟她说的一句直接传到了她这里。"""
+    await _stand("akao", "家/客厅", _on(25, 6))
     await _happened("akao", "把胶片摊了一茶几", _on(25, 10), kind=KIND_ACT)
-    await _happened("ayana", "今天要下雨吧", _on(25, 15), to=["akao"])
+    await _received("akao", "绫奈", "当面对你说：「今天要下雨吧」", _on(25, 15))
 
 
 # --------------------------------------------------------------------------
@@ -162,15 +204,15 @@ def test_the_page_table_is_not_the_old_engines_day_page_table():
     整批迁移回滚、Pod 起不来。**这一条在测试里看不见** —— 测试是在一张空库里建新表，
     只有真的部署到已经有那张旧表的库上才炸。所以把类名派生出来的表名钉在这里。
     """
-    from app.living.day_page import _TABLE
-    from app.runtime.migrator import _table_name
+    from app.data.schema import table_name
+    from app.living.day_page.pages import _TABLE
 
-    assert _table_name(LivingDayPage) != _OLD_ENGINE_TABLE, (
+    assert table_name(LivingDayPage) != _OLD_ENGINE_TABLE, (
         f"这个 Data 类派生出来的表名是 {_OLD_ENGINE_TABLE} —— 那是已删掉的旧引擎"
         "（睡前回顾）的表，列的形状不一样，而且 prod 上还在被写。用这个类名 = "
         "下次部署 MigrationError、Pod crash loop。"
     )
-    assert _TABLE == _table_name(LivingDayPage), (
+    assert _TABLE == table_name(LivingDayPage), (
         "模块里真正拼进 SQL 的表名跟类名派生出来的不是同一个 —— 迁移建的那张表和"
         "读写打的那张表会是两张。"
     )
@@ -210,7 +252,7 @@ async def test_she_writes_down_the_day_that_just_ended(page_db, stub_page):
     await _a_day_worth_of_stuff()
     stub_page("胶片摊了一茶几，绫奈说要下雨，结果没下。")
 
-    page = await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    page = await _tick(_on(26, 4, 30))
 
     assert page is not None, "到点了、那天也有东西，却什么都没写下"
     assert page.day == _DAY, "写的不是刚过去那一天"
@@ -224,8 +266,8 @@ async def test_a_day_that_already_has_a_page_is_not_written_again(page_db, stub_
     await _a_day_worth_of_stuff()
     runner = stub_page()
 
-    first = await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
-    again = await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 35))
+    first = await _tick(_on(26, 4, 30))
+    again = await _tick(_on(26, 4, 35))
 
     assert first is not None
     assert again is None, "同一天写了第二页"
@@ -238,8 +280,8 @@ async def test_outside_the_window_she_does_not_look_back(page_db, stub_page):
     await _a_day_worth_of_stuff()
     runner = stub_page()
 
-    assert await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 2)) is None
-    assert await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 12)) is None
+    assert await _tick(_on(26, 2)) is None
+    assert await _tick(_on(26, 12)) is None
     assert runner.runs == [], "没到点却叫了模型"
 
 
@@ -248,7 +290,7 @@ async def test_a_day_with_nothing_in_it_gets_no_page(page_db, stub_page):
     """那天服务根本没跑 —— 不该有那一页，更不该为一片空白叫一次模型。"""
     runner = stub_page()
 
-    assert await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30)) is None
+    assert await _tick(_on(26, 4, 30)) is None
     assert runner.runs == [], "一天什么都没发生，却还是叫了模型"
 
 
@@ -258,25 +300,24 @@ async def test_a_round_that_writes_nothing_leaves_no_page(page_db, stub_page):
     await _a_day_worth_of_stuff()
     stub_page("   ")
 
-    assert await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30)) is None
+    assert await _tick(_on(26, 4, 30)) is None
     assert await read_day_page(lane=LANE, persona_id="akao", day=_DAY) is None
 
     stub_page("补上了：胶片摊了一茶几。")
-    later = await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 5))
+    later = await _tick(_on(26, 5))
     assert later is not None, "上一拍空了就再也不写了 —— 这一天她永远丢了"
 
 
 # --------------------------------------------------------------------------
-# 三 · 摆给她的是她的那一天
+# 三 · 摆给她的是她自己的经历
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.integration
 async def test_what_she_did_herself_is_in_it(page_db):
-    """感知那条路抑制回声，照抄过来的话她的一天里只有别人做的事。"""
     await _a_day_worth_of_stuff()
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
 
     assert any("把胶片摊了一茶几" in line for line in lines), (
         f"她自己那一天做的事不在材料里：{lines}"
@@ -284,28 +325,165 @@ async def test_what_she_did_herself_is_in_it(page_db):
 
 
 @pytest.mark.integration
-async def test_what_was_said_to_her_is_in_it(page_db):
+async def test_what_reached_her_is_in_it_with_who_sent_it(page_db):
     await _a_day_worth_of_stuff()
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
 
-    assert any("今天要下雨吧" in line for line in lines), lines
+    assert "15:00 CST 绫奈：当面对你说：「今天要下雨吧」" in lines, lines
 
 
 @pytest.mark.integration
-async def test_what_she_could_not_reach_never_enters_her_day(page_db):
-    """她够不着的地方发生的事，她当时就不知道 —— 日记里不该冒出来。"""
+async def test_what_world_told_her_is_in_it_as_it_was_told(page_db):
+    """world 告诉她的是她察觉到的事，原样摆，不标是谁说的（跟她每一轮读到的一样）。"""
+    await _received("akao", "world", "窗外开始下雨了。", _on(25, 16))
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
+
+    assert lines == ["16:00 CST 窗外开始下雨了。"], lines
+
+
+@pytest.mark.integration
+async def test_what_reached_her_without_waking_her_is_in_her_day_too(page_db):
+    """不叫醒她的告知只是没把她提前叫来，照样是她那一天传到她这里的事。"""
+    await _received("akao", "world", "窗外的雨小了一点。", _on(25, 16), wakes_her=False)
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
+
+    assert lines == ["16:00 CST 窗外的雨小了一点。"], lines
+
+
+@pytest.mark.integration
+async def test_what_her_sisters_did_never_enters_her_day_on_its_own(page_db):
+    """别的姐妹的经历是她们自己的。哪怕两个人站在同一间屋里、那句话还是冲着她说的，
+    她知道的也只是传到她这里的那一条，不是从别人的记录里按位置读出来的。"""
     await _stand("akao", "家/客厅", _on(25, 6))
-    await _stand("chinagi", "学校/操场", _on(25, 6))
-    await _happened("chinagi", "把球踢进了树丛", _on(25, 11), place="学校/操场", kind=KIND_ACT)
+    await _stand("ayana", "家/客厅", _on(25, 6))
+    await _happened("ayana", "今天要下雨吧", _on(25, 15), to=["akao"])
+    await _happened("ayana", "把伞挂到了门口", _on(25, 15, 1), kind=KIND_ACT)
     await _happened("akao", "煮了壶抹茶", _on(25, 12), kind=KIND_ACT)
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
+    joined = "\n".join(lines)
 
-    assert any("煮了壶抹茶" in line for line in lines)
-    assert not any("树丛" in line for line in lines), (
-        f"她当时在客厅，操场上那一脚她不可能知道：{lines}"
+    assert "煮了壶抹茶" in joined
+    assert "今天要下雨吧" not in joined, f"绫奈的记录被当成了她的经历：{lines}"
+    assert "把伞挂到了门口" not in joined, f"绫奈的记录被当成了她的经历：{lines}"
+
+
+@pytest.mark.integration
+async def test_her_phone_messages_and_take_backs_stay_in_her_day(page_db):
+    """手机上发的、撤回的照常是她的经历（不进 world 的汇总，但她自己回看得到）。"""
+    await _happened(
+        "akao", "你去过那家抹茶店吗？", _on(25, 11), to=["bezhai"], medium=MEDIUM_PHONE
     )
+    await _happened(
+        "akao",
+        "去撤回自己说过的那句「你去过那家抹茶店吗？」",
+        _on(25, 11, 5),
+        kind=KIND_ACT,
+        medium=MEDIUM_PHONE,
+    )
+
+    joined = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED))
+
+    assert "你对 bezhai 说：「你去过那家抹茶店吗？」" in joined
+    assert "去撤回自己说过的那句" in joined
+
+
+@pytest.mark.integration
+async def test_a_sister_named_by_id_in_her_day_reads_as_her_name(page_db):
+    """那一天的记录里说给谁记的是 life 内部的 id 时，摆给她写日记的材料里换成姐妹的名字。"""
+    await _happened("akao", "开饭了。", _on(25, 18), to=["chinagi", "许阿姨"])
+
+    joined = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED))
+
+    assert "你对 千凪、许阿姨 说：「开饭了。」" in joined
+    assert "chinagi" not in joined
+
+
+@pytest.mark.integration
+async def test_her_day_reads_in_the_order_things_happened(page_db):
+    """按事情发生的先后排，不按到达的先后：早发生的告知晚到了，也排在它发生的那一刻。"""
+    await _happened("akao", "出门去车站", _on(25, 10), kind=KIND_ACT)
+    await _received("akao", "千凪", "当面对你说：「路上小心」", _on(25, 10, 30))
+    # 这条最后才存下，可它说的是九点半的事。
+    await _received("akao", "world", "九点半的时候楼下的猫跑掉了。", _on(25, 9, 30))
+    await _happened("akao", "在车站买了票", _on(25, 11), kind=KIND_ACT)
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
+
+    assert lines == [
+        "09:30 CST 九点半的时候楼下的猫跑掉了。",
+        "10:00 CST 你 出门去车站",
+        "10:30 CST 千凪：当面对你说：「路上小心」",
+        "11:00 CST 你 在车站买了票",
+    ], lines
+
+
+@pytest.mark.integration
+async def test_what_reached_her_comes_before_what_she_did_at_the_same_moment(page_db):
+    """同一刻的，收到的排在前面：先传到她这里，她才接着做。"""
+    await _happened("akao", "去开门", _on(25, 10), kind=KIND_ACT)
+    await _received("akao", "world", "有人敲门。", _on(25, 10))
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
+
+    assert lines == ["10:00 CST 有人敲门。", "10:00 CST 你 去开门"], lines
+
+
+@pytest.mark.integration
+async def test_her_own_things_keep_the_order_she_did_them_in(page_db):
+    """她自己的几件按提交序排，不按钟点：提前来的那一轮先落地、钟点更早的那一轮后落地时，
+    钟点的先后跟她做事的先后是反的。"""
+    await _happened("akao", "被叫醒去接电话", _on(25, 21, 34), kind=KIND_ACT)
+    await _happened("akao", "接着看胶片", _on(25, 21, 30), kind=KIND_ACT)
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
+
+    assert lines == ["21:34 CST 你 被叫醒去接电话", "21:30 CST 你 接着看胶片"], lines
+
+
+@pytest.mark.integration
+async def test_messages_outside_that_day_are_not_in_that_page(page_db):
+    """传到她这里的消息按它说的那一刻归到哪一天，跟她自己做的事同一条边界。"""
+    await _received("akao", "world", "前一天晚上停了电。", _on(24, 22))
+    await _received("akao", "world", "凌晨一点打雷了。", _on(26, 1))
+    await _received("akao", "world", "新的一天出太阳了。", _on(26, 5))
+
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
+
+    assert lines == ["07-26 01:00 CST 凌晨一点打雷了。"], lines
+
+
+@pytest.mark.integration
+async def test_three_sisters_get_three_different_days(page_db):
+    """一个人的日记材料不是另一个人的：她自己做的事、传到她这里的消息，都只是她的。"""
+    await _a_day_worth_of_stuff()
+    await _happened("chinagi", "把球踢进了树丛", _on(25, 11), kind=KIND_ACT)
+    await _received("chinagi", "world", "操场边的树丛里有只猫。", _on(25, 11, 5))
+
+    mine = "\n".join(await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED))
+    hers = "\n".join(await day_material(lane=LANE, persona_id="chinagi", day=_DAY, her_records=HER_RECORDS, received=RECEIVED))
+
+    assert "今天要下雨吧" in mine and "把胶片摊了一茶几" in mine
+    assert "树丛" not in mine, mine
+    assert "把球踢进了树丛" in hers and "操场边的树丛里有只猫" in hers
+    assert "今天要下雨吧" not in hers and "把胶片摊了一茶几" not in hers, hers
+
+
+@pytest.mark.integration
+async def test_a_day_where_only_messages_reached_her_still_gets_a_page(
+    page_db, stub_page
+):
+    """她那天一件事都没做，可传到她这里的消息就是她那一天 —— 那一天不是空的。"""
+    await _received("akao", "world", "下了一整天的雨。", _on(25, 13))
+    runner = stub_page("下了一整天的雨，我哪儿也没去。")
+
+    page = await _tick(_on(26, 4, 30))
+
+    assert page is not None and page.happenings == 1
+    assert "下了一整天的雨。" in runner.material
 
 
 @pytest.mark.integration
@@ -316,7 +494,7 @@ async def test_only_that_day_goes_into_that_page(page_db):
     await _happened("akao", "凌晨还在翻论坛", _on(26, 1), kind=KIND_ACT)
     await _happened("akao", "新的一天煮了咖啡", _on(26, 5), kind=KIND_ACT)
 
-    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY)
+    lines = await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
     joined = "\n".join(lines)
 
     assert "凌晨还在翻论坛" in joined, "07-26 凌晨一点属于 07-25 这个生活日"
@@ -331,25 +509,10 @@ async def test_the_small_hours_are_dated_so_she_can_tell_them_apart(page_db):
     await _happened("akao", "凌晨还在翻论坛", _on(26, 1), kind=KIND_ACT)
 
     (line,) = [
-        line for line in await day_material(lane=LANE, persona_id="akao", day=_DAY)
+        line for line in await day_material(lane=LANE, persona_id="akao", day=_DAY, her_records=HER_RECORDS, received=RECEIVED)
         if "翻论坛" in line
     ]
     assert "07-26" in line, f"跨过午夜那几行没标日子：{line!r}"
-
-
-@pytest.mark.integration
-async def test_three_sisters_get_three_different_days(page_db):
-    """信息差在这里同样成立：一个人的日记材料不是另一个人的。"""
-    await _stand("akao", "家/客厅", _on(25, 6))
-    await _stand("ayana", "家/客厅", _on(25, 6))
-    await _stand("chinagi", "学校/操场", _on(25, 6))
-    await _happened("ayana", "今天要下雨吧", _on(25, 15), to=["akao"])
-
-    mine = await day_material(lane=LANE, persona_id="akao", day=_DAY)
-    hers = await day_material(lane=LANE, persona_id="chinagi", day=_DAY)
-
-    assert any("今天要下雨吧" in line for line in mine)
-    assert hers == [], f"千凪在操场上，客厅那句话不该进她的一天：{hers}"
 
 
 # --------------------------------------------------------------------------
@@ -362,14 +525,11 @@ async def test_the_snapshot_carries_the_page_she_wrote(page_db, stub_page):
     """写了没人读 = 白写。这一段必须真的进她每一轮的输入。"""
     await _a_day_worth_of_stuff()
     stub_page("胶片摊了一茶几，绫奈说要下雨。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    await _tick(_on(26, 4, 30))
 
-    snap = await read_snapshot(
-        lane=LANE, persona_id="akao", after_seq=0, now=_on(26, 14)
-    )
+    shown = await her_diary().last_written_section(_her_round(_on(26, 14)))
 
-    assert snap.day_page is not None
-    assert "胶片摊了一茶几，绫奈说要下雨。" in snap.render_state(her_words_in_view=True)
+    assert "胶片摊了一茶几，绫奈说要下雨。" in shown
 
 
 @pytest.mark.integration
@@ -386,12 +546,12 @@ async def test_a_page_of_the_current_living_day_is_never_served_as_yesterday(
     """
     await _a_day_worth_of_stuff()
     stub_page("07-25 这天。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    await _tick(_on(26, 4, 30))
 
     # 她 07-26 白天又过了一天，07-27 凌晨写下 07-26 那页。
     await _happened("akao", "去了趟唱片店", _on(26, 15), kind=KIND_ACT)
     stub_page("07-26 这天。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(27, 4, 30))
+    await _tick(_on(27, 4, 30))
 
     got = await read_day_page_before(
         lane=LANE, persona_id="akao", day=living_day_of(_on(27, 10))
@@ -405,12 +565,9 @@ async def test_a_page_of_the_current_living_day_is_never_served_as_yesterday(
 @pytest.mark.integration
 async def test_with_no_page_yet_the_snapshot_says_so_plainly(page_db):
     """冷启动第一天一页都没有 —— 如实说空，不留白洞。"""
-    snap = await read_snapshot(
-        lane=LANE, persona_id="akao", after_seq=0, now=_on(26, 14)
-    )
+    shown = await her_diary().last_written_section(_her_round(_on(26, 14)))
 
-    assert snap.day_page is None
-    assert snap.render_state(her_words_in_view=False).strip() != ""
+    assert shown.strip() != ""
 
 
 @pytest.mark.integration
@@ -418,13 +575,9 @@ async def test_a_page_older_than_yesterday_is_labelled_by_its_date(page_db, stub
     """中间断了几天（服务没跑）时，不许把三天前那页说成"昨天"。"""
     await _a_day_worth_of_stuff()
     stub_page("07-25 这天。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    await _tick(_on(26, 4, 30))
 
-    snap = await read_snapshot(
-        lane=LANE, persona_id="akao", after_seq=0, now=_on(29, 14)
-    )
-
-    rendered = snap.render_state(her_words_in_view=False)
+    rendered = await her_diary().last_written_section(_her_round(_on(29, 14)))
     assert "07-25" in rendered
     assert "昨天" not in rendered, f"三天前那页被说成了昨天：{rendered}"
 
@@ -435,7 +588,7 @@ async def test_a_page_older_than_yesterday_is_labelled_by_its_date(page_db, stub
 
 
 async def _drop_a_page(persona_id: str, day: dt.date, text: str) -> None:
-    from app.runtime.persist import insert_idempotent
+    from app.data.persist import insert_idempotent
 
     await insert_idempotent(
         LivingDayPage(
@@ -516,11 +669,11 @@ async def test_writing_a_page_she_can_see_the_one_before(page_db, stub_page):
     """不给上一页的话每一页都是孤立的一天，跨天这条链断在第二天。"""
     await _a_day_worth_of_stuff()
     stub_page("07-25：胶片摊了一茶几。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    await _tick(_on(26, 4, 30))
 
     await _happened("akao", "去了趟唱片店", _on(26, 15), kind=KIND_ACT)
     runner = stub_page("07-26：去了唱片店。")
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(27, 4, 30))
+    await _tick(_on(27, 4, 30))
 
     assert "07-25：胶片摊了一茶几。" in runner.material, (
         f"写第二页时看不见第一页：{runner.material}"
@@ -533,35 +686,182 @@ async def test_the_material_reaches_her_verbatim(page_db, stub_page):
     await _a_day_worth_of_stuff()
     runner = stub_page()
 
-    await write_day_page(lane=LANE, persona_id="akao", now=_on(26, 4, 30))
+    await _tick(_on(26, 4, 30))
 
     assert "把胶片摊了一茶几" in runner.material
     assert "今天要下雨吧" in runner.material
 
 
 # --------------------------------------------------------------------------
-# 六 · 接进那条钟
+# 六 · 她的日记队列和那条钟
 # --------------------------------------------------------------------------
 
 
+async def test_each_sister_has_a_day_page_queue_the_clock_signals_every_five_minutes(app_host):
+    """day_page 插件给三姐妹每人登记一条日记队列（占用上限 900 秒），日记的钟每 5 分钟给它发一个信号；
+    每个信号都排队（``QUEUE_EACH``）。它和她的轮次不在一条队列上，写日记不挡她过日子。忘了登记的
+    症状是静默的：模块写好了、测试全绿，而线上一页都不会有。"""
+    from app.host import Coalesce
+    from app.living.day_page.pages import write_due_page
+    from app.living.persona.chain import PersonaChain
+    from tests.living.conftest import her_residents
+
+    host = await app_host("agent-service")
+    queues = {r.name: r.detail["turns"] for r in host.registered() if r.kind == "turns"}
+    wakes = [
+        r
+        for r in host.registered()
+        if r.kind == "wake" and r.detail["source"].name == "day-page"
+    ]
+
+    assert sorted(
+        (w.plugin, w.detail["turns"].participant, w.detail["turns"].line, w.detail["every"])
+        for w in wakes
+    ) == sorted(("day_page", p, "day-page", dt.timedelta(minutes=5)) for p in her_residents())
+    for w in wakes:
+        assert w.detail["turns"] is queues[f"{w.detail['turns'].participant}/day-page"]
+        assert w.detail["turns"].hold_limit == dt.timedelta(seconds=900)
+        assert w.detail["source"].coalesce is Coalesce.QUEUE_EACH
+        assert w.detail["source"].run.func is write_due_page
+        assert isinstance(w.detail["source"].run.keywords["persona"], PersonaChain)
+
+
 @pytest.mark.integration
-async def test_the_tick_writes_a_page_for_each_of_them(page_db, stub_page, monkeypatch):
-    """忘了挂钟的症状是静默的：模块写好了、测试全绿，而线上一页都不会有。"""
-    from app.living import day_page as page_mod
+async def test_one_tick_writes_a_page_for_each_of_them(page_db, stub_page, app_host, monkeypatch):
+    """钟的一拍同时送到三个人的日记队列上（宿主的钟就是这样发的），三个人各写各的那一天。"""
+    import asyncio
 
-    # 千凪要**先**站进客厅再让那几件事发生：``record_happening`` 在写入那一刻把"谁在
-    # 哪"拍进事件行，读取侧一次位置查询都不做（见 app.living.happening 的模块
-    # docstring）。反过来写的话她那一天是空的，而这条用例验的是"钟推到了几个人"。
-    await _stand("chinagi", "家/客厅", _on(25, 6))
+    # 三个人那一天各有自己的经历：材料是空的那一个不写页，而这条用例验的是"钟推到了几个人"。
     await _a_day_worth_of_stuff()
+    await _happened("ayana", "在厨房煮乌冬", _on(25, 12), kind=KIND_ACT)
+    await _received("chinagi", "赤尾", "当面对你说：「吃饭了」", _on(25, 12, 30))
     stub_page("这天。")
+    monkeypatch.setenv("LANE", LANE)
+    monkeypatch.setattr("app.host.host.now_cst", lambda: _on(26, 4, 30))
 
-    monkeypatch.setattr(page_mod, "living_lane", lambda: LANE)
-    monkeypatch.setattr(page_mod, "now_cst", lambda: _on(26, 4, 30))
-
-    await day_page_tick.__wrapped__(page_mod.DayPageTick(ts=_on(26, 4, 30).isoformat()))
+    host = await app_host("agent-service")
+    await asyncio.gather(
+        *(
+            r.detail["turns"].take(r.detail["source"], Signal(at=_on(26, 4, 30)))
+            for r in host.registered()
+            if r.kind == "wake" and r.detail["source"].name == "day-page"
+        )
+    )
 
     for who in ("akao", "ayana", "chinagi"):
         assert await read_day_page(lane=LANE, persona_id=who, day=_DAY) is not None, (
             f"{who} 那一天没有页 —— 那条钟没把三个人都推到"
         )
+
+
+@pytest.mark.integration
+async def test_a_page_that_waited_behind_a_stuck_one_is_written_when_it_gets_her(
+    page_db, stub_page
+):
+    """前一次写页挂住了（模型调用卡住，最长占着 15 分钟），04:30 那一拍排在后面，04:46 才轮到。
+    这一页是 04:46 写下的，记的就是这一刻，不是那一拍敲响的 04:30。"""
+    import asyncio
+
+    await _a_day_worth_of_stuff()
+    stub_page("这天。")
+    clock = [_on(26, 4, 30)]
+    pages = her_queue("akao", "day-page", clock=lambda: clock[0])
+
+    async with her_round_runs(pages):  # 挂住的那一次
+        tick = asyncio.create_task(pages.take(_day_pages(), Signal(at=_on(26, 4, 30))))
+        await settled()
+        clock[0] = _on(26, 4, 46)
+    await tick
+
+    page = await read_day_page(lane=LANE, persona_id="akao", day=_DAY)
+    assert page is not None and page.written_at == _on(26, 4, 46)
+
+
+@pytest.mark.integration
+async def test_a_page_whose_tick_was_in_the_window_is_written_even_if_it_gets_her_after(
+    page_db, stub_page
+):
+    """窗口是 [04:00, 06:00)。05:59 那一拍还在窗口里，排在挂住的那一次后面，06:10 才轮到：
+    已经过了窗口，这一页照样写，记的是轮到时的 06:10。窗口按那一拍响的时刻判，只管这一拍要不要
+    去试；按轮到时的钟判的话，这一拍就不写了，而下一个窗口写的是下一天，这一天从此没有页。"""
+    import asyncio
+
+    assert (DAY_PAGE_FROM, DAY_PAGE_UNTIL) == (dt.time(4, 0), dt.time(6, 0))
+    await _a_day_worth_of_stuff()
+    stub_page("这天。")
+    clock = [_on(26, 5, 59)]
+    pages = her_queue("akao", "day-page", clock=lambda: clock[0])
+
+    async with her_round_runs(pages):  # 挂住的那一次
+        tick = asyncio.create_task(pages.take(_day_pages(), Signal(at=_on(26, 5, 59))))
+        await settled()
+        clock[0] = _on(26, 6, 10)
+    await tick
+
+    page = await read_day_page(lane=LANE, persona_id="akao", day=_DAY)
+    assert page is not None, "排在窗口末尾的那一拍轮到时过了窗口，那一天就没有页了"
+    assert page.written_at == _on(26, 6, 10)
+
+
+@pytest.mark.integration
+async def test_a_tick_before_the_window_does_not_write_even_if_it_gets_her_inside(
+    page_db, stub_page
+):
+    """反过来也一样按那一拍响的时刻判：03:55 那一拍不在窗口里，排在挂住的那一次后面、04:01 才
+    轮到，也不写。下一拍（04:00 之后响的）才写。"""
+    import asyncio
+
+    await _a_day_worth_of_stuff()
+    runner = stub_page("这天。")
+    clock = [_on(26, 3, 55)]
+    pages = her_queue("akao", "day-page", clock=lambda: clock[0])
+
+    async with her_round_runs(pages):  # 挂住的那一次
+        tick = asyncio.create_task(pages.take(_day_pages(), Signal(at=_on(26, 3, 55))))
+        await settled()
+        clock[0] = _on(26, 4, 1)
+
+    assert await tick is None
+    assert runner.runs == [], "窗口之前响的那一拍叫了模型"
+    assert await read_day_page(lane=LANE, persona_id="akao", day=_DAY) is None
+
+
+@pytest.mark.integration
+async def test_every_tick_waits_its_turn_behind_a_stuck_page(page_db, stub_page):
+    """每一拍都排队，不像她的轮次那样有一拍在等就把后来的丢掉：两拍都排在挂住的那一次后面，
+    各自轮到时再判这一天写过没有。第一拍写下这一页，第二拍看见它已经写了。"""
+    import asyncio
+
+    await _a_day_worth_of_stuff()
+    runner = stub_page("这天。")
+    pages = her_queue("akao", "day-page", clock=clock_at(_on(26, 4, 40)))
+
+    async with her_round_runs(pages):  # 挂住的那一次
+        ticks = [
+            asyncio.create_task(pages.take(_day_pages(), Signal(at=_on(26, 4, m))))
+            for m in (30, 35)
+        ]
+        await settled()
+        assert [t.done() for t in ticks] == [False, False], "有一拍没排上就被打发走了"
+
+    first, second = await asyncio.gather(*ticks)
+    assert first is not None and first.day == _DAY
+    assert second is None
+    assert len(runner.runs) == 1
+
+
+@pytest.mark.integration
+async def test_a_process_that_comes_up_after_six_does_not_write_that_day(page_db, stub_page):
+    """进程停过，06:00 之后才起来：刚过去那一天的窗口已经过了，这一天不写。第二天早上写的是
+    第二天的前一天，不回头补这一天。"""
+    await _a_day_worth_of_stuff()
+    runner = stub_page("07-26：去了唱片店。")
+
+    assert await _tick(_on(26, 6, 5)) is None  # 一个刚起来的进程，第一拍在 06:05
+
+    await _happened("akao", "去了趟唱片店", _on(26, 15), kind=KIND_ACT)
+    page = await _tick(_on(27, 4, 30))
+
+    assert page is not None and page.day == dt.date(2026, 7, 26)
+    assert await read_day_page(lane=LANE, persona_id="akao", day=_DAY) is None
+    assert len(runner.runs) == 1

@@ -12,7 +12,7 @@
 
 - **`ppe-<name>`（共用 prod 组件）**：表结构、历史数据、种子配置都用线上的，不需要准备。代价是 dev bot 触发的所有写入（消息记录、撤回、新表新字段）都直接写进 prod，schema 变更或错误数据会污染线上历史；而且消息写进的是 prod 库，所以**回复消息的是 prod 的 agent-service**。适合入站格式转换、规则引擎、出站投递这类不改数据库、也不涉及 agent-service 的改动。
 - **`coe-<name>`（独立的 chiwei-test 容器集）**：写入只影响 chiwei-test，不会波及 prod。代价是要**提前准备 chiwei-test 的数据**：
-  - **schema**：agent-service 启动时，framework 的 Data 表（`data_*`）由 `app/runtime/migrator.py` 增量创建；老的 SQLAlchemy ORM 表只在 coe-* 泳道由 `ensure_business_schema()` 用 `create_all` 创建。不在这两处注册的新表或新字段不会被创建。
+  - **schema**：agent-service 启动时，framework 的 Data 表（`data_*`）由 `app/data/migrator.py` 增量创建；老的 SQLAlchemy ORM 表只在 coe-* 泳道由 `ensure_business_schema()` 用 `create_all` 创建。不在这两处注册的新表或新字段不会被创建。
   - **种子数据**：dev bot 运行必须读到的 user / persona / bot 配置等，要从 prod 导出一份到 chiwei-test 对应的库。
   - 适合 schema 变更、消息协议变更、写入量很大或可能写入错误数据的改动。
 

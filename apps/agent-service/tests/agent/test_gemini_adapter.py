@@ -5,19 +5,17 @@ Symmetric to the OpenAI adapter (T2): it translates neutral types
 FunctionDeclaration / FunctionCall / FunctionResponse) and back. The dev box has
 no network egress to Gemini and production keys must not be extracted, so every
 test mocks the SDK: we hand the adapter a *canned* genai client whose
-``aio.models.generate_content`` / ``generate_content_stream`` return hand-built
-response / chunk objects, then assert the adapter's neutral translation.
+``aio.models.generate_content`` returns hand-built response objects, then assert
+the adapter's neutral translation.
 
 Coverage (spec §T3 Verification, adapted to mocked transport):
   - plain text round-trip neutral→wire→neutral,
   - multimodal image content block → Gemini image part,
-  - thinking part (``thought=True``) → a thought part of the turn sequence /
-    chunk.reasoning, with its signature,
+  - thinking part (``thought=True``) → a thought part of the turn sequence,
+    with its signature,
   - tool_call (function calling) round-trip,
   - tool_result (function_response) → wire,
   - structured output → dict (response_mime_type json + response_schema),
-  - finish_reason mapping (SAFETY/RECITATION→content_filter, MAX_TOKENS→length,
-    STOP→stop),
   - use_proxy wires settings.forward_proxy_url into the genai http options,
   - SDK auto-retry is disabled (attempts=1),
   - a generation span is produced.
@@ -34,10 +32,9 @@ import pytest
 
 from app.agent.adapters.gemini import GeminiAdapter
 from app.agent.neutral import ContentBlock, Message, Role, ToolCall, ToolDef
-from app.agent.tooling import tool
 
 # ---------------------------------------------------------------------------
-# Canned google-genai response / chunk builders
+# Canned google-genai response builders
 # ---------------------------------------------------------------------------
 
 
@@ -79,7 +76,7 @@ def _response(
     parts: list[Any] | None = None,
     finish_reason: Any = "STOP",
 ) -> SimpleNamespace:
-    # ``None`` → default text; an explicit ``[]`` stays empty (a finish-only chunk).
+    # ``None`` → default text; an explicit ``[]`` stays empty.
     if parts is None:
         parts = [_part(text="hi there")]
     candidate = SimpleNamespace(
@@ -101,52 +98,20 @@ class _MockGenaiClient:
     def __init__(self, **kwargs: Any):
         self.init_kwargs = kwargs
         self.last_generate_kwargs: dict[str, Any] | None = None
-        # every generate call's kwargs, in order — a ReAct loop calls more than
-        # once and what the SECOND request carried is the point of a replay test.
-        self.generate_calls: list[dict[str, Any]] = []
         self._next_result: Any = None
-        self._stream_chunks: list[Any] | None = None
-        self._stream_scripts: list[list[Any]] = []
 
         async def _generate_content(**kw: Any) -> Any:
             self.last_generate_kwargs = kw
-            self.generate_calls.append(kw)
             return self._next_result
-
-        async def _generate_content_stream(**kw: Any) -> Any:
-            self.last_generate_kwargs = kw
-            self.generate_calls.append(kw)
-            chunks = (
-                self._stream_scripts.pop(0)
-                if self._stream_scripts
-                else (self._stream_chunks or [])
-            )
-
-            async def _gen() -> Any:
-                for c in chunks:
-                    yield c
-
-            return _gen()
 
         async def _aclose() -> None:
             pass
 
-        models = SimpleNamespace(
-            generate_content=_generate_content,
-            generate_content_stream=_generate_content_stream,
-        )
+        models = SimpleNamespace(generate_content=_generate_content)
         self.aio = SimpleNamespace(models=models, close=_aclose)
 
     def set_result(self, result: Any) -> None:
         self._next_result = result
-
-    def set_stream(self, chunks: list[Any]) -> None:
-        self._stream_chunks = chunks
-
-    def set_streams(self, scripts: list[list[Any]]) -> None:
-        """One chunk list per ``stream`` call, in order (the ReAct loop streams
-        again after it has dispatched the tools a turn asked for)."""
-        self._stream_scripts = [list(s) for s in scripts]
 
 
 @pytest.fixture
@@ -1245,39 +1210,6 @@ async def test_complete_captures_thought_signature_on_tool_call(mock_sdk):
     assert out.tool_calls[0].signature == b"sig-abc"
 
 
-async def test_stream_captures_thought_signature_on_tool_call(mock_sdk):
-    """The streamed tool_call chunk carries the part's thought_signature too."""
-    adapter = GeminiAdapter(
-        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_stream(
-        [
-            _response(
-                parts=[
-                    _part(
-                        function_call=_function_call(
-                            "load_skill", {"name": "x"}, "c1"
-                        ),
-                        thought_signature=b"sig-xyz",
-                    )
-                ],
-                finish_reason="STOP",
-            )
-        ]
-    )
-    tools = [
-        ToolDef(name="load_skill", description="d", parameters={"type": "object"})
-    ]
-    chunks = [
-        c
-        async for c in adapter.stream(
-            [Message(role=Role.USER, content="q")], tools=tools
-        )
-    ]
-    tc_chunks = [c for c in chunks if c.tool_call is not None]
-    assert tc_chunks[0].tool_call.signature == b"sig-xyz"
-
-
 async def test_assistant_tool_call_reattaches_thought_signature_on_wire(mock_sdk):
     """Resending an assistant function_call turn re-attaches its thought_signature
     to the wire Part — else Gemini 2.5 rejects the next turn (400 INVALID_ARGUMENT,
@@ -1366,104 +1298,6 @@ async def test_structured_returns_dict(mock_sdk):
     cfg = mock_sdk.instance.last_generate_kwargs["config"]
     assert cfg.response_mime_type == "application/json"
     assert cfg.response_schema == schema
-
-
-# ---------------------------------------------------------------------------
-# stream() — neutral chunk emission
-# ---------------------------------------------------------------------------
-
-
-async def test_stream_emits_text_reasoning_finish(mock_sdk):
-    adapter = GeminiAdapter(
-        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_stream(
-        [
-            _response(parts=[_part(text="think", thought=True)], finish_reason=None),
-            _response(parts=[_part(text="hel")], finish_reason=None),
-            _response(parts=[_part(text="lo")], finish_reason=None),
-            _response(parts=[], finish_reason="STOP"),
-        ]
-    )
-
-    chunks = [c async for c in adapter.stream([Message(role=Role.USER, content="hi")])]
-
-    assert any(c.reasoning == "think" for c in chunks)
-    assert "".join(c.text for c in chunks if c.text) == "hello"
-    assert chunks[-1].finish_reason == "stop"
-
-
-async def test_stream_emits_tool_call_boundary(mock_sdk):
-    adapter = GeminiAdapter(
-        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_stream(
-        [
-            _response(parts=[_part(text="let me search")], finish_reason=None),
-            _response(
-                parts=[
-                    _part(
-                        function_call=_function_call("search", {"q": "cats"}, "call_1")
-                    )
-                ],
-                finish_reason="STOP",
-            ),
-        ]
-    )
-
-    tools = [ToolDef(name="search", description="d", parameters={"type": "object"})]
-    chunks = [
-        c
-        async for c in adapter.stream(
-            [Message(role=Role.USER, content="find cats")], tools=tools
-        )
-    ]
-
-    assert "".join(c.text for c in chunks if c.text) == "let me search"
-    tool_chunks = [c for c in chunks if c.tool_call is not None]
-    assert len(tool_chunks) == 1
-    assert tool_chunks[0].tool_call.name == "search"
-    assert tool_chunks[0].tool_call.arguments == {"q": "cats"}
-    assert chunks[-1].finish_reason == "stop"
-
-
-# ---------------------------------------------------------------------------
-# finish_reason mapping
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("gemini_reason", "neutral_reason"),
-    [
-        ("STOP", "stop"),
-        ("MAX_TOKENS", "length"),
-        ("SAFETY", "content_filter"),
-        ("RECITATION", "content_filter"),
-    ],
-)
-async def test_stream_finish_reason_mapping(mock_sdk, gemini_reason, neutral_reason):
-    adapter = GeminiAdapter(
-        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_stream(
-        [_response(parts=[_part(text="partial")], finish_reason=gemini_reason)]
-    )
-
-    chunks = [c async for c in adapter.stream([Message(role=Role.USER, content="x")])]
-    assert chunks[-1].finish_reason == neutral_reason
-
-
-async def test_finish_reason_accepts_enum_objects(mock_sdk):
-    """A finish_reason given as an enum-like object (has ``.name``) maps too."""
-    adapter = GeminiAdapter(
-        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
-    )
-    enum_like = SimpleNamespace(name="MAX_TOKENS")
-    mock_sdk.instance.set_stream(
-        [_response(parts=[_part(text="x")], finish_reason=enum_like)]
-    )
-    chunks = [c async for c in adapter.stream([Message(role=Role.USER, content="x")])]
-    assert chunks[-1].finish_reason == "length"
 
 
 # ---------------------------------------------------------------------------
@@ -1581,40 +1415,6 @@ async def test_generation_span_produced_for_structured(mock_sdk):
     assert len(_span_calls) == 1
 
 
-async def test_stream_generation_span_records_usage(mock_sdk):
-    """Streaming must record token usage on the generation span.
-
-    Gemini delivers cumulative usage_metadata on the last streamed chunk. The
-    stream() span — like complete() — must surface it as usage_details so
-    langfuse token accounting isn't silently lost on the main chat path.
-    """
-    adapter = GeminiAdapter(
-        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
-    )
-    last = _response(parts=[], finish_reason="STOP")
-    last.usage_metadata = _usage(prompt=11, candidates=22)
-    mock_sdk.instance.set_stream(
-        [
-            _response(parts=[_part(text="hel")], finish_reason=None),
-            _response(parts=[_part(text="lo")], finish_reason=None),
-            last,
-        ]
-    )
-
-    async for _ in adapter.stream([Message(role=Role.USER, content="hi")]):
-        pass
-
-    # the streamed generation span recorded usage_details from the last chunk
-    span = _MOST_RECENT_SPAN[-1]
-    usage_updates = [u for u in span.updates if "usage_details" in u]
-    assert usage_updates, "stream span never recorded usage_details"
-    assert usage_updates[-1]["usage_details"] == {
-        "input": 11,
-        "output": 22,
-        "total": 33,
-    }
-
-
 # ---------------------------------------------------------------------------
 # prompt cache — Gemini's implicit cache is on by default and reports the hit
 # in ``usage_metadata.cached_content_token_count``. Without it on the span a
@@ -1673,29 +1473,6 @@ async def test_structured_records_cached_content_tokens_in_usage(mock_sdk):
         "usage_details"
     ]
     assert details["cache_read_input_tokens"] == 700
-
-
-async def test_stream_records_cached_content_tokens_in_usage(mock_sdk):
-    """The cumulative usage of the last streamed chunk carries the cache hit."""
-    adapter = GeminiAdapter(
-        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
-    )
-    last = _response(parts=[], finish_reason="STOP")
-    last.usage_metadata = _usage_with_cache(prompt=62000, candidates=22, cached=60000)
-    mock_sdk.instance.set_stream(
-        [
-            _response(parts=[_part(text="hi")], finish_reason=None),
-            last,
-        ]
-    )
-
-    async for _ in adapter.stream([Message(role=Role.USER, content="hi")]):
-        pass
-
-    details = [u for u in _MOST_RECENT_SPAN[-1].updates if "usage_details" in u][-1][
-        "usage_details"
-    ]
-    assert details["cache_read_input_tokens"] == 60000
 
 
 async def test_usage_without_cached_content_omits_cache_key(mock_sdk):
@@ -1791,186 +1568,6 @@ async def test_registration_dispatches_google(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# supports_native_web_search — only Gemini 3 can co-host native google search
-# with custom function declarations; Gemini 2.5 can't, so it stays False.
-# Model-name normalisation strips a "models/" prefix and is case-insensitive;
-# anything we can't recognise is treated as unsupported (fail-closed).
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "model_name",
-    [
-        "gemini-3.5-flash",  # main chat
-        "gemini-3-flash-preview",  # diary
-        "models/gemini-3.5-flash",  # SDK-style "models/" prefix
-        "Gemini-3.5-Flash",  # mixed case
-        "MODELS/Gemini-3-Pro",  # prefix + case
-    ],
-)
-def test_supports_native_web_search_true_for_gemini_3(mock_sdk, model_name):
-    adapter = GeminiAdapter(model_name=model_name, api_key="k", base_url="https://g")
-    assert adapter.supports_native_web_search is True
-
-
-@pytest.mark.parametrize(
-    "model_name",
-    [
-        "gemini-2.5-flash",  # Gemini 2.5 can't co-host grounding + tools
-        "models/gemini-2.5-pro",
-        "Gemini-2.5-Flash",
-        "gemini-2.0-flash",
-        "gpt-4o",  # not Gemini at all
-        "",  # unknown → fail-closed
-    ],
-)
-def test_supports_native_web_search_false_for_non_gemini_3(mock_sdk, model_name):
-    adapter = GeminiAdapter(model_name=model_name, api_key="k", base_url="https://g")
-    assert adapter.supports_native_web_search is False
-
-
-# ---------------------------------------------------------------------------
-# native_web_search signal → request carries native google search tool
-# (④). When the loop hands native_web_search=True, the adapter appends a
-# Tool(google_search=GoogleSearch()) ALONGSIDE the custom function-declaration
-# tool (Gemini 3 co-hosts both). Default (no signal) leaves only the function
-# tool — non-Gemini-3 paths and the switch-off case are byte-for-byte unchanged.
-# ---------------------------------------------------------------------------
-
-
-def _split_tools(cfg: Any) -> tuple[list[Any], list[Any]]:
-    """Partition a config's tools into (function-declaration tools, search tools)."""
-    tools = cfg.tools or []
-    func_tools = [t for t in tools if t.function_declarations]
-    search_tools = [t for t in tools if getattr(t, "google_search", None) is not None]
-    return func_tools, search_tools
-
-
-async def test_complete_native_web_search_appends_google_search_tool(mock_sdk):
-    adapter = GeminiAdapter(
-        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
-
-    tools = [ToolDef(name="draw", description="d", parameters={"type": "object"})]
-    await adapter.complete(
-        [Message(role=Role.USER, content="weather?")],
-        tools=tools,
-        native_web_search=True,
-    )
-
-    cfg = mock_sdk.instance.last_generate_kwargs["config"]
-    func_tools, search_tools = _split_tools(cfg)
-    # custom function tool still present
-    assert len(func_tools) == 1
-    assert func_tools[0].function_declarations[0].name == "draw"
-    # native google search co-hosted
-    assert len(search_tools) == 1
-    # Gemini 3 requires include_server_side_tool_invocations to combine a built-in
-    # tool (google search) with function declarations — without it the API 400s
-    # ("Please enable tool_config.include_server_side_tool_invocations ...").
-    assert cfg.tool_config is not None
-    assert cfg.tool_config.include_server_side_tool_invocations is True
-
-
-async def test_stream_native_web_search_appends_google_search_tool(mock_sdk):
-    adapter = GeminiAdapter(
-        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_stream([_response(parts=[_part(text="ok")])])
-
-    tools = [ToolDef(name="draw", description="d", parameters={"type": "object"})]
-    async for _ in adapter.stream(
-        [Message(role=Role.USER, content="weather?")],
-        tools=tools,
-        native_web_search=True,
-    ):
-        pass
-
-    cfg = mock_sdk.instance.last_generate_kwargs["config"]
-    func_tools, search_tools = _split_tools(cfg)
-    assert len(func_tools) == 1
-    assert len(search_tools) == 1
-
-
-async def test_complete_without_native_web_search_has_no_google_search_tool(mock_sdk):
-    """Default (no signal): only the custom function tool, no google_search."""
-    adapter = GeminiAdapter(
-        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
-
-    tools = [ToolDef(name="draw", description="d", parameters={"type": "object"})]
-    await adapter.complete([Message(role=Role.USER, content="q")], tools=tools)
-
-    cfg = mock_sdk.instance.last_generate_kwargs["config"]
-    func_tools, search_tools = _split_tools(cfg)
-    assert len(func_tools) == 1
-    assert search_tools == []
-    # no native search → no server-side-tool toggle (non-native path unchanged)
-    assert cfg.tool_config is None
-
-
-async def test_complete_native_web_search_false_has_no_google_search_tool(mock_sdk):
-    """Explicit native_web_search=False is the same as no signal: no search tool."""
-    adapter = GeminiAdapter(
-        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
-
-    tools = [ToolDef(name="draw", description="d", parameters={"type": "object"})]
-    await adapter.complete(
-        [Message(role=Role.USER, content="q")],
-        tools=tools,
-        native_web_search=False,
-    )
-
-    cfg = mock_sdk.instance.last_generate_kwargs["config"]
-    _, search_tools = _split_tools(cfg)
-    assert search_tools == []
-
-
-async def test_native_web_search_signal_not_leaked_into_config_fields(mock_sdk):
-    """native_web_search is a control param, never a GenerateContentConfig field
-    or a trace model_parameter — it's consumed, not passed through."""
-    adapter = GeminiAdapter(
-        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
-
-    await adapter.complete(
-        [Message(role=Role.USER, content="q")],
-        native_web_search=True,
-    )
-
-    assert "native_web_search" not in _span_calls[0]["model_parameters"]
-    cfg = mock_sdk.instance.last_generate_kwargs["config"]
-    assert not hasattr(cfg, "native_web_search")
-
-
-async def test_native_web_search_with_no_tools_still_appends_google_search(mock_sdk):
-    """Even with no custom tools, the native search signal yields a search tool.
-
-    (In practice main chat always carries tools, but _build_config must not gate
-    the search tool on the function tool existing.)
-    """
-    adapter = GeminiAdapter(
-        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_result(_response(parts=[_part(text="ok")]))
-
-    await adapter.complete(
-        [Message(role=Role.USER, content="q")],
-        native_web_search=True,
-    )
-
-    cfg = mock_sdk.instance.last_generate_kwargs["config"]
-    func_tools, search_tools = _split_tools(cfg)
-    assert func_tools == []
-    assert len(search_tools) == 1
-
-
-# ---------------------------------------------------------------------------
 # ⑤ grounding sources must not leak into赤尾's visible reply. The wire→neutral
 # helpers only read part.text (skipping thoughts) and never touch
 # candidate.grounding_metadata / search_entry_point. These fixtures attach
@@ -2021,26 +1618,6 @@ async def test_complete_drops_grounding_metadata_from_visible_content(mock_sdk):
     assert _SEARCH_ENTRY_HTML not in out.content
     assert "search-entry" not in out.content
     assert "web_search_queries" not in out.content
-
-
-async def test_stream_drops_grounding_metadata_from_visible_content(mock_sdk):
-    adapter = GeminiAdapter(
-        model_name="gemini-3.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_stream(
-        [_grounded_response("今天广州多云转晴，气温 28 度。")]
-    )
-
-    chunks = [
-        c async for c in adapter.stream([Message(role=Role.USER, content="天气?")])
-    ]
-    text = "".join(c.text for c in chunks if c.text)
-
-    assert text == "今天广州多云转晴，气温 28 度。"
-    assert _SOURCE_URL not in text
-    assert "example.com" not in text
-    assert _SEARCH_ENTRY_HTML not in text
-    assert "search-entry" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -2332,142 +1909,6 @@ async def test_a_call_stripped_off_the_turn_takes_its_part_with_it(mock_sdk):
     sent = mock_sdk.instance.last_generate_kwargs["contents"][1]
     assert [bool(p.thought) for p in sent.parts] == [True]
     assert sent.parts[0].function_call is None
-
-
-async def test_stream_carries_the_signature_on_a_thought_chunk(mock_sdk):
-    adapter = GeminiAdapter(
-        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_stream(
-        [
-            _response(
-                parts=[_part(text="想", thought=True, thought_signature=b"sig-t")],
-                finish_reason=None,
-            ),
-            _response(
-                parts=[_part(text="好", thought_signature=b"sig-x")],
-                finish_reason="STOP",
-            ),
-        ]
-    )
-
-    chunks = [c async for c in adapter.stream([Message(role=Role.USER, content="hi")])]
-
-    thought = next(c for c in chunks if c.reasoning)
-    assert thought.signature == b"sig-t"
-    spoken = next(c for c in chunks if c.text)
-    assert spoken.signature == b"sig-x"
-
-
-# ---------------------------------------------------------------------------
-# 流式收发一整圈：这一块里回来的是几段，回放出去就还是几段
-#
-# 段边界在 adapter 这一层是知道的（``_chunk_to_neutral`` 正在遍历 parts），到了
-# 上层就只剩下一串 chunk。所以下面这一圈走的是真 adapter + 真 ReAct loop：一块里
-# 两段思考进去，第二次请求的 model turn 里必须还是两段，签名各归各段。
-# ---------------------------------------------------------------------------
-
-
-@tool
-async def look_around() -> str:
-    """Look around and report what is there."""
-    return "空无一人"
-
-
-async def test_two_thought_parts_in_one_chunk_stay_two_parts_on_replay(mock_sdk):
-    """同一块里回来的两段思考不能被并成一段，签名也不能跟着搬家。"""
-    from app.agent.core import _stream_loop
-
-    adapter = GeminiAdapter(
-        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_streams(
-        [
-            [
-                _response(
-                    parts=[
-                        _part(text="先想一下", thought=True),
-                        _part(
-                            text="再想一下",
-                            thought=True,
-                            thought_signature=b"sig-B",
-                        ),
-                        _part(
-                            function_call=_function_call("look_around", {}, "call_1"),
-                            thought_signature=b"sig-c",
-                        ),
-                    ],
-                    finish_reason="STOP",
-                )
-            ],
-            [_response(parts=[_part(text="好了")], finish_reason="STOP")],
-        ]
-    )
-
-    async for _ in _stream_loop(
-        adapter,
-        messages=[Message(role=Role.USER, content="q")],
-        tools=[look_around],
-        context=None,
-        recursion_limit=4,
-    ):
-        pass
-
-    replayed = mock_sdk.instance.generate_calls[1]["contents"][1]
-    assert replayed.role == "model"
-    assert [p.text for p in replayed.parts] == ["先想一下", "再想一下", None]
-    assert [bool(p.thought) for p in replayed.parts] == [True, True, False]
-    assert [p.thought_signature for p in replayed.parts] == [
-        None,
-        b"sig-B",
-        b"sig-c",
-    ]
-    assert replayed.parts[2].function_call.name == "look_around"
-
-
-async def test_one_part_cut_across_chunks_is_still_one_part_on_replay(mock_sdk):
-    """一段被切成多块传回来的，仍然合成一段——边界未知时照旧顺着签名收口。"""
-    from app.agent.core import _stream_loop
-
-    adapter = GeminiAdapter(
-        model_name="gemini-2.5-flash", api_key="k", base_url="https://g"
-    )
-    mock_sdk.instance.set_streams(
-        [
-            [
-                _response(parts=[_part(text="先想", thought=True)], finish_reason=None),
-                _response(
-                    parts=[
-                        _part(text="一下", thought=True, thought_signature=b"sig-A")
-                    ],
-                    finish_reason=None,
-                ),
-                _response(
-                    parts=[
-                        _part(
-                            function_call=_function_call("look_around", {}, "call_1"),
-                            thought_signature=b"sig-c",
-                        )
-                    ],
-                    finish_reason="STOP",
-                ),
-            ],
-            [_response(parts=[_part(text="好了")], finish_reason="STOP")],
-        ]
-    )
-
-    async for _ in _stream_loop(
-        adapter,
-        messages=[Message(role=Role.USER, content="q")],
-        tools=[look_around],
-        context=None,
-        recursion_limit=4,
-    ):
-        pass
-
-    replayed = mock_sdk.instance.generate_calls[1]["contents"][1]
-    assert [p.text for p in replayed.parts] == ["先想一下", None]
-    assert [p.thought_signature for p in replayed.parts] == [b"sig-A", b"sig-c"]
 
 
 async def test_a_signed_part_with_no_text_keeps_its_signature_on_the_wire(mock_sdk):

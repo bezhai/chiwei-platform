@@ -263,7 +263,7 @@ async def test_timeout_not_reached_returns_all_results() -> None:
 @pytest.mark.asyncio
 async def test_typed_capability_exception_preserved() -> None:
     """Typed capability errors flow through unwrapped so callers can catch them."""
-    from app.capabilities._errors import CapabilityTimeout
+    from app.capabilities.errors import CapabilityTimeout
 
     err = CapabilityTimeout("upstream LLM timed out")
     results = await fan_out_wait([_delayed("ok"), _raise(err)])

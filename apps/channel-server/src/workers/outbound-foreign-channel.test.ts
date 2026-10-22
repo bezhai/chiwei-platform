@@ -4,7 +4,7 @@
 // 越界写入，唯一的隔离手段就是「rk 分对了 + 消费侧不越界」。rk 配错是配置问题，
 // fail-closed 让它立刻暴露而不是静默写脏另一个服务的台账。
 //
-// 「拒绝」= nack(requeue=false)：prod 队列挂着 DLX，消息进 dead_letters 可查可重放。
+// 「拒绝」= nack(requeue=false)：prod 队列挂着 DLX，消息进 dead_letters 并一直留在那里（仓库里没有查看或重放它的工具）。
 // 绝不 requeue —— 消息只会原样退回这条队列，下一轮还是本进程拿到，在这里转圈。
 // 「告警」= 带稳定 event 名的 error 日志，可以用 make logs KEYWORD= 直接捞。
 //

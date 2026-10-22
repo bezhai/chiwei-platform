@@ -1,9 +1,19 @@
-# Framework/runtime changes should always get an explicit owner review.
-/apps/agent-service/app/runtime/ @bezhai
-/apps/agent-service/app/wiring/ @bezhai
+# Framework-layer changes always get an explicit owner review (docs/governance/framework-layer.md).
+/apps/agent-service/app/host/ @bezhai
+/apps/agent-service/app/agent/contracts.py @bezhai
+/apps/agent-service/app/agent/round.py @bezhai
+/apps/agent-service/app/manifests/ @bezhai
+/apps/agent-service/app/plugins/ @bezhai
+/apps/agent-service/app/data/schema.py @bezhai
+/apps/agent-service/app/data/migrator.py @bezhai
+/apps/agent-service/app/data/persist.py @bezhai
+/apps/agent-service/app/data/ordered.py @bezhai
+/apps/agent-service/app/data/tx.py @bezhai
+/apps/agent-service/app/data/session.py @bezhai
+/apps/agent-service/app/infra/outbound.py @bezhai
 /apps/agent-service/app/deployment.py @bezhai
 /apps/agent-service/app/main.py @bezhai
-/apps/agent-service/app/workers/runtime_entry.py @bezhai
+/apps/agent-service/scripts/ @bezhai
 /docs/governance/ @bezhai
-/docs/guides/dataflow-* @bezhai
+/docs/guides/plugin-host.md @bezhai
 /.github/workflows/ @bezhai

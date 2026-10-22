@@ -1,0 +1,538 @@
+"""跨轮连续的上下文 —— 一个 agent 每一轮的输入和产出存下来，下一轮接在输入前面。
+
+一轮跑完，这一轮喂进去的那条 USER 消息、模型说的每一句、每一次工具调用和工具返回，
+原样存成下一版；下一轮把它们接在这一轮的输入前面。agent 因此不是每一轮从头开始，而是
+接着上次往下走。
+
+**这是基础层。** 任何 App 的 agent 都可以用，它不 import 任何 App 的代码，也不认识任何
+业务上的时间（谁的"一天"从几点起）。它提供三样：
+
+  * **写入**：:func:`commit_transcript` 带版本做 CAS，别人在中间写过就抛
+    :class:`TranscriptConflict`。读用 :func:`app.agent.session.load_session`，它交回的
+    版本号原样带到写入这一步。
+  * **裁剪**：:func:`trim_for_round`（喂给模型之前）和 :func:`next_transcript`（存下去
+    之前）。按调用方给的 :class:`TrimPolicy` 和素材工具表裁。
+  * **标记消息**：到了清理点、或者上一轮没存下来时，插入一条带时刻的 USER 消息，内容是
+    那个时刻加调用方渲染好的状态，作为往后那一段的新起点；之前的标记消息同时折叠成只剩
+    表头。:func:`continues_unbroken` 告诉调用方这份上下文是不是一路连着的。
+
+**调用方自己定的**：存储键（带不带泳道、分不分人）、五个阈值、哪些工具的返回算素材、
+标记消息里写的那段状态、写失败之后这一轮算不算数，以及这些地方对模型说的每一句话
+（:class:`~app.agent.contracts.HistoryTexts`：两种标记消息的表头和说明、裁掉的载荷和图片换成的
+那句话）。这一层对这些一个默认值都不给：给了默认
+值的话，接进来的下一个调用方一个阈值都不写、一个工具都不分类也照跑，跑的是谁设计的那一套
+没人说得清，而且一句报错都没有。
+
+存储
+----
+
+存在 :class:`app.domain.session_transcript.SessionTranscript` 上，每一版一行，读永远
+取最新那一版（:mod:`app.agent.session`）。进程里不存任何副本，杀掉 pod 重启照样接上。
+
+**存储层不做任何截断。** 裁剪只在这里一处：两套同时生效的话，存储层会先砍掉策略想留
+的东西，而调用方拿到的返回值一切正常，排查时看不出来。
+
+**写入是 CAS。** 调用方要保证同一条上下文不会有两轮同时在跑；:class:`TranscriptConflict`
+是这个保证破了之后的检查，把"看不见的互相覆盖"变成一行看得见的错误。它不是多副本并发
+写的许可证。
+
+**写入跟调用方打开的事务一起提交。** 它跟调用方的哪些写入一起提交，由调用方决定：
+在 ``async with tx():`` 里调用就随那个事务提交或回滚；不在事务里调用就单独开一个事务提交，
+跟别的写入都不绑。
+
+裁剪规则
+--------
+
+**两档时长，固定时刻清理。** 工具返回里的素材留 ``material_minutes``，其余（每轮的输入、
+模型自己说的话、不算素材的工具返回）留 ``own_minutes``。清理只发生在清理点上：一张从
+Unix 纪元起算、每格 ``cleanup_minutes`` 分钟的固定网格（:func:`_cleanup_instant`）。
+两次清理之间截止线一动不动，前缀逐字节稳定，前缀缓存才有得命中；滑动窗口会每轮都改
+上下文开头。周期整除 60 时清理点落在整点上（任何整小时偏移的时区里都是）。
+
+**"保留 1 小时"在整点清理下实际是 1–2 小时，这是设计不是 bug。** 年龄的下界是一条消息
+之后第一条标记消息的时刻，所以刚过清理点写下的东西要等到下一个清理点之后才可能被裁。
+
+**以一次完整的工具调用为单位裁。** 没有结果的工具调用会被 provider 拒掉整个请求，同一
+轮里多个调用和多个结果也必须逐个对上。所以调用还在保留期内时只把过期的**载荷**换成一句
+写死的短语（调用方给的 ``HistoryTexts.material_trimmed``），消息结构一条不动；整组过期时调用和它的全部结果
+一起删。**换成写死的短语，不是概括**：概括会留下一个可能已经错了的版本，而原文没了，错
+了没人知道。
+
+**图片块比文本先走。** 图片地址是有寿命的预签名 URL（:data:`PICTURE_URL_MINUTES`），
+adapter 回放历史时会把 http(s) 地址重新下载，过期就在模型请求之前抛错。所以图片块只活在
+最新那一代：插入一条标记消息，它之前那一代的图片就换成 ``HistoryTexts.picture_trimmed``，同一条
+消息里的文字照留。一张图最长活一个清理周期加一轮间隔，:data:`MAX_CLEANUP_MINUTES` 守住
+它和 :data:`PICTURE_URL_MINUTES` 之间的余量。
+
+**每次清理插入一条标记消息，把调用方给的状态写进去。** 旧东西被裁掉之后那段经历只剩调用方
+自己的记录里还有，标记消息把"现在"重新交代一遍，作为新起点。空历史（第一次跑、刚清过库）也
+插入一条。标记消息同时是**分代的边界**：每条消息的年龄下界就是它之后第一条标记消息的时刻，
+不需要给每条消息单独存时刻。第一条标记消息之前写下的东西没有上界，一律留着。
+
+**上下文里的状态永远只有一份。** 插入新标记消息的那一下，之前每一条都折叠成只剩表头
+（:func:`_folded`）：表头是分代的边界，得留着；正文是插入那一刻的状态，新的一份进来之后
+它就是一份过时的副本，留着的话一天清理十几次就叠十几份。实测过这个后果：一个 agent 的
+上下文里叠了 5 份状态，它自己说过的话在一轮输入里出现了几十次，输出跟着一轮比一轮收窄
+成同一个样子。折叠只发生在插入那一下，而那一下本来就在改上下文，所以两次插入之间前缀
+照样逐字节不变。不分调用方、不给开关：任何调用方的状态都只对插入那一刻成立。
+
+**上下文是不是一路连着的**（:func:`continues_unbroken`）：历史里至少有一条标记消息、
+而且上一轮存下来了。调用方拿它决定状态里要不要补那些本来就在上下文里的东西 —— 连着的
+时候再补一份就是重复；断过的时候（空的、硬顶把标记消息全裁掉了、上一轮没存下来）上下文
+接不住，得补。
+
+**上一轮没存下来时插入的是另一种标记消息**（``HistoryTexts.gap_head``）。历史一条不丢，少的是中间那一
+轮的经过；文案因此跟清理那种分开，说的是"接不上"而不是"看不到"。判据由调用方给
+（``lost_last_round``）。
+
+**裁在模型调用之前**（:func:`trim_for_round`），存下去之前只做硬顶兜底
+（:func:`next_transcript`）。只在收尾裁的话，一段带着过期图片地址的历史永远轮不到被
+裁——每一轮都在 adapter 下载那一步抛错，收尾走不到。
+
+**硬顶是兜底，不是主路，判两次。** 估算超过 ``hard_cap_tokens`` 就从最老的组开始整组丢
+到 ``trim_target_tokens`` 以下，并记一行日志。存下去那次不动这一轮自己的消息（丢掉刚发生
+的事等于这一轮白跑），所以一轮自己就超了的时候它照样写下去；喂之前那次没有这个豁免，会
+把它裁回顶以下。少了后者就是死循环：那一份下一轮读回来仍然超限、模型当场失败、失败就不
+提交、再读到同一份。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
+
+from app.agent.contracts import TrimPolicy
+from app.agent.neutral import ContentBlock, Message, Role
+from app.agent.session import replace_session
+
+if TYPE_CHECKING:
+    from app.agent.contracts import HistoryTexts
+
+logger = logging.getLogger(__name__)
+
+
+class TranscriptConflict(RuntimeError):
+    """这条上下文在这一轮跑的时候被别人写过了。
+
+    调用方保证同一条上下文不会有两轮同时在跑，所以正常永远撞不上。撞上就说明那个前提
+    破了（多副本、或者有人绕开了调用方的排他占用）。默默覆盖等于把另一个写入方刚写下的
+    一整段丢掉，而且没有任何痕迹，所以这里必须抛。
+    """
+
+
+async def commit_transcript(
+    key: str,
+    messages: list[Message],
+    *,
+    expected_ver: int,
+) -> None:
+    """把这一轮结束后的完整上下文写成下一版。
+
+    ``messages`` 是**完整的新上下文**（:func:`next_transcript` 的结果），不是增量。
+    ``expected_ver`` 是 :func:`app.agent.session.load_session` 读到的那一版；库里已经
+    不是它了就抛 :class:`TranscriptConflict`，一行都不写。写失败（CAS 没写成、或者 PG
+    抛错）一律往外抛，怎么处理由调用方定。在调用方的 ``tx()`` 里调用就随那个事务提交，
+    否则单独提交。
+    """
+    landed = await replace_session(key, messages, expected_ver=expected_ver)
+    if not landed:
+        raise TranscriptConflict(
+            f"上下文 {key} 在这一轮跑的时候被别人写过了（读到的是 ver={expected_ver}）"
+            f"—— 同一条上下文有两轮在并发跑，调用方的排他占用破了"
+        )
+
+
+# 图片地址的寿命：``tos_client.get_file_url`` 的签名 90 分钟就过期。
+PICTURE_URL_MINUTES = 90
+
+# 清理周期的上限。一张图最长活一个清理周期加一轮间隔：60 分钟的周期留给轮间隔的余量是
+# 30 分钟。要把周期配得更长，得先解决"回放时地址已经死了"这件事本身，不能只调这个数。
+MAX_CLEANUP_MINUTES = 60
+
+# token 估算。没有能离线跑的 tokenizer（gemini 的 count_tokens 是一次网络调用，不能
+# 放在每轮写库的路上），所以按字节估，而且**一律往高了估**——估低了才会真的撞上模型
+# 的上限，那时是整轮抛错。
+#
+#   * 每 3 个 UTF-8 字节算 1 个 token。中日文一个字 3 字节 ≈ 1 token，而 SentencePiece
+#     常把常用词并成一个，所以这是高估；ASCII 实测约 4 字符 1 token，按 3 字节算同样高估
+#   * 一张图按 2600 算：gemini 每 768×768 一块 258 token，2048×2048 是 9 块 ≈ 2322
+#   * 每条消息再加 8，算角色、id 这些框架开销
+_BYTES_PER_TOKEN = 3
+_PICTURE_TOKENS = 2600
+_FRAME_TOKENS = 8
+
+# 标记消息两种（表头、说明由调用方给，``HistoryTexts``）：
+#
+#   * 清理（``checkpoint_head``）  固定时刻的清理，往前那一段真的不在了；
+#   * 缺口（``gap_head``）         上一轮的上下文没存下来，往前那一段还在、中间少了一轮。
+#
+# 两种在结构上是同一回事 —— 都带一个时刻、都重新写一遍状态 —— 所以都算这一代的边界。
+# 文案必须分开：缺口那次眼前的历史一条没少，套用"再往前的那一段不在你眼前了"就是
+# 往它眼前塞一句假话。
+
+# 清理网格的起点。固定在纪元上，不跟任何业务上的"一天"对齐。
+_GRID_ORIGIN = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class HistoryView:
+    """A participant's history as one round read it: the messages (trimmed for the round), the
+    version they were stored as (the round writes the next one), whether the round before lost
+    its write (the gap marker), and whether the history still carries what she last said
+    (:func:`continues_unbroken`)."""
+
+    messages: list[Message]
+    version: int
+    lost_last_round: bool
+    continues_unbroken: bool
+
+
+def estimate_tokens(messages: list[Message]) -> int:
+    """这一份上下文大概多少 token —— 往高了估。
+
+    只算上下文本身：SYSTEM 正文和工具定义不在这份列表里，它们是每次请求的固定开销，
+    设硬顶时要在模型的 context 上限之外给它们和这一轮的新增留出余量。
+    """
+    return sum(_message_tokens(m) for m in messages)
+
+
+def _text_tokens(text: str) -> int:
+    return -(-len(text.encode("utf-8")) // _BYTES_PER_TOKEN)
+
+
+def _message_tokens(message: Message) -> int:
+    total = _FRAME_TOKENS
+    content = message.content
+    if isinstance(content, str):
+        total += _text_tokens(content)
+    else:
+        for block in content:
+            if block.type == "text":
+                total += _text_tokens(block.text or "")
+            else:
+                total += _PICTURE_TOKENS
+    total += _text_tokens(message.thought_text())
+    for call in message.tool_calls:
+        total += _text_tokens(call.name)
+        total += _text_tokens(json.dumps(call.arguments, ensure_ascii=False))
+    return total
+
+
+def _cleanup_instant(now: datetime, minutes: int) -> datetime:
+    """``now`` 之前最近的那个清理点：从纪元起算的 ``minutes`` 分钟网格，时区沿用 ``now``。
+
+    时区沿用调用方的，标记消息里写出来的时刻才跟调用方其余地方的时刻是同一种写法。
+    """
+    step = timedelta(minutes=minutes)
+    instant = _GRID_ORIGIN + (now - _GRID_ORIGIN) // step * step
+    return instant.astimezone(now.tzinfo)
+
+
+def _marker(head: str, note: str, at: datetime, state: str) -> Message:
+    """一条标记消息：表头（带那个时刻）+ 发生了什么 + 此刻的状态，作为往后那一段的新起点。"""
+    return Message(
+        role=Role.USER, content=f"{head.format(at=at.isoformat())}\n{note}{state}"
+    )
+
+
+def _checkpoint(at: datetime, state: str, texts: HistoryTexts) -> Message:
+    """固定时刻清理时插入的那条：再往前的东西这一下真的从眼前走了。
+
+    那句说明（"往前那一段不在眼前了"）只对最新这条是实话，下一条插入时它连同状态一起
+    折叠掉（:func:`_folded`）。
+    """
+    return _marker(texts.checkpoint_head, texts.checkpoint_note, at, state)
+
+
+def _gap_marker(at: datetime, state: str, texts: HistoryTexts) -> Message:
+    """上一轮的上下文没存下来时插入的那条：往前那一段一条没少，少的是中间那一轮的经过。"""
+    return _marker(texts.gap_head, texts.gap_note, at, state)
+
+
+def _head_of(message: Message, texts: HistoryTexts) -> tuple[datetime, int] | None:
+    """这条是标记消息吗（两种都算）；是就给出它的时刻和表头在哪里结束。表头是 ``{at}`` 之前的
+    字、时刻、之后第一处收尾的字（:class:`~app.agent.contracts.HistoryTexts` 保证两头都有字）。"""
+    if message.role is not Role.USER or not isinstance(message.content, str):
+        return None
+    for head in (texts.checkpoint_head, texts.gap_head):
+        before, _, after = head.partition("{at}")
+        if not message.content.startswith(before):
+            continue
+        end = message.content.find(after, len(before))
+        if end < 0:
+            return None
+        try:
+            at = datetime.fromisoformat(message.content[len(before) : end])
+        except ValueError:
+            return None
+        return at, end + len(after)
+    return None
+
+
+def _marker_at(message: Message, texts: HistoryTexts) -> datetime | None:
+    """这条是标记消息吗（两种都算）；是就给出它的时刻。"""
+    head = _head_of(message, texts)
+    return None if head is None else head[0]
+
+
+def _folded(message: Message, texts: HistoryTexts) -> Message:
+    """一条旧标记消息只留表头（开头 + 时刻 + 收尾括号）；不是标记消息就原样还回去。
+
+    **表头是标记消息上唯一还有人读的部分**：分代边界和按代裁剪都只读它
+    （:func:`_marker_at`）。正文那份状态只对插入它的那一刻成立。
+
+    **不是删掉**：删了分代边界就没了，它之前那些消息的年龄无从判断。表头之后那句说明
+    一起走 —— 放在一条已经过时的标记消息上，它说的就不是实话了。
+
+    表头永远不是空串（开头本身就有字），所以折叠之后这条仍然是一个有内容的 USER：空串
+    会被 gemini adapter 编码成一个没有 parts 的 content，provider 拒掉整个请求。
+
+    切在时刻之后第一处收尾的字，跟 :func:`_marker_at` 认的是同一个位置。
+    """
+    head = _head_of(message, texts)
+    if head is None:
+        return message
+    return replace(message, content=message.content[: head[1]])
+
+
+def continues_unbroken(
+    history: list[Message], *, lost_last_round: bool, texts: HistoryTexts
+) -> bool:
+    """这份上下文是不是一路连着写下来的 —— 历史里至少有一条标记消息，而且上一轮存下来了。
+
+    ``history`` 是这一轮读到、还没裁的那一份；``lost_last_round`` 同 :func:`trim_for_round`。
+
+    连着的时候，调用方的 agent 最近几个小时的输入和产出都原样在上下文里，状态里再补一份
+    就是同一批话在一轮输入里出现好几遍。断过的有两类：
+
+      * **一条标记消息都没有**：第一次跑、清过库，眼前什么都没有；或者硬顶把标记消息全
+        裁掉了（:func:`_under_cap` 从最老的组开始整组丢），剩下那一截说不清是从哪儿接
+        上的，丢掉的可能正是刚产出的东西；
+      * **上一轮没存下来**：那一轮的产出比眼前剩下的都新，却不在眼前。
+
+    **不按这一轮要插哪种标记消息来判。** 缺口和清理点撞在一起时插的是清理那条（先判
+    :func:`_crossed`），硬顶之后下一轮插的也是清理那条 —— 按类型判，这两种断过的情况
+    就会被当成连着的。
+
+    折叠过的标记消息照样算：表头就是标记。
+    """
+    if lost_last_round:
+        return False
+    return any(_marker_at(m, texts) is not None for m in history)
+
+
+def _groups(messages: list[Message]) -> list[list[int]]:
+    """把消息切成"一次完整的工具调用"：带调用的那条 ASSISTANT + 紧跟的全部 TOOL。
+
+    其余每条自成一组。整组留、整组删，就不会出现没有结果的调用。
+    """
+    groups: list[list[int]] = []
+    i = 0
+    while i < len(messages):
+        group = [i]
+        if messages[i].role is Role.ASSISTANT and messages[i].tool_calls:
+            j = i + 1
+            while j < len(messages) and messages[j].role is Role.TOOL:
+                group.append(j)
+                j += 1
+            i = j
+        else:
+            i += 1
+        groups.append(group)
+    return groups
+
+
+def _bounds(messages: list[Message], texts: HistoryTexts) -> list[datetime | None]:
+    """每条消息的"最晚写于"：它之后第一条标记消息的时刻；``None`` = 在最新那一代里。"""
+    nearest: datetime | None = None
+    out: list[datetime | None] = [None] * len(messages)
+    for i in range(len(messages) - 1, -1, -1):
+        out[i] = nearest
+        at = _marker_at(messages[i], texts)
+        if at is not None:
+            nearest = at
+    return out
+
+
+def _without_pictures(message: Message, picture_trimmed: str) -> Message:
+    """图片块换成一句话，别的一个字不动。
+
+    换成**文本块**而不是整个丢掉：调用方的正文里可能逐张写着图片编号，块数一少就对不上
+    了。``replace`` 而不是逐字段重建：契约就是「只换 content」，逐字段抄漏一个（比如思考
+    段和它们的签名）下一轮请求就会被 provider 拒掉。
+    """
+    content = message.content
+    if not isinstance(content, list) or all(b.type == "text" for b in content):
+        return message
+    return replace(
+        message,
+        content=[
+            b if b.type == "text" else ContentBlock.from_text(picture_trimmed)
+            for b in content
+        ],
+    )
+
+
+def _faded(
+    message: Message,
+    *,
+    name: str | None,
+    material_tools: frozenset[str],
+    texts: HistoryTexts,
+) -> Message:
+    """过期的素材载荷换成写死的短语；不是素材的只去掉图片。消息结构一条不动。"""
+    if message.role is not Role.TOOL or name not in material_tools:
+        return _without_pictures(message, texts.picture_trimmed)
+    return Message(
+        role=Role.TOOL,
+        content=texts.material_trimmed,
+        tool_call_id=message.tool_call_id,
+    )
+
+
+def _clean(
+    messages: list[Message],
+    *,
+    at: datetime,
+    policy: TrimPolicy,
+    material_tools: frozenset[str],
+    texts: HistoryTexts,
+) -> list[Message]:
+    """按两档时长裁一遍。整组过期整组删，没过期只换过期的载荷，旧一代的图片一律换掉。"""
+    bounds = _bounds(messages, texts)
+    names = {call.id: call.name for m in messages for call in m.tool_calls}
+    own = timedelta(minutes=policy.own_minutes)
+    material = timedelta(minutes=policy.material_minutes)
+
+    kept: list[Message] = []
+    for group in _groups(messages):
+        bound = bounds[group[0]]
+        if bound is None:
+            kept.extend(messages[i] for i in group)
+            continue
+        age = at - bound
+        if age >= own:
+            continue
+        if age >= material:
+            kept.extend(
+                _faded(
+                    messages[i],
+                    name=names.get(messages[i].tool_call_id or ""),
+                    material_tools=material_tools,
+                    texts=texts,
+                )
+                for i in group
+            )
+        else:
+            kept.extend(
+                _without_pictures(messages[i], texts.picture_trimmed) for i in group
+            )
+    return kept
+
+
+def _under_cap(
+    messages: list[Message], *, floor: int, policy: TrimPolicy
+) -> list[Message]:
+    """撞上硬顶就从最老的组开始整组丢，丢到裁剪目标以下，并且一定留下一行日志。
+
+    末尾 ``floor`` 条一条都不丢。
+    """
+    total = estimate_tokens(messages)
+    if total <= policy.hard_cap_tokens:
+        return messages
+
+    tail_from = len(messages) - floor
+    dropped: set[int] = set()
+    running = total
+    for group in _groups(messages):
+        if running <= policy.trim_target_tokens or group[-1] >= tail_from:
+            break
+        dropped.update(group)
+        running -= sum(_message_tokens(messages[i]) for i in group)
+
+    kept = [m for i, m in enumerate(messages) if i not in dropped]
+    over = running > policy.hard_cap_tokens
+    logger.log(
+        logging.ERROR if over else logging.WARNING,
+        "上下文撞到硬顶：估 %d token > %d，裁到 %d token（%d 条 → %d 条）%s",
+        total,
+        policy.hard_cap_tokens,
+        running,
+        len(messages),
+        len(kept),
+        "；这一轮自己就超了，只能原样写下去" if over else "",
+    )
+    return kept
+
+
+def _crossed(history: list[Message], at: datetime, texts: HistoryTexts) -> bool:
+    """这一轮跨过清理点了吗 —— 最后一条标记消息比这个清理点早就是跨过了；一条都没有也算。"""
+    for message in reversed(history):
+        last = _marker_at(message, texts)
+        if last is not None:
+            return last < at
+    return True
+
+
+def trim_for_round(
+    history: list[Message],
+    *,
+    now: datetime,
+    state: str,
+    policy: TrimPolicy,
+    material_tools: frozenset[str],
+    texts: HistoryTexts,
+    lost_last_round: bool = False,
+) -> list[Message]:
+    """这一轮该喂给模型的那份历史。
+
+    跨过清理点（或者历史是空的）：插入一条清理标记消息，再按两档时长裁一遍。没跨过但
+    ``lost_last_round``：插入一条时刻为 ``now`` 的缺口标记消息，历史一条不丢。两样都没有：
+    原样还回来，一个字节都不动（硬顶除外）。插入的那一下，之前每一条标记消息都折叠成只剩
+    表头（:func:`_folded`）；缺口那条在清理周期中间插入，那一轮前缀会多变一次。
+
+    ``state`` 是调用方渲染好的"此刻的状态"，只写进标记消息。``material_tools`` 是哪些工具
+    的返回算素材。``texts`` 是标记消息和裁掉的东西换成的那几句话。``lost_last_round`` 是"上一轮
+    的上下文没存下来"，判据归调用方。
+
+    先插入标记消息再裁：它同时是这一代的上界，插入之后再裁，这一代的图片当场就换掉。刚插入
+    的那条不许被硬顶裁掉：它是这一轮唯一一份"你现在"。
+    """
+    at = _cleanup_instant(now, policy.cleanup_minutes)
+    if _crossed(history, at, texts):
+        marker: Message | None = _checkpoint(at, state, texts)
+    elif lost_last_round:
+        # 跨清理点插入的那条已经重新写过状态了，两条一起插入没有意义。
+        marker = _gap_marker(now, state, texts)
+    else:
+        marker = None
+    if marker is None:
+        staged = list(history)
+    else:
+        # 新的一条带着此刻的状态插进来，之前每一条都只剩表头：上下文里的状态永远只有
+        # 一份。只在这一下折叠，所以两次插入之间前缀照样一个字节都不动。
+        staged = [*(_folded(m, texts) for m in history), marker]
+    cleaned = _clean(
+        staged, at=at, policy=policy, material_tools=material_tools, texts=texts
+    )
+    return _under_cap(cleaned, floor=0 if marker is None else 1, policy=policy)
+
+
+def next_transcript(
+    history: list[Message],
+    produced: list[Message],
+    *,
+    policy: TrimPolicy,
+) -> list[Message]:
+    """这一轮结束后该存下来的完整上下文，直接交给 :func:`commit_transcript`。
+
+    ``history`` 是 :func:`trim_for_round` 裁过、这一轮真的喂给了模型的那一份，
+    ``produced`` 是这一轮的输入和模型产出的每一条。两档时长在上一步已经裁完，这里只剩
+    硬顶兜底，而且 ``produced`` 一条都不丢。
+    """
+    if not produced:
+        raise ValueError("这一轮一条消息都没有 —— 没有可写下去的上下文")
+    return _under_cap([*history, *produced], floor=len(produced), policy=policy)

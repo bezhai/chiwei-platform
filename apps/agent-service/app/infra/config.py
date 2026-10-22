@@ -67,15 +67,15 @@ class Settings:
         default_factory=lambda: _env_or_none("GOOGLE_SEARCH_CX")
     )
 
-    # -- Misc --
+    # -- QWeather（和风天气；只有 world App 配，见 app.capabilities.weather） --
     qweather_api_key: str | None = field(
         default_factory=lambda: _env_or_none("QWEATHER_API_KEY")
     )
-    # 和风 2024 改版后每个账号分配专属 API Host（统一 devapi/api 域名对新 key 返
-    # Invalid Host 403）。host 是账号级敏感信息，走 env 注入、不入代码。
     qweather_api_host: str | None = field(
         default_factory=lambda: _env_or_none("QWEATHER_API_HOST")
     )
+
+    # -- Misc --
     bangumi_access_token: str | None = field(
         default_factory=lambda: _env_or_none("BANGUMI_ACCESS_TOKEN")
     )
@@ -128,3 +128,13 @@ class Settings:
 
 
 settings = Settings()
+
+
+DEFAULT_APP = "agent-service"
+"""The app a process runs as when ``APP_NAME`` is not set."""
+
+
+def current_app() -> str:
+    """The app this process runs as: ``APP_NAME`` (PaaS injects it per Deployment), otherwise
+    :data:`DEFAULT_APP`. Read from the environment each time it is asked for."""
+    return environ.get("APP_NAME") or DEFAULT_APP

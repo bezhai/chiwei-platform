@@ -21,7 +21,6 @@ from app.agent.neutral import (
     ContentBlock,
     Message,
     Role,
-    StreamChunk,
     ToolCall,
     ToolDef,
     ToolResult,
@@ -29,7 +28,6 @@ from app.agent.neutral import (
     TurnPartKind,
     normalize_content_to_text,
 )
-
 
 # ---------------------------------------------------------------------------
 # Message: roles + plain string content
@@ -190,51 +188,6 @@ def test_tool_def_holds_name_description_and_json_schema():
     )
     assert td.name == "search_web"
     assert td.parameters["properties"]["query"]["type"] == "string"
-
-
-# ---------------------------------------------------------------------------
-# StreamChunk — must serve app/chat/stream.py's consumption contract
-# ---------------------------------------------------------------------------
-
-
-def test_stream_chunk_text_token():
-    chunk = StreamChunk(text="hi")
-    assert chunk.text == "hi"
-    assert chunk.finish_reason is None
-    assert chunk.tool_call is None
-    assert chunk.reasoning is None
-
-
-def test_stream_chunk_finish_reason_content_filter():
-    chunk = StreamChunk(finish_reason="content_filter")
-    assert chunk.finish_reason == "content_filter"
-
-
-def test_stream_chunk_finish_reason_length():
-    chunk = StreamChunk(finish_reason="length")
-    assert chunk.finish_reason == "length"
-
-
-def test_stream_chunk_tool_call_boundary():
-    # consumer detects the text->tool boundary by a chunk carrying a tool_call
-    chunk = StreamChunk(
-        tool_call=ToolCall(id="c1", name="search_web", arguments={})
-    )
-    assert chunk.tool_call is not None
-    assert chunk.tool_call.name == "search_web"
-
-
-def test_stream_chunk_tool_result():
-    chunk = StreamChunk(
-        tool_result=ToolResult(tool_call_id="c1", content="done")
-    )
-    assert chunk.tool_result is not None
-    assert chunk.tool_result.content == "done"
-
-
-def test_stream_chunk_reasoning_passthrough():
-    chunk = StreamChunk(reasoning="thinking...")
-    assert chunk.reasoning == "thinking..."
 
 
 # ---------------------------------------------------------------------------
@@ -440,9 +393,3 @@ def test_the_langfuse_dict_shows_the_thought_and_the_signature_size_only():
     ]
     assert Message.from_dict(dumped).turn_parts[0].text == "想了想"
     assert Message.from_dict(dumped).turn_parts[0].signature is None
-
-
-def test_stream_chunk_carries_the_signature_riding_on_its_part():
-    chunk = StreamChunk(reasoning="想了想", signature=b"sig-1")
-    assert chunk.signature == b"sig-1"
-    assert StreamChunk(text="hi").signature is None

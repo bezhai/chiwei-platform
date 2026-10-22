@@ -2,12 +2,11 @@
 
 The thinking core never talks to a provider SDK directly. It talks to a
 ``ModelClient``: a thin adapter that translates neutral types (``app.agent.
-neutral``) to one provider's wire and back. ``Agent.run / stream / extract``
-each map onto one of three consumptions:
+neutral``) to one provider's wire and back. ``Agent.run / extract`` each map
+onto one of two consumptions:
 
-  - ``complete``   — non-streaming; returns the final assistant ``Message``
+  - ``complete``   — returns the final assistant ``Message``
                      (``run`` drinks this to its last state),
-  - ``stream``     — yields neutral ``StreamChunk``s (``stream`` forwards them),
   - ``structured`` — one structured output as a dict the caller validates
                      against its pydantic schema (``extract``).
 
@@ -23,12 +22,65 @@ test-injected fake adapter via ``register_adapter``.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, Protocol, runtime_checkable
 
 from app.agent.models import resolve_model_info
-from app.agent.neutral import Message, StreamChunk, ToolDef
+from app.agent.neutral import Message, ToolDef
+from app.capabilities.errors import CapabilityTimeout
+
+# ---------------------------------------------------------------------------
+# How long one model call waits for the provider
+# ---------------------------------------------------------------------------
+
+# Every ModelClient call waits on its provider for at most this long for its
+# whole answer. Past it the call fails with ``CapabilityTimeout``.
+#
+# Why it exists: the google-genai SDK sends requests with no timeout at all
+# (``HttpOptions.timeout`` unset → httpx ``timeout=None`` for connect, read,
+# write and pool), and the TLS handshake with the model gateway sometimes never
+# completes. Nothing then ended the call until the hold limit of her queue
+# (``app.living.common.HOLD_LIMIT``, 900 s) cut the whole round: she was stuck
+# for 15 minutes, and Langfuse showed a generation with no output and no error.
+#
+# Calibrated on measured calls: single-call traces in Langfuse (day page /
+# persona review on gpt-5.5, 2026-09-05..10-05) top out at 59 s; her completed
+# rounds on gemini-3.7-flash (coe-world, 10-03..10-05, n=60) take 37 s at most
+# for the whole multi-call round; the slowest round of any kind measured was
+# 189 s (``app.living.common.HOLD_LIMIT``). 180 s is three times the slowest single call,
+# and two attempts (the Agent layer's default retry) still end well inside the
+# 900 s hold limit.
+#
+# A source constant, not Dynamic Config: it changes nothing about what any agent
+# does, it only turns a hang into a failure — the same judgment as the other
+# hang guards in this service (``app.living.household.outgoing``, ``app.living.reading.agent``).
+MODEL_ANSWER_SECONDS = 180.0
+
+
+@asynccontextmanager
+async def answer_deadline(model: str) -> AsyncIterator[None]:
+    """Give ``model`` at most :data:`MODEL_ANSWER_SECONDS` for what this block awaits.
+
+    Past the deadline the wait is cancelled and ``CapabilityTimeout`` is raised,
+    chained to the cancelled wait so its traceback shows where the call was
+    stuck. Only this deadline is turned into one: a ``TimeoutError`` the SDK
+    raises on its own passes through untouched, so the error never reports a
+    wait that did not happen.
+    """
+    try:
+        async with asyncio.timeout(MODEL_ANSWER_SECONDS) as deadline:
+            yield
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise
+        raise CapabilityTimeout(
+            f"{model} gave no answer within {MODEL_ANSWER_SECONDS:g}s",
+            meta={"model": model, "seconds": MODEL_ANSWER_SECONDS},
+        ) from exc
+
 
 # ---------------------------------------------------------------------------
 # Adapter constructor protocol
@@ -52,10 +104,13 @@ class AdapterFactory(Protocol):
 class ModelClient(ABC):
     """Provider-agnostic chat client.
 
-    The three abstract methods are the only surface ``Agent.run / stream /
-    extract`` consume. Adapters keep the neutral contract on both sides:
-    neutral ``Message``/``ToolDef`` in, neutral ``Message``/``StreamChunk``/
-    ``dict`` out.
+    The two abstract methods are the only surface ``Agent.run / extract``
+    consume. Adapters keep the neutral contract on both sides: neutral
+    ``Message``/``ToolDef`` in, neutral ``Message``/``dict`` out.
+
+    Every wait on the provider runs under :func:`answer_deadline`, inside the
+    call's generation span, so a provider that never answers fails the call
+    with ``CapabilityTimeout`` and the generation records why.
     """
 
     @abstractmethod
@@ -66,17 +121,7 @@ class ModelClient(ABC):
         tools: list[ToolDef] | None = None,
         **kwargs: Any,
     ) -> Message:
-        """Non-streaming completion → final assistant ``Message``."""
-
-    @abstractmethod
-    def stream(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[ToolDef] | None = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[StreamChunk]:
-        """Streaming completion → neutral chunk stream."""
+        """Completion → final assistant ``Message``."""
 
     @abstractmethod
     async def structured(
@@ -87,17 +132,6 @@ class ModelClient(ABC):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Single structured output → dict the caller validates (``extract``)."""
-
-    @property
-    def supports_native_web_search(self) -> bool:
-        """Whether this model can run native web search alongside custom tools.
-
-        Default ``False`` (fail-closed): only providers whose native grounding
-        co-exists with custom function declarations override this. OpenAI and
-        every other adapter inherit the default — the agent layer reads it to
-        decide whether to swap the ``search_web`` tool for native search.
-        """
-        return False
 
 
 # ---------------------------------------------------------------------------

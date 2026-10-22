@@ -1,0 +1,392 @@
+{
+  "baseline": "world_answer/answered",
+  "steps": [
+    {
+      "step": "start world",
+      "at": "2026-07-25T13:00:00+08:00",
+      "outcome": {
+        "returned": null
+      },
+      "model_calls": [],
+      "effects": [
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "publish": [
+            "messaging_scheduled_coe-replay"
+          ],
+          "rk": "messaging.scheduled.coe-replay",
+          "delay_ms": 0,
+          "headers": {
+            "trace_id": "",
+            "lane": "coe-replay"
+          },
+          "body": {
+            "message_id": "<uuid:1>",
+            "sender": "world",
+            "recipient": "world",
+            "time": "2026-07-25T13:00:00+08:00",
+            "kind": "message",
+            "wakes_recipient": true,
+            "body": "进程刚启动，没有找到你定下的下次醒来时刻。"
+          },
+          "confirmed": true
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "file": "write",
+          "path": "coe-replay/next_wake.json"
+        }
+      ],
+      "consumers_started": [
+        "inbox_world_coe-replay",
+        "messaging_scheduled_coe-replay",
+        "questions_world_coe-replay"
+      ],
+      "rows": {
+        "message_record": {
+          "added": [
+            {
+              "body": "进程刚启动，没有找到你定下的下次醒来时刻。",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:1>",
+              "message_time": "2026-07-25T13:00:00+08:00",
+              "outcome": "scheduled",
+              "reason": null,
+              "recipient": "world",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            },
+            {
+              "body": "进程刚启动，没有找到你定下的下次醒来时刻。",
+              "id": "<serial>",
+              "in_reply_to": null,
+              "kind": "message",
+              "lane": "coe-replay",
+              "message_id": "<uuid:1>",
+              "message_time": "2026-07-25T13:00:00+08:00",
+              "outcome": "sending",
+              "reason": null,
+              "recipient": "world",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            }
+          ]
+        }
+      },
+      "files": {
+        "coe-replay/next_wake.json": {
+          "added": {
+            "latest": {
+              "message_id": "<uuid:1>",
+              "at": "2026-07-25T13:00:00+08:00",
+              "reason": "进程刚启动，没有找到你定下的下次醒来时刻。"
+            },
+            "written_at": "2026-07-25T13:00:00+08:00"
+          }
+        },
+        "coe-replay/writer.lock": {
+          "added": ""
+        }
+      }
+    },
+    {
+      "step": "绫奈's question is delivered and answered",
+      "at": "2026-07-25T15:00:00+08:00",
+      "outcome": {
+        "returned": "ack"
+      },
+      "model_calls": [
+        {
+          "agent": "world_answer",
+          "number": 1,
+          "call": "complete",
+          "model": "offline-model",
+          "prompt": {
+            "name": "world_answer",
+            "version": 1,
+            "variables": {}
+          },
+          "options": {
+            "session_id": "world:coe-replay"
+          },
+          "tools": [
+            "list_records",
+            "read_record",
+            "check_current_weather",
+            "check_hourly_forecast",
+            "check_daily_forecast",
+            "search_web",
+            "list_senders",
+            "read_messages_from"
+          ],
+          "messages": [
+            {
+              "role": "system",
+              "content": [
+                "你替这个世界回答别人的提问：某处现在什么样、谁在哪、某样东西现在怎样。你只回答，不改变世界里的任何东西。",
+                "",
+                "## 你会拿到什么",
+                "",
+                "现在是什么时候、谁问的、什么时候问的、问的是什么。",
+                "",
+                "## 你能查到什么",
+                "",
+                "你手里有一组只读的查询工具，每个工具的说明写着它知道什么。回答之前先查，不凭印象。",
+                "",
+                "## 怎么回答",
+                "",
+                "- 某处现在什么样：以世界的记录为准，再按现在的时间、天气和季节推出此刻的样子。记录写的是那里一贯的样子和已经发生的变化，此刻的光线、冷热、有没有人这类东西，由你当场推。",
+                "- 谁在哪：只以这个人自己发来的消息为依据（查他告诉世界的事），说清楚是什么时候说的；记录里、别人的话里说他在哪，不算依据。没有依据，就说不知道这个人现在在哪；不替这个人编一个去处。",
+                "- 记录里没有、也推不出来的，直说不知道。不编世界里没有的地方、人和事。",
+                "- 回答主语是世界的东西：那里是什么样、发生过什么。不替居民说他们在想什么、有什么感受。",
+                "- 用平实的自然语言，问什么答什么，几句话就够。",
+                "",
+                "最后说的那段话就是给提问的人的回答。",
+                ""
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                "【现在】2026-07-25 周六 15:00 CST",
+                "【绫奈 问】（2026-07-25 周六 15:00 CST）",
+                "家里客厅现在什么样？"
+              ]
+            }
+          ],
+          "reply": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "world_answer:1:1",
+                "name": "read_record",
+                "arguments": {
+                  "path": "地方/家.md"
+                }
+              }
+            ],
+            "turn_parts": [
+              {
+                "kind": "tool_call",
+                "call_id": "world_answer:1:1"
+              }
+            ]
+          }
+        },
+        {
+          "agent": "world_answer",
+          "number": 2,
+          "call": "complete",
+          "model": "offline-model",
+          "prompt": {
+            "name": "world_answer",
+            "version": 1,
+            "variables": {}
+          },
+          "options": {
+            "session_id": "world:coe-replay"
+          },
+          "tools": [
+            "list_records",
+            "read_record",
+            "check_current_weather",
+            "check_hourly_forecast",
+            "check_daily_forecast",
+            "search_web",
+            "list_senders",
+            "read_messages_from"
+          ],
+          "continues": "world_answer #1",
+          "then": [
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "world_answer:1:1",
+                  "name": "read_record",
+                  "arguments": {
+                    "path": "地方/家.md"
+                  }
+                }
+              ],
+              "turn_parts": [
+                {
+                  "kind": "tool_call",
+                  "call_id": "world_answer:1:1"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": [
+                "《地方/家.md》（27 字，最后改动 2026-07-25 周六 13:00 CST）",
+                "",
+                "家在一栋老公寓的三楼。客厅朝南，茶几上摊着赤尾的胶片。"
+              ],
+              "tool_call_id": "world_answer:1:1"
+            }
+          ],
+          "reply": {
+            "role": "assistant",
+            "content": "家里客厅朝南，下午这会儿有太阳照进来；茶几上摊着赤尾的胶片。",
+            "turn_parts": [
+              {
+                "kind": "text",
+                "text": "家里客厅朝南，下午这会儿有太阳照进来；茶几上摊着赤尾的胶片。"
+              }
+            ]
+          }
+        }
+      ],
+      "effects": [
+        {
+          "deliver": "questions_world_coe-replay",
+          "message_id": "ayana-question-1"
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT runtime_inflight"
+          ]
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "UPDATE runtime_inflight"
+          ]
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT data_thinking_tokens_spent"
+          ]
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "publish": [
+            "amq.gen-1"
+          ],
+          "rk": "messaging.reply.ayana-asks.coe-replay",
+          "headers": {
+            "trace_id": "",
+            "lane": "coe-replay"
+          },
+          "body": {
+            "in_reply_to": "ayana-question-1",
+            "message": {
+              "message_id": "<uuid:2>",
+              "sender": "world",
+              "recipient": "绫奈",
+              "time": "2026-07-25T07:00:00+00:00",
+              "kind": "answer",
+              "wakes_recipient": true,
+              "body": "家里客厅朝南，下午这会儿有太阳照进来；茶几上摊着赤尾的胶片。"
+            }
+          },
+          "confirmed": true
+        },
+        {
+          "db": "commit",
+          "writes": [
+            "INSERT message_record"
+          ]
+        },
+        {
+          "settled": "ack",
+          "queue": "questions_world_coe-replay",
+          "message_id": "ayana-question-1"
+        }
+      ],
+      "consumers_started": [],
+      "rows": {
+        "data_thinking_tokens_spent": {
+          "added": [
+            {
+              "actor": "world",
+              "cached_tokens": 800,
+              "created_at": "<db-clock>",
+              "dedup_hash": "<dedup>",
+              "input_tokens": 2000,
+              "lane": "coe-replay",
+              "model_calls": 2,
+              "observed_at": "2026-07-25T15:00:00+08:00",
+              "output_tokens": 200,
+              "round_id": "world-answer:<uuid:3>",
+              "total_tokens": 2200
+            }
+          ]
+        },
+        "message_record": {
+          "added": [
+            {
+              "body": "家里客厅朝南，下午这会儿有太阳照进来；茶几上摊着赤尾的胶片。",
+              "id": "<serial>",
+              "in_reply_to": "ayana-question-1",
+              "kind": "answer",
+              "lane": "coe-replay",
+              "message_id": "<uuid:2>",
+              "message_time": "2026-07-25T15:00:00+08:00",
+              "outcome": "delivered",
+              "reason": null,
+              "recipient": "绫奈",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            },
+            {
+              "body": "家里客厅朝南，下午这会儿有太阳照进来；茶几上摊着赤尾的胶片。",
+              "id": "<serial>",
+              "in_reply_to": "ayana-question-1",
+              "kind": "answer",
+              "lane": "coe-replay",
+              "message_id": "<uuid:2>",
+              "message_time": "2026-07-25T15:00:00+08:00",
+              "outcome": "sending",
+              "reason": null,
+              "recipient": "绫奈",
+              "recorded_at": "<db-clock>",
+              "sender": "world"
+            }
+          ]
+        },
+        "runtime_inflight": {
+          "added": [
+            {
+              "attempts": 1,
+              "created_at": "<db-clock>",
+              "data_table": "questions_world",
+              "edge_id": "inbox:world@coe-replay",
+              "idempotent_key": "ayana-question-1",
+              "last_error": null,
+              "locked_until": null,
+              "state": "succeeded",
+              "trace_id": null,
+              "updated_at": "<db-clock>",
+              "worker_id": null
+            }
+          ]
+        }
+      },
+      "files": {}
+    }
+  ]
+}

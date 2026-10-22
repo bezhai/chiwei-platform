@@ -29,7 +29,7 @@ with the *same* ``pydantic.create_model`` machinery langchain uses, so per-type
 output (int constraints, ``Optional`` -> ``anyOf[type, null]``, ``list[str]``
 -> array of string) matches by construction.
 
-``@tool`` stacks **above** the project's ``@tool_error`` (``_common.py``): the
+``@tool`` stacks **above** the project's ``@tool_error`` (:mod:`app.agent.tools.outcome`): the
 wrapped callable already returns a ``ToolOutcomeError`` dict on failure instead
 of raising, and reflection sees through ``functools.wraps`` to the original
 signature/docstring.
@@ -168,7 +168,9 @@ def _strip_titles_node(node: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def dispatch(tools: list[Tool], call: ToolCall) -> ToolResult:
+async def dispatch(
+    tools: list[Tool], call: ToolCall, *, bad_arguments: str | None = None
+) -> ToolResult:
     """Find the tool named ``call.name``, invoke it, wrap its return.
 
     The tool's raw return value (``str`` / ``dict`` / list of content blocks) is
@@ -191,14 +193,16 @@ async def dispatch(tools: list[Tool], call: ToolCall) -> ToolResult:
             tool_call_id=call.id,
             content=f"unknown tool {call.name!r}; available: {known}",
         )
-    binding_outcome = _check_binding(target, call)
+    binding_outcome = _check_binding(target, call, bad_arguments)
     if binding_outcome is not None:
         return ToolResult(tool_call_id=call.id, content=binding_outcome)
     result = await target.invoke(call.arguments)
     return ToolResult(tool_call_id=call.id, content=result)
 
 
-def _check_binding(target: Tool, call: ToolCall) -> dict[str, Any] | None:
+def _check_binding(
+    target: Tool, call: ToolCall, bad_arguments: str | None
+) -> dict[str, Any] | None:
     """绑定预检：把 LLM 幻觉出的参数错误拦在工具函数体之外。
 
     2026-06-12 prod 事故：睡前回顾 agent 调 update_day_page 时幻觉串入了
@@ -212,7 +216,8 @@ def _check_binding(target: Tool, call: ToolCall) -> dict[str, Any] | None:
     形态的工具天然绑得上多余参数，不会误伤。只有"绑定本身"抛 TypeError
     才回喂——函数体内部的异常与本函数无关，照旧传播。
 
-    绑定失败返回 outcome dict，可绑定返回 ``None``。
+    回喂的那句话是 agent 声明的（``AgentSpec.bad_arguments``，填进工具名和原因）；没声明就只有
+    工具名和原因，通用层不替参与者说话。绑定失败返回 outcome dict，可绑定返回 ``None``。
     """
     try:
         inspect.signature(target._func).bind(**call.arguments)
@@ -230,8 +235,9 @@ def _check_binding(target: Tool, call: ToolCall) -> dict[str, Any] | None:
         return ToolOutcomeError(
             kind="invalid_args",
             message=(
-                f"工具 {call.name} 参数绑定失败：{exc}。"
-                "请检查该工具的参数定义，修正参数后重新调用。"
+                f"{call.name}: {exc}"
+                if bad_arguments is None
+                else bad_arguments.format(tool=call.name, error=exc)
             ),
             detail={"original_error_type": type(exc).__name__},
         ).model_dump()

@@ -18,7 +18,7 @@ import datetime as dt
 
 import pytest
 
-from app.living.pictures import (
+from app.living.pictures.album import (
     Picture,
     handle_for,
     her_picture,

@@ -401,7 +401,7 @@ func TestDeployWorkerSkipsService(t *testing.T) {
 }
 
 // TestApplyDeploymentInjectsAppName 验证 Deployment 的主容器 env 注入了 APP_NAME，
-// 供 agent-service dataflow framework 在 Pod 启动时按 App 过滤 Node 使用。
+// agent-service 的进程启动时按它找到自己那个 App 的清单，只起清单里的插件。
 func TestApplyDeploymentInjectsAppName(t *testing.T) {
 	client := fakeclient.NewSimpleClientset()
 	deployer := NewK8sDeployer(client, "default", "")

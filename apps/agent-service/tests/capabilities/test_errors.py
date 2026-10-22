@@ -1,4 +1,4 @@
-"""Tests for capability exception hierarchy (A3 / contract §4.8).
+"""Tests for capability exception hierarchy (``app.capabilities.errors``).
 
 The five capability exception classes plus the base ``CapabilityError``
 are the typed contract that capability/infra layers MUST raise instead
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.capabilities._errors import (
+from app.capabilities.errors import (
     CapabilityCallFailed,
     CapabilityError,
     CapabilityInvalidArg,
@@ -21,7 +21,6 @@ from app.capabilities._errors import (
     CapabilityRateLimited,
     CapabilityTimeout,
 )
-
 
 # ---------------------------------------------------------------------------
 # Base class behaviour

@@ -11,12 +11,12 @@ Lane and trace headers are auto-injected by ``HTTPClient``.
 整轮就废了。
 
 裁在这里而不是在调用方，是因为这个 capability 是**两条路唯一都要经过的地方**：她自己
-跑一条命令（``app.living.guides.run_a_script``），和一份说明里那条 ``!`cmd``` 的结果被
+跑一条命令（``app.living.guides.at_hand.run_a_script``），和一份说明里那条 ``!`cmd``` 的结果被
 替换进正文（``app.skills.renderer.render_skill``，那一份同样没有上限）。裁在调用方就
 是两份实现、迟早漏一条；将来多一个调用方还会再漏一次。
 
 **截了必须说出来。** 静默截断比截断本身更糟：她读到一段戛然而止的输出会当成那就是
-全部，然后拿一个不完整的结果往下做事（同类判断见 ``app.living.day_page`` 里"留白她会
+全部，然后拿一个不完整的结果往下做事（同类判断见 ``app.living.day_page.pages`` 里"留白她会
 以为材料被截断了，转去补一段自己编的前情"）。所以裁完在后面接一句实话，说清楚还剩多
 少没给她、以及怎么让它少打点。
 """
@@ -49,7 +49,7 @@ _CLIENT = HTTPClient(service="sandbox-worker", timeout=45.0, retries=0)
 OUTPUT_MAX_CHARS = 4_000
 
 # 截过之后接在后面那句话里的固定一段。**只在这里定义一次**：她读到的是它，调用方
-# 事后想认出"这段被截过"认的也是它（``app.living.guides.read_a_guide`` 那条路拿不到
+# 事后想认出"这段被截过"认的也是它（``app.living.guides.at_hand.read_a_guide`` 那条路拿不到
 # 计数，只看得见正文）。两边各写一遍字面量的话，改一个字就认不回来了。
 OUTPUT_CUT_MARK = "个字没给你"
 

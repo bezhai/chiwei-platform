@@ -37,7 +37,7 @@ from pydantic import Field
 
 from app.agent.neutral import ToolCall, ToolResult
 from app.agent.tooling import dispatch, tool
-from app.agent.tools._common import tool_error
+from app.agent.tools.outcome import tool_error
 
 # ---------------------------------------------------------------------------
 # Reflection: per-type JSON schema (no docstring Args injection)
@@ -290,7 +290,7 @@ async def test_tool_stacks_above_tool_error_swallows_failure():
 
 
 async def test_tool_error_invalid_args_routing_through_stack():
-    from app.capabilities._errors import CapabilityInvalidArg
+    from app.capabilities.errors import CapabilityInvalidArg
 
     @tool
     @tool_error("bad")
@@ -423,17 +423,39 @@ async def test_dispatch_unexpected_kwarg_feeds_error_back_not_raise():
         name="update_day",
         arguments={"narrative": "x", "other_user_id": "u1"},
     )
-    result = await dispatch([update_day], call)  # 必须不抛
+    result = await dispatch(
+        [update_day], call, bad_arguments="工具 {tool} 参数不对：{error}。改了再调。"
+    )  # 必须不抛
     assert isinstance(result, ToolResult)
     assert result.tool_call_id == "c_bind1"
     assert isinstance(result.content, dict)
     assert result.content["kind"] == "invalid_args"
-    # 错误文本：工具名 + 绑定失败原因（点名多余参数）+ 重调提示
-    assert "update_day" in result.content["message"]
-    assert "other_user_id" in result.content["message"]
-    assert "重新调用" in result.content["message"]
+    # 错误文本是 agent 声明的那句话：工具名 + 绑定失败原因（点名多余参数）
+    message = result.content["message"]
+    assert message.startswith("工具 update_day 参数不对：") and message.endswith("。改了再调。")
+    assert "other_user_id" in message
     # 预检挡在调用之前：函数体一次都不能执行
     assert calls == []
+
+
+async def test_dispatch_without_the_agents_words_answers_with_the_tool_and_the_error():
+    """通用层不替参与者说话：agent 没声明那句话，回喂的只有工具名和绑定失败的原因。"""
+
+    @tool
+    async def update_day(narrative: str) -> str:
+        """整篇重写昨天页。"""
+        return "ok"
+
+    call = ToolCall(
+        id="c_bind3",
+        name="update_day",
+        arguments={"narrative": "x", "other_user_id": "u1"},
+    )
+    result = await dispatch([update_day], call)
+
+    assert result.content["kind"] == "invalid_args"
+    assert result.content["message"].startswith("update_day: ")
+    assert "other_user_id" in result.content["message"]
 
 
 async def test_dispatch_missing_required_arg_feeds_error_back_not_raise():

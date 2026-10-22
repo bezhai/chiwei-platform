@@ -2,7 +2,7 @@ name: dataflow grep gate
 
 # Phase 7a/7b/7c/7d CI gate: closed-gap exact-zero + open-gap baseline.
 #
-# Closed gaps (Gap 7 / 9 / 11 from Phase 7a + Gap 8 / 12 / 18 from
+# Closed gaps (Gap 7 / 9 / 11 from Phase 7a + Gap 8 / 18 from
 # Phase 7b + Gap 15 from Phase 7c + Gap 13 / 14 / 16 from Phase 7d)
 # must stay at zero occurrences in business code; new violations
 # block the PR.
@@ -13,13 +13,15 @@ name: dataflow grep gate
 #
 # **业务目录清单**（每个 step 里那份 BUSINESS）是 app/ 下真实存在的业务包：
 #
-#     agent  life  living  memory  nodes  skills
+#     living  plugins  skills  world
 #
-# 不在里面的是框架和基建：runtime / data / infra / api / capabilities /
-# domain / wiring / workers。加一个业务包就要把它加进每一处清单 —— 漏一处等于
-# 那个包不受任何一条 gap 管，这正是 app/living/ 建起来之后发生过的事（22 个
-# 文件、一条 gap 都没扫到）。删一个包同理要从每一处摘掉，否则清单会慢慢变成
-# 一份指向空目录的名单，每条断言都因为扫不到东西而通过。
+# living 和 world 下每个目录是一个插件，plugins 下每个模块是一个插件（operator、skills），
+# skills 是插件调用的业务模块。不在里面的是框架和基建：host / agent / manifests / data /
+# infra / api / capabilities / messaging / domain。agent 是固定的 agent 循环和单次模型调用，替插件
+# 跑一轮，跟 host 一样归框架层；manifests 只写一个 App 由哪些插件、agent、profile 组成。分层见
+# docs/guides/plugin-host.md。加一个业务包就要把它加进每一处清单 —— 漏一处等于那个包不受任何一条 gap 管，这正是
+# app/living/ 建起来之后发生过的事（22 个文件、一条 gap 都没扫到）。删一个包同理要从每一处
+# 摘掉，否则清单会慢慢变成一份指向空目录的名单，每条断言都因为扫不到东西而通过。
 
 on:
   pull_request:
@@ -29,7 +31,7 @@ on:
 
 jobs:
   closed-gap-zero:
-    name: Closed-gap exact-zero (Gap 7/8/9/11/12/13/14/15/16/18)
+    name: Closed-gap exact-zero (Gap 7/8/9/11/13/14/15/16/18)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,49 +39,50 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/)
+          BUSINESS=(apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
+                    apps/agent-service/app/skills/ \
+                    apps/agent-service/app/world/)
           # business code must not implement its own retry / sleep loops
           c=$(grep -rn -E "while.*retry|for.*range.*retry" "${BUSINESS[@]}" \
               2>/dev/null | grep -v "__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 7 violation: $c business retry loops"; exit 1; }
           # The insert_idempotent half of Gap 7 moved to the open-gap baseline
           # (gap_7_insert_idempotent). Reason recorded there: the check as
-          # written contradicts app/runtime/persist.py's own public API.
+          # written contradicts app/data/persist.py's own public API.
       - name: Gap 11 — no direct contextvar / header reads in dataflow business code
         shell: bash
         run: |
           set -e
-          # trace_id_var / lane_var allowlist: runtime/{propagation,middleware,
-          # durable,sink_dispatch,emit,outbox,outbox_dispatcher}, api/middleware, infra/rabbitmq,
-          # capabilities/* (HTTP capability injects trace into outbound calls).
+          # trace_id_var / lane_var allowlist: infra/propagation,
+          # api/middleware, capabilities/* (HTTP capability injects trace into
+          # outbound calls).
           c=$(grep -rn "trace_id_var\|lane_var" apps/agent-service/app/ \
               2>/dev/null \
-              | grep -v "runtime/propagation.py\|runtime/middleware.py\|api/middleware.py\|infra/rabbitmq.py\|runtime/durable.py\|runtime/sink_dispatch.py\|runtime/emit.py\|runtime/outbox.py\|runtime/outbox_dispatcher.py\|capabilities/\|__pycache__\|/test_" \
+              | grep -v "infra/propagation.py\|api/middleware.py\|capabilities/\|__pycache__\|/test_" \
               | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c contextvar reads outside allowlist"; exit 1; }
           # nobody reads message.headers["trace_id"|"lane"] except propagation
           c=$(grep -rn 'headers\["trace_id"\]\|headers\["lane"\]' apps/agent-service/app/ \
-              2>/dev/null | grep -v "runtime/propagation.py\|__pycache__\|/test_" | wc -l || true)
+              2>/dev/null | grep -v "infra/propagation.py\|__pycache__\|/test_" | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 11 violation: $c raw header reads"; exit 1; }
-      - name: Gap 8 — business `await emit(` count == 3 reviewed call sites
+      - name: Gap 8 — business `publish(` count == 2 reviewed call sites
         shell: bash
         run: |
           set -e
-          # 出站 emit 一律经 wire 的 durable 边；裸 `await emit(` 每一处都要有
-          # 独立理由，并且数在这里钉死。当前 3 处全在 app/living/，各自的
-          # docstring 写明为什么不能进事务（takeback / reading / mouth：都是
-          # "交给外面之后才知道下场"的那一跳）。旧的 10 处随上一版实现删除，
-          # 它们所在的 nodes/agent/life/memory 现在是 0。
+          # 出站一律经宿主登记的出站队列（ctx.outbound 登记类型 -> 队列，业务调
+          # app.infra.outbound.publish）；每一处 `publish(` 都要有独立理由，并且数在这里
+          # 钉死。当前 2 处全在 app/living/speaking/，各自的 docstring 写明为什么不能进事务
+          # （takeback / mouth：都是"交给外面之后才知道下场"的那一跳）。读一程那一处
+          # 改成了发给读书收件箱的消息（app/living/reading/）。
           #
           # 加一处新的就要更新这个数，否则 gate 抓回归。
-          c=$(grep -rn '\bawait emit(' \
-              apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-              apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+          c=$(grep -rn '\bpublish(' \
+              apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
+              apps/agent-service/app/skills/ \
+              apps/agent-service/app/world/ \
               --include='*.py' 2>/dev/null | wc -l || true)
-          [ "$c" -eq 3 ] || { echo "Gap 8 violation: business await emit count=$c, expected 3"; exit 1; }
+          [ "$c" -eq 2 ] || { echo "Gap 8 violation: business publish( count=$c, expected 2"; exit 1; }
+
       - name: Gap 15 — no arq imports, no arq dependency
         shell: bash
         run: |
@@ -102,94 +105,58 @@ jobs:
           c=$(grep -rn "# emit AFTER commit\|# commit-then-emit" \
               apps/agent-service/app/ 2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 8 violation: $c commit-then-emit comments"; exit 1; }
-      - name: Gap 12 — Makefile DLQ targets and runbook present
-        shell: bash
-        run: |
-          set -e
-          grep -q "^dlq-inspect:" Makefile || { echo "Gap 12 violation: Makefile missing dlq-inspect target"; exit 1; }
-          grep -q "^dlq-replay:" Makefile  || { echo "Gap 12 violation: Makefile missing dlq-replay target"; exit 1; }
-          grep -q "^dlq-dry-run:" Makefile || { echo "Gap 12 violation: Makefile missing dlq-dry-run target"; exit 1; }
-          test -f docs/runbooks/dlq-replay.md || { echo "Gap 12 violation: docs/runbooks/dlq-replay.md missing"; exit 1; }
       - name: Gap 18 — no don't-catch comments / requeue=False / business nack
         shell: bash
         run: |
           set -e
-          # No more "不要 catch" / "don't catch" warnings: the wire DSL
-          # expresses error policy via .on_error("dlq") explicitly.
+          # No more "不要 catch" / "don't catch" warnings in business code.
           c=$(grep -rn "# 不要 catch\|# 不要 try/except\|# don't catch" \
-              apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-              apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+              apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
+              apps/agent-service/app/skills/ \
+              apps/agent-service/app/world/ \
               2>/dev/null | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c don't-catch comments in business code"; exit 1; }
           # Manual ack/nack/requeue=False belongs to the framework
-          # (runtime/* + workers/common). The DLQ admin tooling at
-          # nodes/dlq_admin.py is the only business-facing exception
-          # (the 6-step requeue protocol). Scan business dirs only.
+          # (messaging/*). living/reading/carry_over.py is the one exception
+          # in business code, and a one-off: it takes the old reading queue's
+          # messages and puts back (nack, requeue) the ones it does not carry
+          # over; it is removed once prod has switched over and the old queue
+          # is deleted.
+          # Scan business dirs only.
           c=$(grep -rn "requeue=False\|\.nack(" \
-              apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-              apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-              apps/agent-service/app/nodes/ apps/agent-service/app/skills/ \
+              apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
+              apps/agent-service/app/skills/ \
+              apps/agent-service/app/world/ \
               2>/dev/null \
-              | grep -v "nodes/dlq_admin.py\|__pycache__\|/test_" \
+              | grep -v "living/reading/carry_over.py\|__pycache__\|/test_" \
               | wc -l || true)
           [ "$c" -eq 0 ] || { echo "Gap 18 violation: $c nack/requeue=False call sites in business code"; exit 1; }
-      - name: Gap 13 — no DB session leakage in business code
+      - name: Gap 13 — nothing outside app/data opens a database session
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/)
-          # 拿 session 那三条只对**不拥有自己 Data 表**的业务包 exact-zero。
-          # app/life/ 和 app/living/ 自己声明 Data 表、并且用裸 SQL 读它们
-          # （MAX(seq) 取号、DISTINCT ON 取最新一版这类 runtime 四个原语
-          # 没覆盖的形状），所以它们在 gap_13_business_owns_data_tables
-          # 这条 baseline 上计数、不在这里判零。**公共层怎么读仍然 exact-zero
-          # 地由 queries 层管**：living 读 common_* 的那批查询已经全部收进
-          # app/data/queries/，这条 baseline 只兜自己那几张表。
-          NO_OWN_TABLES=(apps/agent-service/app/agent/ apps/agent-service/app/memory/ \
-                         apps/agent-service/app/nodes/ apps/agent-service/app/skills/)
-          # No `from app.data.session import …`
-          c=$(grep -rnE "from app\.data\.session import|from app\.data import session" \
-              "${NO_OWN_TABLES[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c data.session imports in business"; exit 1; }
-          # No session-factory call sites
-          c=$(grep -rnE "get_session\(|async_session\(|AsyncSessionLocal|current_session\(" \
-              "${NO_OWN_TABLES[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c session factory call sites in business"; exit 1; }
-          # No direct session.<op> (session.execute / .commit / ...)
-          c1=$(grep -rnE "\bsession\.(execute|commit|add|merge|flush|rollback)\(" \
-              "${NO_OWN_TABLES[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
-          c2=$(grep -rnE "\bs\.(execute|commit|add|merge|flush|rollback)\(" \
-              "${NO_OWN_TABLES[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
-          c=$((c1 + c2))
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c direct session.* in business"; exit 1; }
-          # 下面这几条对**全部**业务包 exact-zero —— 它们说的是"别绕开 queries 层
-          # 和 outbox"，跟拥不拥有自己的表无关。
-          # No `current_session` import in business (queries layer is internal)
-          c=$(grep -rnE "from app\.runtime\.db import.*current_session|from app\.runtime import.*current_session" \
-              "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c current_session imports in business"; exit 1; }
-          # No AsyncSession type references in business (queries own the type)
-          c=$(grep -rn "AsyncSession" "${BUSINESS[@]}" 2>/dev/null \
-              | grep -v "__pycache__\|/test_" | wc -l) || true
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c AsyncSession references in business"; exit 1; }
-          # transactional_emit was renamed; emit_tx via app.runtime is the public surface
-          c=$(grep -rn "transactional_emit" "${BUSINESS[@]}" 2>/dev/null \
-              | grep -v "__pycache__\|/test_" | wc -l) || true
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c transactional_emit in business"; exit 1; }
-          # Business must not import from app.runtime.outbox (use app.runtime.emit_tx)
-          c=$(grep -rn "from app\.runtime\.outbox import" "${BUSINESS[@]}" 2>/dev/null \
-              | grep -v "__pycache__\|/test_" | wc -l) || true
-          [ "$c" -eq 0 ] || { echo "Gap 13 violation: $c app.runtime.outbox imports in business"; exit 1; }
+          # 数据库只有 app/data 一个包碰：它建 engine、开 session、管事务。别的包——业务、
+          # 宿主、messaging，没有例外——读写走 app.data.persist 的函数（读用
+          # fetch_all / fetch_one / fetch_value + from_row，写用 insert_*），几条语句要一起
+          # 落地就包一层 ``async with tx():``。所以在 app/data 之外：不 import app.data.session，
+          # 不调 get_session，不提 AsyncSession。
+          OUTSIDE_DATA=$(find apps/agent-service/app -name '*.py' -not -path '*/__pycache__/*' \
+                         -not -path 'apps/agent-service/app/data/*')
+          c=$(grep -nE "app\.data\.session|from app\.data import (.*[ ,])?session\b|get_session|AsyncSession" \
+              $OUTSIDE_DATA 2>/dev/null | wc -l) || true
+          [ "$c" -eq 0 ] || {
+            grep -nE "app\.data\.session|from app\.data import (.*[ ,])?session\b|get_session|AsyncSession" \
+              $OUTSIDE_DATA || true
+            echo "Gap 13 violation: $c session uses outside app/data"; exit 1; }
+          # 业务代码也够不着事务里的会话（current_session、整个 app.data.tx 模块）：由
+          # business-tasks-and-sessions 那个 job 按语法树查，报出文件和行。
       - name: Gap 14 — no Redis primitives in business code
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/)
+          BUSINESS=(apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
+                    apps/agent-service/app/skills/ \
+                    apps/agent-service/app/world/)
           c=$(grep -rnE "from app\.infra\.redis import|from app\.infra import redis" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 14 violation: $c infra.redis imports in business"; exit 1; }
@@ -200,29 +167,20 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUSINESS=(apps/agent-service/app/agent/ apps/agent-service/app/life/ \
-                    apps/agent-service/app/living/ apps/agent-service/app/memory/ \
-                    apps/agent-service/app/nodes/ apps/agent-service/app/skills/)
-          # app/agent/adapters/ 排除在外，永久：它们**就是**跟外部 HTTP 讲话的
-          # 那一层（openai / gemini 的 ModelClient 实现），跟 app/capabilities/
-          # 同级。Gap 11 已经按同样理由豁免了 capabilities/。要求适配层不碰
-          # httpx 等于要求它别干自己的活。
-          #
-          # app/agent/tools/external_sources.py 排除在外，临时：那是业务代码，
-          # 每个查询自己 new 一个 AsyncClient，确实绕开了 capability 层。它现在
-          # 零调用方（工具带随上一版实现整批摘掉，等重写"每日底料"时接回），
-          # 改了没有任何调用路径能验证。所以它进 gap_16_business_owns_http
-          # baseline 盯着不许变多，接回来的那次一起改成走 capability。
+          BUSINESS=(apps/agent-service/app/living/ apps/agent-service/app/plugins/ \
+                    apps/agent-service/app/skills/ \
+                    apps/agent-service/app/world/)
+          # 模型的适配层（app/agent/adapters/）跟外部 HTTP 讲话，它在框架层的 app/agent 里，
+          # 不在这份清单上。
           c=$(grep -rnE "import httpx|from httpx" "${BUSINESS[@]}" 2>/dev/null \
-              | grep -v "__pycache__\|/test_" \
-              | grep -v "agent/adapters/\|agent/tools/external_sources.py" | wc -l) || true
+              | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c httpx imports in business"; exit 1; }
           c=$(grep -rnE "from app\.capabilities\.http import|from app\.capabilities import http" \
               "${BUSINESS[@]}" 2>/dev/null | grep -v "__pycache__\|/test_" | wc -l) || true
           [ "$c" -eq 0 ] || { echo "Gap 16 violation: $c HTTPClient direct imports in business"; exit 1; }
 
   open-gap-baseline:
-    name: Open-gap baseline no-new (Gap 7 insert_idempotent / 13 own-tables / 19)
+    name: Open-gap baseline no-new (Gap 7 insert_idempotent / 16)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -234,55 +192,30 @@ jobs:
 
           baselines = json.load(open(".github/grep-baselines.json"))
           BUSINESS = [
-              "apps/agent-service/app/agent/", "apps/agent-service/app/life/",
-              "apps/agent-service/app/living/", "apps/agent-service/app/memory/",
-              "apps/agent-service/app/nodes/", "apps/agent-service/app/skills/",
+              "apps/agent-service/app/living/", "apps/agent-service/app/plugins/",
+              "apps/agent-service/app/skills/",
+              "apps/agent-service/app/world/",
           ]
-          # app/life/ 和 app/living/ 自己声明 Data 表并用裸 SQL 读它们。
-          OWN_TABLES = [
-              "apps/agent-service/app/life/", "apps/agent-service/app/living/",
-          ]
+          # BUSINESS 里列一个不存在的目录会让 grep 以 2 退出、整条计数读成 0。
           patterns = {
-              # 业务不该自己做消息去重 —— 那是 wire 的 .durable() 边的事。但
-              # insert_idempotent 同时也是 app/runtime/persist.py 四个公开原语之一
-              # （insert_append / select_latest / select_all_versions 是另外三个，
+              # 业务不该自己做消息去重 —— 那是通信机制按消息 id 做的事。但
+              # insert_idempotent 同时也是 app/data/persist.py 三个公开原语之一
+              # （insert_append / select_latest 是另外两个，
               # 谁都没被 gate 管），业务写自己那张 Data 表时调它是正当用法。
-              # 现存 5 处（app/living/ 4 处 + app/domain/thinking_cost.py 1 处）
-              # 全是后者，所以这条从 exact-zero 降成 baseline：加新调用点仍然会
+              # 现存的调用点（app/living/ 和 app/domain/thinking_cost.py，数在
+              # .github/grep-baselines.json）全是后者，所以这条从 exact-zero
+              # 降成 baseline：加新调用点仍然会
               # 被挡下、需要显式抬基线 + reviewer 签字，但不再断言一个代码库本身
-              # 就不成立的零。运行时那两个实现自己排除在外。
+              # 就不成立的零。存储自己的实现（data/persist.py，以及建在它上面的
+              # data/ordered.py）排除在外。
               "gap_7_insert_idempotent": (
                   r"\binsert_idempotent\(",
                   ["apps/agent-service/app/"],
-                  ["runtime/persist.py", "runtime/durable.py"],
+                  ["data/persist.py", "data/ordered.py"],
               ),
-              # 业务包自己拿 session 读写**自己那几张 Data 表**的残留。读公共层
-              # （common_*）已经全部收进 app/data/queries/，由 Gap 13 的 exact-zero
-              # 那半边管；这里兜的是 MAX(seq) 取号、DISTINCT ON 取最新一版这类
-              # runtime 四个原语没覆盖的形状。数只准降不准升。
-              "gap_13_business_owns_data_tables": (
-                  r"from app\.data\.session import|from app\.data import session|"
-                  r"get_session\(|async_session\(|AsyncSessionLocal|current_session\(|"
-                  r"\bsession\.(execute|commit|add|merge|flush|rollback)\(|"
-                  r"\bs\.(execute|commit|add|merge|flush|rollback)\(",
-                  OWN_TABLES,
-                  [],
-              ),
-              # 业务代码自己 new httpx client 的残留。app/agent/adapters/ 不在
-              # 这里数（它们是适配层本身，理由写在 Gap 16 那个 step 里）；剩下
-              # 的 1 处是 external_sources.py，零调用方、等接回工具带时改成走
-              # capability 层。在那之前这个数不许变多 —— 新工具一律走 capability。
+              # 业务代码自己 new httpx client 的残留。现在是 0，新工具一律走 capability。
               "gap_16_business_owns_http": (
                   r"import httpx|from httpx",
-                  BUSINESS,
-                  ["agent/adapters/"],
-              ),
-              # 现在是 0，但留在 baseline 里而不是升成 exact-zero：归零是上一版
-              # 实现被删掉的副产物，没有人做过迁移。app/agent/ 那批工具重新接
-              # 回来时它可能又不是 0，那时候该是一次显式的判断，不是一次"CI 突然
-              # 红了"。
-              "gap_19_create_task_business": (
-                  r"asyncio\.create_task|asyncio\.ensure_future",
                   BUSINESS,
                   [],
               ),
@@ -314,3 +247,108 @@ jobs:
                   fail = True
           sys.exit(1 if fail else 0)
           PY
+
+  package-cycles:
+    name: No new cycles between app packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Only the cycles listed in KNOWN_CYCLES remain, and no edge in FORBIDDEN_EDGES
+        shell: bash
+        working-directory: apps/agent-service
+        run: |
+          # app/ 下每个子包和顶层模块是一个节点，包里任何一处 import 另一个包就是一条边
+          # （函数里的 import、import_module 的字符串字面量都算）。互相走得到的几个包
+          # 是一组环：不在 KNOWN_CYCLES 里的环失败，名单上的环消失或缩小了也失败，
+          # 所以名单只能缩。FORBIDDEN_EDGES 里的边不管成不成环，出现就失败：下层不 import
+          # 上层（存储和消息 < agent 层 < 宿主 < 插件），宿主和 agent 层不 import 任何插件。
+          # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_package_cycles.py
+          python3 -m scripts.check_package_cycles app
+
+  business-tasks-and-sessions:
+    name: Business code starts no task and reaches no session
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No create_task / ensure_future / TaskGroup / threads, no current_session in business code
+        shell: bash
+        working-directory: apps/agent-service
+        run: |
+          # 业务代码（app/living、app/world、app/plugins、app/skills）要在后台跑的
+          # 东西交给宿主（ctx.task、ctx.clock），宿主停下时取消、等它们收尾；等着的 gather、
+          # to_thread 照常。数据库会话只有存储碰：业务不碰 current_session，不 import 整个
+          # app.data.tx 模块。原来的 Gap 13 业务那一半和 open-gap 的 gap_19 并进了这一条。
+          # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_business_tasks_and_sessions.py
+          python3 -m scripts.check_business_tasks_and_sessions app
+
+  manifests-resolve:
+    name: Both apps' manifests resolve without any external service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install agent-service's locked dependencies
+        working-directory: apps/agent-service
+        run: uv sync --frozen --python 3.12
+      - name: Start each app's host with no IO and check its manifest
+        working-directory: apps/agent-service
+        run: |
+          # 每个 App 的宿主按它的清单起来：每个插件的 setup 跑一遍，然后拿清单对插件登记的东西
+          # （工具、段落、段、步骤）：清单列了没人登记的、登记了清单没放的、重名的，都在这里失败，
+          # 而不是等到下一次部署。runner 上没有数据库、broker、Langfuse、泳道注册表，测试里每一次
+          # 连接也都被拒绝，所以 setup 要是开始依赖进程外的东西，这里同样失败。
+          # 只跑这一个文件，不是整套测试（整套要 docker 起 Postgres 和 RabbitMQ）。
+          uv run --frozen pytest tests/plugins/test_manifests_resolve.py
+
+  framework-private:
+    name: Business code uses only what the framework exports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No framework-private module in business code, no private name across packages
+        shell: bash
+        working-directory: apps/agent-service
+        run: |
+          # 业务代码（app/living、app/world、app/plugins、app/skills、两个 App 的
+          # 清单）从宿主只 import app.host 包导出的名字，不 import app/host/ 下的模块，也不
+          # import app.agent.continuity、app.messaging.receiving、app.data.session：要的东西由
+          # 包导出（app.host、app.agent）或者由宿主交给插件（ctx）。app/ 下任何代码不从另一个
+          # 包 import 下划线开头的名字或模块。
+          # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_framework_private.py
+          python3 -m scripts.check_framework_private app
+
+  plugin-boundaries:
+    name: A plugin never imports another plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Plugins in app/living, app/world and app/plugins only talk through services
+        shell: bash
+        working-directory: apps/agent-service
+        run: |
+          # 她的插件是 app/living/<插件>/，world 的是 app/world/<插件>/，app/plugins/ 里一个模块
+          # 一个插件。一个插件只 import 自己目录里的模块和这一边的共享模块（living：services、
+          # common；world：services、agents、volume），别的插件的东西经服务拿（ctx.service），
+          # 另一边的插件也一样。共享模块和包本身不 import 任何一边的插件；living、world 目录下
+          # 插件目录之外只有共享模块。
+          # 名单上的目录或共享模块不在了也算失败。
+          # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_plugin_boundaries.py
+          python3 -m scripts.check_plugin_boundaries app
+
+  world-life-isolation:
+    name: World and life never import each other
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No import between app/world and app/living (or their manifests), in either direction
+        shell: bash
+        run: |
+          # world 和三姐妹的 life 是两个独立的引擎，唯一的连接是通信机制
+          # （app/messaging）。两边的插件都在各自目录下（app/world/<插件>/、
+          # app/living/<插件>/）；两个 App 的清单（app/manifests/world.py、
+          # app/manifests/agent_service.py）同样不许 import 另一边：一个 App 的进程
+          # 只起它清单里的插件，清单 import 了哪边的代码，进程就加载哪边。规则按
+          # 语法树判 import（含相对 import 和 importlib.import_module 的字符串），
+          # docstring 里提到另一边不算；规则列的目录或文件不存在也算失败。
+          # 规则自己的测试：apps/agent-service/tests/unit/scripts/test_check_world_life_imports.py
+          python3 apps/agent-service/scripts/check_world_life_imports.py apps/agent-service/app

@@ -1,16 +1,16 @@
 """``@retry`` — process-local retry decorator for async network calls.
 
-Sibling abstraction to ``app/runtime/retry.py`` but a different scope:
+Sibling abstraction to ``app/messaging/retry.py`` but a different scope:
 
-* ``app/runtime/retry.py`` decides whether a *durable* RabbitMQ message
-  should be re-delivered across processes (broker-layer redelivery).
+* ``app/messaging/retry.py`` decides whether a message whose handler failed
+  in its inbox should be delivered again (broker-layer redelivery).
 * ``@retry`` here is in-process. It wraps an ``async def`` and retries
   the call locally with exponential / linear backoff against a
   white-list of exception types — used for one-shot HTTP / LLM calls
   where transient timeouts and 429s benefit from retrying inside the
   same task rather than dropping the request to DLQ.
 
-Defaults match the typed capability layer (A3 / contract §4.8): the
+Defaults match the typed capability layer (``app.capabilities.errors``): the
 white-list is the three retry-eligible classes ``CapabilityTimeout``,
 ``CapabilityRateLimited``, ``CapabilityCallFailed``; the two LLM-visible
 classes ``CapabilityInvalidArg`` and ``CapabilityNotFound`` are *not*
@@ -32,7 +32,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import ParamSpec, TypeVar
 
-from app.capabilities._errors import (
+from app.capabilities.errors import (
     CapabilityCallFailed,
     CapabilityRateLimited,
     CapabilityTimeout,

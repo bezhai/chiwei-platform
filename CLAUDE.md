@@ -25,7 +25,8 @@ apps/
 | lark-service | **lark-outbound** | 消费 `chat_response_lark` / `recall_lark`，发飞书消息和撤回 |
 | channel-server | **channel-server** | QQ 入站 HTTP（`POST /api/internal/qq/inbound`，由 qq-gateway 投递） |
 | channel-server | **chat-response-worker** | 消费 QQ 回复队列，经 qq-gateway 发出 |
-| agent-service | **agent-service** | 生活引擎，不消费任何入站队列；另有运维 HTTP（health、admin DLQ） |
+| agent-service | **agent-service** | 生活引擎，不消费任何入站队列；另有运维 HTTP：health；`/admin/messaging/*`，以运维身份给参与者发消息、查通信记录和死信；`/admin/reading/carry-over`，把旧读书队列里的消息一次性搬进读书收件箱 |
+| agent-service | **world** | world 引擎，独立 App：只通过通信机制（具名收件箱 + 定时送达）和其他参与者交流。不是 sibling，单独部署 `make deploy APP=world`；日志用 `make logs APP=world`，不在 `APP=agent-service` 里 |
 
 飞书消息发送失败查 `make logs APP=lark-outbound`，QQ 查 `APP=chat-response-worker`，不是查 `lark-service` / `channel-server`。
 
@@ -56,7 +57,7 @@ paas-engine 的 `domain.ClassifyLane` 按前缀校验，未知前缀直接拒绝
 | `ppe-<name>` | 共用 prod 全部组件（PG/Redis/MQ/Qdrant/Mongo） | 业务逻辑、prompt 验证；读写的是线上数据 |
 | `coe-<name>` | 独立的 chiwei-test 容器集，连接串由 ConfigBundle `class_overrides[coe]` 注入 | schema 变更、协议变更、可能写入错误数据的改动 |
 
-验证 agent-service 的改动只能用 `coe-*`（原因见 e2e-testing.md）。非 prod 泳道默认不启动 cron/interval 定时源，要启动就设 Release env `DATAFLOW_ENABLE_TIME_SOURCES=1`。
+验证 agent-service 的改动只能用 `coe-*`（原因见 e2e-testing.md）。非 prod 泳道默认不启动 cron/interval 定时源，但 ConfigBundle `agent-service-runtime` 对 coe 类别把 `DATAFLOW_ENABLE_TIME_SOURCES` 设成了 1，所以部署到 coe 就会开始跑她的轮次；其他非 prod 泳道要启动就设 Release env `DATAFLOW_ENABLE_TIME_SOURCES=1`。
 
 ## 部署
 

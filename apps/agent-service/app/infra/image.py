@@ -113,9 +113,9 @@ class _ImageClient:
 
         Returns ``data`` dict on success, ``None`` on any failure.
 
-        contract-allowed None (§4.8) for legacy-pinned reason: this client
+        contract-allowed None for legacy-pinned reason: this client
         has 4 call-sites in ``infra.image`` plus external callers
-        (``_context_images.py``, ``agent/tools/_common.py``)
+        (``_context_images.py``, :func:`upload_image`)
         that all branch on ``if data:`` / ``return_exceptions=True``. Migrating
         to ``raise CapabilityTimeout/CallFailed`` is correct per the contract
         but is a deliberate behavior change; tracked as backlog L1 follow-up
@@ -240,7 +240,7 @@ class _ImageClient:
     ) -> str | None:
         """Download an image and return it as a data URI.
 
-        contract-allowed None (§4.8): same legacy pin as ``_post`` — callers
+        contract-allowed None: same legacy pin as ``_post`` — callers
         branch on the falsy return (``gather(return_exceptions=True)`` /
         ``isinstance(r, str)`` filtering), so flipping to raise is safe but
         is deferred to the dedicated image-client migration (backlog L1)."""
@@ -283,6 +283,31 @@ class _ImageClient:
 
 # Module-level instance
 image_client = _ImageClient()
+
+
+
+async def upload_image(source_type: str, data: str) -> StoredImage | None:
+    """Put an image into object storage; hand back its **permanent handle**.
+
+    ``source_type`` is ``"base64"`` or ``"url"``; ``data`` is the base64
+    payload or the source url.
+
+    Returns the :class:`~app.infra.image.StoredImage` (``file_name`` +
+    a pre-signed ``url`` that expires in 1.5 hours), or ``None`` when the
+    upload did not land — for any reason, transport included. Tools go
+    through here rather than calling the client directly so a failure is one
+    value, not three shapes.
+
+    **Failure is ``None``, never the input echoed back.** The previous
+    contract returned ``(data, None)`` on failure, so a base64 blob travelled
+    onward wearing the shape of a storage handle: persisted into her record,
+    later handed to the re-signing endpoint as if it were a TOS key.
+    """
+    try:
+        return await image_client.upload_to_tos(source_type, data)
+    except Exception:
+        logger.warning("upload_image failed", exc_info=True)
+        return None
 
 
 # How long to wait when fetching a signed address to see whether an image comes

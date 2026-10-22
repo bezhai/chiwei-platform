@@ -1,4 +1,4 @@
-"""Tests for capabilities.banned_words (Phase 7d Gap 14).
+"""Tests for app.living.speaking.banned_words (Phase 7d Gap 14).
 
 Uses ``fakeredis[lua]`` to back ``app.infra.redis.get_redis()`` with an
 in-memory Redis stub.
@@ -8,7 +8,7 @@ from __future__ import annotations
 import fakeredis.aioredis
 import pytest
 
-from app.capabilities import banned_words
+from app.living.speaking import banned_words
 
 
 @pytest.fixture

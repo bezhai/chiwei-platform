@@ -1,57 +1,66 @@
 """Unified Agent — single entry point for all LLM interactions.
 
-Every ``run()`` / ``stream()`` / ``extract()`` drives a hand-written ReAct loop
-over a neutral :class:`~app.agent.client.ModelClient` (resolved from a model_id
-by ``build_model_client``). There is no langchain / langgraph: the loop owns the
-control flow, the adapter owns the provider wire, and ``dispatch`` runs tools.
+``run()`` drives a hand-written ReAct loop over a neutral
+:class:`~app.agent.client.ModelClient` (resolved from a model_id by
+``build_model_client``); ``extract()`` makes one structured call. There is no
+langchain / langgraph: the loop owns the control flow, the adapter owns the
+provider wire, and ``dispatch`` runs tools.
 
   - ``run``     — loop ``model.complete`` until the assistant stops calling
-                  tools; return the final neutral ``Message``.
-  - ``stream``  — forward neutral ``StreamChunk``s; on a tool-call turn, dispatch
-                  the tools and feed the results back, looping for more turns.
+                  tools, or calls one its declaration says ends the round
+                  (``ToolSpec.ends_round``); return the final neutral ``Message``.
   - ``extract`` — one structured call: ``model.structured`` → dict →
                   ``response_model.model_validate``.
 
 Tracing埋 lives here (the langchain ``CallbackHandler`` is gone): each
-run/stream/extract opens one root span via langfuse; the adapter opens a
-generation span per LLM call (nested automatically), and every tool dispatch
-opens a tool span. ``update_trace`` controls only whether the root *trace*'s
-name / IO is overwritten (``update_current_trace``) — the spans are always
-produced (guard / deep_research want spans without clobbering the parent trace).
+run/extract opens one root span via langfuse and records what it hands
+back as that span's output; the adapter opens a generation span per LLM call
+(nested automatically), and every tool dispatch opens a tool span under the
+generation that requested it. ``update_trace`` controls only whether the root
+*trace*'s name / IO is overwritten (``update_current_trace``) — the spans are
+always produced (the output check wants spans without clobbering the parent
+trace).
 
 Retry is the Agent layer's sole responsibility (the adapters disable SDK retry).
-``run`` / ``extract`` wrap the whole call in ``@retry``; ``stream`` retries only
-*before* the first token is yielded (replaying a streamed prefix would duplicate
-it downstream).
+``run`` / ``extract`` wrap the whole call in ``@retry``. A model call whose
+provider never answers fails at ``MODEL_ANSWER_SECONDS`` (``app.agent.client``)
+with ``CapabilityTimeout``, which is retried like the provider's own timeouts.
 
 Usage::
 
-    from app.agent.core import Agent, AgentConfig
+    from app.agent.contracts import AgentSpec, Segment
+    from app.agent.core import Agent
     from app.agent.neutral import Message, Role
+    from app.agent.prompts import PromptSet
+    from app.agent.round import open_call
 
-    CFG = AgentConfig("world_engine", "offline-model", "world-engine")
+    SPEC = AgentSpec(segments=("world_engine",), model="offline-model", trace_name="world-engine")
 
-    result = await Agent(CFG).run(messages=[Message(role=Role.USER, content="hi")])
+    prompts = await PromptSet.resolve(
+        {"world_engine": SPEC}, {"world_engine": Segment("world_engine", "world_engine")}, None
+    )
+    call = open_call("world_engine", SPEC, lane="prod")
+    result = await Agent(SPEC).run(
+        [Message(role=Role.USER, content="hi")], call=call, prompts=prompts
+    )
     text = result.text()
 
-    async for chunk in Agent(CFG, tools=ALL_TOOLS).stream(messages=[...]):
-        ...
-
-    data = await Agent(CFG).extract(Model, messages=[...])
+The caller opens the call and keeps it (:mod:`app.agent.round`): the agent binds it while it
+runs, and what the call's tools noted is read from it afterwards. The prompt comes from the
+set the caller resolved (:class:`app.agent.prompts.PromptSet`): a participant's round resolves
+it once for itself and the sub-agents it may call; a call outside any round resolves its own.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import contextmanager
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
-from inner_shared.dynamic_config import dynamic_config
 from langfuse import Langfuse
+from langfuse.model import PromptClient
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -61,35 +70,34 @@ from openai import (
 from pydantic import BaseModel
 
 from app.agent.client import ModelClient, build_model_client
-from app.agent.context import AgentContext
+from app.agent.contracts import AgentSpec, FromConfig, ToolSpec
 from app.agent.neutral import (
     ContentBlock,
     Message,
     Role,
-    StreamChunk,
     ToolCall,
     ToolDef,
     ToolResult,
-    TurnPart,
     TurnPartKind,
 )
-from app.agent.prompts import compile_to_messages, get_prompt
-from app.agent.runtime_context import agent_context
+from app.agent.prompts import PromptSet
+from app.agent.round import Call, in_call, wake_source
 from app.agent.tooling import Tool, dispatch
 from app.agent.trace import (
-    TURN_TRACE_NAME,
-    current_generation_context,
-    current_turn_trace_id,
+    mark_failed,
+    rendered_from,
+    separate_trace,
+    under_last_generation,
 )
-from app.api.middleware import get_lane
+from app.capabilities.errors import CapabilityTimeout
 from app.capabilities.retry import retry as _retry_decorator
-from app.infra import cst_time
-from app.infra.config import settings
-from app.runtime.lane_policy import (
+from app.infra.config import current_app, settings
+from app.infra.lane_policy import (
     classify_deployment_lane,
     current_deployment_lane,
     normalize_deployment_lane,
 )
+from app.infra.propagation import current_context
 
 logger = logging.getLogger(__name__)
 
@@ -100,23 +108,22 @@ logger = logging.getLogger(__name__)
 # TODO(C3): once LLM/HTTP capability layer translates upstream openai errors
 # into typed CapabilityError subclasses, switch this tuple to the typed
 # defaults exported by ``app.capabilities.retry``.
+#
+# ``CapabilityTimeout`` is what a model call raises when its provider never
+# answers within ``MODEL_ANSWER_SECONDS`` (``app.agent.client``). It is a
+# timeout like ``APITimeoutError`` and gets the same treatment: retried up to the
+# caller's ``max_retries``. Callers that must not replay a whole run pass
+# ``max_retries=1`` and get the failure straight away.
 RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
     APITimeoutError,
     APIConnectionError,
     InternalServerError,
     RateLimitError,
+    CapabilityTimeout,
 )
 
-_DEFAULT_MAX_RETRIES = 2
 _BACKOFF_BASE = 2  # seconds (exponential base)
 _BACKOFF_MAX = 8  # seconds (clamp)
-
-# Max model calls per run/stream — the hand-written loop counts model calls
-# directly. The legacy LangGraph ``recursion_limit=12`` counted graph
-# super-steps (model + tool nodes alternating), i.e. ~6 model calls / ~6 tool
-# rounds. We keep that model-call budget here so runaway-loop cost / latency
-# stays equivalent to the langchain path.
-_DEFAULT_RECURSION_LIMIT = 6
 
 # Max attempts (including the first) for ONE ReAct turn when the model returns
 # an empty result — no text, no tool_calls (trace 82323210372fe067ec2a60abd8e9
@@ -131,29 +138,6 @@ _DEFAULT_RECURSION_LIMIT = 6
 # still costs exactly one model call, so this never adds latency/cost to the
 # common case.
 _EMPTY_TURN_MAX_ATTEMPTS = 3
-
-
-# ---------------------------------------------------------------------------
-# Agent configuration
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class AgentConfig:
-    """Immutable configuration for an agent.
-
-    Each domain module defines its own config constants.
-    Use ``dataclasses.replace(cfg, model_id="...")`` for per-call overrides.
-    """
-
-    prompt_id: str
-    model_id: str
-    trace_name: str | None = None
-    recursion_limit: int = _DEFAULT_RECURSION_LIMIT
-    # Opt-in: this agent wants Gemini's native google search to replace the
-    # ``search_web`` tool when the resolved model actually supports it. Only
-    # main chat declares it; every other config keeps the default (off).
-    native_web_search: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -179,14 +163,19 @@ class _NoOpRootSpan:
         pass
 
 
-def _trace_lane_attributes() -> tuple[dict[str, str], list[str]]:
-    """Return Langfuse trace attributes that make lane lookup cheap.
+def _trace_attributes() -> tuple[dict[str, str], list[str]]:
+    """Return Langfuse trace attributes that make app and lane lookup cheap.
 
     ``tags`` are the primary query surface (``list-traces`` supports tags
-    directly); metadata carries the same lane fields for the trace detail page
-    and later analytics.
+    directly); metadata carries the same fields for the trace detail page and
+    later analytics. The app is the one this process runs as (``APP_NAME``,
+    injected by PaaS per Deployment, :func:`app.infra.config.current_app`), so a world
+    round is tagged ``app:world`` and an agent-service run ``app:agent-service``. The
+    lane is the one the hop that started this work bound (a message's, a clock's), else
+    the deployment's.
     """
-    raw_request_lane = get_lane()
+    app_name = current_app()
+    raw_request_lane = current_context().lane
     if raw_request_lane:
         lane = normalize_deployment_lane(raw_request_lane) or "prod"
         source = "request"
@@ -197,13 +186,13 @@ def _trace_lane_attributes() -> tuple[dict[str, str], list[str]]:
 
     lane_class = classify_deployment_lane(lane)
     metadata = {
-        "app": "agent-service",
+        "app": app_name,
         "lane": lane,
         "laneClass": lane_class,
         "laneSource": source,
     }
     tags = [
-        "app:agent-service",
+        f"app:{app_name}",
         f"lane:{lane}",
         f"lane_class:{lane_class}",
     ]
@@ -224,7 +213,7 @@ def _set_current_trace(
     break the call.
     """
     try:
-        metadata, tags = _trace_lane_attributes()
+        metadata, tags = _trace_attributes()
         _get_trace_client().update_current_trace(
             name=name,
             input=input,
@@ -237,26 +226,19 @@ def _set_current_trace(
 
 
 @contextmanager
-def _safe_current_span(
-    span_name: str, input: Any, trace_context: dict[str, Any] | None = None
-):
+def _safe_current_span(span_name: str, input: Any):
     """Enter a langfuse ``start_as_current_span`` defensively, yield it (or no-op).
 
     Tracing must never break the wrapped call. Both *creating* the span and
     *entering / exiting* its context manager are guarded: any langfuse / OTel
     failure degrades to a no-op span while the body still runs. The body's own
     exceptions (e.g. a retryable LLM error) are NOT swallowed — they propagate
-    so the Agent's retry logic still sees them; only span ``__exit__`` failures
-    on the way out are swallowed.
-
-    ``trace_context`` (e.g. ``{"trace_id": ...}``) attaches the span to an
-    existing trace; used by ``_root_span`` to fold one turn's guard + main spans
-    into one trace. ``None`` lets langfuse start a fresh trace (current behaviour).
+    so the Agent's retry logic still sees them, after the span is marked as
+    failed with the reason (``mark_failed``); only span ``__exit__`` failures on
+    the way out are swallowed.
     """
     try:
-        cm = _get_trace_client().start_as_current_span(
-            name=span_name, input=input, trace_context=trace_context
-        )
+        cm = _get_trace_client().start_as_current_span(name=span_name, input=input)
         span = cm.__enter__()
     except Exception as exc:
         logger.warning("langfuse span %s unavailable: %s", span_name, exc)
@@ -268,6 +250,7 @@ def _safe_current_span(
         yield span
     except BaseException as exc:  # noqa: BLE001 - re-raised after closing span
         body_exc = exc
+        mark_failed(span, exc)
         raise
     finally:
         try:
@@ -286,15 +269,24 @@ def _root_span(
     input: Any,
     update_trace: bool,
     session_id: str | None = None,
+    prompts: Sequence[PromptClient] = (),
 ):
-    """Open the run/stream/extract root span and (optionally) name the trace.
+    """Open the run/extract root span and (optionally) name the trace.
 
     The langchain ``CallbackHandler`` used to do this. We open one
     ``start_as_current_span`` so the adapter's generation spans and our tool
     spans nest under it (langfuse v3 propagates the current span via OTel
     context). When ``update_trace`` is set, the trace's name / input is
-    overwritten with this agent's — guard / deep_research pass ``False`` so the
+    overwritten with this agent's — the output check passes ``False`` so the
     parent trace keeps its identity while still getting our spans.
+
+    调用方把这次调用交回去的结果记成这个 span 的 output（``_record_output``）。它是 trace 的根
+    时，langfuse 拿它的名字、输入输出和开始时间当 trace 的。
+
+    ``prompts`` 是这次调用实际编译的那几个 prompt 对象（每段一个），这个 span 里开的模型调用由它们
+    渲染（``rendered_from``：只有一段时 generation 关联它）；空的是不由 prompt 渲染的调用，清掉
+    外层调用设的那些。离开时恢复外层的，外层 agent 的工具里调完这一次，外层接下来的模型调用照旧
+    关联外层的 prompt。
 
     ``session_id`` (when provided) groups this trace into a langfuse session,
     independently of who owns the trace name/input: a guard span with
@@ -303,31 +295,17 @@ def _root_span(
     before.
 
     Tracing must never break the call: every langfuse touch degrades to no-op.
-
-    When opened inside a ``turn_trace`` scope (per-turn @node), the span attaches
-    to that turn's langfuse trace_id so this turn's guard + main spans fold into
-    one trace; outside a turn it stays None and langfuse starts a fresh trace.
     """
     span_name = name or "agent"
-    tid = current_turn_trace_id()
-    trace_context = {"trace_id": tid} if tid else None
-    with _safe_current_span(span_name, input, trace_context) as span:
-        trace_name: str | None = None
-        trace_input: Any = None
-        if tid is not None:
-            # Inside a turn the guards / main / post-safety are separate root
-            # spans on one trace; langfuse would name the whole trace after the
-            # last one ingested (post-safety). Every root span writes the SAME
-            # unified trace name so the name is stable — this is the trace-level
-            # name only, each span keeps its own observation name. Only the main
-            # path (``update_trace``) owns the trace input, so the trace top
-            # reads the chat turn, not a guard's safety prompt.
-            trace_name = TURN_TRACE_NAME
-            trace_input = input if update_trace else None
-        elif update_trace:
-            trace_name = span_name
-            trace_input = input
-        _set_current_trace(name=trace_name, input=trace_input, session_id=session_id)
+    with (
+        _safe_current_span(span_name, input) as span,
+        rendered_from(prompts),
+    ):
+        _set_current_trace(
+            name=span_name if update_trace else None,
+            input=input if update_trace else None,
+            session_id=session_id,
+        )
         yield span
 
 
@@ -335,66 +313,66 @@ def _root_span(
 def _tool_span(*, name: str, input: Any):
     """Open a span around one tool dispatch; degrade to no-op on langfuse error.
 
-    Re-parents under the model call that requested the tool (its generation span
-    has closed by now, but its parent_span_id is still a valid parent), so the
-    trace reads model-call → its tools instead of a flat list under the agent.
+    挂在要这个工具的那次模型调用下面（那个 generation 这时已经结束，但仍能当父节点），trace
+    读起来是"模型调用 → 它要的工具"，而不是平铺在 agent 根下面。父节点走普通的 OTel 上下文
+    （``under_last_generation``），所以工具 span 不会被 langfuse 当成 trace 的根。
     """
-    with _safe_current_span(
-        f"tool.{name}", input, trace_context=current_generation_context()
-    ) as span:
+    with under_last_generation(), _safe_current_span(f"tool.{name}", input) as span:
         yield span
 
 
+def _record_call(span: Any, prompts: PromptSet, call: Call) -> None:
+    """Record on the call's root span which segments it rendered, at which label and version, and,
+    for a call made in a participant's round, what woke that round: the wake source, the round's
+    identity and the reason (best-effort). An agent rendered from several segments links no one
+    prompt on its model calls, so this is where its versions are read back."""
+    try:
+        metadata: dict[str, Any] = {
+            "prompt_segments": [
+                {"prompt_id": prompt_id, "label": label, "version": version}
+                for prompt_id, label, version in prompts.versions(call.agent)
+            ]
+        }
+        if call.round is not None:
+            metadata["wake"] = {
+                "source": wake_source(),
+                "round_id": call.round.round_id,
+                "reason": call.round.reason,
+            }
+        span.update(metadata=metadata)
+    except Exception as exc:  # pragma: no cover - tracing must not break the call
+        logger.warning("langfuse span metadata update failed: %s", exc)
+
+
+def _record_output(span: Any, output: Any) -> None:
+    """Record what a span's call handed back as its ``output`` (best-effort).
+
+    The output must already be JSON-serialisable (langfuse serialises the span).
+    Guarded: a tracing failure must never break the call it records.
+    """
+    try:
+        span.update(output=output)
+    except Exception as exc:  # pragma: no cover - tracing must not break the call
+        logger.warning("langfuse span output update failed: %s", exc)
+
+
 def _record_tool_output(span: Any, result: ToolResult) -> None:
-    """Record a dispatched tool's result on its span (best-effort).
+    """Record a dispatched tool's result on its span.
 
     The loop opens the tool span before dispatch so the call arguments land as
     ``input``; without this the span has no ``output`` and langfuse renders the
     tool result as ``undefined``. Content is reduced to JSON-serialisable form
-    (block lists → plain dicts) since langfuse must serialise the span. Guarded:
-    a tracing failure must never break the tool loop.
+    (block lists → plain dicts) since langfuse must serialise the span.
     """
-    try:
-        content = result.content
-        output: Any = (
-            [b.to_dict() for b in content]
-            if isinstance(content, list)
-            else content
-        )
-        span.update(output=output)
-    except Exception as exc:  # pragma: no cover - tracing must not break dispatch
-        logger.warning("langfuse tool span output update failed: %s", exc)
+    content = result.content
+    _record_output(
+        span, [b.to_dict() for b in content] if isinstance(content, list) else content
+    )
 
 
 # ---------------------------------------------------------------------------
 # Hand-written ReAct loops (module-level so they can be de-risked in isolation)
 # ---------------------------------------------------------------------------
-
-# Tools whose call means "this run is over" — the loop returns as soon as one is
-# dispatched, without asking the model for another turn. ``no_reply`` is chat's
-# (``app.agent.tools.no_reply``); ``stop_for_now`` is hers
-# (``app.living.moment``), the hand she ends a life moment with. A tool renamed
-# without updating this set fails silently — the loop just keeps going — so each
-# name is pinned by a test next to the tool it belongs to.
-_TERMINAL_TOOL_NAMES = {"no_reply", "stop_for_now"}
-
-# What a call that never ran is answered with. A terminal tool ends the run at
-# the position it holds in the turn, so every call after it is left unexecuted —
-# and an assistant turn whose calls are not all answered makes the provider
-# reject the whole next request. The wording says what happened, so a model
-# reading the stored context does not take it for a tool that failed.
-_NEVER_RAN = "（这一轮在这只手之前就结束了，它没有执行。）"
-
-# The self-written web-search tool. When an agent that opted into native search
-# runs on a model that supports it (and the flag is on), this tool is dropped
-# from the model's tool list and replaced by the provider's native grounding.
-_SEARCH_WEB_TOOL_NAME = "search_web"
-
-# Dynamic Config kill-switch for the native-search swap. Default off so the
-# swap stays dark until explicitly enabled per lane; flipping it back off
-# restores ``search_web`` at runtime with no redeploy.
-_NATIVE_WEB_SEARCH_FLAG = "main_chat_native_web_search"
-
 
 def _tooldefs(tools: list[Tool]) -> list[ToolDef] | None:
     """Project neutral Tools to the ToolDefs the model sees, or None if empty."""
@@ -415,8 +393,8 @@ def _normalise_tool_result(result: ToolResult) -> ToolResult:
       - ``list`` of block-dicts     → ``list[ContentBlock]`` (multimodal),
       - ``dict`` / anything else    → ``json.dumps`` string.
 
-    Returns a new ToolResult so the streamed ``tool_result`` chunk and the tool
-    message fed back both carry the normalised content.
+    Returns a new ToolResult so the tool message fed back carries the
+    normalised content.
     """
     content = result.content
     if isinstance(content, str):
@@ -430,39 +408,6 @@ def _normalise_tool_result(result: ToolResult) -> ToolResult:
     # dict (incl. tool_error outcome) or any other JSON-able value → string
     text = json.dumps(content, ensure_ascii=False, default=str)
     return ToolResult(tool_call_id=result.tool_call_id, content=text)
-
-
-def _is_terminal_tool_call(call: ToolCall) -> bool:
-    """Whether a tool call intentionally ends the current agent turn."""
-    return call.name in _TERMINAL_TOOL_NAMES
-
-
-def _extend_turn(
-    parts: list[TurnPart], kind: TurnPartKind, chunk: StreamChunk
-) -> None:
-    """Fold one streamed chunk into the sequence the turn is being rebuilt as.
-
-    A stream cuts one wire part into many chunks, so consecutive chunks of the
-    same kind extend the part that is still open. Two things close it: the
-    adapter saying this chunk opens a new one (``starts_part`` — it read the
-    provider's parts and saw the boundary), and a signature arriving, which
-    belongs to the segment it rode in on. A chunk carrying neither text nor a
-    signature adds nothing.
-    """
-    text = (chunk.text if kind is TurnPartKind.TEXT else chunk.reasoning) or ""
-    if not text and chunk.signature is None:
-        return
-    open_part = parts[-1] if parts else None
-    if (
-        not chunk.starts_part
-        and open_part is not None
-        and open_part.kind is kind
-        and open_part.signature is None
-    ):
-        open_part.text += text
-        open_part.signature = chunk.signature
-        return
-    parts.append(TurnPart(kind=kind, text=text, signature=chunk.signature))
 
 
 def _carries_something(message: Message) -> bool:
@@ -484,12 +429,10 @@ def _is_empty_turn(text: str, tool_calls: list[ToolCall]) -> bool:
     """Whether one model turn produced nothing usable: no tool_calls AND no
     non-whitespace text.
 
-    ``text`` should be the turn's plain-text view (``Message.text()`` for
-    ``_run_loop``, the joined streamed text parts for ``_stream_loop``) —
-    thinking is deliberately excluded from both: a turn that only thought
-    (thought parts on the turn, or streamed ``reasoning`` chunks) without
-    producing text or a tool_call is still empty *as an answer*, because
-    thinking is never surfaced to the user. This is a different question from
+    ``text`` should be the turn's plain-text view (``Message.text()``) —
+    thinking is deliberately excluded: a turn that only thought (thought parts
+    on the turn) without producing text or a tool_call is still empty *as an
+    answer*, because thinking is never surfaced to the user. This is a different question from
     ``_carries_something`` (whether the turn is worth replaying), which counts
     thoughts because the provider gets them back.
     """
@@ -566,19 +509,21 @@ async def _run_loop(
     *,
     messages: list[Message],
     tools: list[Tool],
-    context: AgentContext | None,
     recursion_limit: int,
+    ends_round: frozenset[str] = frozenset(),
+    never_ran: str | None = None,
+    bad_arguments: str | None = None,
     session_id: str | None = None,
-    native_web_search: bool = False,
     model_kwargs: dict[str, Any] | None = None,
     transcript_sink: list[Message] | None = None,
 ) -> Message:
     """Drive ``model.complete`` until the assistant stops calling tools.
 
     Each iteration: call the model with the running transcript + tool defs.
-    If the assistant requested tools, dispatch each (under ``agent_context`` so
-    tool bodies can read the ambient context), append the assistant turn and one
-    tool message per result, and loop. Otherwise return the assistant message.
+    If the assistant requested tools, dispatch each (a tool reads its call and
+    round with ``current_call()`` / ``current_round()``, bound by the agent and
+    the round's runner), append the assistant turn and one tool message per
+    result, and loop. Otherwise return the assistant message.
 
     ``model_kwargs`` (e.g. ``reasoning_effort`` for the safety guard) are
     forwarded to every model call — dropping them silently changes behaviour.
@@ -600,7 +545,10 @@ async def _run_loop(
 
       - **every call is answered.** A terminal tool ends the run where it sits
         in the turn, so the calls after it never run; each of those gets a
-        result saying so (``_NEVER_RAN``).
+        result saying so, in the caller's words (``never_ran``: an assistant
+        turn whose calls are not all answered makes the provider reject the
+        whole next request, and the words say what happened, so a model reading
+        the stored context does not take it for a tool that failed).
       - **nothing content-free is stored** (``_carries_something``). The empty
         message a terminal tool returns stays out — it carries nothing, and a
         caller whose rounds usually end that way would pile up one per round —
@@ -614,13 +562,7 @@ async def _run_loop(
     """
     convo = list(messages)
     tool_defs = _tooldefs(tools)
-    extra = model_kwargs or {}
-    # Only forward native_web_search when enabled: a False would hand existing
-    # adapters (which don't know the kwarg) a parameter they never received,
-    # so the non-native path stays byte-for-byte unchanged.
-    call_kwargs = {**extra, "session_id": session_id}
-    if native_web_search:
-        call_kwargs["native_web_search"] = True
+    call_kwargs = {**(model_kwargs or {}), "session_id": session_id}
     last: Message | None = None
 
     for _ in range(max(1, recursion_limit)):
@@ -644,22 +586,21 @@ async def _run_loop(
             transcript_sink.append(last)
         for at, call in enumerate(last.tool_calls):
             with _tool_span(name=call.name, input=call.arguments) as span:
-                with agent_context(context) if context is not None else _nullctx():
-                    result = await dispatch(tools, call)
+                result = await dispatch(tools, call, bad_arguments=bad_arguments)
                 normalised = _normalise_tool_result(result)
                 _record_tool_output(span, normalised)
             tool_msg = normalised.to_message()
             convo.append(tool_msg)
             if transcript_sink is not None:
                 transcript_sink.append(tool_msg)
-            if _is_terminal_tool_call(call):
+            if call.name in ends_round:
                 # The calls after this one never ran, and the assistant turn
                 # carrying them is already stored. Answer each so the stored
                 # round keeps every call paired with a result — a turn with an
                 # unanswered call makes the provider reject the next request.
-                for skipped in last.tool_calls[at + 1 :]:
+                for skipped in last.tool_calls[at + 1 :] if never_ran is not None else ():
                     cancelled = ToolResult(
-                        tool_call_id=skipped.id, content=_NEVER_RAN
+                        tool_call_id=skipped.id, content=never_ran
                     ).to_message()
                     convo.append(cancelled)
                     if transcript_sink is not None:
@@ -710,209 +651,70 @@ async def _run_loop(
     return closing
 
 
-async def _stream_loop(
-    model: ModelClient,
-    *,
-    messages: list[Message],
-    tools: list[Tool],
-    context: AgentContext | None,
-    recursion_limit: int,
-    session_id: str | None = None,
-    native_web_search: bool = False,
-    model_kwargs: dict[str, Any] | None = None,
-) -> AsyncIterator[StreamChunk]:
-    """Stream neutral chunks; on a tool-call turn, dispatch and loop.
-
-    Each turn streams from the model, forwarding every chunk downstream while
-    accumulating the assistant's text + any tool calls. If the turn ended with
-    tool calls, dispatch them (under ``agent_context``), emit a ``tool_result``
-    chunk per result (so the consumer can count them), feed the assistant turn +
-    tool messages back into the transcript, and stream another turn. A turn with
-    no tool calls ends the loop.
-
-    ``model_kwargs`` are forwarded to every model call. ``recursion_limit`` caps
-    the number of streamed turns.
-    """
-    convo = list(messages)
-    tool_defs = _tooldefs(tools)
-    extra = model_kwargs or {}
-    # Same rule as _run_loop: only forward native_web_search when enabled, so a
-    # non-native stream call carries exactly the kwargs it always did.
-    call_kwargs = {**extra, "session_id": session_id}
-    if native_web_search:
-        call_kwargs["native_web_search"] = True
-
-    for _ in range(max(1, recursion_limit)):
-        text_parts: list[str] = []
-        turn_parts: list[TurnPart] = []
-        turn_calls: list[ToolCall] = []
-        attempts = 0
-
-        # Transparent single-turn retry, mirroring _complete_turn: an empty
-        # attempt (no text, no tool_calls — see _is_empty_turn) re-issues
-        # model.stream for the SAME turn (no tools dispatched) instead of being
-        # accepted as the final turn. What that attempt thought does ride into
-        # the retry — see below.
-        # Chunks are still forwarded live as they arrive (yield below) so a
-        # normal turn keeps true token-by-token streaming — only once this
-        # attempt's stream is fully drained do we know whether it was empty.
-        # An empty attempt only ever carried reasoning / a bare finish_reason
-        # (never non-whitespace text or a tool_call, by definition), so
-        # nothing user-visible needs to be undone when we loop for another
-        # attempt. Exhausting the budget changes nothing about what happens
-        # below — same control flow, same shape — only a log marks it (see
-        # _complete_turn's docstring for why this must never raise instead).
-        while True:
-            attempts += 1
-            text_parts = []
-            turn_parts = []
-            turn_calls = []
-
-            async for chunk in model.stream(convo, tools=tool_defs, **call_kwargs):
-                if chunk.text:
-                    text_parts.append(chunk.text)
-                if chunk.text is not None:
-                    _extend_turn(turn_parts, TurnPartKind.TEXT, chunk)
-                if chunk.reasoning is not None:
-                    _extend_turn(turn_parts, TurnPartKind.THOUGHT, chunk)
-                if chunk.tool_call is not None:
-                    turn_calls.append(chunk.tool_call)
-                    turn_parts.append(TurnPart.from_tool_call(chunk.tool_call))
-                yield chunk
-
-            empty_turn = _is_empty_turn("".join(text_parts), turn_calls)
-            if not empty_turn or attempts >= _EMPTY_TURN_MAX_ATTEMPTS:
-                if empty_turn:
-                    logger.warning(
-                        "agent stream turn empty (no text, no tool_calls) after "
-                        "%d/%d attempts; model=%s",
-                        attempts,
-                        _EMPTY_TURN_MAX_ATTEMPTS,
-                        _model_label(model),
-                    )
-                break
-            # This attempt answered nothing, but what it thought is kept: the
-            # retry streams against a transcript that has it, so the signatures
-            # the model was reasoning from go back with it. An attempt that came
-            # back with nothing at all is dropped — on the wire it is an empty
-            # turn, which the provider rejects the whole request over.
-            unanswered = Message.from_model_turn(turn_parts, turn_calls)
-            if _carries_something(unanswered):
-                convo.append(unanswered)
-
-        if not turn_calls:
-            return
-
-        # rebuild the assistant turn from what we streamed, then dispatch. The
-        # sequence is carried back too (mirroring _run_loop, where the Message
-        # returned by model.complete already holds it) so the next request
-        # replays the thoughts and signatures this turn produced.
-        assistant_turn = Message.from_model_turn(turn_parts, turn_calls)
-        convo.append(assistant_turn)
-        for call in turn_calls:
-            with _tool_span(name=call.name, input=call.arguments) as span:
-                with agent_context(context) if context is not None else _nullctx():
-                    result = await dispatch(tools, call)
-                result = _normalise_tool_result(result)
-                _record_tool_output(span, result)
-            tool_msg = result.to_message()
-            convo.append(tool_msg)
-            yield StreamChunk(tool_result=result)
-            if _is_terminal_tool_call(call):
-                return
-
-
-@contextmanager
-def _nullctx():
-    yield None
-
-
 # ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
 
 
-class Agent:
-    """Unified thinking entry point.
+async def _configured(value: str | int | FromConfig) -> Any:
+    """``value`` itself, or what it reads from Dynamic Config now."""
+    return await value.read() if isinstance(value, FromConfig) else value
 
-    ``run`` / ``stream`` drive a hand-written ReAct loop. Having tools or not is
-    just a parameter difference, not a code path difference. ``extract`` is the
-    structured-output path (single ``model.structured`` call).
+
+class Agent:
+    """Unified thinking entry point for one agent (its :class:`AgentSpec`).
+
+    ``run`` drives a hand-written ReAct loop. Having tools or not is just a
+    parameter difference, not a code path difference. ``extract`` is the
+    structured-output path (single ``model.structured`` call). The tools are
+    given as their declarations (:class:`~app.agent.contracts.ToolSpec`): the
+    model sees their schemas in the order given, and a call to one declared
+    ``ends_round`` ends the run; when the run is kept (``transcript_sink``), the calls
+    after it are answered with ``never_ran`` (the participant's
+    :class:`~app.agent.contracts.HistoryTexts`), which it then needs. A tool call whose
+    arguments do not fit its tool is answered with ``spec.bad_arguments``.
+
+    Every entry takes the :class:`~app.agent.round.Call` its caller opened and binds it as the
+    current call for as long as it runs; the call's own state is emptied at the start of each
+    attempt. Its prompt comes from the :class:`~app.agent.prompts.PromptSet` resolved for the
+    round (or for the call) under the call's name; ``values`` are the variables known only at the
+    call. The root span records the segments rendered (``prompt_segments``) and, in a round, what
+    woke the round (``wake``); the model calls link the prompt when the agent has a single one. The model and the budget of model calls are read when the call starts (they may come
+    from Dynamic Config); a whole call is tried ``spec.max_retries`` times on a temporary model
+    failure. ``spec.separate_trace`` puts every call in a Langfuse trace of its own.
     """
 
     def __init__(
         self,
-        config: AgentConfig,
+        spec: AgentSpec,
         *,
-        tools: list[Tool] | None = None,
-        model_kwargs: dict[str, Any] | None = None,
-        update_trace: bool = True,
+        tools: Sequence[ToolSpec] = (),
+        never_ran: str | None = None,
     ) -> None:
-        self._cfg = config
-        self._tools = tools or []
-        self._model_kwargs = model_kwargs or {}
-        self._update_trace = update_trace
+        self._spec = spec
+        self._tools = [t.tool for t in tools]
+        self._ends_round = frozenset(t.tool.name for t in tools if t.ends_round)
+        self._never_ran = never_ran
 
     # ------------------------------------------------------------------
     # internal
     # ------------------------------------------------------------------
 
-    async def _prepare(
-        self, prompt_vars: dict[str, Any]
-    ) -> tuple[ModelClient, list[Message]]:
-        """Resolve the model client and compile the prompt messages."""
-        if not self._cfg.prompt_id:
-            raise ValueError(
-                f"Agent({self._cfg.trace_name}).run/stream requires a non-empty "
-                f"prompt_id. Guard agents (empty prompt_id) should use extract()."
-            )
-        langfuse_prompt = get_prompt(self._cfg.prompt_id)
-        model = await build_model_client(self._cfg.model_id)
-        # 全局注入的"现在"显式取 CST（北京时间），不依赖容器时区——naive
-        # ``datetime.now()`` 在 TZ 不确定的容器里可能是 UTC，喂给每条 prompt 的
-        # currTime 就跟 world/life 的 CST 时刻差 8 小时。这一处修正整条 chat 线。
-        now = cst_time.now_cst()
-        prompt_messages = compile_to_messages(
-            langfuse_prompt,
-            currDate=now.strftime("%Y-%m-%d"),
-            currTime=now.strftime("%H:%M:%S"),
-            **prompt_vars,
+    def _trace_scope(self):
+        return separate_trace() if self._spec.separate_trace else nullcontext()
+
+    async def _model(self) -> tuple[ModelClient, int]:
+        """The model client and the budget of model calls, read when the call starts."""
+        model = await build_model_client(await _configured(self._spec.model))
+        return model, await _configured(self._spec.recursion_limit)
+
+    def _retry(self):
+        return _retry_decorator(
+            attempts=self._spec.max_retries,
+            base_delay_s=float(_BACKOFF_BASE),
+            max_delay_s=float(_BACKOFF_MAX),
+            retry_on=RETRYABLE_EXCEPTIONS,
         )
-        return model, prompt_messages
-
-    async def _resolve_native_web_search(
-        self, model: ModelClient
-    ) -> tuple[list[Tool], bool]:
-        """Decide this run's tool list and whether to enable native web search.
-
-        The swap fires only when all three conditions hold — this agent opted in
-        (``cfg.native_web_search``, only main chat does), the resolved model can
-        run native grounding alongside custom tools (Gemini 3), and the runtime
-        flag is on — AND ``search_web`` is actually mounted. When it fires the
-        ``search_web`` tool is dropped (the model uses native search instead) and
-        the signal is returned. Otherwise the tool list is returned unchanged and
-        the signal is False, so every other agent (world / life / guard, never
-        opted in) calls the model byte-for-byte as before.
-
-        The two cheap in-memory predicates are checked first so every non-opted
-        agent short-circuits *before* touching Dynamic Config — the flag read is
-        the only blocking bit, wrapped in ``asyncio.to_thread`` because the SDK's
-        cache-miss refresh is sync httpx that would otherwise stall the shared
-        event loop.
-
-        Computed once per run (the model is fixed across retry attempts) so the
-        loops stay free of this business judgment.
-        """
-        tools = self._tools
-        if not (self._cfg.native_web_search and model.supports_native_web_search):
-            return tools, False
-        flag_on = await asyncio.to_thread(
-            dynamic_config.get_bool, _NATIVE_WEB_SEARCH_FLAG, default=False
-        )
-        if flag_on and any(t.name == _SEARCH_WEB_TOOL_NAME for t in tools):
-            tools = [t for t in tools if t.name != _SEARCH_WEB_TOOL_NAME]
-            return tools, True
-        return tools, False
 
     # ------------------------------------------------------------------
     # public API
@@ -922,10 +724,10 @@ class Agent:
         self,
         messages: list[Message],
         *,
-        prompt_vars: dict[str, Any] | None = None,
-        context: AgentContext | None = None,
+        call: Call,
+        prompts: PromptSet,
+        values: Mapping[str, str] | None = None,
         transcript_sink: list[Message] | None = None,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> Message:
         """Execute the ReAct loop and return the final assistant ``Message``.
 
@@ -935,159 +737,96 @@ class Agent:
         can store the round losslessly. The Agent itself reads and writes no
         store: a caller that continues a conversation passes the prior messages in
         ``messages`` and decides when and with what else the round is persisted
-        (:mod:`app.living.continuity`).
+        (:mod:`app.agent.continuity`).
 
         Only the messages of a *successful* attempt reach the sink: a retried
         attempt starts a fresh collection, so a transient failure never leaves a
-        half-written turn behind.
+        half-written turn behind. The call's own state starts empty on every
+        attempt for the same reason.
         """
-        model, prompt_messages = await self._prepare(prompt_vars or {})
-        tools, native_web_search = await self._resolve_native_web_search(model)
+        spec = self._spec
+        if transcript_sink is not None and self._ends_round and self._never_ran is None:
+            raise ValueError(
+                f"agent {spec.trace_name!r}: {sorted(self._ends_round)} end the round and the "
+                f"run is kept, so the calls after them need never_ran (the participant's "
+                f"HistoryTexts.never_ran)"
+            )
+        with in_call(call), self._trace_scope():
+            model, recursion_limit = await self._model()
+            full_messages = [*prompts.messages(call.agent, values), *messages]
 
-        full_messages = [*prompt_messages, *messages]
-        trace_session_id = context.session_id if context else None
+            @self._retry()
+            async def _invoke() -> tuple[Message, list[Message]]:
+                call.clear_state()
+                sink: list[Message] = []
+                with _root_span(
+                    name=spec.trace_name,
+                    input=[m.to_dict() for m in full_messages],
+                    update_trace=spec.update_trace,
+                    session_id=call.session,
+                    prompts=prompts.prompts(call.agent),
+                ) as span:
+                    _record_call(span, prompts, call)
+                    result = await _run_loop(
+                        model,
+                        messages=full_messages,
+                        tools=self._tools,
+                        ends_round=self._ends_round,
+                        never_ran=self._never_ran,
+                        bad_arguments=spec.bad_arguments,
+                        recursion_limit=recursion_limit,
+                        session_id=call.session,
+                        model_kwargs=dict(spec.model_kwargs),
+                        transcript_sink=sink,
+                    )
+                    _record_output(span, result.to_dict())
+                    return result, sink
 
-        @_retry_decorator(
-            attempts=max_retries,
-            base_delay_s=float(_BACKOFF_BASE),
-            max_delay_s=float(_BACKOFF_MAX),
-            retry_on=RETRYABLE_EXCEPTIONS,
-        )
-        async def _invoke() -> tuple[Message, list[Message]]:
-            sink: list[Message] = []
-            with _root_span(
-                name=self._cfg.trace_name,
-                input=[m.to_dict() for m in full_messages],
-                update_trace=self._update_trace,
-                session_id=trace_session_id,
-            ):
-                result = await _run_loop(
-                    model,
-                    messages=full_messages,
-                    tools=tools,
-                    context=context,
-                    recursion_limit=self._cfg.recursion_limit,
-                    session_id=trace_session_id,
-                    native_web_search=native_web_search,
-                    model_kwargs=self._model_kwargs,
-                    transcript_sink=sink,
-                )
-                return result, sink
-
-        result, produced = await _invoke()
+            result, produced = await _invoke()
         if transcript_sink is not None:
             transcript_sink.extend(produced)
         return result
-
-    async def stream(
-        self,
-        messages: list[Message],
-        *,
-        prompt_vars: dict[str, Any] | None = None,
-        context: AgentContext | None = None,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
-    ) -> AsyncGenerator[StreamChunk, None]:
-        """Stream neutral ``StreamChunk``s through the ReAct loop.
-
-        Retry only before the first chunk is yielded: once a token reaches the
-        consumer, replaying would duplicate the prefix. Backoff math matches
-        ``app.capabilities.retry`` (exponential ``base * 2^(N-1)`` clamped) so
-        streaming and non-streaming paths stay consistent.
-        """
-        model, prompt_messages = await self._prepare(prompt_vars or {})
-        tools, native_web_search = await self._resolve_native_web_search(model)
-
-        full_messages = [*prompt_messages, *messages]
-        trace_session_id = context.session_id if context else None
-
-        for attempt in range(1, max_retries + 1):
-            tokens_yielded = False
-            try:
-                with _root_span(
-                    name=self._cfg.trace_name,
-                    input=[m.to_dict() for m in full_messages],
-                    update_trace=self._update_trace,
-                    session_id=trace_session_id,
-                ):
-                    async for chunk in _stream_loop(
-                        model,
-                        messages=full_messages,
-                        tools=tools,
-                        context=context,
-                        recursion_limit=self._cfg.recursion_limit,
-                        session_id=trace_session_id,
-                        native_web_search=native_web_search,
-                        model_kwargs=self._model_kwargs,
-                    ):
-                        tokens_yielded = True
-                        yield chunk
-                return
-            except RETRYABLE_EXCEPTIONS as e:
-                if tokens_yielded or attempt >= max_retries:
-                    raise
-                delay = min(_BACKOFF_BASE**attempt, _BACKOFF_MAX)
-                logger.warning(
-                    "Agent(%s).stream attempt %d/%d failed (%s: %s); "
-                    "retrying in %.2fs",
-                    self._cfg.trace_name,
-                    attempt,
-                    max_retries,
-                    type(e).__name__,
-                    e,
-                    delay,
-                )
-                await asyncio.sleep(delay)
 
     async def extract(
         self,
         response_model: type[BaseModel],
         messages: list[Message],
         *,
-        prompt_vars: dict[str, Any] | None = None,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
-        session_id: str | None = None,
+        call: Call,
+        prompts: PromptSet,
+        values: Mapping[str, str] | None = None,
     ) -> BaseModel:
         """Structured output — return a validated Pydantic model instance.
 
         One ``model.structured`` call against ``response_model``'s JSON schema;
-        the returned dict is validated back into the model. Guard agents (empty
-        prompt_id) skip prompt compilation.
+        the returned dict is validated back into the model.
 
-        ``session_id`` (when given) tags this trace's langfuse session, so an
-        async-internal structured judgment (e.g. world 在场匹配) groups into its
-        actor's day session like ``run`` / ``stream`` do. ``None`` keeps the
-        status quo — the trace's session is left untouched. ``extract`` stays
-        stateless either way (no transcript read/write): session_id is a trace
-        tag only, not a continuation.
+        The call's session (when its agent has one) tags this trace's langfuse
+        session; ``extract`` stays stateless either way (no transcript
+        read/write): a session is a trace tag only, not a continuation.
         """
-        model = await build_model_client(self._cfg.model_id)
-        schema = response_model.model_json_schema()
+        spec = self._spec
+        with in_call(call), self._trace_scope():
+            model = await build_model_client(await _configured(spec.model))
+            schema = response_model.model_json_schema()
+            full_messages = [*prompts.messages(call.agent, values), *messages]
 
-        full_messages = list(messages)
-        prompt_id = self._cfg.prompt_id
-        if prompt_id:
-            langfuse_prompt = get_prompt(prompt_id)
-            prompt_messages = compile_to_messages(
-                langfuse_prompt, **(prompt_vars or {})
-            )
-            full_messages = [*prompt_messages, *messages]
+            @self._retry()
+            async def _invoke() -> BaseModel:
+                call.clear_state()
+                with _root_span(
+                    name=spec.trace_name,
+                    input=[m.to_dict() for m in full_messages],
+                    update_trace=spec.update_trace,
+                    session_id=call.session,
+                    prompts=prompts.prompts(call.agent),
+                ) as span:
+                    _record_call(span, prompts, call)
+                    data = await model.structured(
+                        full_messages, schema=schema, **dict(spec.model_kwargs)
+                    )
+                    result = response_model.model_validate(data)
+                    _record_output(span, result.model_dump(mode="json"))
+                    return result
 
-        @_retry_decorator(
-            attempts=max_retries,
-            base_delay_s=float(_BACKOFF_BASE),
-            max_delay_s=float(_BACKOFF_MAX),
-            retry_on=RETRYABLE_EXCEPTIONS,
-        )
-        async def _invoke() -> BaseModel:
-            with _root_span(
-                name=self._cfg.trace_name,
-                input=[m.to_dict() for m in full_messages],
-                update_trace=self._update_trace,
-                session_id=session_id,
-            ):
-                data = await model.structured(
-                    full_messages, schema=schema, **self._model_kwargs
-                )
-                return response_model.model_validate(data)
-
-        return await _invoke()
+            return await _invoke()

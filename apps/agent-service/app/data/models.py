@@ -7,6 +7,11 @@ Tables:
   - common_bot_presence (raw SQL, managed by channel-server)
   - model_provider, model_mappings
   - bot_persona
+  - message_record (written and read with raw SQL in app.messaging.record)
+
+How these tables come into existence: ``app.data.bootstrap.ensure_business_schema``
+runs ``create_all`` on coe-* lanes only. prod gets them through a DDL request that
+lands before the release that reads them (docs/runbooks/prod-ddl-backlog.md).
 """
 
 from datetime import datetime
@@ -19,6 +24,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Index,
     Integer,
     String,
     Text,
@@ -118,7 +124,7 @@ class CommonMessage(Base):
     # 她在生活引擎里自己发起说话时先派生一个稳定唯一的 id，再以 ``proactive:<uuid>``
     # 的形式放在出站信封的 message_id 上；渠道服务落这条 assistant 行时把**前缀之后
     # 那个 uuid** 记在这里（前缀是线格式的命名空间标记，列是 uuid 类型，整串进不来）。
-    # 引擎按这一列把"她那次开口"和"库里这一行"对上账（``app.living.landing``）。
+    # 引擎按这一列把"她那次开口"和"库里这一行"对上账（``app.living.speaking.landing``）。
     #
     # NULL 和"确实不是主动发的"是两件事：NULL = 没记过（加列前的存量行、QQ 的行、
     # 飞书新写入方上线前的行）。所以这一列既不能 NOT NULL 也不能给默认值 —— 给了就
@@ -134,7 +140,7 @@ class CommonMessage(Base):
     # ``app.living.phone``）据此把它从她眼前拿掉。
     #
     # 引擎这边没有入站边，撤成功了没人来通知，所以撤回的结果也是**事后按
-    # ``agent_outbound_id`` 反查这一列**对回台账的（``app.living.landing``）。
+    # ``agent_outbound_id`` 反查这一列**对回台账的（``app.living.speaking.landing``）。
     #
     # 可空、无默认值，跟上面那一列同一个理由：NULL = 没撤过或者还没撤掉，跟"撤掉
     # 了"是两件事，给了默认值就再也分不开。写入方在投递侧（lark-service），TS 侧那
@@ -250,3 +256,43 @@ class BotPersona(Base):
     )
 
 
+# ---------------------------------------------------------------------------
+# Messaging record
+# ---------------------------------------------------------------------------
+
+
+class MessageRecord(Base):
+    """Every message that passed through app.messaging, delivered or not.
+
+    Append-only: each state change of a message is its own row. Only
+    :mod:`app.messaging.record` writes it and only the operator entry reads it;
+    participants never do. ``lane`` is the writing process's deployment lane —
+    ppe lanes share prod's database and this column keeps them apart.
+    """
+
+    __tablename__ = "message_record"
+    __table_args__ = (
+        Index("message_record_message_idx", "message_id"),
+        Index("message_record_lane_time_idx", "lane", text("recorded_at DESC")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    lane: Mapped[str] = mapped_column(Text, nullable=False)
+    message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    sender: Mapped[str] = mapped_column(Text, nullable=False)
+    recipient: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    message_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    in_reply_to: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # clock_timestamp(), not now(): several rows for one message are written in
+    # quick succession and their order has to show in this column.
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("clock_timestamp()"),
+    )

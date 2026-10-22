@@ -27,8 +27,8 @@ import uuid
 
 import pytest
 
-from app.living.phone import reachable_conversations
-from app.living.whitelist import (
+from app.living.phone.handset import reachable_conversations
+from app.living.phone.whitelist import (
     DIRECT_TOTAL_OVER,
     IN_SIGHT_TIERS,
     LIVING_PINNED_GROUPS_KEY,
@@ -126,7 +126,7 @@ def test_an_unusable_pin_list_pins_nothing_at_all(raw):
 
 
 async def test_the_pinned_groups_come_from_dynamic_config(monkeypatch):
-    from app.living import whitelist as whitelist_mod
+    from app.living.phone import whitelist as whitelist_mod
 
     seen: dict[str, str] = {}
     pinned = str(uuid.uuid4())
@@ -392,7 +392,7 @@ async def test_a_count_that_blew_up_leaves_the_conversation_out_of_sight(
 
     反过来做的话，这道闸在库最不健康的时候正好整个消失 —— 而那正是最需要它的时候。
     """
-    from app.living import whitelist as whitelist_mod
+    from app.living.phone import whitelist as whitelist_mod
 
     await _seed_world()
     await _they_said(_DM, how_many=1, first_at=_NOW - dt.timedelta(minutes=5))
@@ -414,7 +414,7 @@ async def test_a_pin_list_that_cannot_be_read_does_not_silence_the_tiers(
 
     旧的 ``feed_whitelist`` 是"配置挂 = 群聊全静音"，这里不能再来一遍。
     """
-    from app.living import whitelist as whitelist_mod
+    from app.living.phone import whitelist as whitelist_mod
 
     await _seed_world()
     await _they_said(_DM, how_many=1, first_at=_NOW - dt.timedelta(minutes=5))
@@ -477,7 +477,7 @@ async def test_the_list_is_counted_once_in_a_moment(living_db, in_a_moment, monk
     这条钟一分钟一拍、她一次 moment 里要问好几次（信封、看手机、找人、发消息、找文件），
     每次都重算就是把这个功能最贵的那一项乘上几倍。
     """
-    from app.living import whitelist as whitelist_mod
+    from app.living.phone import whitelist as whitelist_mod
 
     await _seed_world()
     await _they_said(_DM, how_many=1, first_at=_NOW - dt.timedelta(minutes=10))
@@ -514,7 +514,7 @@ async def test_the_volume_rule_is_asked_as_a_yes_or_no_and_only_about_direct_lin
     各走一次索引（1175 个 buffer 全部命中缓存）。跟四个窗口混在同一次调用里还会把
     那四个窗口一起拖下水 —— 这一条是那两个陷阱的门禁。
     """
-    from app.living import whitelist as whitelist_mod
+    from app.living.phone import whitelist as whitelist_mod
 
     await _seed_world()
     # 谁都够不到四个窗口：那条私聊才会走到"够不够"这一步。
@@ -561,7 +561,7 @@ async def test_a_volume_check_that_blew_up_leaves_the_line_out_of_sight(
     两半各有一次查询，只堵一半的话另一半炸了会静默放行：那道闸在库最不健康的时候
     正好半边消失。
     """
-    from app.living import whitelist as whitelist_mod
+    from app.living.phone import whitelist as whitelist_mod
 
     await _seed_world()
     # 时间窗全部够不到，进名单只能靠总量那条。

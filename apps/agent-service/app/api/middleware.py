@@ -126,11 +126,9 @@ for _header_name, _cfg in HEADER_CONFIG.items():
     header_vars[_var_name] = contextvars.ContextVar(_var_name, default=None)
 
 # Module-level aliases for the contextvars that other modules need to read
-# directly (e.g. ``app.runtime.durable`` propagates these across RabbitMQ).
+# directly (e.g. ``app.infra.propagation`` carries these across RabbitMQ).
 trace_id_var = header_vars["trace_id"]
 lane_var = header_vars["lane"]
-# Phase 7b Gap 12: operator identity for DLQ admin audit trail.
-operator_var = header_vars["operator"]
 
 
 class HeaderContextMiddleware(BaseHTTPMiddleware):

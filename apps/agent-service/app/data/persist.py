@@ -1,0 +1,374 @@
+"""Append-only persistence primitives for Data rows, and the reads everyone else runs.
+
+Three operations, deliberately minimal:
+
+  - :func:`insert_append` — durable write with runtime-maintained ``Version``
+    auto-increment. Concurrency-safe via ``pg_advisory_xact_lock`` keyed on
+    the natural-key tuple. Optional ``expected_current_ver`` turns the append
+    into an optimistic CAS (write only if ``MAX(ver)`` is still the version
+    the caller loaded; the check rides inside the INSERT statement itself).
+  - :func:`insert_idempotent` — ``INSERT ... ON CONFLICT (dedup_hash) DO
+    NOTHING RETURNING 1``. Returns the number of rows actually inserted
+    (0 on collision, 1 otherwise); see function docstring for the full
+    contract.
+  - :func:`select_latest` — newest version per key using ``DISTINCT ON``.
+
+Reads whose shape those do not cover (``MAX(seq)``, ``ORDER BY … LIMIT``, time windows,
+``NOT EXISTS`` joins) keep their own SQL and run it through :func:`fetch_all`,
+:func:`fetch_one` or :func:`fetch_value`; :func:`from_row` turns a row read that way into its
+record. Code outside :mod:`app.data` never opens a session: what it decides is the SQL and,
+with ``async with tx():``, which statements share a transaction.
+
+:func:`serialise_writers` is the lock both :func:`insert_append` and
+:func:`app.data.ordered.insert_in_commit_order` take, so "writers on this key take turns" has
+one definition.
+
+Each of them runs in the caller's open :func:`app.data.tx.tx` when there is one, so several writes
+land together by running inside one ``async with tx():``, and in a transaction of its own
+otherwise. Joining goes through :func:`app.data.tx.auto_tx`, which adds no SAVEPOINT: a storage
+call inside a caller's transaction is part of that transaction, nothing more. A read inside the
+caller's transaction sees that transaction's own writes.
+
+The dedup_hash is a sha256 over the ``Key`` columns, serialized
+via ``json.dumps(sort_keys=True, default=str)``. The class name is *not*
+included — each Data class lives in its own table, so cross-class
+collisions are impossible by construction.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping
+from functools import cache
+from typing import Any, TypeVar
+
+from pydantic import TypeAdapter
+from sqlalchemy import RowMapping, text
+
+from app.data.schema import (
+    Data,
+    is_jsonb_column,
+    key_fields,
+    table_name,
+    version_field,
+)
+from app.data.tx import auto_tx, current_session
+
+_Record = TypeVar("_Record", bound=Data)
+
+
+def _jsonb_columns(cls: type[Data]) -> frozenset[str]:
+    """Names of fields whose declared annotation maps to a JSONB column.
+
+    Reuses the runtime's annotation→pg-type judgement (:func:`is_jsonb_column`,
+    which unwraps ``Optional[X]`` and recognizes ``dict`` / ``list`` /
+    structured origins as ``JSONB``) so the write side and the table-creation
+    side (``migrator``) agree on which columns are JSONB by construction.
+    Decided on the *declared* type, never the runtime value — an
+    ``Optional[dict]=None``, a nested pydantic model, or a dict subclass must
+    still take the JSONB path the column was built for.
+    """
+    return frozenset(
+        name
+        for name, fi in cls.model_fields.items()
+        if is_jsonb_column(fi)
+    )
+
+
+@cache
+def _field_adapter(cls: type[Data], col: str) -> TypeAdapter[Any]:
+    """Per-field ``TypeAdapter`` built from the field's declared annotation.
+
+    Serializing each JSONB column through its *own* annotation (rather than
+    the whole object) keeps scalar fields out of serialization entirely and
+    makes nested pydantic models / datetimes inside the JSONB value follow
+    pydantic's rules. Cached on ``(cls, col)`` because TypeAdapter construction
+    compiles a serializer and is not free to build per write.
+    """
+    return TypeAdapter(cls.model_fields[col].annotation)
+
+
+def _bind_value_sql(col: str, jsonb_cols: frozenset[str]) -> str:
+    """The VALUES fragment for ``col``: ``CAST(:col AS jsonb)`` for JSONB,
+    else a bare ``:col`` placeholder.
+
+    asyncpg binds ``text()`` params without column-type context, so a dict /
+    list bound at a JSONB column raises ``DataError``. The explicit ``CAST``
+    tells postgres the target type and lets us bind the json *text* produced
+    below in :func:`_encode_params`.
+    """
+    return f"CAST(:{col} AS jsonb)" if col in jsonb_cols else f":{col}"
+
+
+def _encode_params(
+    obj: Data,
+    cols_map: dict[str, Any],
+    jsonb_cols: frozenset[str],
+) -> dict[str, Any]:
+    """Return a params map where JSONB columns carry json *text*.
+
+    Each JSONB column is serialized **on its own**, through a TypeAdapter
+    built from that field's declared annotation
+    (:func:`_field_adapter`), so nested pydantic models / datetimes inside
+    the value follow pydantic's json rules. The result is bound at
+    ``CAST(:col AS jsonb)``.
+
+    Scalar columns (incl. ``datetime`` / ``date`` / ``bytes`` / the
+    runtime-managed ``dedup_hash``) never touch serialization at all — their
+    native Python value asyncpg already maps correctly. We deliberately do
+    **not** dump the whole object: a blanket ``model_dump`` would (a) stringify
+    scalar datetimes / bytes and break their bindings, and (b) raise on a
+    non-JSON-safe scalar (e.g. non-UTF-8 ``bytes``) even when no JSONB field is
+    at fault.
+
+    Serialization is fail-fast and per-field: a non-JSON-safe value in a JSONB
+    field raises here, naming the Data class and the specific field, with no
+    fallback or placeholder.
+    """
+    if not jsonb_cols:
+        return cols_map
+    cls = type(obj)
+    out = dict(cols_map)
+    for col in jsonb_cols:
+        if col not in out:
+            continue
+        try:
+            out[col] = _field_adapter(cls, col).dump_json(out[col]).decode()
+        except Exception as exc:
+            raise ValueError(
+                f"{cls.__name__}.{col}: value is not JSON-serializable "
+                f"for the JSONB column ({exc})"
+            ) from exc
+    return out
+
+
+async def serialise_writers(table: str, values: tuple[Any, ...]) -> None:
+    """Make the writers of ``values`` in ``table`` take turns, until the current transaction ends.
+
+    Waits for, then holds, a Postgres transaction-scoped advisory lock keyed on
+    ``(table, *values)``. The server releases it when the transaction ends, however it ends:
+    commit, rollback, or the connection going away. So it must run inside a transaction (an open
+    ``tx()`` or ``auto_tx()``); outside one :func:`app.data.tx.current_session` raises. A wait is
+    bounded by the server's ``statement_timeout``.
+
+    The key is the first 8 bytes of an MD5 over ``(table, *values)``, as a signed 64-bit int.
+    MD5 is only a stable bucket here: unrelated keys that share a bucket take turns more than
+    they need to, and never miss the lock.
+
+    A transaction that takes this lock on several keys (it appends to several axes or tables, or
+    mixes :func:`insert_append` and :func:`app.data.ordered.insert_in_commit_order`) holds them
+    all until it ends, so every such transaction must take them in one consistent order.
+    Otherwise two of them can each hold the lock the other waits for, and Postgres aborts one of
+    the two. The transactions that do this today, and their order, are listed under "Lock order"
+    in :mod:`app.data.ordered`.
+    """
+    digest = hashlib.md5(str((table, *values)).encode()).digest()
+    await current_session().execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": int.from_bytes(digest[:8], "big", signed=True)},
+    )
+
+
+def dedup_hash(obj: Data) -> str:
+    """SHA-256 of the obj's dedup columns, deterministic across processes.
+
+    For append-only Data (those declaring a ``Version`` field), the version
+    column is folded into the hash so each append produces a unique row
+    under the ``UNIQUE (dedup_hash)`` index. Without this, two appends
+    under the same natural key would collide — defeating versioning.
+    """
+    cls = type(obj)
+    cols = list(key_fields(cls))
+    ver = version_field(cls)
+    if ver and ver not in cols:
+        cols.append(ver)
+    payload = json.dumps(
+        {c: getattr(obj, c) for c in cols},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+async def insert_append(
+    obj: Data,
+    *,
+    expected_current_ver: int | None = None,
+) -> int:
+    """Append ``obj`` as a new row; auto-assign ``Version`` if declared.
+
+    Holds the per-key lock (:func:`serialise_writers`) during the
+    ``MAX(ver)`` read and the subsequent ``INSERT`` so that concurrent
+    writers against the same key produce monotonic, gapless versions.
+
+    ``expected_current_ver`` (optimistic concurrency, requires a ``Version``
+    column): append only if the key's current ``MAX(ver)`` still equals this
+    value, i.e. nobody appended since the caller read that version. The check
+    rides **inside the INSERT itself** (``INSERT ... SELECT ... WHERE (SELECT
+    MAX(ver) ...) = :expected``) so check and write are one atomic statement —
+    no TOCTOU window even against a writer that bypassed the advisory lock.
+    Returns ``1`` when written, ``0`` when stale (someone advanced the
+    version); the caller decides what a lost race means.
+
+    Without ``expected_current_ver`` the behavior is unchanged: always
+    returns ``1`` on success. A ``UniqueViolation`` on ``dedup_hash`` is
+    raised (not swallowed): because the version column is folded into the
+    hash, a collision means two writers slipped past the advisory lock — an
+    upstream bug worth surfacing loudly.
+
+    Inside a caller's ``tx()`` the append commits or rolls back with it. The
+    advisory lock is transaction-scoped, so there it is held until the
+    caller's transaction ends — keep such transactions short.
+    """
+    cls = type(obj)
+    table = table_name(cls)
+    ver_col = version_field(cls)
+    keys = key_fields(cls)
+    if expected_current_ver is not None and not ver_col:
+        raise ValueError(
+            f"{cls.__name__}: expected_current_ver requires a Version column"
+        )
+
+    cols_map: dict[str, Any] = {c: getattr(obj, c) for c in cls.model_fields}
+
+    async with auto_tx():
+        s = current_session()
+        await serialise_writers(table, tuple(getattr(obj, k) for k in keys))
+        where = " AND ".join(f"{k} = :{k}" for k in keys)
+        if expected_current_ver is not None:
+            # CAS path: the version to write is pinned to expected+1; whether
+            # expected still holds is judged by the INSERT's own WHERE below.
+            cols_map[ver_col] = expected_current_ver + 1
+        elif ver_col:
+            r = await s.execute(
+                text(
+                    f"SELECT COALESCE(MAX({ver_col}), 0) FROM {table} "
+                    f"WHERE {where}"
+                ),
+                {k: getattr(obj, k) for k in keys},
+            )
+            cols_map[ver_col] = r.scalar() + 1
+
+        # dedup_hash must reflect the assigned version, so it is computed
+        # after the ver column is resolved. Build a transient obj of the
+        # same class carrying the final values so the hash is consistent
+        # with the row we actually insert.
+        hashed = cls.model_construct(**cols_map)
+        cols_map["dedup_hash"] = dedup_hash(hashed)
+
+        jsonb_cols = _jsonb_columns(cls)
+        cols = list(cols_map.keys())
+        placeholders = ", ".join(_bind_value_sql(c, jsonb_cols) for c in cols)
+        if expected_current_ver is not None:
+            # Atomic check-and-insert: key columns are part of cols_map, so the
+            # subquery's :{k} binds reuse the same params (same values).
+            sql = (
+                f"INSERT INTO {table} ({', '.join(cols)}) "
+                f"SELECT {placeholders} "
+                f"WHERE (SELECT COALESCE(MAX({ver_col}), 0) FROM {table} "
+                f"WHERE {where}) = :_expected_ver RETURNING 1"
+            )
+            params = _encode_params(obj, cols_map, jsonb_cols)
+            params["_expected_ver"] = expected_current_ver
+            r = await s.execute(text(sql), params)
+            return len(r.fetchall())
+        sql = (
+            f"INSERT INTO {table} ({', '.join(cols)}) "
+            f"VALUES ({placeholders})"
+        )
+        await s.execute(text(sql), _encode_params(obj, cols_map, jsonb_cols))
+        return 1
+
+
+async def insert_idempotent(obj: Data) -> int:
+    """Insert ``obj`` if its dedup key has not been seen; return rows inserted.
+
+    Uses ``ON CONFLICT (dedup_hash) DO NOTHING RETURNING 1`` on the
+    runtime-managed hash column (:func:`dedup_hash`). We count ``len(fetchall())`` because asyncpg does not reliably populate
+    ``rowcount`` for ``DO NOTHING``.
+
+    Inside a caller's ``tx()`` the insert commits or rolls back with it. A
+    collision returns ``0`` without aborting that transaction (``DO NOTHING``
+    raises nothing), so the caller's later writes still land.
+    """
+    cls = type(obj)
+    table = table_name(cls)
+
+    cols_map: dict[str, Any] = {c: getattr(obj, c) for c in cls.model_fields}
+    cols_map["dedup_hash"] = dedup_hash(obj)
+
+    jsonb_cols = _jsonb_columns(cls)
+    cols = list(cols_map.keys())
+    placeholders = ", ".join(_bind_value_sql(c, jsonb_cols) for c in cols)
+    sql = (
+        f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders}) "
+        "ON CONFLICT (dedup_hash) DO NOTHING RETURNING 1"
+    )
+    params = _encode_params(obj, cols_map, jsonb_cols)
+    async with auto_tx():
+        r = await current_session().execute(text(sql), params)
+        return len(r.fetchall())
+
+
+async def select_latest(
+    cls: type[Data], keys_values: dict[str, Any]
+) -> Data | None:
+    """Return the highest-version row matching ``keys_values``, or ``None``.
+
+    Inside a caller's ``tx()`` it reads on that transaction, so it sees the
+    transaction's own writes.
+    """
+    table = table_name(cls)
+    keys = key_fields(cls)
+    ver = version_field(cls)
+    where = " AND ".join(f"{k} = :{k}" for k in keys)
+    order = (
+        f"{', '.join(keys)}, {ver} DESC"
+        if ver
+        else f"{', '.join(keys)}"
+    )
+    sql = (
+        f"SELECT DISTINCT ON ({', '.join(keys)}) * FROM {table} "
+        f"WHERE {where} ORDER BY {order}"
+    )
+    row = await fetch_one(sql, **keys_values)
+    return None if row is None else from_row(cls, row)
+
+
+async def fetch_all(sql: str, /, **params: Any) -> list[RowMapping]:
+    """Every row ``sql`` returns, with ``params`` bound by name (``:name`` in the SQL).
+
+    Runs in the caller's open ``tx()`` when there is one (no SAVEPOINT), else in a transaction
+    of its own, as the writes do.
+    """
+    async with auto_tx():
+        return list((await current_session().execute(text(sql), params)).mappings().all())
+
+
+async def fetch_one(sql: str, /, **params: Any) -> RowMapping | None:
+    """The first row ``sql`` returns, or ``None`` when it returns none. Further rows are
+    ignored, so a query that means "the latest" says so with ``ORDER BY … LIMIT 1``.
+
+    Transaction as :func:`fetch_all`.
+    """
+    async with auto_tx():
+        return (await current_session().execute(text(sql), params)).mappings().first()
+
+
+async def fetch_value(sql: str, /, **params: Any) -> Any:
+    """The first column of the first row ``sql`` returns (``MAX(…)``, ``count(*)``, one
+    column of the latest row), or ``None`` when it returns no row.
+
+    Transaction as :func:`fetch_all`.
+    """
+    async with auto_tx():
+        return (await current_session().execute(text(sql), params)).scalar()
+
+
+def from_row(cls: type[_Record], row: Mapping[str, Any]) -> _Record:
+    """The ``cls`` record a row read from its table holds: each of the record's fields from the
+    column of the same name. Columns the record does not declare (``dedup_hash``,
+    ``created_at``, the extra columns of a join) are left out; a field with no column raises
+    ``KeyError``. Reads nothing itself."""
+    return cls(**{k: row[k] for k in cls.model_fields})

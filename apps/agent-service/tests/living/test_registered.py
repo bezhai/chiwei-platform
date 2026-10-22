@@ -2,10 +2,10 @@
 
 两件事都是"错了就静默"：
 
-  * 拉不到 registry 的后果是静默的：``Runtime.migrate_schema()`` 只看
+  * 拉不到 registry 的后果是静默的：``migrate_schema()`` 只看
     ``DATA_REGISTRY``，没进 registry 就不建表，一路跑到真读写才炸。所以这条用子进程
-    验——只 import ``app.wiring``（跟线上启动同一条链），不许靠测试自己额外 import
-    兜底。
+    验——只按线上那样起 agent-service 的插件宿主（:func:`tests.hosting.in_a_fresh_process`），
+    不许靠测试自己额外 import 兜底。
   * 列的类型和字段集合**落表之后改不了**：migrator 是 additive-only，加列随时可以，
     删列 / 改类型直接 ``MigrationError`` 崩启动。所以把它们钉在这里——把
     ``occurred_at`` 手滑写回 ``str``、或者顺手加一个"可能有用"的字段，在这条测试就
@@ -15,24 +15,22 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-import subprocess
-import sys
 
 import pytest
 from pydantic import ValidationError
 
-from app.living.day_page import LivingDayPage
-from app.living.persona import PersonaVersion
-from app.living.pictures import Picture
-from app.living.reading import FilePickedUp, FileRead
-from app.living.records import (
-    KIND_SPEECH,
-    MEDIUM_IN_PERSON,
-    Happening,
-    Upcoming,
-    Whereabouts,
-)
-from app.runtime.schema_types import pg_type
+from app.data.schema import commit_order, pg_type
+from app.living.day_page.pages import LivingDayPage
+from app.living.her_records.records import Happening, Whereabouts
+from app.living.household.outgoing import OutgoingMessage, OutgoingResult, OutgoingUpTo
+from app.living.household.received import ReceivedMessage, ReceivedRead
+from app.living.life.moment import LifeMoment
+from app.living.life.nudge import NudgeBegun
+from app.living.persona.chain import PersonaVersion
+from app.living.pictures.album import Picture
+from app.living.reading.files import FileRead
+from app.living.services import KIND_SPEECH, MEDIUM_IN_PERSON
+from tests.hosting import in_a_fresh_process
 
 _AWARE = dt.datetime(2026, 7, 25, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
 _NAIVE = dt.datetime(2026, 7, 25, 10, 0)
@@ -44,13 +42,11 @@ _VALID: dict[type, dict] = {
         "happening_id": "h1",
         "seq": 1,
         "actor": "akao",
-        "place": "家/客厅",
         "kind": KIND_SPEECH,
         "medium": MEDIUM_IN_PERSON,
         "content": "早",
         "occurred_at": _AWARE,
         "audience": [],
-        "who_was_where": {},
         "channel_id": None,
     },
     Whereabouts: {
@@ -61,15 +57,6 @@ _VALID: dict[type, dict] = {
         "place": "家/客厅",
         "doing": "待着",
         "noted_at": _AWARE,
-    },
-    Upcoming: {
-        "lane": "coe-x",
-        "item_id": "i1",
-        "ver": 1,
-        "what": "天亮",
-        "due_at": _AWARE,
-        "place": None,
-        "consumed_at": _AWARE,
     },
     FileRead: {
         "lane": "coe-x",
@@ -82,14 +69,6 @@ _VALID: dict[type, dict] = {
         "finished": False,
         "read_at": _AWARE,
         "round_id": "r-1",
-    },
-    FilePickedUp: {
-        "lane": "coe-x",
-        "round_id": "r-1",
-        "persona_id": "akao",
-        "attachment_id": "msg-1:key-a",
-        "title": "斜阳.txt",
-        "tos_file": "files/key-a",
     },
     Picture: {
         "lane": "coe-x",
@@ -115,6 +94,48 @@ _VALID: dict[type, dict] = {
         "written_at": "2026-07-25T10:00:00+08:00",
         "version": 1,
     },
+    ReceivedMessage: {
+        "lane": "coe-x",
+        "persona_id": "ayana",
+        "message_id": "0123456789abcdef0123456789abcdef",
+        "sender": "world",
+        "body": "窗外下起了雨。",
+        "message_time": _AWARE,
+        "wakes_recipient": True,
+    },
+    ReceivedRead: {
+        "lane": "coe-x",
+        "persona_id": "ayana",
+        "message_id": "0123456789abcdef0123456789abcdef",
+        "moment_id": "2026-07-25T10:00+08:00",
+    },
+    NudgeBegun: {
+        "lane": "coe-x",
+        "persona_id": "ayana",
+        "nudged_by": "inbox:0123456789abcdef0123456789abcdef",
+    },
+    OutgoingMessage: {
+        "lane": "coe-x",
+        "message_id": "0123456789abcdef0123456789abcdef",
+        "persona_id": "akao",
+        "seq": 1,
+        "sender": "赤尾",
+        "recipient": "绫奈",
+        "body": "当面对你说：「饭好了。」",
+        "message_time": _AWARE,
+    },
+    OutgoingResult: {
+        "lane": "coe-x",
+        "message_id": "0123456789abcdef0123456789abcdef",
+        "delivered": True,
+        "reason": "",
+    },
+    OutgoingUpTo: {
+        "lane": "coe-x",
+        "persona_id": "akao",
+        "happening_seq": 12,
+        "whereabouts_seq": 3,
+    },
 }
 
 # 列名 -> pg 类型。改这张表 == 改一张已经落地的表的形状，先想清楚怎么迁。
@@ -124,13 +145,11 @@ _PINNED: dict[type, dict[str, str]] = {
         "happening_id": "TEXT",
         "seq": "BIGINT",
         "actor": "TEXT",
-        "place": "TEXT",
         "kind": "TEXT",
         "medium": "TEXT",
         "content": "TEXT",
         "occurred_at": "TIMESTAMPTZ",
         "audience": "JSONB",
-        "who_was_where": "JSONB",
         "channel_id": "TEXT",
     },
     Whereabouts: {
@@ -141,15 +160,6 @@ _PINNED: dict[type, dict[str, str]] = {
         "place": "TEXT",
         "doing": "TEXT",
         "noted_at": "TIMESTAMPTZ",
-    },
-    Upcoming: {
-        "lane": "TEXT",
-        "item_id": "TEXT",
-        "ver": "BIGINT",
-        "what": "TEXT",
-        "due_at": "TIMESTAMPTZ",
-        "place": "TEXT",
-        "consumed_at": "TIMESTAMPTZ",
     },
     FileRead: {
         "lane": "TEXT",
@@ -162,17 +172,6 @@ _PINNED: dict[type, dict[str, str]] = {
         "finished": "BOOLEAN",
         "read_at": "TIMESTAMPTZ",
         "round_id": "TEXT",
-    },
-    # durable 边落地的那条信号行（``(lane, round_id)`` 就是它的去重键）。它没有
-    # 时刻列 —— 一程真正的时刻是**读完**那一版写下的 ``FileRead.read_at``，
-    # 而不是她按下那一下；在信号上再放一个时刻只会多出一个没人该信的口径。
-    FilePickedUp: {
-        "lane": "TEXT",
-        "round_id": "TEXT",
-        "persona_id": "TEXT",
-        "attachment_id": "TEXT",
-        "title": "TEXT",
-        "tos_file": "TEXT",
     },
     # 她做过的一张图。**没有 URL 列**：预签名地址 1.5 小时就死，存下来的后果是静默的
     # （那一行还在，点开是过期签名）。永久的是 ``file_name``，要看的时候现签。
@@ -211,32 +210,110 @@ _PINNED: dict[type, dict[str, str]] = {
         "written_at": "TEXT",
         "version": "BIGINT",
     },
+    # 她收到的一条消息，原样：通信机制外层只有 id、发送方、时间，其余都在正文里。**没有
+    # 到达时刻列**：那是框架的 ``created_at``。**没有"读过没有"的列**：看过哪几条是另一件
+    # 事、另一张表，跟这一轮一起落地。
+    ReceivedMessage: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "message_id": "TEXT",
+        "sender": "TEXT",
+        "body": "TEXT",
+        "message_time": "TIMESTAMPTZ",
+        # 发件方说的要不要叫醒她。后加的列：加之前的行是 NULL，读出来当成叫醒。
+        "wakes_recipient": "BOOLEAN",
+    },
+    # 她在哪一轮看过某一条收到的消息。一条一行，不是一个水位：后到的消息可能更早发生，
+    # 按任何一种先后开水位都会漏。``moment_id`` 不进键（同一条只算看过一次），也**没有时刻
+    # 列**——那一轮的『现在』在 ``LifeMoment.began_at`` 上，按 ``moment_id`` 查得到。
+    ReceivedRead: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "message_id": "TEXT",
+        "moment_id": "TEXT",
+    },
+    # 被什么叫醒的那一轮开始了。**没有"落地了没有"的列**：落没落地看那一轮的
+    # ``LifeMoment`` 在不在，落地那次提交就是它的了结。**没有时刻列**：开始的先后是框架的
+    # ``created_at``。
+    NudgeBegun: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "nudged_by": "TEXT",
+    },
+    # 她要发出去的一条消息：id、发给谁、正文、消息上的时间生成那一刻就定死，补发时原样再发。
+    # ``seq`` 是她要发的消息里的先后（同一位收件人按它的先后发）。``message_time`` 是消息说的事
+    # 发生的那一刻，随消息发出去，对方按它排；补发时给发出那一刻，早话就排到后话后面。**没有
+    # "发没发出去"的列**：结果是另一件事、另一张表。生成的先后是框架的 ``created_at``。
+    OutgoingMessage: {
+        "lane": "TEXT",
+        "message_id": "TEXT",
+        "persona_id": "TEXT",
+        "seq": "BIGINT",
+        "sender": "TEXT",
+        "recipient": "TEXT",
+        "body": "TEXT",
+        "message_time": "TIMESTAMPTZ",
+    },
+    # 一条消息发出去的结果：送到了，或者对方没开收件箱。有这一行就不再发；没确认的那次什么都
+    # 不记，下一次再发。
+    OutgoingResult: {
+        "lane": "TEXT",
+        "message_id": "TEXT",
+        "delivered": "BOOLEAN",
+        "reason": "TEXT",
+    },
+    # 她的经历讲到哪了：两张表各自的 seq（经历是全泳道一条轴，位置是她自己一条轴）。
+    OutgoingUpTo: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "happening_seq": "BIGINT",
+        "whereabouts_seq": "BIGINT",
+    },
 }
 
 
-def test_living_data_reaches_the_registry_via_app_wiring():
-    code = (
-        "import app.wiring;"
-        "from app.runtime.data import DATA_REGISTRY;"
-        "print(sorted(c.__name__ for c in DATA_REGISTRY))"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
+# 按提交顺序取号的那几张表：哪一列是号，哪几列定一条轴
+# （:func:`app.data.ordered.insert_in_commit_order`）。经历是全 lane 一条轴，三个人共用；
+# 其余每人一条。
+_COMMIT_ORDER: dict[type, tuple[str, tuple[str, ...]]] = {
+    Happening: ("seq", ("lane",)),
+    Whereabouts: ("seq", ("lane", "persona_id")),
+    LifeMoment: ("seq", ("lane", "persona_id")),
+    OutgoingMessage: ("seq", ("lane", "persona_id")),
+}
+
+
+def test_each_numbered_record_declares_its_axis():
+    """轴钉死：库里已有的号是按这几条轴数出来的，改一条轴，之后写下的每一个号都跟着变。
+
+    按 ``seq`` 读的那几处（讲到哪了的游标、最新一条、按先后排）每一处都只读一个人的行，
+    所以轴只能是"一个人"或者更宽。比这窄的话，同一个人的几行各在各的轴上数，号的先后就
+    不再是她落库的先后。
+    """
+    for cls, expected in _COMMIT_ORDER.items():
+        assert commit_order(cls) == expected, cls.__name__
+
+
+def test_living_data_reaches_the_registry_when_agent_service_starts():
+    registered = in_a_fresh_process(
+        "agent-service",
+        "from app.data.schema import DATA_REGISTRY;"
+        "print(sorted(c.__name__ for c in DATA_REGISTRY))",
         timeout=120,
     )
-    assert proc.returncode == 0, proc.stderr
-    registered = proc.stdout
     for name in (
         "Happening",
         "Whereabouts",
-        "Upcoming",
         "FileRead",
-        "FilePickedUp",
         "Picture",
         "LivingDayPage",
         "PersonaVersion",
+        "ReceivedMessage",
+        "ReceivedRead",
+        "NudgeBegun",
+        "OutgoingMessage",
+        "OutgoingResult",
+        "OutgoingUpTo",
     ):
         assert f"'{name}'" in registered, (
             f"{name} 没进 DATA_REGISTRY —— migrate_schema 不会建它的表。"
@@ -245,7 +322,7 @@ def test_living_data_reaches_the_registry_via_app_wiring():
 
 
 def test_the_package_doc_lists_every_module_in_it():
-    """``app/living/__init__.py`` 那份模块清单就是这个包里的全部模块。
+    """``app/living/__init__.py`` 那份模块清单就是这个包里的全部模块和插件目录。
 
     这份清单是读这个包的人第一眼看到的地图。漏一个的后果跟漏一张表一样是**静默**
     的：没有任何东西会因为它不在清单上而报错，于是清单慢慢变成一份只覆盖一半的名
@@ -258,10 +335,9 @@ def test_the_package_doc_lists_every_module_in_it():
 
     import app.living as living_pkg
 
-    on_disk = {
-        p.stem
-        for p in Path(living_pkg.__file__).parent.glob("*.py")
-        if p.stem != "__init__"
+    root = Path(living_pkg.__file__).parent
+    on_disk = {p.stem for p in root.glob("*.py") if p.stem != "__init__"} | {
+        d.name for d in root.iterdir() if (d / "__init__.py").is_file()
     }
     listed = set(re.findall(r"app\.living\.([a-z_]+)", living_pkg.__doc__ or ""))
     assert on_disk - listed == set(), (
@@ -288,7 +364,7 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
     """不带 tzinfo 的时刻在写入前就被拒 —— 四个字段一视同仁，不许挡一半。
 
     落进 TIMESTAMPTZ 的 naive datetime 会被按服务器时区解释，静默偏 8 小时：
-    ``due_at`` 是整个日历的基准，偏了就是日历全错、而且一句报错都没有。跟
+    按时刻开窗的读取会整段错位，而且一句报错都没有。跟
     ``medium`` 写成 ``"in-person"`` 是同一类静默毒化，所以挡在同一个位置。
 
     这条按 ``_PINNED`` 遍历，新加一个 TIMESTAMPTZ 字段却忘了校验就会红。
@@ -308,9 +384,9 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
         ("FileRead", "read_at"),
         ("Happening", "occurred_at"),
         ("LivingDayPage", "written_at"),
+        ("OutgoingMessage", "message_time"),
         ("Picture", "made_at"),
-        ("Upcoming", "consumed_at"),
-        ("Upcoming", "due_at"),
+        ("ReceivedMessage", "message_time"),
         ("Whereabouts", "noted_at"),
     ]
 
@@ -337,28 +413,29 @@ async def test_a_row_written_before_the_column_existed_still_reads_back(living_d
 
     from sqlalchemy import text as _text
 
-    from app.data import session as session_mod
-    from app.living.loose_ends import LooseEnd
-    from app.living.moment import (
+    from app.data.tx import current_session, tx
+    from app.living.life.moment import (
         LifeMoment,
         latest_moment,
         latest_regular_moment,
     )
+    from app.living.loose_ends.threads import LooseEnd
     from tests.runtime.conftest import migrate
 
     for cls in (LooseEnd, LifeMoment):
         await migrate(cls, living_db)
 
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         # 模拟"这一行是加列之前写下的"：显式把新列写成 NULL。
         await s.execute(
             _text(
                 "INSERT INTO data_life_moment "
-                "(lane, persona_id, moment_id, began_at, after_seq, next_seq,"
-                " perceived, switched, pulled_by, recorded, doing, open_ends,"
+                "(lane, persona_id, moment_id, began_at,"
+                " switched, pulled_by, recorded, doing, open_ends,"
                 " said, nudged, dedup_hash) "
                 "VALUES ('coe-living', 'akao', '2026-07-25T14:00+08:00',"
-                " :at, 0, 3, 1, false, '', 0, '看书', 0, '继续', NULL, 'legacy-1')"
+                " :at, false, '', 0, '看书', 0, '继续', NULL, 'legacy-1')"
             ),
             {"at": dt.datetime(2026, 7, 25, 14, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))},
         )
@@ -378,12 +455,12 @@ async def test_a_row_written_before_the_column_existed_still_reads_back(living_d
 
 @pytest.mark.integration
 async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living_db):
-    """加 ``seq`` 列之后，"读到哪了"不许被旧行钉死。
+    """加 ``seq`` 列之后，"最后落地的是哪一轮"不许被旧行钉死。
 
     这是同一个陷阱的另一面，而且比 ``ValidationError`` 更阴：DESC 排序下 pg 把 NULL
     放**最前**，所以 ``ORDER BY seq DESC`` 会让加列之前的每一行永远压在新一轮前面 ——
-    游标从此取回那条旧行、再也推不动，她每一轮把同一批动静重新感知一遍，一句报错
-    都没有。
+    从此每一轮取回的都是那条旧行：离上一次过了多久算错，上下文丢没丢也判不出来，一句
+    报错都没有。
 
     钟点故意造反：新一轮的 ``began_at`` 比两条旧行都早。落地顺序赢的必须是新一轮。
     """
@@ -391,25 +468,26 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
 
     from sqlalchemy import text as _text
 
-    from app.data import session as session_mod
-    from app.living.loose_ends import LooseEnd
-    from app.living.moment import LifeMoment, latest_moment
-    from app.runtime.persist import insert_idempotent
+    from app.data.persist import insert_idempotent
+    from app.data.tx import current_session, tx
+    from app.living.life.moment import LifeMoment, latest_moment
+    from app.living.loose_ends.threads import LooseEnd
     from tests.runtime.conftest import migrate
 
     cst = dt.timezone(dt.timedelta(hours=8))
     for cls in (LooseEnd, LifeMoment):
         await migrate(cls, living_db)
 
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         for hour, tag in ((14, "old-a"), (15, "old-b")):
             await s.execute(
                 _text(
                     "INSERT INTO data_life_moment "
-                    "(lane, persona_id, moment_id, seq, began_at, after_seq,"
-                    " next_seq, perceived, switched, pulled_by, recorded, doing,"
+                    "(lane, persona_id, moment_id, seq, began_at,"
+                    " switched, pulled_by, recorded, doing,"
                     " open_ends, said, nudged, dedup_hash) "
-                    "VALUES ('coe-living', 'akao', :mid, NULL, :at, 0, 3, 1,"
+                    "VALUES ('coe-living', 'akao', :mid, NULL, :at,"
                     " false, '', 0, '看书', 0, '继续', false, :tag)"
                 ),
                 {
@@ -425,9 +503,6 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
         moment_id="nudge:m-1",
         seq=1,
         began_at=dt.datetime(2026, 7, 25, 13, 0, tzinfo=cst),  # 比旧行都早
-        after_seq=3,
-        next_seq=9,
-        perceived=2,
         switched=False,
         pulled_by="",
         recorded=0,
@@ -441,10 +516,8 @@ async def test_a_new_moment_outranks_every_row_written_before_seq_existed(living
 
     got = await latest_moment(lane="coe-living", persona_id="akao")
     assert got.moment_id == "nudge:m-1", (
-        "加列之前的旧行（seq 是 NULL）压在了新一轮前面 —— 游标从此钉死，"
-        "她每一轮把同一批动静重新感知一遍"
+        "加列之前的旧行（seq 是 NULL）压在了新一轮前面 —— 从此每一轮取回的都是那条旧行"
     )
-    assert got.next_seq == 9
 
 
 @pytest.mark.integration
@@ -458,20 +531,21 @@ async def test_a_happening_written_before_channel_id_existed_still_reads_back(
     """
     from sqlalchemy import text as _text
 
-    from app.data import session as session_mod
-    from app.living.happening import read_perceived_by
+    from app.data.tx import current_session, tx
+    from app.living.her_records.deeds import recent_own_happenings
 
-    async with session_mod.get_session() as s:
+    async with tx():
+        s = current_session()
         await s.execute(
             _text(
                 "INSERT INTO data_happening "
-                "(lane, happening_id, seq, actor, place, kind, medium, content,"
-                " occurred_at, audience, who_was_where, channel_id, dedup_hash) "
-                "VALUES ('coe-living', 'legacy-h', 1, 'ayana', '家/客厅',"
-                " 'speech', 'in_person', '早', NOW(), '[\"akao\"]'::jsonb,"
-                " '{}'::jsonb, NULL, 'legacy-h1')"
+                "(lane, happening_id, seq, actor, kind, medium, content,"
+                " occurred_at, audience, channel_id, dedup_hash) "
+                "VALUES ('coe-living', 'legacy-h', 1, 'akao',"
+                " 'speech', 'in_person', '早', NOW(), '[\"ayana\"]'::jsonb,"
+                " NULL, 'legacy-h1')"
             )
         )
 
-    window = await read_perceived_by(lane="coe-living", persona_id="akao")
-    assert [p.content for p in window.items] == ["早"]
+    got = await recent_own_happenings(lane="coe-living", persona_id="akao")
+    assert [(h.content, h.channel_id) for h in got] == [("早", None)]

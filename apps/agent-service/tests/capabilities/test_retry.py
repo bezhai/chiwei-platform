@@ -1,7 +1,7 @@
 """Tests for ``@retry`` decorator (B3 / plan §B3).
 
 Process-local retry for one-shot async network/LLM calls. Sibling to
-``app/runtime/retry.py`` (cross-process broker re-delivery, different
+``app/messaging/retry.py`` (cross-process broker re-delivery, different
 abstraction). Behaviour contract pinned here:
 
 * white-list semantics — only ``retry_on`` exceptions retry,
@@ -24,14 +24,13 @@ from typing import Any
 
 import pytest
 
-from app.capabilities._errors import (
+from app.capabilities.errors import (
     CapabilityCallFailed,
     CapabilityInvalidArg,
     CapabilityRateLimited,
     CapabilityTimeout,
 )
 from app.capabilities.retry import retry
-
 
 # ---------------------------------------------------------------------------
 # Helpers

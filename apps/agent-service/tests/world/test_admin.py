@@ -1,0 +1,227 @@
+"""world 记录的人工读写接口：列目录、读一份、写一份、删一份。
+
+跑在真的 HTTP 这一层上（凭据、泳道核对、参数、错误码），路由由 world 的宿主挂上去，记录落在
+临时的私有卷上。凭据和泳道核对跟通信机制的人工入口是同一套声明（``inner_secret`` /
+``lane_match`` / ``answers_with_lane``）。
+"""
+from __future__ import annotations
+
+import dataclasses
+import logging
+
+import httpx
+import pytest
+from fastapi import FastAPI
+
+from app.infra import config
+from app.world import records
+
+from .conftest import LANE
+
+SECRET = "world-admin-secret"
+BASE = "http://world.test"
+LIST = "/admin/world/records"
+DOC = "/admin/world/records/document"
+
+
+@pytest.fixture
+async def api(volume, monkeypatch, app_host) -> FastAPI:
+    monkeypatch.setenv("APP_NAME", "world")
+    monkeypatch.setattr(
+        config, "settings", dataclasses.replace(config.settings, inner_http_secret=SECRET)
+    )
+    application = FastAPI()
+    from app.api.middleware import HeaderContextMiddleware
+
+    application.add_middleware(HeaderContextMiddleware)
+    await app_host("world", http=application)
+    return application
+
+
+def _client(api, **headers) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api), base_url=BASE, headers=headers
+    )
+
+
+@pytest.fixture
+async def client(api):
+    async with _client(api, Authorization=f"Bearer {SECRET}", **{"x-ctx-lane": LANE}) as c:
+        yield c
+
+
+async def test_list_read_write_and_delete(client):
+    created = await client.put(DOC, json={"path": "地方/甲.md", "text": "朝北的窗。"})
+    assert created.status_code == 200
+    body = created.json()
+    assert body["lane"] == LANE and body["created"] is True
+    assert body["previous_fingerprint"] is None
+    fp = body["fingerprint"]
+
+    listed = await client.get(LIST)
+    assert listed.status_code == 200
+    assert listed.json()["lane"] == LANE
+    [entry] = listed.json()["records"]
+    assert (entry["path"], entry["chars"], entry["fingerprint"]) == ("地方/甲.md", 5, fp)
+
+    read = await client.get(DOC, params={"path": "地方/甲.md"})
+    assert read.status_code == 200
+    assert read.json()["text"] == "朝北的窗。" and read.json()["fingerprint"] == fp
+
+    rewritten = await client.put(
+        DOC, json={"path": "地方/甲.md", "text": "朝北的窗，窗台上有盆花。", "fingerprint": fp}
+    )
+    assert rewritten.status_code == 200
+    assert rewritten.json()["created"] is False
+    assert rewritten.json()["previous_fingerprint"] == fp
+    new_fp = rewritten.json()["fingerprint"]
+
+    deleted = await client.delete(DOC, params={"path": "地方/甲.md", "fingerprint": new_fp})
+    assert deleted.status_code == 200
+    assert deleted.json() == {"lane": LANE, "path": "地方/甲.md", "fingerprint": new_fp}
+    assert records.listing() == []
+
+
+async def test_rewriting_without_or_with_a_stale_fingerprint_changes_nothing(client):
+    first = records.write("人/乙.md", "第一版。", expected=None)
+    records.write("人/乙.md", "world 刚改的。", expected=first.fingerprint)
+
+    blind = await client.put(DOC, json={"path": "人/乙.md", "text": "盲写。"})
+    stale = await client.put(
+        DOC, json={"path": "人/乙.md", "text": "旧指纹。", "fingerprint": first.fingerprint}
+    )
+    stale_delete = await client.delete(
+        DOC, params={"path": "人/乙.md", "fingerprint": first.fingerprint}
+    )
+
+    assert [r.status_code for r in (blind, stale, stale_delete)] == [409, 409, 409]
+    assert all(r.json()["detail"]["lane"] == LANE for r in (blind, stale, stale_delete))
+    assert records.read("人/乙.md").text == "world 刚改的。"
+
+
+async def test_a_missing_record_is_404(client):
+    read = await client.get(DOC, params={"path": "没有/这份.md"})
+    delete = await client.delete(DOC, params={"path": "没有/这份.md", "fingerprint": "x"})
+
+    assert (read.status_code, delete.status_code) == (404, 404)
+    assert read.json()["detail"]["lane"] == LANE
+
+
+@pytest.mark.parametrize("path", ["../next_wake.json", "../records.md", "/甲.md", "甲.txt"])
+async def test_nothing_outside_the_records_tree_is_reachable(client, volume, path):
+    (volume / LANE).mkdir(parents=True, exist_ok=True)
+    (volume / LANE / "next_wake.json").write_text("{}", encoding="utf-8")
+
+    read = await client.get(DOC, params={"path": path})
+    write = await client.put(DOC, json={"path": path, "text": "x"})
+
+    assert (read.status_code, write.status_code) == (400, 400)
+    assert (volume / LANE / "next_wake.json").read_text(encoding="utf-8") == "{}"
+
+
+async def test_oversized_text_is_a_bad_request(client):
+    r = await client.put(
+        DOC, json={"path": "甲.md", "text": "字" * (records.MAX_RECORD_CHARS + 1)}
+    )
+
+    assert r.status_code == 400
+    assert records.listing() == []
+
+
+async def test_writes_and_deletes_are_logged_with_the_operator(client, caplog):
+    caplog.set_level(logging.INFO, logger="app.world.records.admin")
+
+    r = await client.put(
+        DOC, json={"path": "甲.md", "text": "一。"}, headers={"X-Operator": "bezhai"}
+    )
+    await client.delete(
+        DOC,
+        params={"path": "甲.md", "fingerprint": r.json()["fingerprint"]},
+        headers={"X-Operator": "bezhai"},
+    )
+
+    lines = [rec.getMessage() for rec in caplog.records if rec.name == "app.world.records.admin"]
+    assert len(lines) == 2
+    assert all("bezhai" in line and "甲.md" in line for line in lines)
+
+
+async def test_without_a_volume_the_answer_says_so(client, monkeypatch):
+    monkeypatch.delenv("WORLD_DATA_DIR")
+
+    r = await client.get(LIST)
+
+    assert r.status_code == 503
+    assert r.json()["detail"]["lane"] == LANE
+
+
+@pytest.mark.parametrize(
+    "method,path,kwargs",
+    [
+        ("GET", LIST, {}),
+        ("GET", DOC, {"params": {"path": "甲.md"}}),
+        ("PUT", DOC, {"json": {"path": "甲.md", "text": "x"}}),
+        ("DELETE", DOC, {"params": {"path": "甲.md", "fingerprint": "x"}}),
+    ],
+)
+async def test_every_route_needs_the_inner_credential(api, method, path, kwargs):
+    async with _client(api, **{"x-ctx-lane": LANE}) as bare:
+        r = await bare.request(method, path, **kwargs)
+
+    assert r.status_code == 401
+    assert records.listing() == []
+
+
+async def test_a_request_meant_for_another_lane_changes_nothing(api):
+    async with _client(
+        api, Authorization=f"Bearer {SECRET}", **{"x-ctx-lane": "coe-elsewhere"}
+    ) as c:
+        r = await c.put(DOC, json={"path": "甲.md", "text": "落错泳道。"})
+
+    assert r.status_code == 409
+    assert r.json()["detail"]["lane"] == LANE
+    assert records.listing() == []
+
+
+async def test_a_request_without_a_lane_is_meant_for_prod_and_refused_here(api):
+    async with _client(api, Authorization=f"Bearer {SECRET}") as c:
+        r = await c.get(LIST)
+
+    assert r.status_code == 409
+
+
+async def test_the_routes_run_in_the_world_app(app_host):
+    """这四条路由只挂在 world 的进程里：world 的宿主登记它们，agent-service 的宿主一条都没有。"""
+
+    def record_routes(host) -> list[str]:
+        return [
+            r.name
+            for r in host.registered()
+            if r.kind == "route" and "/admin/world/records" in r.name
+        ]
+
+    world = await app_host("world")
+    assert len(record_routes(world)) == 4
+    await world.stop()
+
+    assert record_routes(await app_host("agent-service")) == []
+
+
+async def test_a_process_without_the_writer_lock_refuses_writes_but_still_reads(client, volume):
+    """发布期间新旧两个 world 进程同时在跑，请求可能落到没拿到锁的那一个：写不做、说清楚。"""
+    from app.world import volume as world_volume
+
+    from .test_writer_lock import held_by_another_process
+
+    records.write("甲.md", "已有的。", expected=None)
+    world_volume.release_writer_lock()
+    try:
+        with held_by_another_process(volume):
+            put = await client.put(DOC, json={"path": "乙.md", "text": "不该写下。"})
+            listed = await client.get(LIST)
+    finally:
+        assert world_volume.try_acquire_writer_lock()
+
+    assert put.status_code == 503
+    assert put.json()["detail"]["lane"] == LANE
+    assert listed.status_code == 200
+    assert [r["path"] for r in listed.json()["records"]] == ["甲.md"]
