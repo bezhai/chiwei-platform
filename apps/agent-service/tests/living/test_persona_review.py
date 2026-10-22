@@ -533,22 +533,42 @@ async def test_a_long_message_reaches_her_whole(review_db, stub_review):
 async def test_past_the_limit_the_earliest_are_left_out_and_she_is_told(
     review_db, stub_review, monkeypatch
 ):
-    """一周的条数有上限，手机和身边各算各的：超出的是更早的那些，整条不摆，并且如实告诉她还有几条
-    没摆 —— 不说的话她会以为那一周就这么安静。"""
+    """一周的条数有上限，手机和身边各算各的：两路同时超出时，每一路各留自己最近的那些、各自整条不摆
+    更早的，开头如实告诉她两路各少摆了几条 —— 不说的话她会以为那一周就这么安静。留下来的两路照样按
+    时间交错，同一刻的手机上的排在前面。"""
     from app.living.persona_review import review as review_mod
 
+    monkeypatch.setattr(review_mod, "WEEK_PHONE_LIMIT", 2)
     monkeypatch.setattr(review_mod, "WEEK_NEARBY_LIMIT", 3)
-    for i in range(5):
-        await _heard(_on(_LAST_MONDAY + dt.timedelta(days=i), 10), f"第{i + 1}句")
+    await _seed_world()
+    for i, at in enumerate(
+        (
+            _on(_LAST_MONDAY, 9),
+            _on(dt.date(2026, 9, 1), 9),
+            _on(dt.date(2026, 9, 2), 9),
+            _on(dt.date(2026, 9, 3), 10),
+        ),
+        start=1,
+    ):
+        await _incoming(_DM, text_body=f"手机{i}", at=at)
+    for i in range(6):
+        await _heard(_on(_LAST_MONDAY + dt.timedelta(days=i), 10), f"身边{i + 1}")
     runner = stub_review()
 
     await _tick(_NOW)
 
-    assert "第1句" not in runner.material and "第2句" not in runner.material
-    assert all(f"第{i}句" in runner.material for i in (3, 4, 5))
-    assert "（更早的还有 2 条没摆在这里：身边 2 条。）" in runner.material, (
-        f"没告诉她还有几条没摆：\n{runner.material}"
-    )
+    assert runner.material.endswith(
+        "（更早的还有 5 条没摆在这里：手机上 2 条、身边 3 条。）\n\n"
+        "09-02\n"
+        '- 09:00【手机】私聊 <msg from="bezhai" rel="owner">手机3</msg>\n\n'
+        "09-03\n"
+        '- 10:00【手机】私聊 <msg from="bezhai" rel="owner">手机4</msg>\n'
+        "- 10:00【身边】千凪：身边4\n\n"
+        "09-04\n"
+        "- 10:00【身边】千凪：身边5\n\n"
+        "09-05\n"
+        "- 10:00【身边】千凪：身边6"
+    ), f"拿到：\n{runner.material}"
 
 
 @pytest.mark.integration
