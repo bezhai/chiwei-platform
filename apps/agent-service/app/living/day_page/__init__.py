@@ -5,7 +5,6 @@
     （:meth:`app.living.day_page.pages.Diary.last_written_section`）。
   * 三姐妹各一条日记队列（``day-page``），各挂一个日记的唤醒：钟每五分钟一拍，那一拍落在 04:00–06:00
     的窗口里、那一天还没有页，就写刚过去那一天（:func:`app.living.day_page.pages.day_page_due`）。
-  * 交出 ``day_pages`` 服务（:class:`app.living.services.DayPages`）：每周回看经它读一周的日记。
   * 要 ``persona``（她是谁）、``her_records``（那一天她做过、说过的）和 ``received``（传到她这里的）服务。
 
 **日记有自己的一条队列**，跟她的轮次、每周回看各占各的，占用上限相同（:data:`app.living.common.HOLD_LIMIT`）：
@@ -58,7 +57,6 @@ def setup(ctx: Context) -> None:
         her_records=ctx.service("her_records"),
         received=ctx.service("received"),
     )
-    ctx.provide("day_pages", diary)
     ctx.section("day_page.last_written", diary.last_written_section)
     pages = day_page_wake(living_lane(), diary)
     for persona_id in ctx.participants(profile="resident"):
@@ -70,5 +68,4 @@ PLUGIN = Plugin(
     name="day_page",
     setup=setup,
     requires=("persona", "her_records", "received"),
-    provides=("day_pages",),
 )

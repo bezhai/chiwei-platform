@@ -92,7 +92,7 @@ def her_mailbox(residents=None, her_records=None):
 
 
 def her_diary(her_records=None, received=None):
-    """``day_pages`` 服务：day_page 插件对象本身（不带状态，读写的是用例的库）。「她是谁」是 persona
+    """day_page 插件对象本身（不带状态，读写的是用例的库）。「她是谁」是 persona
     插件对象，``her_records``、``received`` 默认是 :func:`own_records`、:func:`her_mailbox`。"""
     from app.living.day_page.pages import Diary
     from app.living.persona.chain import PersonaChain

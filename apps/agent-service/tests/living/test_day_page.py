@@ -36,7 +36,6 @@ from app.living.day_page.pages import (
     living_day_of,
     read_day_page,
     read_day_page_before,
-    read_day_pages_between,
 )
 from app.living.her_records.deeds import record_happening
 from app.living.her_records.whereabouts import note_whereabouts
@@ -580,83 +579,6 @@ async def test_a_page_older_than_yesterday_is_labelled_by_its_date(page_db, stub
     rendered = await her_diary().last_written_section(_her_round(_on(29, 14)))
     assert "07-25" in rendered
     assert "昨天" not in rendered, f"三天前那页被说成了昨天：{rendered}"
-
-
-# --------------------------------------------------------------------------
-# 四之二 · 按范围取一段日子（每周回看读的就是这个）
-# --------------------------------------------------------------------------
-
-
-async def _drop_a_page(persona_id: str, day: dt.date, text: str) -> None:
-    from app.data.persist import insert_idempotent
-
-    await insert_idempotent(
-        LivingDayPage(
-            lane=LANE,
-            persona_id=persona_id,
-            day=day,
-            text=text,
-            written_at=dt.datetime.combine(
-                day + dt.timedelta(days=1), dt.time(4, 30), tzinfo=_CST
-            ),
-            happenings=1,
-        )
-    )
-
-
-@pytest.mark.integration
-async def test_pages_between_is_half_open_and_in_order(page_db):
-    """``[since, until)``，按日子升序 —— 每周回看拿到的必须正好是那一周。
-
-    右边界闭上的话每周回看会多带一天（下一周的第一天），而多带的那天她当时还没
-    过完；顺序错的话她读到的是一周的乱序片段，看起来仍然像一周。
-    """
-    for day, text in (
-        (dt.date(2026, 8, 30), "区间之前那天。"),
-        (dt.date(2026, 8, 31), "周一。"),
-        (dt.date(2026, 9, 2), "周三。"),
-        (dt.date(2026, 9, 6), "周日。"),
-        (dt.date(2026, 9, 7), "区间之后那天。"),
-    ):
-        await _drop_a_page("akao", day, text)
-
-    pages = await read_day_pages_between(
-        lane=LANE,
-        persona_id="akao",
-        since=dt.date(2026, 8, 31),
-        until=dt.date(2026, 9, 7),
-    )
-
-    assert [p.text for p in pages] == ["周一。", "周三。", "周日。"]
-
-
-@pytest.mark.integration
-async def test_pages_between_is_scoped_to_one_lane_and_one_person(page_db):
-    await _drop_a_page("akao", dt.date(2026, 9, 1), "赤尾这天。")
-    await _drop_a_page("ayana", dt.date(2026, 9, 2), "绫奈这天。")
-
-    window = {"since": dt.date(2026, 8, 31), "until": dt.date(2026, 9, 7)}
-    mine = await read_day_pages_between(lane=LANE, persona_id="akao", **window)
-    elsewhere = await read_day_pages_between(lane="prod", persona_id="akao", **window)
-
-    assert [p.text for p in mine] == ["赤尾这天。"]
-    assert elsewhere == []
-
-
-@pytest.mark.integration
-async def test_pages_between_with_nothing_in_range_is_empty(page_db):
-    """那一周服务根本没跑 —— 空列表，不是报错，也不是"最近几页"。"""
-    await _drop_a_page("akao", dt.date(2026, 8, 30), "区间之前那天。")
-
-    assert (
-        await read_day_pages_between(
-            lane=LANE,
-            persona_id="akao",
-            since=dt.date(2026, 8, 31),
-            until=dt.date(2026, 9, 7),
-        )
-        == []
-    )
 
 
 # --------------------------------------------------------------------------

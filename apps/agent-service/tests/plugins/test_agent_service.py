@@ -70,7 +70,6 @@ async def test_each_plugin_registers_its_own_part(app_host):
         ("reading", "tool"): 2,
         ("reading", "inbox"): 1,
         ("reading", "route"): 1,
-        ("day_page", "service"): 1,
         ("day_page", "section"): 1,
         ("day_page", "turns"): 3,
         ("day_page", "wake"): 3,

@@ -1,7 +1,6 @@
 """day_page 和 persona_review 两个插件：她的日记和她每周的回看，各有一条自己的队列。
 
-  * day_page 插件对象（:class:`app.living.day_page.pages.Diary`）：她一轮里"上一次写下的那一天"那一段，
-    和 ``day_pages`` 服务。
+  * day_page 插件对象（:class:`app.living.day_page.pages.Diary`）：她一轮里"上一次写下的那一天"那一段。
   * persona_review 插件：每周回看读的是 ``phone`` 服务交回的别人在手机上对她说的，和 ``received`` 服务
     交回的传到她这里的。
 
@@ -87,13 +86,12 @@ def _round(now: dt.datetime) -> Round:
 
 
 async def test_the_diary_and_the_look_back_each_have_her_queues_and_their_wakes(app_host):
-    """day_page 插件登记"上一次写下的那一天"那一段、交出 ``day_pages`` 服务，给三姐妹各开一条日记队列、
+    """day_page 插件登记"上一次写下的那一天"那一段，给三姐妹各开一条日记队列、
     各挂一个日记的唤醒；persona_review 插件给三姐妹各开一条回看队列、各挂一个回看的唤醒。"""
     host = await app_host("agent-service")
     registered = host.registered()
 
     assert Counter((r.plugin, r.kind) for r in registered if r.plugin == "day_page") == {
-        ("day_page", "service"): 1,
         ("day_page", "section"): 1,
         ("day_page", "turns"): 3,
         ("day_page", "wake"): 3,
@@ -108,7 +106,6 @@ async def test_the_diary_and_the_look_back_each_have_her_queues_and_their_wakes(
         r.name for r in registered if r.plugin == "persona_review" and r.kind == "wake"
     } == {f"persona-review -> {p}/persona-review" for p in ("akao", "ayana", "chinagi")}
     assert {(r.kind, r.name) for r in registered if r.plugin == "day_page"} >= {
-        ("service", "day_pages"),
         ("section", "day_page.last_written"),
     }
 
