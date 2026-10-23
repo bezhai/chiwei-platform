@@ -33,7 +33,7 @@ packages/
 ## 文档
 
 - [MANIFESTO.md](MANIFESTO.md) — 赤尾宣言，项目宪法，未经许可禁止修改
-- [CLAUDE.md](CLAUDE.md) — 开发流程、部署铁律、泳道命名规范、运维命令
+- [CLAUDE.md](CLAUDE.md) — 操作边界、开发与上线规则、赤尾设计原则
 - [docs/service-topology.md](docs/service-topology.md) — 全部服务的拓扑现状：五个面、核心数据流、队列地图、存储归属
 - [docs/chiwei-system-design.md](docs/chiwei-system-design.md) — 赤尾系统设计（对话 / 世界 / 生活 / 记忆）
 - [docs/build-convention.md](docs/build-convention.md) — 构建约定与新服务接入步骤
@@ -56,4 +56,4 @@ make status
 make logs APP=agent-service KEYWORD=error
 ```
 
-本地开发按各 app 自己的工具链：Go 服务进目录用 `make build` / `make test`，TS 服务用 `bun`，Python 服务用 `uv`。完整的部署命令、泳道规范和 e2e 测试流程见 [CLAUDE.md](CLAUDE.md)。
+本地开发按各 app 自己的工具链：Go 服务进目录用 `make build` / `make test`，TS 服务用 `bun`，Python 服务用 `uv`。部署命令见根目录 `Makefile`，泳道选择和 e2e 测试流程见 [.claude/rules/e2e-testing.md](.claude/rules/e2e-testing.md)。
