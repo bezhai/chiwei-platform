@@ -2,7 +2,7 @@
 
 本项目的 AI 协作规范分布在以下文件中，所有 AI Agent 必须遵守：
 
-- [CLAUDE.md](./CLAUDE.md) — 项目结构、消息链路、泳道、部署命令、操作边界、开发与上线规则、赤尾设计原则
+- [CLAUDE.md](./CLAUDE.md) — 镜像与服务映射、配置与部署、操作边界、开发与上线规则、赤尾设计原则
 - [.claude/rules/e2e-testing.md](./.claude/rules/e2e-testing.md) — 飞书 dev 泳道端到端测试
 - [.claude/rules/paas-engine.md](./.claude/rules/paas-engine.md) — PaaS Engine 开发指南（仅 `apps/paas-engine/` 下生效）
 - [MANIFESTO.md](./MANIFESTO.md) — 赤尾宣言，禁止修改

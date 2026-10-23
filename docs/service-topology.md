@@ -311,4 +311,4 @@ build/release 是本职,但它还累积了网关规则、动态配置、ConfigBu
 
 ### 3. 杂项
 
-跨语言队列契约各写一遍(TS 的 `packages/ts-shared/src/mq/client.ts` 和 Python 的 `apps/agent-service/app/infra/rabbitmq.py` 各一份,有漂移风险);`proactive_eval` 两头都没有,`recall_qq` 只有生产侧声明、QQ 没起消费者,都是空队列;`CLAUDE.md` 的项目结构只列常用的几个 app(全量 15 个目录的清单在根 README 和本文档)。
+跨语言队列契约各写一遍(TS 的 `packages/ts-shared/src/mq/client.ts` 和 Python 的 `apps/agent-service/app/infra/rabbitmq.py` 各一份,有漂移风险);`proactive_eval` 两头都没有,`recall_qq` 只有生产侧声明、QQ 没起消费者,都是空队列。全量目录清单在根 README 和本文档,`CLAUDE.md` 不列。
