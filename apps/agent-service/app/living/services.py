@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -65,6 +65,25 @@ class Persona(Protocol):
         self, *, lane: str, persona_id: str, now: datetime | None = None
     ) -> bool:
         """``now`` 所在的自然周（周一 00:00 CST 起）有没有 ``source='review'`` 的版本。"""
+        ...
+
+    async def note_written_this_week(
+        self, *, lane: str, persona_id: str, now: datetime
+    ) -> bool:
+        """``now`` 所在的自然周（周一 00:00 CST 起）她写过「这阵子」没有。"""
+        ...
+
+    async def write_note(
+        self,
+        *,
+        lane: str,
+        persona_id: str,
+        note: str,
+        week_since: date,
+        week_until: date,
+        written_at: datetime,
+    ) -> None:
+        """追加一段「这阵子」：她回头看 ``[week_since, week_until)`` 那一周时写下的。"""
         ...
 
     async def seed_chain(self, *, lane: str, persona_id: str) -> bool:

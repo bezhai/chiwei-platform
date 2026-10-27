@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated
 
 from app.agent.round import Round
@@ -52,6 +52,7 @@ from app.infra.cst_time import now_cst, now_cst_iso
 from app.infra.cst_time import parse as parse_time
 from app.infra.lane_policy import current_deployment_lane
 from app.living.common import week_start_cst
+from app.living.persona.notes import append_note, read_latest_note
 from app.living.services import PersonaText
 
 logger = logging.getLogger(__name__)
@@ -278,6 +279,37 @@ class PersonaChain:
         if written is None:
             return False
         return written >= week_start_cst(now if now is not None else now_cst())
+
+    async def note_written_this_week(
+        self, *, lane: str, persona_id: str, now: datetime
+    ) -> bool:
+        """``now`` 所在的自然周（周一 00:00 CST 起）她写过「这阵子」没有
+        （:class:`app.living.persona.notes.WeeklyNote`，看最近那一段的 ``written_at``）。
+
+        每周回看的幂等只看这一张表，不另设标记：标记和那一段是两个事实，中间崩一次就永久对不上。
+        """
+        latest = await read_latest_note(lane=lane, persona_id=persona_id)
+        return latest is not None and latest.written_at >= week_start_cst(now)
+
+    async def write_note(
+        self,
+        *,
+        lane: str,
+        persona_id: str,
+        note: str,
+        week_since: date,
+        week_until: date,
+        written_at: datetime,
+    ) -> None:
+        """追加一段「这阵子」（:func:`app.living.persona.notes.append_note`）。"""
+        await append_note(
+            lane=lane,
+            persona_id=persona_id,
+            note=note,
+            week_since=week_since,
+            week_until=week_until,
+            written_at=written_at,
+        )
 
     async def seed_chain(self, *, lane: str, persona_id: str) -> bool:
         """v0 灌入：链为空时把 ``bot_persona.persona_core`` 原文落为第一版

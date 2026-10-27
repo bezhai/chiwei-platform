@@ -27,6 +27,7 @@ from app.living.household.received import ReceivedMessage, ReceivedRead
 from app.living.life.moment import LifeMoment
 from app.living.life.nudge import NudgeBegun
 from app.living.persona.chain import PersonaVersion
+from app.living.persona.notes import WeeklyNote
 from app.living.pictures.album import Picture
 from app.living.reading.files import FileRead
 from app.living.services import KIND_SPEECH, MEDIUM_IN_PERSON
@@ -92,6 +93,15 @@ _VALID: dict[type, dict] = {
         "narrative": "她今年在准备去日本读书。",
         "source": "review",
         "written_at": "2026-07-25T10:00:00+08:00",
+        "version": 1,
+    },
+    WeeklyNote: {
+        "lane": "coe-x",
+        "persona_id": "akao",
+        "note": "这阵子在准备考试。",
+        "week_since": dt.date(2026, 7, 20),
+        "week_until": dt.date(2026, 7, 27),
+        "written_at": _AWARE,
         "version": 1,
     },
     ReceivedMessage: {
@@ -210,6 +220,18 @@ _PINNED: dict[type, dict[str, str]] = {
         "written_at": "TEXT",
         "version": "BIGINT",
     },
+    # 她回头看完一周写下的「这阵子」，一段一版。``week_since`` / ``week_until`` 是 **DATE**：它说的是
+    # 哪一周（周一到下一个周一，右开），不是某个时刻。**没有"这周回看过了"的标记列**：这周写过没有
+    # 看 ``written_at``，两个事实中间崩一次就永久对不上。
+    WeeklyNote: {
+        "lane": "TEXT",
+        "persona_id": "TEXT",
+        "note": "TEXT",
+        "week_since": "DATE",
+        "week_until": "DATE",
+        "written_at": "TIMESTAMPTZ",
+        "version": "BIGINT",
+    },
     # 她收到的一条消息，原样：通信机制外层只有 id、发送方、时间，其余都在正文里。**没有
     # 到达时刻列**：那是框架的 ``created_at``。**没有"读过没有"的列**：看过哪几条是另一件
     # 事、另一张表，跟这一轮一起落地。
@@ -308,6 +330,7 @@ def test_living_data_reaches_the_registry_when_agent_service_starts():
         "Picture",
         "LivingDayPage",
         "PersonaVersion",
+        "WeeklyNote",
         "ReceivedMessage",
         "ReceivedRead",
         "NudgeBegun",
@@ -387,6 +410,7 @@ def test_every_timestamptz_field_rejects_a_naive_datetime():
         ("OutgoingMessage", "message_time"),
         ("Picture", "made_at"),
         ("ReceivedMessage", "message_time"),
+        ("WeeklyNote", "written_at"),
         ("Whereabouts", "noted_at"),
     ]
 
