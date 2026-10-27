@@ -17,7 +17,7 @@
 
 所以摆给她的就是这些（:func:`week_evidence`），每一条都是原文，带着什么时候、从哪儿来（【手机】
 还是【身边】）、是谁，按天分段、按时间先后排下来：读起来是"这一周我身上发生了什么"，不是一份日志。
-SYSTEM 里是她平时读到的那份「她是谁」（:meth:`app.living.services.Persona.prompt_vars`），让她用自己的
+SYSTEM 里是她平时读到的那份「她是谁」（:meth:`app.living.services.Persona.who_she_is`），让她用自己的
 眼光看这一周。
 
 **她自己写的日记页、她自己说的话、她上一次写的「这阵子」都不摆。** 日记页是她对那一天的复述，她说的
@@ -348,7 +348,7 @@ async def write_due_review(due: DueReview, *, persona: Persona) -> str | None:
     """让她读判出来的那一周（:class:`DueReview`）别人对她说的、她身边发生的，用那只手记下一段「这阵子」；
     交回记下的那一段，没写成返回 ``None``。
 
-    SYSTEM 里是她平时读到的那份「她是谁」（:meth:`~app.living.services.Persona.prompt_vars`：链上最新
+    SYSTEM 里是她平时读到的那份「她是谁」（:meth:`~app.living.services.Persona.who_she_is`：链上最新
     一版，没有就是 ``bot_persona.persona_core``），USER 里是那一周的材料。她上一次写的「这阵子」不给。
 
     **没写成就什么都不落**：她没调那只手（只说了话），或者交给它的是空白，记一条 warning，返回
@@ -364,7 +364,7 @@ async def write_due_review(due: DueReview, *, persona: Persona) -> str | None:
     一条 warning（一个人的失败不拖累另两个人）。
     """
     lane, persona_id, since, until = due.lane, due.persona_id, due.since, due.until
-    prompt_vars = await persona.prompt_vars(lane=lane, persona_id=persona_id)
+    prompt_vars = await persona.who_she_is(lane=lane, persona_id=persona_id)
     call = open_call(
         PERSONA_REVIEW_PROMPT_ID, PERSONA_REVIEW_AGENT, lane=lane, participant=persona_id
     )

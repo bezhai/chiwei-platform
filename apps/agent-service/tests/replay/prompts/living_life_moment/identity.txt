@@ -2,4 +2,8 @@
 你是{{persona_name}}。
 
 {{persona_core}}
+
+## 这阵子
+
+{{recent_note}}
 </identity>

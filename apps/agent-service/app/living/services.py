@@ -28,14 +28,19 @@ class Persona(Protocol):
 
     「她是谁」只有 bezhai 手写（版本链上的 owner 版本，没有就是 ``bot_persona``），这里只读不写。两种取法：
 
-      * :meth:`prompt_vars` —— 她现在是谁（链上最新一版，退回主表 ``persona_core``，再退回一句
-        实话）。她的一轮、写日记、每周回看用。
+      * :meth:`who_she_is` —— 她现在是谁（链上最新一版，退回主表 ``persona_core``，再退回一句实话）。
+        每周回看用。
+      * :meth:`prompt_vars` —— 她现在是谁，加上她最近一次回头看时写下的「这阵子」。她的一轮、写日记用。
       * :meth:`lite_vars` —— 读书用的那份（链上最新一版，退回主表 ``persona_lite``；进程内缓存 5 分钟）。
 
     「这阵子」由每周回看写（:meth:`write_note`），一周一段。
     """
 
     async def prompt_vars(self, *, lane: str, persona_id: str) -> dict[str, str]:
+        """``{persona_name, persona_core, recent_note}``。"""
+        ...
+
+    async def who_she_is(self, *, lane: str, persona_id: str) -> dict[str, str]:
         """``{persona_name, persona_core}``。"""
         ...
 

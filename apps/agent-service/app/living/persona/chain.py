@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Annotated
 
 from app.agent.round import Round
@@ -33,7 +33,7 @@ from app.data.queries import find_persona
 from app.data.schema import Data, Key, Version
 from app.infra.lane_policy import current_deployment_lane
 from app.living.common import week_start_cst
-from app.living.persona.notes import append_note, read_latest_note
+from app.living.persona.notes import WeeklyNote, append_note, read_latest_note
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,26 @@ def _persona_core_var(*candidates: str | None) -> str:
     return "（还没有为她写下这份人设正文——这一轮没有可对照的底色。）"
 
 
+# 她还没写过「这阵子」时 ``{{recent_note}}`` 的值：说实话，不留一个空洞。
+NO_NOTE_YET = "你还没有回头看过哪一周。"
+
+
+def _recent_note_var(note: WeeklyNote | None) -> str:
+    """SYSTEM 变量 ``{{recent_note}}`` 的值：她最近写下的那一段，前面一行说清是哪一周过完时写的；还没写过
+    就是 :data:`NO_NOTE_YET`。
+
+    周写成"那一周的周一到周日"（``week_until`` 是下一周的周一，右开，所以减一天）。不写"上周"：她读到
+    这一段的时候可能已经隔了几天，甚至隔了一周（那一周回看没写成），说"上周"就是一句假话。
+    """
+    if note is None:
+        return NO_NOTE_YET
+    last_day = note.week_until - timedelta(days=1)
+    return (
+        f"（{note.week_since:%Y-%m-%d} 到 {last_day:%Y-%m-%d} 那一周过完，你回头看时写下的）\n"
+        f"{note.note}"
+    )
+
+
 class PersonaChain:
     """persona 服务（:class:`app.living.services.Persona`）：「她是谁」的全部读写都经这里。
 
@@ -102,13 +122,22 @@ class PersonaChain:
         self._lite: dict[str, tuple[dict[str, str], float]] = {}
 
     async def prompt_vars(self, *, lane: str, persona_id: str) -> dict[str, str]:
-        """把「她是谁」摆成 prompt 变量 —— **恰好两个**，全仓一处组装。
+        """她的一轮、写日记时 SYSTEM 里的那一段：她是谁（:meth:`who_she_is`），和她最近一次回头看时
+        写下的「这阵子」（``recent_note``，:func:`_recent_note_var`）。**恰好三个**，全仓一处组装。
 
-        **只有不随轮次变的东西才配当 prompt 变量**：她叫什么、她是个什么样的人。每一轮
-        都变的（快照、手机信封、那一天的材料）一律走 USER 消息，理由是 prompt 变量没有
-        编译期校验、改名会静默渲染成字面量，能少一个就少一个。同理这两个键名
-        （``persona_name`` / ``persona_core``）就是 Langfuse 上那两个 prompt 正文里写着
-        的名字，改代码这边等于让它们原样渲染成字面量出现在她眼前。
+        **只有不随轮次变的东西才配当 prompt 变量**：她叫什么、她是个什么样的人、她这阵子怎么样（一周才
+        换一次）。每一轮都变的（快照、手机信封、那一天的材料）一律走 USER 消息，理由是 prompt 变量没有
+        编译期校验、改名会静默渲染成字面量，能少一个就少一个；SYSTEM 也因此只在她写下新的一段「这阵子」
+        时变一次，前缀缓存照样命中。同理这几个键名就是 Langfuse 上那几个 prompt 正文里写着的名字，改代码
+        这边等于让它们原样渲染成字面量出现在她眼前。
+        """
+        who = await self.who_she_is(lane=lane, persona_id=persona_id)
+        note = await read_latest_note(lane=lane, persona_id=persona_id)
+        return {**who, "recent_note": _recent_note_var(note)}
+
+    async def who_she_is(self, *, lane: str, persona_id: str) -> dict[str, str]:
+        """她是谁：``{persona_name, persona_core}``。每周回看只要这两个：那一段「这阵子」要只出自这一周
+        别人那一侧的事，她上一次写的那段不能流回去。
 
         正文取链上最新一版（不分来源，bezhai 手写的那一版即刻生效），链空 / 那一版空白才退回主表
         的 ``persona_core``，两边都空白退回 :func:`_persona_core_var` 里那句实话。
@@ -127,7 +156,7 @@ class PersonaChain:
         }
 
     async def identity_vars(self, round: Round) -> dict[str, str]:
-        """她一轮 prompt 里「她是谁」那一段的两个变量，一轮开始取齐 prompt 时算一次
+        """她一轮 prompt 里「她是谁」那一段的三个变量，一轮开始取齐 prompt 时算一次
         （:meth:`prompt_vars`，这一轮的泳道和她）。"""
         return await self.prompt_vars(lane=round.lane, persona_id=round.participant)
 

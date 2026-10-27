@@ -260,6 +260,34 @@ async def test_she_writes_down_the_day_that_just_ended(page_db, stub_page):
 
 
 @pytest.mark.integration
+async def test_she_writes_the_page_knowing_these_days(page_db, stub_page):
+    """写日记那一轮的 SYSTEM 跟她的一轮一样：「她是谁」后面跟着她最近一次回头看时写下的「这阵子」。"""
+    from app.living.persona.chain import PersonaChain
+
+    await _a_day_worth_of_stuff()
+    await PersonaChain().write_note(
+        lane=LANE,
+        persona_id="akao",
+        note="这阵子千凪常叫我一起吃晚饭。",
+        week_since=dt.date(2026, 7, 13),
+        week_until=dt.date(2026, 7, 20),
+        written_at=dt.datetime(2026, 7, 20, 6, 30, tzinfo=_CST),
+    )
+    runner = stub_page()
+
+    await _tick(_on(26, 4, 30))
+
+    assert runner.prompt_vars == {
+        "persona_name": "赤尾",
+        "persona_core": "她拍胶片、泡抹茶店。",
+        "recent_note": (
+            "（2026-07-13 到 2026-07-19 那一周过完，你回头看时写下的）\n"
+            "这阵子千凪常叫我一起吃晚饭。"
+        ),
+    }
+
+
+@pytest.mark.integration
 async def test_a_day_that_already_has_a_page_is_not_written_again(page_db, stub_page):
     """页存在本身就是"这天复盘过了"。重复的拍不该再烧一次模型。"""
     await _a_day_worth_of_stuff()

@@ -2,8 +2,9 @@
 
 前缀缓存（Gemini 的隐式缓存、字节网关的 prompt cache）只对"请求开头逐字节相同的那
 一段"生效。SYSTEM 模板一旦引用一个跟着钟走的变量，这一段每次调用都不同，命中恒为 0。
-``living_life_moment`` 的模板变量是 ``persona_name`` / ``persona_core`` /
-``guides_you_can_read`` 三个，都不是时间，所以前缀是稳的；编译时也不再注入任何时间变量
+``living_life_moment`` 的模板变量是 ``persona_name`` / ``persona_core`` / ``recent_note`` /
+``guides_you_can_read`` 四个，都不是时间（``recent_note`` 是她最近一次回头看时写下的「这阵子」，
+一周才换一次），所以前缀是稳的；编译时也不再注入任何时间变量
 （原来每条 prompt 都会收到精确到秒的 ``currTime`` / ``currDate``）。
 
 **这个文件钉得住什么、钉不住什么**：模板正文在 Langfuse 上、不在仓库里，所以"有人在
@@ -173,6 +174,7 @@ async def _system_at(templates: dict[str, str], clock: dt.datetime) -> str:
         return {
             "persona_name": "赤尾",
             "persona_core": "她拍胶片、写角色分析、逛论坛。",
+            "recent_note": "（2026-07-13 到 2026-07-19 那一周过完，你回头看时写下的）\n这阵子在考试。",
         }
 
     chain = PersonaChain()
@@ -214,7 +216,7 @@ async def _system_at(templates: dict[str, str], clock: dt.datetime) -> str:
 
 
 _STABLE_TEMPLATES = {
-    "identity": "你是 {{persona_name}}。\n{{persona_core}}",
+    "identity": "你是 {{persona_name}}。\n{{persona_core}}\n\n## 这阵子\n\n{{recent_note}}",
     "this-moment": "<this-moment>\n此刻。\n</this-moment>",
     "rules": "<rules>\n规则。\n</rules>",
     "voice": "<voice>\n说话。\n</voice>",

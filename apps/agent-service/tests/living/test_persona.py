@@ -28,6 +28,7 @@ from app.data.tx import current_session, tx
 from app.infra.cst_time import CST
 from app.living.common import week_start_cst
 from app.living.persona.chain import PersonaChain, PersonaVersion, read_latest_version
+from app.living.persona.notes import WeeklyNote
 from tests.runtime.conftest import migrate
 
 # persona 插件交出去的那个服务对象。它不带状态（除了读书那份人设的进程内缓存，这里用不到），
@@ -38,6 +39,7 @@ CHAIN = PersonaChain()
 @pytest.fixture
 async def chain_db(test_db):
     await migrate(PersonaVersion, test_db)
+    await migrate(WeeklyNote, test_db)
     yield test_db
 
 
@@ -294,16 +296,76 @@ async def test_a_persona_the_table_never_heard_of_still_gets_two_variables(seed_
 
 
 @pytest.mark.integration
-async def test_the_variables_are_exactly_the_two_the_prompts_name(seed_db):
-    """键名就是 Langfuse 上那两个 prompt 正文里写着的那两个。
+async def test_the_variables_are_exactly_the_ones_the_prompts_name(seed_db):
+    """键名就是 Langfuse 上那几个 prompt 正文里写着的：她的一轮和日记是三个（她是谁、这阵子），
+    每周回看是两个（只有她是谁）。
 
     改键名不会报错，只会让 ``{{persona_core}}`` 原样渲染成字面量出现在她眼前。
     """
     await _seed_bot_persona("akao", "出厂身份正文。")
 
     got = await CHAIN.prompt_vars(lane="coe-t1", persona_id="akao")
+    who = await CHAIN.who_she_is(lane="coe-t1", persona_id="akao")
 
-    assert set(got) == {"persona_name", "persona_core"}
+    assert set(got) == {"persona_name", "persona_core", "recent_note"}
+    assert who == {"persona_name": got["persona_name"], "persona_core": got["persona_core"]}
+
+
+# ---------------------------------------------------------------------------
+# 这阵子：她最近回头看时写下的那一段，跟着「她是谁」一起到她眼前
+# ---------------------------------------------------------------------------
+
+
+async def _note(
+    note: str, *, since: datetime, lane: str = "coe-t1", persona_id: str = "akao"
+) -> None:
+    from datetime import timedelta
+
+    await CHAIN.write_note(
+        lane=lane,
+        persona_id=persona_id,
+        note=note,
+        week_since=since.date(),
+        week_until=(since + timedelta(days=7)).date(),
+        written_at=since + timedelta(days=7, hours=6),
+    )
+
+
+@pytest.mark.integration
+async def test_her_latest_note_comes_with_the_week_it_was_written_for(seed_db):
+    """``{{recent_note}}`` 是她最近写下的那一段，前面一行说清是哪一周过完时写的。"""
+    await _seed_bot_persona("akao", "出厂身份正文。")
+    await _note("这阵子在准备考试。", since=datetime(2026, 10, 12, tzinfo=CST))
+    await _note("这阵子考完了，千凪常叫我一起吃晚饭。", since=datetime(2026, 10, 19, tzinfo=CST))
+
+    got = await CHAIN.prompt_vars(lane="coe-t1", persona_id="akao")
+
+    assert got["recent_note"] == (
+        "（2026-10-19 到 2026-10-25 那一周过完，你回头看时写下的）\n"
+        "这阵子考完了，千凪常叫我一起吃晚饭。"
+    )
+
+
+@pytest.mark.integration
+async def test_before_her_first_look_back_she_is_told_so(seed_db):
+    """还没写过「这阵子」时说实话，不留一个空洞。"""
+    await _seed_bot_persona("akao", "出厂身份正文。")
+
+    got = await CHAIN.prompt_vars(lane="coe-t1", persona_id="akao")
+
+    assert got["recent_note"] == "你还没有回头看过哪一周。"
+
+
+@pytest.mark.integration
+async def test_another_lanes_note_never_reaches_this_one(seed_db):
+    """prod 上写下的那一段读不到 coe 里来，赤尾的读不到绫奈那里。"""
+    await _seed_bot_persona("akao", "出厂身份正文。")
+    await _note("prod 上的这阵子。", since=datetime(2026, 10, 19, tzinfo=CST), lane="prod")
+    await _note("绫奈的这阵子。", since=datetime(2026, 10, 19, tzinfo=CST), persona_id="ayana")
+
+    got = await CHAIN.prompt_vars(lane="coe-t1", persona_id="akao")
+
+    assert got["recent_note"] == "你还没有回头看过哪一周。"
 
 
 async def test_the_persona_plugin_places_who_she_is_in_her_round(app_host):
@@ -322,7 +384,7 @@ async def test_the_persona_plugin_places_who_she_is_in_her_round(app_host):
     (service,) = [r for r in registered if r.kind == "service" and r.name == "persona"]
     segment = identity.detail["segment"]
     assert identity.plugin == service.plugin == "persona"
-    assert segment.variables == ("persona_name", "persona_core")
+    assert segment.variables == ("persona_name", "persona_core", "recent_note")
     assert isinstance(segment.values.__self__, PersonaChain)
     assert segment.values.__func__ is PersonaChain.identity_vars
 
@@ -350,4 +412,8 @@ async def test_her_identity_segment_is_computed_for_her_round(seed_db):
 
     got = await CHAIN.identity_vars(SimpleNamespace(lane="coe-t1", participant="akao"))
 
-    assert got == {"persona_name": "赤尾", "persona_core": "bezhai 手写的她。"}
+    assert got == {
+        "persona_name": "赤尾",
+        "persona_core": "bezhai 手写的她。",
+        "recent_note": "你还没有回头看过哪一周。",
+    }

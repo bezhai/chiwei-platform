@@ -18,6 +18,7 @@ import pytest
 from langfuse.api import Prompt_Text
 from langfuse.model import TextPromptClient
 
+from app.agent.contracts import Segment
 from app.agent.prompts import PromptSet
 from app.infra.propagation import Context
 from app.living.day_page.pages import (
@@ -48,15 +49,13 @@ class _SdkCachingLangfuse:
         self._cache: dict[str, tuple[TextPromptClient, float]] = {}
         self.clock = 0.0
 
-    def release(self, prompt_id: str, version: int) -> None:
-        """``production`` 这个 label 挪到 ``prompt_id`` 的 ``version`` 上。"""
-        variables = {
-            PERSONA_REVIEW_PROMPT_ID: "{{persona_name}}{{persona_core}}",
-            DAY_PAGE_PROMPT_ID: "{{persona_name}}{{persona_core}}",
-        }[prompt_id]
-        self.server[prompt_id] = TextPromptClient(
+    def release(self, segment: Segment, version: int) -> None:
+        """``production`` 这个 label 挪到 ``segment`` 那条 prompt 的 ``version`` 上；正文声明的变量正好是
+        这一段要的那几个。"""
+        variables = "".join(f"{{{{{v}}}}}" for v in segment.variables)
+        self.server[segment.prompt_id] = TextPromptClient(
             Prompt_Text(
-                name=prompt_id,
+                name=segment.prompt_id,
                 version=version,
                 prompt=f"v{version}：{variables}",
                 config={},
@@ -110,10 +109,10 @@ async def test_a_prompt_released_since_the_last_run_is_the_one_rendered(
         [(_, _, version)] = prompts.versions(prompt_id)
         return version
 
-    langfuse.release(prompt_id, 3)
+    langfuse.release(segment, 3)
     assert await version_rendered() == 3
 
-    langfuse.release(prompt_id, 4)
+    langfuse.release(segment, 4)
     langfuse.clock += 7 * 24 * 3600
 
     assert await version_rendered() == 4, "渲染的是上一次缓存下来的旧版本"

@@ -28,7 +28,7 @@
     （:func:`read_day_page_before`）。她凌晨写下的是刚过去那天的页，不卡这一条的话
     第二天的页会在写下的当天就被当成"你的昨天"喂回去，她会把今天当昨天过。
 
-prompt 在 Langfuse（:data:`DAY_PAGE_PROMPT_ID`），变量只有 persona 那两个；那一天的
+prompt 在 Langfuse（:data:`DAY_PAGE_PROMPT_ID`），变量是 persona 服务那三个（她是谁、这阵子）；那一天的
 材料和上一页走 USER 消息 —— 它们每天都变，而 prompt 变量改名会**静默**渲染成字面量
 （同 :mod:`app.living.life.moment`）。
 """
@@ -92,7 +92,7 @@ DAY_PAGE_AGENT = AgentSpec(
 DAY_PAGE_SEGMENT = Segment(
     DAY_PAGE_PROMPT_ID,
     DAY_PAGE_PROMPT_ID,
-    variables=("persona_name", "persona_core"),
+    variables=("persona_name", "persona_core", "recent_note"),
     cached=False,
 )
 
@@ -349,7 +349,7 @@ async def day_page_due(
 
 
 async def write_due_page(due: DuePage, *, persona: Persona) -> LivingDayPage | None:
-    """让她把判出来的那一天（:class:`DuePage`）写成一页；没写成返回 ``None``。「她是谁」那两个
+    """让她把判出来的那一天（:class:`DuePage`）写成一页；没写成返回 ``None``。「她是谁」和「这阵子」那三个
     prompt 变量从 ``persona`` 服务取（:meth:`app.living.services.Persona.prompt_vars`），和她的一轮
     是同一份。
 
