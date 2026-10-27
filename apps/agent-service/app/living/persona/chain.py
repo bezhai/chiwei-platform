@@ -37,7 +37,7 @@ from app.living.persona.notes import WeeklyNote, append_note, read_latest_note
 
 logger = logging.getLogger(__name__)
 
-# 读书那份人设的进程内缓存（秒）：周级慢漂，5 分钟不失效也看不出差别。
+# 读书那份人设的进程内缓存（秒）：「她是谁」只在 bezhai 手写时变，5 分钟不失效也看不出差别。
 LITE_TTL_SECONDS = 300
 
 
@@ -167,7 +167,7 @@ class PersonaChain:
         ``persona_lite`` 优先取版本链最新一版（不分来源——bezhai 手写的那一版即生效），链空 / 链最新版
         空白 / 链读失败退回 ``bot_persona.persona_lite``；名字永远来自主表。主表没这一行时名字
         退回 ``persona_id``、正文是空串，链也不查（链以主表为源）。lane 口径 =
-        ``current_deployment_lane() or "prod"``。周级漂移 + 5 分钟 TTL，无需任何失效机制。
+        ``current_deployment_lane() or "prod"``。正文只在 bezhai 手写时变，5 分钟 TTL 不需要任何失效机制。
         """
         now = time.monotonic()
         cached = self._lite.get(persona_id)
