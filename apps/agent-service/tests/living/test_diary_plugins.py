@@ -30,9 +30,9 @@ class _Unused:
 
 
 class _NoReviewYet:
-    """``persona`` 服务的替身：这一周她还没回看过。"""
+    """``persona`` 服务的替身：这一周她还没写过「这阵子」。"""
 
-    async def has_review_this_week(self, *, lane, persona_id, now):
+    async def note_written_this_week(self, *, lane, persona_id, now):
         return False
 
 

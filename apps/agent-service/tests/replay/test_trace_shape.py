@@ -447,7 +447,14 @@ async def test_her_weekly_look_back_is_a_trace_of_its_own_in_her_review_session(
     await seeds.bezhai_says(
         "论坛上有人回你那篇角色分析了", at=_at(23, 22), name="review-trace"
     )
-    replay.model.script("living_persona_review", Reply(text="她这阵子开始自己冲胶卷。"))
+    replay.model.script(
+        "living_persona_review",
+        Reply(
+            tools=(
+                ToolUse("write_down_these_days", {"these_days": "这阵子我开始自己冲胶卷。"}),
+            )
+        ),
+    )
     await replay.step(
         "the look-back tick in the window",
         lambda: replay.tick("persona-review"),

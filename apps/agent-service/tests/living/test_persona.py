@@ -1,27 +1,20 @@
 """「她是谁」：版本链本身，以及链到底有没有走到她眼前.
 
-persona 慢漂（周级 review）不 UPDATE ``bot_persona`` 主表，而是落 framework Data
-版本链：每版带来源（seed＝出厂灌入 / review＝自动慢漂 / owner＝bezhai 干预），
-形状是 Key + narrative + written_at + Version、append-only、
-读最新一版、整篇重写——新版**取代**旧版。
+「她是谁」只有 bezhai 手写：他在 framework Data 版本链上手写 SQL 追加一版（``source='owner'``），
+形状是 Key + narrative + written_at + Version、append-only、读最新一版、新版**取代**旧版；代码不往
+链里写。链上更早的 seed / review 版本是之前的代码写下的，原样留着。
 
-钉死的语义（docstring 层契约，本文件断言数据层行为）：
+钉死的语义：
 
-  * 读 a（读路径）：最新一版**不分来源**——owner 盖版即生效。
-  * 读 b / 读 c（自动班的幂等与证据游标）：**只认 source='review'**——owner/seed
-    版本既不挡当周自动班、也不推走证据窗口。
-  * 周界 = 自然周一 00:00 CST（生活日是 04:00 界，但周界用自然周一零点，
-    spec 决策 4）。
-  * v0 灌入：链为空时把 ``bot_persona.persona_core`` 原文落为第一版
-    （source='seed'）；链非空零操作，重跑无害。灌的必须是**链空时她实际读到的那
-    份**——``PersonaChain.prompt_vars`` 退回的就是 ``persona_core``。
+  * 读最新一版**不分来源**，"最新"按 version 算；链空、或者最新那一版空白，退回 ``bot_persona.persona_core``。
+  * 周界 = 自然周一 00:00 CST（生活日是 04:00 界，但周界用自然周一零点）。
+  * 泳道隔离：别的泳道链上的版本到不了这一条。
 
-文件最后一节验的是**另一件事**：链上写下的东西真的到了她眼前。链写得再对，读侧
-去读 ``bot_persona`` 那个扁平列的话，她自己改了三个月的正文一个字都不会出现——而
+文件后面几节验的是**另一件事**：链上写下的东西真的到了她眼前。链写得再对，读侧
+去读 ``bot_persona`` 那个扁平列的话，bezhai 改过的正文一个字都不会出现——而
 且没有任何报错，只是每一轮的底色都是出厂那份。
 
-持久化用真实 Postgres（testcontainers）——版本链的正确性故事全在"能不能 append
-进去、版本是否递增、来源过滤是否只认 review"，mock pg 等于什么都没测。
+持久化用真实 Postgres（testcontainers）。
 """
 
 from __future__ import annotations
@@ -30,14 +23,11 @@ from datetime import datetime
 
 import pytest
 
+from app.data.persist import insert_append
 from app.data.tx import current_session, tx
 from app.infra.cst_time import CST
 from app.living.common import week_start_cst
-from app.living.persona.chain import (
-    PersonaChain,
-    PersonaVersion,
-    read_latest_review_written_at,
-)
+from app.living.persona.chain import PersonaChain, PersonaVersion, read_latest_version
 from tests.runtime.conftest import migrate
 
 # persona 插件交出去的那个服务对象。它不带状态（除了读书那份人设的进程内缓存，这里用不到），
@@ -53,7 +43,7 @@ async def chain_db(test_db):
 
 @pytest.fixture
 async def seed_db(chain_db):
-    """补上 ``bot_persona`` 主表（SQLAlchemy 表）——v0 灌入要从它读原文。"""
+    """补上 ``bot_persona`` 主表（SQLAlchemy 表）——链空时从它读原文。"""
     from app.data.models import Base, BotPersona
 
     async with chain_db.begin() as conn:
@@ -83,6 +73,26 @@ async def _seed_bot_persona(
                 appearance_detail="红发",
             )
         )
+
+
+async def _version(
+    narrative: str,
+    *,
+    lane: str = "coe-t1",
+    persona_id: str = "akao",
+    source: str = "owner",
+    written_at: str = "2026-06-08T10:00:00+08:00",
+) -> None:
+    """往链上追加一版（bezhai 手写 SQL 追加 owner 版本是这样；更早的 seed / review 是之前代码写下的）。"""
+    await insert_append(
+        PersonaVersion(
+            lane=lane,
+            persona_id=persona_id,
+            narrative=narrative,
+            source=source,
+            written_at=written_at,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -141,328 +151,41 @@ def test_week_start_converts_other_timezones_to_cst_first():
 
 
 # ---------------------------------------------------------------------------
-# 读 a：真 PG 端到端（版本链 + owner 盖版即生效 + 隔离）
+# 读最新一版：真 PG 端到端（不分来源 + 隔离）
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_write_then_read_latest_persona_version(chain_db):
-    """写一版 → 按 (lane, persona_id) 读回最新（端到端 insert + 读回）。"""
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="她是刚考完高考的赤尾。",
-        source="seed",
-        written_at="2026-06-08T10:00:00+08:00",
-    )
-
-    latest = await CHAIN.latest(lane="coe-t1", persona_id="akao")
-    assert latest is not None
-    assert latest.narrative == "她是刚考完高考的赤尾。"
-    assert latest.source == "seed"
-    assert latest.written_at == "2026-06-08T10:00:00+08:00"
-    assert latest.version == 1
-
-
-@pytest.mark.integration
-async def test_versions_append_and_owner_supersedes(chain_db):
-    """seed → review → owner 三版递增；读 a 不分来源——owner 盖版即生效。"""
+async def test_versions_append_and_the_newest_wins_whatever_its_source(chain_db):
+    """之前代码写下的 seed、review 和 bezhai 手写的 owner 三版递增；读最新一版不分来源。"""
     from tests.data.read_back import all_versions
 
-    keys = {"lane": "coe-t1", "persona_id": "akao"}
-    await CHAIN.write_version(
-        **keys,
-        narrative="第一版：出厂正文。",
-        source="seed",
-        written_at="2026-06-08T10:00:00+08:00",
-    )
-    await CHAIN.write_version(
-        **keys,
-        narrative="第二版：review 慢漂后的正文。",
-        source="review",
-        written_at="2026-06-08T11:00:00+08:00",
-    )
-    await CHAIN.write_version(
-        **keys,
-        narrative="第三版：bezhai 干预盖掉的正文。",
-        source="owner",
-        written_at="2026-06-08T12:00:00+08:00",
-    )
+    await _version("第一版：出厂正文。", source="seed")
+    await _version("第二版：回看重写过的正文。", source="review")
+    await _version("第三版：bezhai 手写的正文。", source="owner")
 
+    keys = {"lane": "coe-t1", "persona_id": "akao"}
     versions = await all_versions(PersonaVersion, keys)
     assert [v.version for v in versions] == [1, 2, 3], (
         "版本链 append-only：版本逐次递增、旧版保留"
     )
-    latest = await CHAIN.latest(**keys)
-    assert latest.source == "owner"
-    assert latest.narrative == "第三版：bezhai 干预盖掉的正文。"
+    latest = await read_latest_version(**keys)
+    assert (latest.source, latest.narrative) == ("owner", "第三版：bezhai 手写的正文。")
 
 
 @pytest.mark.integration
 async def test_read_latest_cold_chain_returns_none(chain_db):
     """没写过的 (lane, persona_id) 读回 None（冷启：读侧 fallback 主表）。"""
-    assert (
-        await CHAIN.latest(lane="coe-t1", persona_id="akao") is None
-    )
+    assert await read_latest_version(lane="coe-t1", persona_id="akao") is None
 
 
 @pytest.mark.integration
 async def test_persona_chain_lane_and_persona_isolation(chain_db):
     """泳道与 persona 隔离：coe 的版本绝不泄露到 prod、姐妹之间互不可见。"""
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="coe 里赤尾的一版。",
-        source="seed",
-        written_at="2026-06-08T10:00:00+08:00",
-    )
+    await _version("coe 里赤尾的一版。")
 
-    assert (
-        await CHAIN.latest(lane="prod", persona_id="akao") is None
-    )
-    assert (
-        await CHAIN.latest(lane="coe-t1", persona_id="ayana") is None
-    )
-
-
-# ---------------------------------------------------------------------------
-# 读 b：本周是否已有 review 版本（只认 review——owner/seed 不挡班）
-# ---------------------------------------------------------------------------
-
-# 固定"现在"= 2026-06-09（周二）12:00 CST，本周一 = 2026-06-08 00:00 CST。
-_NOW = datetime(2026, 6, 9, 12, 0, tzinfo=CST)
-
-
-@pytest.mark.integration
-async def test_review_this_week_true_when_review_written_in_week(chain_db):
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="本周慢漂的一版。",
-        source="review",
-        written_at="2026-06-08T05:00:00+08:00",
-    )
-
-    assert await CHAIN.has_review_this_week(
-        lane="coe-t1", persona_id="akao", now=_NOW
-    )
-
-
-@pytest.mark.integration
-async def test_review_this_week_ignores_seed_and_owner(chain_db):
-    """同周 seed + owner 版本在场仍返回 False——只认 review，不挡自动班。"""
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="本周灌入的出厂版。",
-        source="seed",
-        written_at="2026-06-08T05:00:00+08:00",
-    )
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="本周 bezhai 盖的版。",
-        source="owner",
-        written_at="2026-06-09T09:00:00+08:00",
-    )
-
-    assert not await CHAIN.has_review_this_week(
-        lane="coe-t1", persona_id="akao", now=_NOW
-    )
-
-
-@pytest.mark.integration
-async def test_review_last_sunday_night_does_not_count_this_week(chain_db):
-    """周日 23:59 写的 review 归上一周：周界是自然周一 00:00 CST。"""
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="上周日深夜的一版。",
-        source="review",
-        written_at="2026-06-07T23:59:00+08:00",
-    )
-
-    assert not await CHAIN.has_review_this_week(
-        lane="coe-t1", persona_id="akao", now=_NOW
-    )
-
-
-@pytest.mark.integration
-async def test_review_monday_just_after_midnight_counts_this_week(chain_db):
-    """周一 00:01 写的 review 归本周（与上一条合起来钉死周一边界）。"""
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="周一凌晨的一版。",
-        source="review",
-        written_at="2026-06-08T00:01:00+08:00",
-    )
-
-    assert await CHAIN.has_review_this_week(
-        lane="coe-t1", persona_id="akao", now=_NOW
-    )
-
-
-@pytest.mark.integration
-async def test_review_this_week_cold_chain_is_false(chain_db):
-    assert not await CHAIN.has_review_this_week(
-        lane="coe-t1", persona_id="akao", now=_NOW
-    )
-
-
-# ---------------------------------------------------------------------------
-# 读 c：最新一条 review 版本的 written_at（证据游标，owner/seed 不动游标）
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-async def test_latest_review_written_at_ignores_seed_and_owner(chain_db):
-    """seed → review → owner 之后，游标 = review 那版的 written_at（不被 owner 推走）。"""
-    keys = {"lane": "coe-t1", "persona_id": "akao"}
-    await CHAIN.write_version(
-        **keys,
-        narrative="出厂版。",
-        source="seed",
-        written_at="2026-06-01T10:00:00+08:00",
-    )
-    await CHAIN.write_version(
-        **keys,
-        narrative="慢漂版。",
-        source="review",
-        written_at="2026-06-08T05:00:00+08:00",
-    )
-    await CHAIN.write_version(
-        **keys,
-        narrative="bezhai 盖版。",
-        source="owner",
-        written_at="2026-06-09T09:00:00+08:00",
-    )
-
-    assert (
-        await read_latest_review_written_at(**keys) == "2026-06-08T05:00:00+08:00"
-    )
-
-
-@pytest.mark.integration
-async def test_latest_review_written_at_none_when_no_review(chain_db):
-    """链上只有 seed / owner（或链为空）→ None：首跑窗口 = 全部现存页。"""
-    assert (
-        await read_latest_review_written_at(lane="coe-t1", persona_id="akao") is None
-    )
-
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="出厂版。",
-        source="seed",
-        written_at="2026-06-01T10:00:00+08:00",
-    )
-    assert (
-        await read_latest_review_written_at(lane="coe-t1", persona_id="akao") is None
-    )
-
-
-# ---------------------------------------------------------------------------
-# v0 灌入：链为空时把 bot_persona.persona_core 落为第一版（source='seed'），幂等
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-async def test_seed_persona_chain_copies_persona_core_verbatim(seed_db):
-    """首跑：bot_persona.persona_core 原文一字不差落为第一版 seed。
-
-    灌的是 ``persona_core`` 而不是 ``persona_lite``：链空时
-    :meth:`PersonaChain.prompt_vars` 退回的就是 ``persona_core``，起点那一版必须等于她
-    当时**实际读到的**那份。灌错列不会报错——链上的历史只是从 v1 起就是断的：v1
-    记着一段她从没读过的东西，而 v2 是在她真正读到的那份上改出来的。
-    """
-    await _seed_bot_persona(
-        "akao",
-        "lite：这一列不该被灌进链里。",
-        persona_core="出厂身份正文：她是住在杭州的赤尾。",
-    )
-
-    assert await CHAIN.seed_chain(lane="coe-t1", persona_id="akao") is True
-
-    latest = await CHAIN.latest(lane="coe-t1", persona_id="akao")
-    assert latest is not None
-    assert latest.narrative == "出厂身份正文：她是住在杭州的赤尾。"
-    assert "lite" not in latest.narrative, (
-        "灌的是 persona_lite —— 起点那一版记的是她从没读过的东西"
-    )
-    assert latest.source == "seed"
-    assert latest.version == 1
-
-
-@pytest.mark.integration
-async def test_the_seeded_version_is_what_she_was_already_reading(seed_db):
-    """灌完之后她读到的东西一个字都没变 —— 起点那一版就是链空时的 fallback。
-
-    这条是上一条的另一面：不比对列名，比对**她眼前那段文字**在灌入前后是否一致。
-    灌错列的话这里会当场变一段她从没读过的正文，而没有任何报错。
-    """
-    await _seed_bot_persona("akao", "lite：这一列不该被灌进链里。")
-
-    before = await CHAIN.prompt_vars(lane="coe-t1", persona_id="akao")
-    await CHAIN.seed_chain(lane="coe-t1", persona_id="akao")
-    after = await CHAIN.prompt_vars(lane="coe-t1", persona_id="akao")
-
-    assert after == before
-
-
-@pytest.mark.integration
-async def test_seed_persona_chain_is_idempotent(seed_db):
-    """连跑两次只有一行：链非空零操作，重跑无害。"""
-    from tests.data.read_back import all_versions
-
-    await _seed_bot_persona("akao", "出厂身份正文。")
-
-    assert await CHAIN.seed_chain(lane="coe-t1", persona_id="akao") is True
-    assert await CHAIN.seed_chain(lane="coe-t1", persona_id="akao") is False
-
-    versions = await all_versions(
-        PersonaVersion, {"lane": "coe-t1", "persona_id": "akao"}
-    )
-    assert len(versions) == 1
-
-
-@pytest.mark.integration
-async def test_seed_persona_chain_noop_when_chain_already_has_versions(seed_db):
-    """链上已有任何版本（哪怕是 review/owner）→ 灌入零操作，不覆盖现状。"""
-    await _seed_bot_persona("akao", "出厂身份正文。")
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="已有的 review 版。",
-        source="review",
-        written_at="2026-06-08T05:00:00+08:00",
-    )
-
-    assert await CHAIN.seed_chain(lane="coe-t1", persona_id="akao") is False
-
-    latest = await CHAIN.latest(lane="coe-t1", persona_id="akao")
-    assert latest.narrative == "已有的 review 版。"
-
-
-@pytest.mark.integration
-async def test_seed_persona_chain_missing_bot_persona_fails_fast(seed_db):
-    """bot_persona 没有这行 → fail fast（没有原文可灌，不静默写空版）。"""
-    with pytest.raises(ValueError):
-        await CHAIN.seed_chain(lane="coe-t1", persona_id="ghost")
-
-
-@pytest.mark.integration
-async def test_seed_version_does_not_satisfy_review_idempotency(seed_db):
-    """灌入的 seed 版不算 review：读 b 仍 False、读 c 仍 None（自动班照常跑）。"""
-    await _seed_bot_persona("akao", "出厂身份正文。")
-    await CHAIN.seed_chain(lane="coe-t1", persona_id="akao")
-
-    assert not await CHAIN.has_review_this_week(
-        lane="coe-t1", persona_id="akao", now=_NOW
-    )
-    assert (
-        await read_latest_review_written_at(lane="coe-t1", persona_id="akao") is None
-    )
+    assert await read_latest_version(lane="prod", persona_id="akao") is None
+    assert await read_latest_version(lane="coe-t1", persona_id="ayana") is None
 
 
 # ---------------------------------------------------------------------------
@@ -471,21 +194,15 @@ async def test_seed_version_does_not_satisfy_review_idempotency(seed_db):
 #
 # 链写对了不等于她读得到。上面每一条验的都是"写进去、读回来"，而她真正看到的是
 # :meth:`PersonaChain.prompt_vars` 摆出来的那两个 prompt 变量——中间任何一处去读
-# ``bot_persona.persona_core`` 那个扁平列，她自己改了三个月的正文就一个字都不会
+# ``bot_persona.persona_core`` 那个扁平列，bezhai 改过的正文就一个字都不会
 # 出现，而且**一句报错都没有**：每一轮照跑，只是底色永远是出厂那份。
 
 
 @pytest.mark.integration
-async def test_what_she_wrote_herself_is_what_reaches_her(seed_db):
+async def test_the_version_on_the_chain_is_what_reaches_her(seed_db):
     """链上有版本时，喂进 prompt 的是最新那一版的 narrative，不是扁平列。"""
     await _seed_bot_persona("akao", "出厂身份正文。")
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="她今年不拍胶片了，改成每周写一篇角色分析。",
-        source="review",
-        written_at="2026-06-08T05:00:00+08:00",
-    )
+    await _version("她今年不拍胶片了，改成每周写一篇角色分析。")
 
     got = await CHAIN.prompt_vars(lane="coe-t1", persona_id="akao")
 
@@ -523,17 +240,11 @@ async def test_with_nothing_written_anywhere_she_is_told_so(seed_db):
 async def test_a_blank_version_does_not_blank_her_out(seed_db):
     """链上最新一版正文空白 → 当成没有，退回扁平列。
 
-    写侧拦得住空白落版，但 owner 是人工写入口。这里是防御纵深：宁可退回出厂那份，
-    也不能让她这一轮拿着一段空白当自己。
+    链只有手写这一个入口，写进一段空白是可能的。宁可退回出厂那份，也不能让她这一轮
+    拿着一段空白当自己。
     """
     await _seed_bot_persona("akao", "出厂身份正文。")
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="   ",
-        source="owner",
-        written_at="2026-06-08T05:00:00+08:00",
-    )
+    await _version("   ")
 
     got = await CHAIN.prompt_vars(lane="coe-t1", persona_id="akao")
 
@@ -544,23 +255,13 @@ async def test_a_blank_version_does_not_blank_her_out(seed_db):
 async def test_the_newest_version_wins_even_when_written_at_goes_backwards(seed_db):
     """"最新"按 ``version`` 算，不按 ``written_at``。
 
-    ``written_at`` 是**调用方给的字符串**（owner 人工盖版可以填任何时刻），乱序完全
-    可能。按它取最新的话，一次填错时刻的人工干预会让链从此永远停在那一版上。
+    ``written_at`` 是**手写进去的字符串**（可以填任何时刻），乱序完全可能。按它取最新
+    的话，一次填错时刻的手写会让链从此永远停在那一版上。
     """
     await _seed_bot_persona("akao", "出厂身份正文。")
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="先落地的那一版。",
-        source="review",
-        written_at="2026-06-09T10:00:00+08:00",
-    )
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="后落地的那一版（written_at 反而更早）。",
-        source="owner",
-        written_at="2026-06-01T10:00:00+08:00",
+    await _version("先落地的那一版。", written_at="2026-06-09T10:00:00+08:00")
+    await _version(
+        "后落地的那一版（written_at 反而更早）。", written_at="2026-06-01T10:00:00+08:00"
     )
 
     got = await CHAIN.prompt_vars(lane="coe-t1", persona_id="akao")
@@ -572,17 +273,11 @@ async def test_the_newest_version_wins_even_when_written_at_goes_backwards(seed_
 async def test_another_lanes_version_never_reaches_this_one(seed_db):
     """prod 那条链上的版本读不到 coe 里来 —— 键上带 lane 就是为了这个。
 
-    漏了 lane 的后果是双向的：coe 里跑实验改出来的人设会当场生效在 prod 的她身上，
+    漏了 lane 的后果是双向的：coe 里改出来的人设会当场生效在 prod 的她身上，
     而这件事在库里看不出来（表里两条链都在，只是读的时候挑错了行）。
     """
     await _seed_bot_persona("akao", "出厂身份正文。")
-    await CHAIN.write_version(
-        lane="prod",
-        persona_id="akao",
-        narrative="prod 上那一版。",
-        source="review",
-        written_at="2026-06-08T05:00:00+08:00",
-    )
+    await _version("prod 上那一版。", lane="prod")
 
     got = await CHAIN.prompt_vars(lane="coe-living", persona_id="akao")
 
@@ -651,53 +346,8 @@ async def test_her_identity_segment_is_computed_for_her_round(seed_db):
     from types import SimpleNamespace
 
     await _seed_bot_persona("akao", "出厂身份正文。")
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="她这周写下的自己。",
-        source="review",
-        written_at="2026-06-08T10:00:00+08:00",
-    )
+    await _version("bezhai 手写的她。")
 
     got = await CHAIN.identity_vars(SimpleNamespace(lane="coe-t1", participant="akao"))
 
-    assert got == {"persona_name": "赤尾", "persona_core": "她这周写下的自己。"}
-
-
-# ---------------------------------------------------------------------------
-# 每周回看的锚：主表那一列的原文，不是链上最新一版
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-async def test_the_review_anchor_is_the_flat_column_verbatim(seed_db):
-    """回看那一轮的 ``{{persona_core}}`` 是 ``bot_persona.persona_core`` 原文：她在自己上一版的基础上
-    改自己，参照物必须站在这条循环外面（:meth:`PersonaChain.review_vars`）。"""
-    await _seed_bot_persona("akao", "lite 正文。", persona_core="出厂那份：她是赤尾。")
-    await CHAIN.write_version(
-        lane="coe-t1",
-        persona_id="akao",
-        narrative="链上最新那一版：她不拍胶片了。",
-        source="review",
-        written_at="2026-06-08T10:00:00+08:00",
-    )
-
-    got = await CHAIN.review_vars(persona_id="akao")
-
-    assert got == {"persona_name": "赤尾", "persona_core": "出厂那份：她是赤尾。"}
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("core", ["", "  \n "])
-async def test_a_blank_review_anchor_fails_fast(seed_db, core):
-    """锚是空白就不跑：没有锚还照跑，她会在一段空白的参照下重写自己，而且看不出来。"""
-    await _seed_bot_persona("akao", "lite 正文。", persona_core=core)
-
-    with pytest.raises(ValueError, match="没有外部锚"):
-        await CHAIN.review_vars(persona_id="akao")
-
-
-@pytest.mark.integration
-async def test_a_persona_the_table_never_heard_of_has_no_review_anchor(seed_db):
-    with pytest.raises(ValueError, match="没有外部锚"):
-        await CHAIN.review_vars(persona_id="ghost")
+    assert got == {"persona_name": "赤尾", "persona_core": "bezhai 手写的她。"}

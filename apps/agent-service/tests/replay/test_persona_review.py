@@ -12,18 +12,16 @@ what world tells her she noticed) are stored as her inbox stores them (``insert_
 ``common_message`` (``seeds.bezhai_says``).
 
 * ``two_weeks`` — a tick before the Monday 06:00–08:00 window does nothing. The first tick in the
-  window finds her chain empty, seeds it with the persona row's text (``source='seed'``), then
-  she rewrites it from what was said to her last week (only Monday 00:00 to the next Monday 00:00,
-  phone and inbox merged by time, day by day) with the flat persona text as the anchor; a later
-  tick finds this week's review written. The next Monday's review reads the version she wrote the
-  week before.
-* ``model_call_fails`` — the model call fails after the chain was seeded; the tick does not raise
-  it.
-  The next tick does not seed again and writes the review.
+  window gives her who she is (the persona row's text, her chain being empty) and what was said to
+  her last week (only Monday 00:00 to the next Monday 00:00, phone and inbox merged by time, day by
+  day), with one tool; she records her 这阵子 note with it, and that note is the only row written
+  (her persona chain is not touched). A later tick finds this week's note written. The next
+  Monday's review reads only that week's evidence, not the note she wrote the week before.
+* ``model_call_fails`` — the model call fails; the tick does not raise it and nothing is written.
+  The next tick writes the note.
 * ``prompt_config_error`` — a release of the review prompt declares a variable no plugin gives.
-  The first tick in the window seeds her chain, as it always does before fixing the prompt, then
-  fails on it before the model; the tick does not raise it. Once the prompt is fixed, the next
-  tick does not seed again and writes the review.
+  The first tick in the window fails on it before the model and writes nothing; the tick does not
+  raise it. Once the prompt is fixed, the next tick writes the note.
 """
 
 from __future__ import annotations
@@ -38,7 +36,7 @@ from app.infra.cst_time import CST
 from app.living.household.received import ReceivedMessage
 from app.living.services import WORLD
 from tests.replay import seeds
-from tests.replay.harness import Fail, Reply
+from tests.replay.harness import Fail, Reply, ToolUse
 from tests.replay.harness.prompts import config_errors
 
 pytestmark = pytest.mark.integration
@@ -96,10 +94,13 @@ WEEK_AFTER = [
     (_at(8, 1, 15), "phone", "周六有空吗，一起去抹茶店"),
 ]
 
-FIRST_REVIEW = (
-    "她拍胶片、写角色分析、逛论坛、收周边、泡抹茶店。这阵子绫奈想跟她学冲胶卷，"
-    "她写的角色分析在论坛上有人认真回了。"
-)
+FIRST_NOTE = "这阵子绫奈想跟我学冲胶卷，我写的角色分析在论坛上有人认真回了。"
+SECOND_NOTE = "这阵子相机回到我手上了，bezhai 约我周末去抹茶店。"
+
+
+def _writes_down(note: str) -> Reply:
+    """She records her 这阵子 note with the one tool she is given."""
+    return Reply(tools=(ToolUse("write_down_these_days", {"these_days": note}),))
 
 
 async def test_two_weeks(replay):
@@ -110,24 +111,21 @@ async def test_two_weeks(replay):
         "a tick before the window does nothing", _tick(replay), at=_at(7, 27, 5, 55)
     )
 
-    replay.model.script(REVIEW, Reply(text=FIRST_REVIEW))
+    replay.model.script(REVIEW, _writes_down(FIRST_NOTE))
     await replay.step(
-        "the first tick in the window: the chain is seeded, then she rewrites it",
+        "the first tick in the window: she writes down these days",
         _tick(replay),
         at=_at(7, 27, 6),
     )
 
     await replay.step(
-        "a later tick finds this week's review written", _tick(replay), at=_at(7, 27, 6, 5)
+        "a later tick finds this week's note written", _tick(replay), at=_at(7, 27, 6, 5)
     )
 
     await _said_to_her(replay, WEEK_AFTER)
-    replay.model.script(
-        REVIEW,
-        Reply(text=FIRST_REVIEW + "bezhai 约她周末去抹茶店。"),
-    )
+    replay.model.script(REVIEW, _writes_down(SECOND_NOTE))
     await replay.step(
-        "the next Monday: she rewrites the version she wrote last week",
+        "the next Monday: she writes a new note from that week alone",
         _tick(replay),
         at=_at(8, 3, 6),
     )
@@ -144,14 +142,14 @@ async def test_model_call_fails(replay):
         Fail(lambda: CapabilityTimeout("offline-model gave no answer within 180s")),
     )
     await replay.step(
-        "the chain is seeded, then the model call fails; the tick swallows it",
+        "the model call fails; the tick swallows it and nothing is written",
         _tick(replay),
         at=_at(7, 27, 6),
     )
 
-    replay.model.script(REVIEW, Reply(text=FIRST_REVIEW))
+    replay.model.script(REVIEW, _writes_down(FIRST_NOTE))
     await replay.step(
-        "the next tick writes the review without seeding again",
+        "the next tick writes the note",
         _tick(replay),
         at=_at(7, 27, 6, 5),
     )
@@ -166,19 +164,19 @@ async def test_prompt_config_error(replay):
 
     replay.misconfigure_prompt(REVIEW, "mood")
     await replay.step(
-        "the chain is seeded, then the review prompt fails its check; the tick swallows it",
+        "the review prompt fails its check; the tick swallows it and nothing is written",
         _tick(replay),
         at=_at(7, 27, 6),
     )
     failed = replay.steps[-1]
     assert failed["model_calls"] == []
-    assert list(failed["rows"]) == ["data_persona_version"], "only the seed"
+    assert failed["rows"] == {}, "nothing is written before the model"
     assert config_errors(REVIEW, "production", "akao") == errors_before + 1
 
     replay.fix_prompt(REVIEW)
-    replay.model.script(REVIEW, Reply(text=FIRST_REVIEW))
+    replay.model.script(REVIEW, _writes_down(FIRST_NOTE))
     await replay.step(
-        "the prompt is fixed; the next tick writes the review without seeding again",
+        "the prompt is fixed; the next tick writes the note",
         _tick(replay),
         at=_at(7, 27, 6, 5),
     )

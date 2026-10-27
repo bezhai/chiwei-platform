@@ -71,6 +71,7 @@ async def _declared(app_host, monkeypatch) -> dict[str, list[ToolSpec]]:
     """Each agent that is offered tools, and the declarations it is given them from."""
     from inner_shared.dynamic_config import dynamic_config
 
+    from app.living.persona_review.review import note_tool
     from app.living.reading.agent import build_reading_tools
     from app.manifests.agent_service import RESIDENT
     from app.manifests.world import MANIFEST, WORLD
@@ -87,6 +88,7 @@ async def _declared(app_host, monkeypatch) -> dict[str, list[ToolSpec]]:
     return {
         "living_life_moment": [hers[name] for name in RESIDENT.tools],
         "book_reading_impression": build_reading_tools(pages=[], total_pages=0, progress={}),
+        "living_persona_review": [note_tool([])],
         "world_round": [its[name] for name in WORLD.tools],
         **{
             agent: [its[name] for name in MANIFEST.agents[agent].tools]
