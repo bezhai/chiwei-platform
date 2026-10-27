@@ -87,8 +87,13 @@ DAY_PAGE_AGENT = AgentSpec(
     recursion_limit=1,
     session="living-day-page:{lane}:{participant}",
 )
+# 一天取一次：不走 SDK 的缓存。缓存过期之后 SDK 先交回过期的那份、后台再刷新，走缓存的话每天渲染的
+# 都是前一天留下的版本（``Segment.cached``）。
 DAY_PAGE_SEGMENT = Segment(
-    DAY_PAGE_PROMPT_ID, DAY_PAGE_PROMPT_ID, variables=("persona_name", "persona_core")
+    DAY_PAGE_PROMPT_ID,
+    DAY_PAGE_PROMPT_ID,
+    variables=("persona_name", "persona_core"),
+    cached=False,
 )
 
 

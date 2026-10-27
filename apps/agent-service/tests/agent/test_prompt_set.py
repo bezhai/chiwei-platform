@@ -288,6 +288,30 @@ async def test_a_lane_takes_its_own_label_and_falls_back_to_production(
     ]
 
 
+async def test_a_segment_that_is_not_cached_is_fetched_fresh_every_time(langfuse, monkeypatch):
+    """``Segment.cached`` False：每次取齐都向 Langfuse 现取（``cache_ttl_seconds=0``），其余的段照常用
+    缓存。SDK 的缓存过期之后先交回过期的那份、后台再刷新，一条隔几天才取一次的 prompt 走缓存的话，
+    每次渲染的都是上一次留下的旧版本。"""
+    asked: list[tuple[str, int | None]] = []
+    real_get = langfuse.get_prompt
+
+    def get_prompt(name: str, *, label: str | None = None, **kwargs: Any):
+        asked.append((name, kwargs.get("cache_ttl_seconds")))
+        return real_get(name, label=label, **kwargs)
+
+    monkeypatch.setattr(langfuse, "get_prompt", get_prompt)
+    langfuse.prompts[("weekly", "production")] = _text("weekly", "一周一次。")
+    langfuse.prompts[("rules", "production")] = _text("rules", "规则。")
+    segments = {
+        "weekly": Segment("weekly", "weekly", cached=False),
+        "rules": Segment("rules", "rules"),
+    }
+
+    await PromptSet.resolve({"review": _agent("weekly", "rules")}, segments, None)
+
+    assert asked == [("weekly", 0), ("rules", 10)]
+
+
 class _BlockingLangfuse(_Langfuse):
     """Each fetch blocks until ``loop_went_on`` is set or two seconds pass, and records which."""
 

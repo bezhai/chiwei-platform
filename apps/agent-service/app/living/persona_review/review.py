@@ -106,10 +106,14 @@ PERSONA_REVIEW_AGENT = AgentSpec(
     recursion_limit=1,
     session="living-persona-review:{lane}:{participant}",
 )
+# 一周取一次：不走 SDK 的缓存。缓存过期之后 SDK 先交回过期的那份、后台再刷新，走缓存的话每周渲染的
+# 都是上一周留下的版本：2026-10-24 coe-review 跑的是 v3，那时泳道的 label 已经指向 v4
+# （``Segment.cached``）。
 PERSONA_REVIEW_SEGMENT = Segment(
     PERSONA_REVIEW_PROMPT_ID,
     PERSONA_REVIEW_PROMPT_ID,
     variables=("persona_name", "persona_core"),
+    cached=False,
 )
 
 
