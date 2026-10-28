@@ -446,6 +446,42 @@ async def test_a_blank_note_writes_nothing(review_db, stub_review, caplog):
     assert any("空白" in r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.integration
+async def test_two_notes_in_one_answer_keep_the_first_and_end_the_call(review_db, models):
+    """一次回答里调了两次记「这阵子」的工具：只记第一段，这一次调用就此结束，不再多叫一次模型。
+
+    这个工具声明了 ``ends_round``：调了它这一轮就结束，后面那次调用不执行。不声明的话两次都会执行，
+    而 recursion_limit 用完之后还会多叫一次不带工具的模型。
+    """
+    from app.agent.client import ModelClient
+    from app.agent.neutral import Message, Role, ToolCall
+    from app.living.persona_review import review as review_mod
+
+    answered: list[int] = []
+
+    class TwoNotesInOneAnswer(ModelClient):
+        async def complete(self, messages, *, tools=None, **_kwargs):
+            answered.append(len(answered) + 1)
+            return Message(
+                role=Role.ASSISTANT,
+                content="",
+                tool_calls=[
+                    ToolCall(id="first", name=NOTE_TOOL, arguments={"these_days": "第一段。"}),
+                    ToolCall(id="second", name=NOTE_TOOL, arguments={"these_days": "第二段。"}),
+                ],
+            )
+
+        async def structured(self, *_args, **_kwargs):  # pragma: no cover - not used here
+            raise NotImplementedError
+
+    await _a_week_of_evidence()
+    models[review_mod.PERSONA_REVIEW_PROMPT_ID] = TwoNotesInOneAnswer
+
+    assert await _tick(_NOW) == "第一段。"
+    assert [n.note for n in await _notes()] == ["第一段。"]
+    assert answered == [1], f"模型被叫了 {len(answered)} 次"
+
+
 # --------------------------------------------------------------------------
 # 五 · 材料：别人对她说的、她身边发生的
 # --------------------------------------------------------------------------
