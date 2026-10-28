@@ -10,9 +10,9 @@
     回看一个字都不写。
   * **能不调模型就不调**：不在窗口、本周写过了、上一周没有一个人对她说过话、她身边什么都
     没发生，三种都在模型前面返回。她自己写的日记页和她自己说的话不算这一周发生了什么。
-  * **只有她调了那只手、写了字才算写下**：没调、或者写的是空白，这一周就还没写，下一拍再来。
+  * **只有她调用了记「这阵子」的工具、写了字才算写下**：没调用、或者写的是空白，这一周就还没写，下一拍再来。
   * **材料是别人对她说的、她身边发生的**：每一条原文、带着什么时候、从哪儿来、是谁，按天排。她上一次
-    写的「这阵子」不摆：这一段只该出自这一周别人那一侧的事，她写过的东西不回流。
+    写的「这阵子」不摆：这一段只该出自这一周别人那一侧的事，她自己写过的东西不再作为材料。
   * **「她是谁」就是她平时读到的那份**：链上最新一版，没有就是 ``bot_persona.persona_core``。
   * **泳道隔离**：收件按泳道存，别的泳道的收件不是她这一周，写下的那段只在这条泳道上。
   * **队列和钟**：三姐妹各一条回看队列，每一拍都排队，窗口按那一拍响的时刻判。
@@ -137,12 +137,12 @@ async def review_db(living_db):
 
 @pytest.fixture
 def stub_review(monkeypatch, models):
-    """装一个模型替身：这一轮她调那只手记下的那一段是钉死的（:class:`tests.living.conftest.Calls`）；
+    """装一个模型替身：这一轮她用记「这阵子」的工具记下的那一段是钉死的（:class:`tests.living.conftest.Calls`）；
     ``material`` 是最后一轮真的摆到她眼前的那段文字，``prompt_vars`` 是那一轮 prompt 编译时拿到的
     变量。"""
 
     def install(note: str = "这阵子千凪常叫她一起吃晚饭。", *, said: str | None = None) -> Calls:
-        """``note``：她调那只手记下的那一段。``said``：她没调那只手，只说了这么一句。"""
+        """``note``：她用这个工具记下的那一段。``said``：她没调用这个工具，只说了这么一句。"""
         runner = (
             Calls(said=said)
             if said is not None
@@ -370,7 +370,7 @@ async def test_once_written_the_rest_of_the_week_does_nothing(review_db, stub_re
 
 
 # --------------------------------------------------------------------------
-# 三 · 能不调模型就不调；没调那只手、写了空白都不算写下
+# 三 · 能不调模型就不调；没调用工具、写了空白都不算写下
 # --------------------------------------------------------------------------
 
 
@@ -400,8 +400,8 @@ async def test_a_week_nobody_said_anything_to_her_gets_no_note(review_db, stub_r
 @pytest.mark.integration
 async def test_her_own_pages_and_words_are_not_what_happened_to_her(review_db, stub_review):
     """她每天都写了日记、在私聊和群里说了不少话，可没有一个人对她说过什么：这一周照样算什么都
-    没发生。日记页是她自己的复述，她说的话是她自己的腔调，拿它们当这一周的证据，就是让她的口头禅
-    和自称给自己作证（2026-09 prod 的 v14、v15、v18 就是这么来的）。"""
+    没发生。日记页是她自己的复述，她说的话是她自己的腔调，拿它们当这一周的证据，她的口头禅和自称
+    就会被当成这一周的事写进去（2026-09 prod 的 v14、v15、v18 就是这么来的）。"""
     await _seed_world()
     for i in range(7):
         day = _LAST_MONDAY + dt.timedelta(days=i)
@@ -417,7 +417,7 @@ async def test_her_own_pages_and_words_are_not_what_happened_to_her(review_db, s
 
 @pytest.mark.integration
 async def test_an_answer_without_the_tool_writes_nothing(review_db, stub_review, caplog):
-    """她只说了一句话、没调那只手：什么都不写，记一条 warning；这一周就还没写，窗口里下一拍再来。"""
+    """她只说了一句话、没调用工具：什么都不写，记一条 warning；这一周就还没写，窗口里下一拍再来。"""
     await _a_week_of_evidence()
     stub_review(said="这阵子挺平静的。")
 
@@ -426,7 +426,7 @@ async def test_an_answer_without_the_tool_writes_nothing(review_db, stub_review,
 
     assert await _notes() == []
     assert any("没调" in r.getMessage() for r in caplog.records), (
-        f"没调那只手却一条 warning 都没有：{[r.getMessage() for r in caplog.records]}"
+        f"没调用工具却一条 warning 都没有：{[r.getMessage() for r in caplog.records]}"
     )
 
     stub_review("下一拍补上的这一段。")
@@ -435,7 +435,7 @@ async def test_an_answer_without_the_tool_writes_nothing(review_db, stub_review,
 
 @pytest.mark.integration
 async def test_a_blank_note_writes_nothing(review_db, stub_review, caplog):
-    """她调了那只手，写的却是空白：不落那一段——拿一段空白把这周记成"写过了"，这一周就永远丢了。"""
+    """她调用了工具，写的却是空白：不落那一段——拿一段空白把这周记成"写过了"，这一周就永远丢了。"""
     await _a_week_of_evidence()
     stub_review("   ")
 
@@ -646,7 +646,7 @@ async def test_the_variables_are_exactly_the_two_the_prompt_names(
 
 @pytest.mark.integration
 async def test_the_one_tool_she_is_given_records_these_days(review_db, stub_review):
-    """她手里只有一只手，说明里直说它是把「这阵子」记下来的。"""
+    """这一轮只给她一个工具，它的说明里直说是把「这阵子」记下来的。"""
     from app.living.persona_review.review import note_tool
 
     await _a_week_of_evidence()

@@ -28,8 +28,9 @@ SYSTEM 里是她平时读到的那份「她是谁」（:meth:`app.living.service
 
 窗口是 CST ``[06:00, 08:00)``。
 
-**这一轮她手里只有一只手**（:func:`note_tool`）：把写好的那一段记下来。一个决定一只手，记下来的就是
-她交给那只手的原文，不从她的回复正文里抠。她没调那只手、或者交的是空白，这一轮就没写成，什么都不落：
+**这一轮只给她一个工具**（:func:`note_tool`）：她记下「这阵子」用的工具。一个决定一个工具，记下来的
+就是她传给这个工具的原文，不从她的回复正文里提取。她没调用这个工具、或者传的是空白，这一轮就没写成，
+什么都不落：
 拿一段空白把这周记成"写过了"，这一周就永远丢了。
 
 prompt 在 Langfuse（:data:`PERSONA_REVIEW_PROMPT_ID`），变量只有她是谁那两个；上一周的材料走 USER
@@ -80,7 +81,7 @@ PERSONA_REVIEW_PROMPT_ID = "living_persona_review"
 # offline-model：一周三次（三个人各一次），比 day_page 还低一个量级，不该占 life
 # 那条高频线的档位。
 #
-# recursion_limit 1：一次生成就完。她手里只有记下「这阵子」那一只手（:func:`note_tool`），调了
+# recursion_limit 1：一次生成就完。她只有记下「这阵子」用的那一个工具（:func:`note_tool`），调了
 # 它这一轮就结束（``ends_round``），不再多叫一次模型；没调就是她只说了话，这一轮没写成。
 #
 # 一个人的每周回看在 langfuse 里读成一条流（session），逐周翻起来才不用大海捞针。
@@ -102,12 +103,12 @@ PERSONA_REVIEW_SEGMENT = Segment(
 )
 
 
-# 她记下「这阵子」的那只手的名字。prompt 里只说"用工具把它记下来"，名字和说明在这里。
+# 她记下「这阵子」用的工具的名字。prompt 里只说"用工具把它记下来"，名字和说明在这里。
 NOTE_TOOL = "write_down_these_days"
 
 
 def note_tool(written: list[str]) -> ToolSpec:
-    """这一轮她手里唯一的一只手：把写好的「这阵子」记下来。她交的原文追加进 ``written``，这一轮结束
+    """这一轮给她的唯一一个工具：她记下「这阵子」用的工具。她传的原文追加进 ``written``，这一轮结束
     之后由 :func:`write_due_review` 落库；调了它这一轮就结束（``ends_round``），只记一次。"""
 
     async def write_down_these_days(
@@ -345,13 +346,13 @@ async def persona_review_due(
 
 
 async def write_due_review(due: DueReview, *, persona: Persona) -> str | None:
-    """让她读判出来的那一周（:class:`DueReview`）别人对她说的、她身边发生的，用那只手记下一段「这阵子」；
+    """让她读判出来的那一周（:class:`DueReview`）别人对她说的、她身边发生的，用 :func:`note_tool` 记下一段「这阵子」；
     交回记下的那一段，没写成返回 ``None``。
 
     SYSTEM 里是她平时读到的那份「她是谁」（:meth:`~app.living.services.Persona.who_she_is`：链上最新
     一版，没有就是 ``bot_persona.persona_core``），USER 里是那一周的材料。她上一次写的「这阵子」不给。
 
-    **没写成就什么都不落**：她没调那只手（只说了话），或者交给它的是空白，记一条 warning，返回
+    **没写成就什么都不落**：她没调用这个工具（只说了话），或者传给它的是空白，记一条 warning，返回
     ``None``；这一周还算没写，窗口里下一拍再来。落一段空白的后果是这一周被记成"写过了"，而那一段是
     空的。
 

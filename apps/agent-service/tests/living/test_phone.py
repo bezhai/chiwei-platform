@@ -4177,7 +4177,7 @@ async def test_a_sisters_picture_is_someone_elses_picture(
 #
 # 每周回看（:mod:`app.living.persona_review`）问的是这一段：这一周谁在手机上对她说过什么。
 # "对她说的"是私聊里别人发的每一条，加上群里点了她名的、回了她某句话的；她自己说的一条
-# 都不算 —— 那是她自己的腔调，回看拿它当证据就是让她的口头禅给自己作证。
+# 都不算 —— 那是她自己的腔调，回看拿它当证据，她的口头禅就会被当成这一周的事写进去。
 
 _SINCE = _at(9)
 _UNTIL = _at(22)
