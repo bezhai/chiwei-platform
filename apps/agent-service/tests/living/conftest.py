@@ -92,7 +92,7 @@ def her_mailbox(residents=None, her_records=None):
 
 
 def her_diary(her_records=None, received=None):
-    """``day_pages`` 服务：day_page 插件对象本身（不带状态，读写的是用例的库）。「她是谁」是 persona
+    """day_page 插件对象本身（不带状态，读写的是用例的库）。「她是谁」是 persona
     插件对象，``her_records``、``received`` 默认是 :func:`own_records`、:func:`her_mailbox`。"""
     from app.living.day_page.pages import Diary
     from app.living.persona.chain import PersonaChain
@@ -415,6 +415,7 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     )
     from app.living.household.received import ReceivedMessage, ReceivedRead
     from app.living.persona.chain import PersonaVersion
+    from app.living.persona.notes import WeeklyNote
     from app.living.phone.handset import PhoneRead
     from app.living.pictures.album import Picture
     from app.living.speaking.mouth import SpokenOutbound
@@ -428,9 +429,10 @@ async def living_db(real_pg_required, test_db):  # noqa: F811 — 形参名就�
     # （``app.agent.continuity``），少了它她的一轮第一步就炸。收到的消息那两张
     # 也是：每一轮都读她还没看过的收件、收尾时记下看过哪几条（``app.living.household.received``）。
     # 她往外发的那三张也是：每一轮开始前和结束时都把她做的事发出去（``app.living.household.outgoing``）。
+    # ``WeeklyNote`` 是每周回看判这周写过没有、写下那一段的地方（``app.living.persona.notes``）。
     for cls in (
         Happening, Whereabouts, PhoneRead, SpokenOutbound, Picture,
-        LivingDayPage, PersonaVersion, SessionTranscript,
+        LivingDayPage, PersonaVersion, WeeklyNote, SessionTranscript,
         ReceivedMessage, ReceivedRead,
         OutgoingMessage, OutgoingResult, OutgoingUpTo,
     ):

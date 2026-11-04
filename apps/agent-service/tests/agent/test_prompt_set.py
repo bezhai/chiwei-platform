@@ -288,6 +288,121 @@ async def test_a_lane_takes_its_own_label_and_falls_back_to_production(
     ]
 
 
+async def test_a_segment_that_is_not_cached_is_fetched_fresh_every_time(langfuse, monkeypatch):
+    """``Segment.cached`` False：每次取齐都向 Langfuse 现取（``cache_ttl_seconds=0``），其余的段照常用
+    缓存。SDK 的缓存过期之后先交回过期的那份、后台再刷新，一条隔几天才取一次的 prompt 走缓存的话，
+    每次渲染的都是上一次留下的旧版本。"""
+    asked: list[tuple[str, int | None]] = []
+    real_get = langfuse.get_prompt
+
+    def get_prompt(name: str, *, label: str | None = None, **kwargs: Any):
+        asked.append((name, kwargs.get("cache_ttl_seconds")))
+        return real_get(name, label=label, **kwargs)
+
+    monkeypatch.setattr(langfuse, "get_prompt", get_prompt)
+    langfuse.prompts[("weekly", "production")] = _text("weekly", "一周一次。")
+    langfuse.prompts[("rules", "production")] = _text("rules", "规则。")
+    segments = {
+        "weekly": Segment("weekly", "weekly", cached=False),
+        "rules": Segment("rules", "rules"),
+    }
+
+    await PromptSet.resolve({"review": _agent("weekly", "rules")}, segments, None)
+
+    assert asked == [("weekly", 0), ("rules", 10)]
+
+
+async def test_on_a_lane_without_its_own_label_the_production_fetch_is_uncached_too(
+    langfuse, monkeypatch
+):
+    """泳道自己的 label 取不到，退回 production 的那一次同样不走缓存：两次请求都是
+    ``cache_ttl_seconds=0``。"""
+    asked: list[tuple[str, str | None, int | None]] = []
+    real_get = langfuse.get_prompt
+
+    def get_prompt(name: str, *, label: str | None = None, **kwargs: Any):
+        asked.append((name, label, kwargs.get("cache_ttl_seconds")))
+        return real_get(name, label=label, **kwargs)
+
+    monkeypatch.setattr(langfuse, "get_prompt", get_prompt)
+    monkeypatch.setattr(
+        "app.agent.prompts.current_context",
+        lambda: Context(trace_id=None, lane="coe-review"),
+    )
+    langfuse.prompts[("weekly", "production")] = _text("weekly", "一周一次。")
+
+    prompts = await PromptSet.resolve(
+        {"review": _agent("weekly")},
+        {"weekly": Segment("weekly", "weekly", cached=False)},
+        None,
+    )
+
+    assert asked == [("weekly", "coe-review", 0), ("weekly", None, 0)]
+    assert prompts.versions("review") == [("weekly", "production", 1)]
+
+
+class _SdkCachingLangfuse:
+    """``get_prompt`` with the SDK's cache: an expired copy is handed back as it is while it is
+    refreshed (a failed refresh keeps the expired copy); ``cache_ttl_seconds=0`` always fetches and
+    raises when the fetch fails. ``serving`` is what Langfuse answers: a prompt, or an exception."""
+
+    def __init__(self) -> None:
+        self.serving: Any = None
+        self.clock = 0.0
+        self._cache: dict[tuple[str, str], tuple[Any, float]] = {}
+
+    def get_prompt(
+        self, name: str, *, label: str | None = None, cache_ttl_seconds: int | None = None, **_: Any
+    ):
+        key, ttl = (name, label or "production"), 60 if cache_ttl_seconds is None else cache_ttl_seconds
+        cached = self._cache.get(key)
+        if cached is None or ttl == 0:
+            return self._fetch(key, ttl)
+        prompt, expires_at = cached
+        if self.clock >= expires_at:
+            try:
+                self._fetch(key, ttl)
+            except Exception:
+                pass
+        return prompt
+
+    def _fetch(self, key: tuple[str, str], ttl: int):
+        if isinstance(self.serving, Exception):
+            raise self.serving
+        self._cache[key] = (self.serving, self.clock + ttl)
+        return self.serving
+
+
+async def test_an_uncached_fetch_that_fails_raises_and_the_next_resolve_fetches_again(
+    monkeypatch,
+):
+    """不走缓存的段取不到时，错误原样抛出，不退回上一次取到的那份；下一次取齐重新去取。"""
+    client = _SdkCachingLangfuse()
+    monkeypatch.setattr("app.agent.prompts._get_client", lambda: client)
+    monkeypatch.setattr(
+        "app.agent.prompts.current_context", lambda: Context(trace_id=None, lane=None)
+    )
+    monkeypatch.setattr("app.agent.prompts.settings", SimpleNamespace(lane="prod"))
+    agents = {"review": _agent("weekly")}
+    segments = {"weekly": Segment("weekly", "weekly", cached=False)}
+
+    async def version() -> int:
+        prompts = await PromptSet.resolve(agents, segments, None)
+        [(_, _, v)] = prompts.versions("review")
+        return v
+
+    client.serving = _text("weekly", "第一版。", version=1)
+    assert await version() == 1
+
+    client.serving = ConnectionError("langfuse is down")
+    client.clock += 7 * 24 * 3600
+    with pytest.raises(ConnectionError):
+        await version()
+
+    client.serving = _text("weekly", "第二版。", version=2)
+    assert await version() == 2
+
+
 class _BlockingLangfuse(_Langfuse):
     """Each fetch blocks until ``loop_went_on`` is set or two seconds pass, and records which."""
 

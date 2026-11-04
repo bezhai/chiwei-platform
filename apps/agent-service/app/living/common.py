@@ -3,7 +3,7 @@
   * :func:`esc`             外面来的字串摆进她这一轮之前先过的那一道，全 living 只有这一份
   * :func:`require_aware`   时刻必须带时区，不带就当场炸（各张表的 validator 用它）
   * :func:`legacy_null_is`  后加的非 Optional 列：旧行读出来的 NULL 当成默认值
-  * :func:`week_start_cst`  她的周界：自然周一 00:00 CST（她改写「我是谁」和回看哪一周都按它）
+  * :func:`week_start_cst`  她的周界：自然周一 00:00 CST（每周回看看哪一周、这一周写过「这阵子」没有都按它）
   * :func:`living_lane`     本进程所在的泳道，拿不到就是 ``"prod"``（她每张表的 Key 里那个 lane）
   * :data:`SEND_SECONDS`    往通信机制发一条最多等多久（往外发和环顾四周共用）
   * :data:`HOLD_LIMIT`      她的一条队列一次最多被占多久（她的轮次、日记、每周回看三条队列共用）
@@ -145,7 +145,7 @@ def require_aware(name: str, v: datetime | None) -> datetime | None:
 def week_start_cst(now: datetime) -> datetime:
     """``now`` 所在自然周的周一 00:00 CST（aware datetime）。
 
-    persona 慢漂的周界口径：生活日是 04:00 界，但周级的钟用**自然周一零点**——别的
+    每周回看的周界口径：生活日是 04:00 界，但周级的钟用**自然周一零点**——别的
     时区的 aware 时刻先归一到 CST 再取周界。
     """
     local = now.astimezone(CST)

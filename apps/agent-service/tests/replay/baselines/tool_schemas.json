@@ -1129,6 +1129,26 @@
       ]
     }
   },
+  "write_down_these_days": {
+    "description": [
+      "把你写好的「这阵子」记下来。",
+      "",
+      "记下来的这一段会接在「你是谁」后面，接下来这一周你每次醒来都会看到它；下周回头看时你会写一段",
+      "新的换掉它。只记一次，调了就记下了。"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "these_days": {
+          "description": "你写好的「这阵子」那一段，原文，不加标题。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "these_days"
+      ]
+    }
+  },
   "write_record": {
     "description": [
       "整份写下一份记录：没有就新建，有就整份替换。",

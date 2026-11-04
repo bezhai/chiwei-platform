@@ -19,62 +19,52 @@ if TYPE_CHECKING:
     from app.agent.round import Round
 
 # ---------------------------------------------------------------------------
-# persona：「她是谁」（persona 插件提供）
+# persona：「她是谁」和「这阵子」（persona 插件提供）
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class PersonaText:
-    """「她是谁」那条版本链上的一版，交给别的插件时的样子（不是那张表本身）。"""
-
-    narrative: str  # 身份正文全文
-    source: str  # 这版从哪来：seed / review / owner
-    written_at: str  # 写下这版的现实时刻（CST ISO8601 字符串）
-    version: int
-
-
 class Persona(Protocol):
-    """「她是谁」：喂进各条 prompt 的人设变量，和她每周改写的那条版本链。
+    """「她是谁」：喂进各条 prompt 的人设变量，和她每周回头看时写下的「这阵子」。
 
-    三种取法各答一个问题，同名变量的值不同是刻意的：
+    「她是谁」只有 bezhai 手写（版本链上的 owner 版本，没有就是 ``bot_persona``），这里只读不写。两种取法：
 
-      * :meth:`prompt_vars` —— 她**现在**是谁（链上最新一版，退回主表 ``persona_core``，再退回一句
-        实话）。她的一轮和写日记用。
-      * :meth:`review_vars` —— 她**本来**是谁（主表 ``persona_core`` 原文，空白就抛）。每周回看用：
-        参照物必须站在她改写自己的循环外面。
+      * :meth:`who_she_is` —— 她现在是谁（链上最新一版，退回主表 ``persona_core``，再退回一句实话）。
+        每周回看用。
+      * :meth:`prompt_vars` —— 她现在是谁，加上她最近一次回头看时写下的「这阵子」。她的一轮、写日记用。
       * :meth:`lite_vars` —— 读书用的那份（链上最新一版，退回主表 ``persona_lite``；进程内缓存 5 分钟）。
+
+    「这阵子」由每周回看写（:meth:`write_note`），一周一段。
     """
 
     async def prompt_vars(self, *, lane: str, persona_id: str) -> dict[str, str]:
-        """``{persona_name, persona_core}``。"""
+        """``{persona_name, persona_core, recent_note}``。"""
         ...
 
-    async def review_vars(self, *, persona_id: str) -> dict[str, str]:
-        """``{persona_name, persona_core}``，``persona_core`` 是主表原文；没有或空白抛 ``ValueError``。"""
+    async def who_she_is(self, *, lane: str, persona_id: str) -> dict[str, str]:
+        """``{persona_name, persona_core}``。"""
         ...
 
     async def lite_vars(self, *, persona_id: str) -> dict[str, str]:
         """``{persona_name, persona_lite}``。"""
         ...
 
-    async def latest(self, *, lane: str, persona_id: str) -> PersonaText | None:
-        """链上最新一版，不分来源；链空返回 ``None``。"""
-        ...
-
-    async def has_review_this_week(
-        self, *, lane: str, persona_id: str, now: datetime | None = None
+    async def note_written_this_week(
+        self, *, lane: str, persona_id: str, now: datetime
     ) -> bool:
-        """``now`` 所在的自然周（周一 00:00 CST 起）有没有 ``source='review'`` 的版本。"""
+        """``now`` 所在的自然周（周一 00:00 CST 起）她写过「这阵子」没有。"""
         ...
 
-    async def seed_chain(self, *, lane: str, persona_id: str) -> bool:
-        """链空时把主表 ``persona_core`` 落为第一版（``source='seed'``）；返回是否真的写了。"""
-        ...
-
-    async def write_version(
-        self, *, lane: str, persona_id: str, narrative: str, source: str, written_at: str
+    async def write_note(
+        self,
+        *,
+        lane: str,
+        persona_id: str,
+        note: str,
+        week_since: date,
+        week_until: date,
+        written_at: datetime,
     ) -> None:
-        """append 一版身份正文。"""
+        """追加一段「这阵子」：她回头看 ``[week_since, week_until)`` 那一周时写下的。"""
         ...
 
 
@@ -363,13 +353,32 @@ class Summons:
     at: datetime
 
 
+@dataclass(frozen=True)
+class SaidToHer:
+    """别人在她手机上对她说的一条：私聊里来的，或者群里点了她的名、回了她某句话的。
+
+    ``body`` 是正文原样，附件和图片按她手机上的写法留着印子（:mod:`app.living.phone.handset`），
+    **没有转义**：摆到她眼前时由 :meth:`Phone.said_to_her_line` 转。
+    """
+
+    at: datetime
+    scope: str        # 'direct'（私聊） | 'group'（群）
+    title: str        # 会话叫什么；私聊多半是空串
+    sender: Sender
+    named_her: bool
+    replied_to_her: bool
+    body: str
+
+
 class Phone(Protocol):
-    """她的手机：哪些会话在她手机上、谁在叫她、她在一条会话上说的话算哪一档、一个人摆在她眼前的样子。
+    """她的手机：哪些会话在她手机上、谁在叫她、一段时间里别人对她说了什么、她在一条会话上说的话算
+    哪一档、一个人摆在她眼前的样子。
 
     **哪些会话在她手机上只有一道闸**：她自己的 bot 还在，而且这条会话在她视野里。闸就在
     :meth:`reachable_conversations` 上，发消息、读文件问的都是这一份，别处不许自己拼一份；视野在她的
-    一轮之内只定一次（一轮里多处各算一次的话，她看到的会话会在这一轮中途变化）。唯一不过视野那一半
-    的是撤回（:meth:`conversation_her_bot_is_in`）。
+    一轮之内只定一次（一轮里多处各算一次的话，她看到的会话会在这一轮中途变化）。不过视野那一半的
+    只有两处：撤回（:meth:`conversation_her_bot_is_in`），和读回一段时间里别人对她说的
+    （:meth:`said_to_her`，理由写在实现上）。
     """
 
     async def reachable_conversations(
@@ -395,6 +404,16 @@ class Phone(Protocol):
         self, *, lane: str, persona_id: str, now: datetime
     ) -> Summons | None:
         """她手机上还没看过、而且是在叫她的那条消息里最新的一条；没有返回 ``None``。"""
+        ...
+
+    async def said_to_her(
+        self, *, persona_id: str, since: datetime, until: datetime
+    ) -> list[SaidToHer]:
+        """``[since, until)`` 之间别人在她手机上对她说的，按时刻排；看没看过都算。"""
+        ...
+
+    def said_to_her_line(self, said: SaidToHer) -> str:
+        """这样一条摆到她眼前的样子：哪条会话、怎么找到她的、谁说的、原话。"""
         ...
 
     def medium_for(self, scope: str) -> str:
@@ -443,28 +462,6 @@ class Received(Protocol):
 
     def line(self, letter: Letter) -> str:
         """收到的一条在她眼里的样子（她每一轮读到的、日记材料里摆的是同一个样子）。"""
-        ...
-
-
-# ---------------------------------------------------------------------------
-# day_pages：她给每个生活日写下的那一页（day_page 插件提供）
-# ---------------------------------------------------------------------------
-
-
-class DayPage(Protocol):
-    """她给一个生活日写下的那一页，交给别的插件时读得到的样子。"""
-
-    day: date
-    text: str
-
-
-class DayPages(Protocol):
-    """她的日记：每个生活日她自己写下的一页。"""
-
-    async def between(
-        self, *, lane: str, persona_id: str, since: date, until: date
-    ) -> list[DayPage]:
-        """``[since, until)`` 这段日子里她写下的每一页，按日子升序；一页都没有返回空列表。"""
         ...
 
 

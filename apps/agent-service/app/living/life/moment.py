@@ -92,11 +92,11 @@
     说明里三份通篇在教她跑脚本，只接读取的话读完手上没有能跑它的东西）
 
 prompt 在 Langfuse，按顶层小节分成五段（:data:`LIFE_MOMENT_AGENT` 列出顺序，id 是
-``living_life_moment/<段名>``），变量三个——``persona_name``、``persona_core`` 在「她是谁」那一段
-（persona 插件登记，:mod:`app.living.persona`），``guides_you_can_read`` 在「手边能读的说明」那一段
-（guides 插件登记，:mod:`app.living.guides`）。**每个 moment 都变的东西一律
-走 USER 消息**：prompt 变量没有编译期校验，改名会静默渲染成字面量，能少一个就少一个。
-第三个是例外，而且只能是变量：她手边有哪些说明可读会变（注册表启动时填、每 30 秒热
+``living_life_moment/<段名>``），变量四个——``persona_name``、``persona_core``、``recent_note``（她最近
+一次回头看时写下的「这阵子」，一周才换一次）在「她是谁」那一段（persona 插件登记，:mod:`app.living.persona`），
+``guides_you_can_read`` 在「手边能读的说明」那一段（guides 插件登记，:mod:`app.living.guides`）。**每个
+moment 都变的东西一律走 USER 消息**：prompt 变量没有编译期校验，改名会静默渲染成字面量，能少一个就少一个。
+最后一个是例外，而且只能是变量：她手边有哪些说明可读会变（注册表启动时填、每 30 秒热
 加载），工具 schema 在 import 时就定死了，装不下一份会变的清单。
 """
 

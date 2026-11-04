@@ -844,11 +844,12 @@ async def test_a_blank_core_says_so_instead_of_rendering_a_hole(
 
 
 @pytest.mark.integration
-async def test_the_prompt_variables_are_exactly_three(moment_db, stub_moment, resident):
+async def test_the_prompt_variables_are_exactly_four(moment_db, stub_moment, resident):
     """变量改名会**静默**渲染成字面量，所以能少一个就少一个；每个 moment 都变的东西走 USER。
 
-    第三个（手边有哪些说明可读）是例外：它会变（注册表每 30 秒热加载），而工具
-    schema 在 import 时定死，装不下一份会变的清单，只能从 prompt 变量进。
+    「这阵子」（``recent_note``）一周才换一次，跟她是谁一样是慢变量。手边有哪些说明可读是例外：
+    它会变（注册表每 30 秒热加载），而工具 schema 在 import 时定死，装不下一份会变的清单，只能从
+    prompt 变量进。
     """
     runner = stub_moment(said="继续")
 
@@ -857,8 +858,33 @@ async def test_the_prompt_variables_are_exactly_three(moment_db, stub_moment, re
     assert set(runner.runs[0][1]["values"]) == {
         "persona_name",
         "persona_core",
+        "recent_note",
         "guides_you_can_read",
     }
+
+
+@pytest.mark.integration
+async def test_her_latest_note_is_in_front_of_her_every_moment(
+    moment_db, stub_moment, resident
+):
+    """她最近一次回头看时写下的「这阵子」跟着「她是谁」一起到她这一轮眼前。"""
+    from app.living.persona.chain import PersonaChain
+
+    await PersonaChain().write_note(
+        lane="coe-living",
+        persona_id="akao",
+        note="这阵子千凪常叫我一起吃晚饭。",
+        week_since=dt.date(2026, 7, 13),
+        week_until=dt.date(2026, 7, 20),
+        written_at=dt.datetime(2026, 7, 20, 6, 30, tzinfo=_CST),
+    )
+    runner = stub_moment(said="继续")
+
+    await regular_round(resident, "akao", _at(14))
+
+    assert runner.runs[0][1]["values"]["recent_note"] == (
+        "（2026-07-13 到 2026-07-19 那一周过完，你回头看时写下的）\n这阵子千凪常叫我一起吃晚饭。"
+    )
 
 
 @pytest.mark.integration

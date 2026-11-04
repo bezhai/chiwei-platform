@@ -50,6 +50,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_data_spoken_outbound_dedup ON data_spoken_o
 CREATE INDEX IF NOT EXISTS ix_data_spoken_outbound_key_ver ON data_spoken_outbound("lane", "outbound_id", "ver" DESC);
 CREATE TABLE IF NOT EXISTS data_thinking_tokens_spent ("lane" TEXT, "actor" TEXT, "round_id" TEXT, "input_tokens" BIGINT, "output_tokens" BIGINT, "total_tokens" BIGINT, "cached_tokens" BIGINT, "model_calls" BIGINT, "observed_at" TEXT, "dedup_hash" TEXT, "created_at" TIMESTAMPTZ DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS ix_data_thinking_tokens_spent_dedup ON data_thinking_tokens_spent("dedup_hash");
+CREATE TABLE IF NOT EXISTS data_weekly_note ("lane" TEXT, "persona_id" TEXT, "note" TEXT, "week_since" DATE, "week_until" DATE, "written_at" TIMESTAMPTZ, "version" BIGINT, "dedup_hash" TEXT, "created_at" TIMESTAMPTZ DEFAULT now());
+CREATE UNIQUE INDEX IF NOT EXISTS ix_data_weekly_note_dedup ON data_weekly_note("dedup_hash");
+CREATE INDEX IF NOT EXISTS ix_data_weekly_note_key_ver ON data_weekly_note("lane", "persona_id", "version" DESC);
 CREATE TABLE IF NOT EXISTS data_whereabouts ("lane" TEXT, "persona_id" TEXT, "moment_id" TEXT, "seq" BIGINT, "place" TEXT, "doing" TEXT, "noted_at" TIMESTAMPTZ, "dedup_hash" TEXT, "created_at" TIMESTAMPTZ DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS ix_data_whereabouts_dedup ON data_whereabouts("dedup_hash");
 CREATE INDEX IF NOT EXISTS ix_data_whereabouts_lane_persona_id_seq ON data_whereabouts("lane", "persona_id", "seq");

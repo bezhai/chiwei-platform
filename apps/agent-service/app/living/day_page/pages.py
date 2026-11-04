@@ -28,7 +28,7 @@
     （:func:`read_day_page_before`）。她凌晨写下的是刚过去那天的页，不卡这一条的话
     第二天的页会在写下的当天就被当成"你的昨天"喂回去，她会把今天当昨天过。
 
-prompt 在 Langfuse（:data:`DAY_PAGE_PROMPT_ID`），变量只有 persona 那两个；那一天的
+prompt 在 Langfuse（:data:`DAY_PAGE_PROMPT_ID`），变量是 persona 服务那三个（她是谁、这阵子）；那一天的
 材料和上一页走 USER 消息 —— 它们每天都变，而 prompt 变量改名会**静默**渲染成字面量
 （同 :mod:`app.living.life.moment`）。
 """
@@ -50,7 +50,7 @@ from app.agent.neutral import Message, Role
 from app.agent.prompts import PromptSet
 from app.agent.round import Round, open_call
 from app.agent.trace import collect_usage
-from app.data.persist import fetch_all, fetch_one, from_row, insert_idempotent
+from app.data.persist import fetch_one, from_row, insert_idempotent
 from app.data.schema import Data, Key, table_name
 from app.domain.thinking_cost import record_round_cost
 from app.infra.cst_time import CST, dated_clock
@@ -87,8 +87,13 @@ DAY_PAGE_AGENT = AgentSpec(
     recursion_limit=1,
     session="living-day-page:{lane}:{participant}",
 )
+# 一天取一次：不走 SDK 的缓存。缓存过期之后 SDK 先交回过期的那份、后台再刷新，走缓存的话每天渲染的
+# 都是前一天留下的版本（``Segment.cached``）。
 DAY_PAGE_SEGMENT = Segment(
-    DAY_PAGE_PROMPT_ID, DAY_PAGE_PROMPT_ID, variables=("persona_name", "persona_core")
+    DAY_PAGE_PROMPT_ID,
+    DAY_PAGE_PROMPT_ID,
+    variables=("persona_name", "persona_core", "recent_note"),
+    cached=False,
 )
 
 
@@ -249,33 +254,6 @@ async def read_day_page_before(
     return None if row is None else from_row(LivingDayPage, row)
 
 
-async def read_day_pages_between(
-    *, lane: str, persona_id: str, since: date, until: date
-) -> list[LivingDayPage]:
-    """``[since, until)`` 这段日子里她写下的每一页，**按 ``day`` 升序**；一页都没有
-    返回空列表。
-
-    每周回看（:mod:`app.living.persona_review`，经 ``day_pages`` 服务）读的就是这个：一整周的日记原文按她
-    过日子的顺序摆到她眼前。
-
-    **右开**跟 :func:`read_day_page_before` 的"严格早于"是同一条理由：调用方给的
-    ``until`` 是下一周的第一天，闭上就会多带一天进来，而那一天她当时还没过完。
-
-    升序不是可选项：读一周的日记是读一段时间的推移，乱序之后每一页仍然读得通、
-    合起来仍然像一周，只是她感觉到的先后是错的 —— 没有任何东西会因此报错。
-
-    索引走 ``LivingDayPage.Meta.indexes`` 那条 ``(lane, persona_id, day)``，跟"比某天早的
-    最新一页"共用同一条，不另加。
-    """
-    sql = (
-        f"SELECT * FROM {_TABLE} WHERE lane = :lane "
-        f"AND persona_id = :persona_id AND day >= :since AND day < :until "
-        f"ORDER BY day ASC"
-    )
-    rows = await fetch_all(sql, lane=lane, persona_id=persona_id, since=since, until=until)
-    return [from_row(LivingDayPage, row) for row in rows]
-
-
 def _day_page_prompt(*, day: date, lines: list[str], previous: LivingDayPage | None) -> str:
     """摆到她眼前的那一段：这是哪一天、这一天发生过什么、上一页写了什么。
 
@@ -371,7 +349,7 @@ async def day_page_due(
 
 
 async def write_due_page(due: DuePage, *, persona: Persona) -> LivingDayPage | None:
-    """让她把判出来的那一天（:class:`DuePage`）写成一页；没写成返回 ``None``。「她是谁」那两个
+    """让她把判出来的那一天（:class:`DuePage`）写成一页；没写成返回 ``None``。「她是谁」和「这阵子」那三个
     prompt 变量从 ``persona`` 服务取（:meth:`app.living.services.Persona.prompt_vars`），和她的一轮
     是同一份。
 
@@ -449,27 +427,18 @@ async def write_due_page(due: DuePage, *, persona: Persona) -> LivingDayPage | N
 
 
 # ---------------------------------------------------------------------------
-# 插件对象：她一轮里"上一次写下的那一天"那一段、day_pages 服务、写一页要用的服务
+# 插件对象：她一轮里"上一次写下的那一天"那一段、写一页要用的服务
 # ---------------------------------------------------------------------------
 
 
 class Diary:
-    """day_page 插件对象：她一轮里"上一次写下的那一天"那一段，和 ``day_pages`` 服务
-    （:class:`app.living.services.DayPages`，每周回看经它读一周的日记）。写一页时她是谁问 ``persona``
-    服务，那一天她做过、说过的问 ``her_records`` 服务，传到她这里的问 ``received`` 服务。不带状态。"""
+    """day_page 插件对象：她一轮里"上一次写下的那一天"那一段。写一页时她是谁问 ``persona`` 服务，
+    那一天她做过、说过的问 ``her_records`` 服务，传到她这里的问 ``received`` 服务。不带状态。"""
 
     def __init__(self, *, persona: Persona, her_records: HerRecords, received: Received) -> None:
         self.persona = persona
         self.her_records = her_records
         self.received = received
-
-    async def between(
-        self, *, lane: str, persona_id: str, since: date, until: date
-    ) -> list[LivingDayPage]:
-        """``[since, until)`` 这段日子里她写下的每一页，按日子升序（:func:`read_day_pages_between`）。"""
-        return await read_day_pages_between(
-            lane=lane, persona_id=persona_id, since=since, until=until
-        )
 
     async def last_written_section(self, round: Round) -> str:
         """状态：她上一次写下的那一天。它是背景，不是此刻正在发生的事。

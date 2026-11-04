@@ -1,12 +1,14 @@
-"""persona 插件：「她是谁」—— 那条会变的版本链，和喂进各条 prompt 的人设变量。
+"""persona 插件：「她是谁」—— bezhai 手写的那条版本链、她每周回头看时写下的「这阵子」，和喂进各条
+prompt 的人设变量。
 
 交出 ``persona`` 服务（:class:`app.living.services.Persona`，实现是
 :class:`app.living.persona.chain.PersonaChain`）：写日记、每周回看、读书都经它取「她是谁」，
-没有第二个组装点。
+没有第二个组装点；每周回看经它判这周写过「这阵子」没有、把那一段记下来
+（:mod:`app.living.persona.notes`）。
 
-登记她一轮 prompt 的「她是谁」那一段（``living_life_moment/identity``）：两个变量
-``persona_name``、``persona_core`` 在一轮开始取齐 prompt 时由同一个对象算出
-（:meth:`~app.living.persona.chain.PersonaChain.identity_vars`），清单 ``resident`` 的主 agent
+登记她一轮 prompt 的「她是谁」那一段（``living_life_moment/identity``）：三个变量
+``persona_name``、``persona_core``、``recent_note``（「这阵子」）在一轮开始取齐 prompt 时由同一个对象
+算出（:meth:`~app.living.persona.chain.PersonaChain.identity_vars`），清单 ``resident`` 的主 agent
 把它排在第一段。
 """
 from __future__ import annotations
@@ -20,11 +22,11 @@ IDENTITY = "living_life_moment/identity"
 
 
 def identity_segment(chain: PersonaChain) -> Segment:
-    """她一轮 prompt 的「她是谁」那一段：两个变量由 ``chain`` 在一轮开始取齐 prompt 时算。"""
+    """她一轮 prompt 的「她是谁」那一段：三个变量由 ``chain`` 在一轮开始取齐 prompt 时算。"""
     return Segment(
         IDENTITY,
         IDENTITY,
-        variables=("persona_name", "persona_core"),
+        variables=("persona_name", "persona_core", "recent_note"),
         values=chain.identity_vars,
     )
 

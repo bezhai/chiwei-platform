@@ -189,6 +189,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import repeat
 from typing import Annotated, Any
 
 from pydantic import Field, field_validator
@@ -201,6 +202,7 @@ from app.data.queries.messages import (
     find_conversation_page,
     find_conversations_by_last_message,
     find_newest_unread_summons,
+    find_said_to_her,
     find_unread_senders,
     find_unread_summary,
     search_conversations_by_name,
@@ -221,6 +223,7 @@ from app.living.services import (
     HerRecords,
     Pictures,
     Reachable,
+    SaidToHer,
     Sender,
     Summons,
 )
@@ -318,18 +321,25 @@ _READ_TABLE = table_name(PhoneRead)
 OWNER = "owner"
 
 
-def _who_tag(sender: Sender) -> str:
-    """一个人摆在她眼前的样子：``<who from=".." rel="owner"/>``。
+def _sender_attrs(sender: Sender) -> list[str]:
+    """一个人在标签上的那几个属性：``from``（显示名，转义过）、``rel="owner"``（只在系统认出是主人
+    时）、``sender_type="bot"``。
 
-    跟消息行（:func:`_one_message`）共用 ``from`` / ``rel`` 这套属性：同一个人在信封上
-    和在会话里被认成同一个身份，靠的是这两处写的是同一件事。
+    信封上的人（:func:`_who_tag`）、会话里的一行（:func:`_one_message`）、读回来的别人对她说的那一行
+    （:func:`said_to_her_line`）都从这里取：同一个人在这几处被认成同一个身份，靠的是这几处写的是
+    同一件事。
     """
     attrs = [f'from="{esc(sender.name)}"']
     if sender.is_owner:
         attrs.append(f'rel="{OWNER}"')
     if sender.is_bot:
         attrs.append('sender_type="bot"')
-    return f"<who {' '.join(attrs)}/>"
+    return attrs
+
+
+def _who_tag(sender: Sender) -> str:
+    """一个人摆在她眼前的样子：``<who from=".." rel="owner"/>``。"""
+    return f"<who {' '.join(_sender_attrs(sender))}/>"
 
 
 @dataclass(frozen=True)
@@ -772,8 +782,9 @@ _PICTURE_KIND = "image"
 # "我看到一张图"没有区别，于是她会照着一张自己根本没看见的图往下编，一句报错都没有。
 _PICTURE_SHUT = "[图片：打不开]"
 
-# 超过 :data:`PHONE_PICTURE_LIMIT` 的那几张。同样如实说 —— 这条会话里有过这张图，
-# 只是这一轮没摆到她眼前。
+# 超过 :data:`PHONE_PICTURE_LIMIT` 的那几张，和读回一段时间里别人对她说的话时的每一张
+# （:func:`said_to_her`，那里一张图都不取）。同样如实说 —— 这条消息里有过这张图，只是这一轮
+# 没摆到她眼前。
 _PICTURE_HELD_BACK = "[图片：这轮没给你看]"
 
 # 她自己发出去的那张。**只给标记和句柄，不摆到她眼前**（见模块 docstring）：她发的
@@ -988,14 +999,16 @@ def _one_message(row, *, now: datetime, pictures: Iterator[str]) -> str:
     在 :func:`_take_back_handle` 上。
     """
     who, when = _who_and_when(row, now=now)
-    attrs = [f'from="{esc(who)}"']
     # ``rel`` 的值是 :data:`OWNER` 这个常量，不是任何人写得进来的字串 —— 所以它不需要
     # 转义，也正因为如此它才说得出身份。``who`` 反过来：别人写的，只能待在被转义的
     # 属性值里。
-    if not row["said_by_you"] and row["by_owner"]:
-        attrs.append(f'rel="{OWNER}"')
-    if row["is_bot"]:
-        attrs.append('sender_type="bot"')
+    attrs = _sender_attrs(
+        Sender(
+            name=who,
+            is_owner=not row["said_by_you"] and bool(row["by_owner"]),
+            is_bot=bool(row["is_bot"]),
+        )
+    )
     attrs.append(f'time="{esc(when)}"')
     if row["recalled_at"] is not None:
         attrs.append('recalled="true"')
@@ -1145,6 +1158,76 @@ def _page_text(
     return head + "）\n" + "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# 一段时间里别人对她说的（每周回看读它）
+# ---------------------------------------------------------------------------
+
+
+async def said_to_her(
+    *, persona_id: str, since: datetime, until: datetime
+) -> list[SaidToHer]:
+    """``[since, until)`` 之间别人在她手机上对她说的：私聊里别人发的每一条，群里点了她名的、回了她
+    某句话的。按时刻排；她看没看过都算（判据在 :func:`app.data.queries.messages.find_said_to_her`）。
+
+    **会话是她的 bot 还在的那些，不过此刻的白名单。** 白名单回答的是"她此刻手机上有哪些会话"；
+    这里问的是过去一段时间里谁对她说过话。私聊来的和群里点她名的消息，到的那一刻就让那条会话进了
+    她的视野（近 1 小时有 1 条在叫她就够，:mod:`app.living.phone.whitelist`），拿读回那一刻的名单去筛，
+    会把她当时看见过的话筛掉：周二在一个群里被点过一次名，到周一早上那个群早就不在她手机上了。代价
+    是两条：群里只回了她的话、没点她名的那几条，当时那个群要是不在她视野里，她其实没看见过；bot 已经
+    被移出去的会话，那之前的话也读不回来了。
+
+    **图一张都不取**，正文里那张图的位置写明这一次没给她看（:data:`_PICTURE_HELD_BACK`）：一周的图
+    要一张张签地址、验对象，而读它的那一轮只是一次没有工具的生成。其余附件跟她手机上的写法一样。
+    """
+    rows = await find_said_to_her(
+        conversations=await find_conversations_with_persona_bot(persona_id),
+        bot_user_ids=await find_bot_user_ids_for_persona(persona_id),
+        own_bots=await find_bot_names_for_persona(persona_id),
+        since_ms=int(since.timestamp() * 1000),
+        until_ms=int(until.timestamp() * 1000),
+    )
+    return [
+        SaidToHer(
+            at=_instant(int(row["at_ms"])),
+            scope=row["scope"],
+            title=row["title"],
+            sender=Sender(
+                name=row["who"],
+                is_owner=bool(row["by_owner"]),
+                is_bot=bool(row["is_bot"]),
+            ),
+            named_her=bool(row["named_her"]),
+            replied_to_her=bool(row["replied_to_her"]),
+            body=_body_of(row, pictures=repeat(_PICTURE_HELD_BACK)),
+        )
+        for row in rows
+    ]
+
+
+def said_to_her_line(said: SaidToHer) -> str:
+    """别人对她说的一条摆到她眼前的样子：哪条会话、怎么找到她的，``<msg>`` 里是谁说的和原话。
+
+    署名跟她手机上同一套（:func:`_sender_attrs`）：``rel`` 由系统认出主人才有，显示名和正文都过
+    :func:`app.living.common.esc`。群名同样是别人写的，同样转义。私聊不写会话名：私聊多半没有标题，
+    是谁在说由署名说清。
+
+    时刻不在这一行上：读它的一方按自己的方式摆（每周回看按天分段、每行带钟点）。
+    """
+    if said.scope == "direct":
+        where = "私聊"
+    else:
+        how = [
+            words
+            for words, yes in (
+                ("点了你的名", said.named_her),
+                ("回了你的话", said.replied_to_her),
+            )
+            if yes
+        ]
+        where = f"群「{esc(said.title)}」里" + "、".join(how)
+    return f"{where} <msg {' '.join(_sender_attrs(said.sender))}>{esc(said.body)}</msg>"
+
+
 @dataclass
 class _Envelopes:
     """这一轮手机上有动静的会话（这一轮的状态），由第一个要用它的段查一次，两段共用。"""
@@ -1201,6 +1284,16 @@ class Handset:
     ) -> Summons | None:
         """还没被她看过、在叫她的最新那条（:func:`newest_unread_summons`）。"""
         return await newest_unread_summons(lane=lane, persona_id=persona_id, now=now)
+
+    async def said_to_her(
+        self, *, persona_id: str, since: datetime, until: datetime
+    ) -> list[SaidToHer]:
+        """``[since, until)`` 之间别人在她手机上对她说的（:func:`said_to_her`）。"""
+        return await said_to_her(persona_id=persona_id, since=since, until=until)
+
+    def said_to_her_line(self, said: SaidToHer) -> str:
+        """这样一条摆到她眼前的样子（:func:`said_to_her_line`）。"""
+        return said_to_her_line(said)
 
     def medium_for(self, scope: str) -> str:
         """这条会话上说的话落成哪一档 medium（:func:`medium_for`）。"""

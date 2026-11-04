@@ -33,6 +33,7 @@ from app.agent.tooling import Tool
 from app.data.tx import current_session, tx
 from tests.living.conftest import glance_text, her_phone, her_reader
 from tests.living.test_phone import (
+    _AKAO_BOT_UID,
     _DM,
     _GROUP,
     _SOMEONE,
@@ -214,6 +215,35 @@ async def test_a_group_name_cannot_carry_markup_into_the_conversation_list(
         listed = await look_through_your_phone.invoke({})
 
     assert_only_our_own_markup(listed, where="会话列表")
+
+
+@pytest.mark.integration
+async def test_nothing_others_wrote_carries_markup_into_what_was_said_to_her(living_db):
+    """读回一段时间里别人对她说的（每周回看读它），一行里有三样是别人写的：群名、昵称、正文。"""
+    await _seed_world()
+    async with tx():
+        s = current_session()
+        await s.execute(
+            text(
+                "UPDATE common_conversation SET display_name = :t "
+                "WHERE common_conversation_id = CAST(:c AS uuid)"
+            ),
+            {"t": POISON, "c": str(_GROUP)},
+        )
+    await _incoming(
+        _GROUP, text_body="@赤尾 在吗", at=_at(21, 30), sender=_SOMEONE,
+        sender_name="路人", names_bot=_AKAO_BOT_UID,
+    )
+    await _incoming(
+        _DM, text_body="在吗", at=_at(21, 31), sender=_SOMEONE, sender_name=POISON
+    )
+    await _incoming(_DM, text_body=POISON, at=_at(21, 32))
+
+    said = await PHONE.said_to_her(persona_id="akao", since=_at(21), until=_at(22))
+
+    assert len(said) == 3, f"前提没成立：三条都该读得回来。拿到：{said}"
+    for one, where in zip(said, ("群名", "昵称", "正文"), strict=True):
+        assert_only_our_own_markup(PHONE.said_to_her_line(one), where=f"别人对她说的那一行的{where}")
 
 
 @pytest.mark.integration

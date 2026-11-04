@@ -2,6 +2,10 @@
 
 {{persona_core}}
 
+## 这阵子
+
+{{recent_note}}
+
 ---
 
 # 昨天

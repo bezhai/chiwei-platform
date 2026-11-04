@@ -1,16 +1,17 @@
 """``common_message`` queries — 一个 bot 身份在会话里看得到什么。
 
 调用方给的是 ``persona`` 名下那些 bot（``own_bots`` / ``bot_user_ids``，由
-:mod:`app.data.queries.persona` 取），这一层据此回答四个问题：哪些行还没被看过、
-谁点了谁的名、打开一条会话看到哪一段、她那次开口在公共层落成了什么。
+:mod:`app.data.queries.persona` 取），这一层据此回答五个问题：哪些行还没被看过、
+谁点了谁的名、一段时间里别人对她说了什么、打开一条会话看到哪一段、她那次开口在公共层
+落成了什么。
 
 **这里的判据认 ``bot_name``，不认 ``role``。** 几个 bot 挂在同一个群里时它们的出站
 在这张表里全是 ``role='assistant'``，长得一模一样；分得开的只有 ``bot_name``
 （``bot_config`` 里 bot → persona 那条映射）。按 ``role`` 判会同时错两次：别的 bot
 说的话被整段排除，同时又被无条件当成"她自己说的"。
 
-判据只在这个模块里定义一次（:data:`_SAID_BY_HER` / :data:`_STILL_IN_THE_CONVERSATION`
-/ :data:`_STILL_UNREAD`），每个查询拼同一份 —— 各写一遍的话，抄漏一个条件就是
+判据只在这个模块里定义一次（:data:`_SAID_BY_HER` / :data:`_SAID_BY_HER_FOR_SURE` /
+:data:`_STILL_IN_THE_CONVERSATION` / :data:`_STILL_UNREAD`），每个查询拼同一份 —— 各写一遍的话，抄漏一个条件就是
 "信封说三条、翻开却数出两条"，而库里没有任何东西对不上。
 """
 from __future__ import annotations
@@ -28,6 +29,7 @@ __all__ = [
     "find_unread_summary",
     "find_unread_senders",
     "find_newest_unread_summons",
+    "find_said_to_her",
     "find_conversation_page",
     "find_conversations_by_last_message",
     "search_conversations_by_name",
@@ -56,6 +58,15 @@ _SAID_BY_HER = (
     "(cm.role = 'assistant'"
     " AND (cm.bot_name IS NULL"
     "      OR cm.bot_name = ANY(CAST(:own_bots AS text[]))))"
+)
+
+
+# 「这一行**确认**是她说的」：她名下某个 bot 发的。跟 :data:`_SAID_BY_HER` 只差 ``bot_name`` 为空
+# 的那些历史行：那边为了不把她的话摆成别人在说，把认不出的都算成她的；这里要的是"这是她的话"的
+# 证据，认不出就不算。只有一处用它：别人回的那一行是不是她说的（:data:`_SAID_TO_HER_SQL`）。
+_SAID_BY_HER_FOR_SURE = (
+    "(cm.role = 'assistant'"
+    " AND cm.bot_name = ANY(CAST(:own_bots AS text[])))"
 )
 
 
@@ -350,6 +361,113 @@ async def find_newest_unread_summons(
             )
         ).mappings().first()
     return dict(row) if row is not None else None
+
+
+# ---------------------------------------------------------------------------
+# 一段时间里别人对她说的
+# ---------------------------------------------------------------------------
+
+# 一段时间里别人在她手机上**对她说的**：私聊里别人发的每一条，群里点了她的名、或者回了她某句
+# 话的那些。每周回看（``app.living.persona_review``）读的就是这个。
+#
+# 判据三条，前两条跟别处是同一份：不是她说的（:data:`_SAID_BY_HER`）、还在会话里
+# （:data:`_STILL_IN_THE_CONVERSATION`）；群里再要点了她的名（:data:`_NAMED_HER`），或者回的是
+# 她说的某一句。
+#
+# **"回了她的话"只在这里算，没有并进 :data:`_CALLING_HER`。** 飞书里回一条消息不会自动 @ 它的
+# 作者，prod 上这样的回复一周有几十条（2026-09-07 那一周 akao 名下 72 条），不算进来，有人在接
+# 她的话这件事她回头看时就看不到。并进 _CALLING_HER 改的是另一件事：谁能把她提前叫醒、她点开
+# 会话落在哪一条。
+#
+# **被回的那一行得确认是她说的**（:data:`_SAID_BY_HER_FOR_SURE`），不能拿 :data:`_SAID_BY_HER` 判。
+# 后者把 ``bot_name`` 为空的 assistant 行也算成她的，那是"排除可能是她的话"时宁严勿宽；拿它当
+# "这是她的话"的证据就反过来了：有人这一周不点名地回了一句很久以前、认不出是哪个角色说的话，这句
+# 回复会以"回了你的话"进她的一周。被回的那一行不限在时间窗里：这一周有人回她上个月说的话，也是这一
+# 周有人在接她的话。
+#
+# 查询分两步：``others`` 先取出时间窗里别人说的、还在会话里、可能是在对她说的那些（私聊、点了她名的、
+# 回了某一条的），"点没点她的名"在这一步算成一列；``toward_her`` 的别名是 ``o``，被回那一行的子查询
+# 里就能再叫 ``cm``，判据原样拼进去。先把"回了某一条"收窄进来，是为了不给一周里群里的每一句闲聊都
+# 查一次被回的那一行。
+#
+# 时间窗左闭右开，两头都是常量下界，走得上 ``idx_common_message_conversation_time``（同
+# :data:`_SUMMONS_COUNT_SQL` 那条论证）。``named_her`` 不套 COALESCE：没人算过的那一列是 NULL，
+# 在 WHERE 里不算点了名，读出来也是"没点名"，跟 :data:`_NAMED_HER` 上那条口径一致。
+_SAID_TO_HER_SQL = f"""
+WITH given AS (
+{_GIVEN_CONVERSATIONS_CTE}
+),
+others AS (
+  SELECT g.scope                    AS scope,
+         g.title                    AS title,
+         cm.common_message_id       AS message_id,
+         cm.event_time              AS at_ms,
+         cm.common_reply_message_id AS reply_to,
+         cm.content                 AS content,
+         cm.content_text            AS content_text,
+         {_WHO_AND_OWNER},
+         ({_NAMED_HER})             AS named_her
+    FROM given g
+    JOIN common_message cm
+      ON cm.common_conversation_id = g.channel_id
+     AND cm.event_time >= :since_ms
+     AND cm.event_time < :until_ms
+    {_JOIN_SPEAKER}
+   WHERE NOT {_SAID_BY_HER}
+     AND {_STILL_IN_THE_CONVERSATION}
+     AND (g.scope = 'direct'
+          OR {_NAMED_HER}
+          OR cm.common_reply_message_id IS NOT NULL)
+),
+toward_her AS (
+  SELECT o.*,
+         EXISTS (
+           SELECT 1
+             FROM common_message cm
+            WHERE cm.common_message_id = o.reply_to
+              AND {_SAID_BY_HER_FOR_SURE}
+         ) AS replied_to_her
+    FROM others o
+)
+SELECT *
+  FROM toward_her
+ WHERE scope = 'direct' OR named_her OR replied_to_her
+ ORDER BY at_ms, message_id
+"""
+
+
+async def find_said_to_her(
+    *,
+    conversations: list[dict],
+    bot_user_ids: list[str],
+    own_bots: list[str],
+    since_ms: int,
+    until_ms: int,
+) -> list[dict]:
+    """``conversations`` 里 ``[since_ms, until_ms)`` 之间别人对她说的，按 ``event_time`` 排。
+
+    集合由调用方给定（形状同
+    :func:`app.data.queries.persona.find_conversations_with_persona_bot` 的出参），理由见
+    :data:`_GIVEN_CONVERSATIONS_CTE`；集合为空就返回空。
+
+    每一行：``scope`` / ``title``（哪条会话）、``at_ms``、``who`` / ``by_owner`` / ``is_bot``
+    （谁说的，口径同 :data:`_WHO_AND_OWNER`）、``content`` / ``content_text``（正文的两份事实）、
+    ``named_her``（``True`` / ``False`` / ``None``，见 :data:`_NAMED_HER`）、``replied_to_her``。
+    """
+    async with auto_tx():
+        rows = (
+            await current_session().execute(
+                text(_SAID_TO_HER_SQL),
+                {
+                    **_unzip_conversations(conversations),
+                    "bot_user_ids": bot_user_ids,
+                    "own_bots": own_bots,
+                    "since_ms": since_ms,
+                    "until_ms": until_ms,
+                },
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

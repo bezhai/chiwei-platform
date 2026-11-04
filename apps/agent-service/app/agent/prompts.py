@@ -9,6 +9,12 @@ a configuration error (:class:`PromptConfigError`), raised before any model is c
 the template declares counts, ``{{...}}`` inside a value is text.
 A segment whose values are worked out from the round (``Segment.values``) gets them here.
 
+**Most prompts come from the SDK's cache** (:data:`_PROMPT_CACHE_TTL_SECONDS`); a segment that is
+not cached (``Segment.cached`` False) is fetched from Langfuse every time. The SDK serves an
+expired prompt as it is and refreshes it in a background thread, so a prompt resolved once a day or
+once a week would always render the version it had the time before; a fetch that is not cached
+fails instead of falling back to it, and the caller's next attempt fetches again.
+
 **A switched-off plugin's segments are left out** (spec decision 8): a segment given as its plugin
 registered it (:class:`app.agent.round.Placed`, as a round's profile and an assembled agent give
 them) whose plugin is switched off for the round (``Round.switched_off``), or for a call outside
@@ -78,19 +84,22 @@ def _get_client() -> Langfuse:
     return _client
 
 
-def _fetch(prompt_id: str) -> tuple[PromptClient, str]:
+def _fetch(prompt_id: str, *, cached: bool) -> tuple[PromptClient, str]:
     """The prompt ``prompt_id`` this process renders, and the label it was served under.
 
     Outside prod the lane's own label is tried first; a lane with no label of its own falls back
-    to production. Blocking: the SDK makes a network round trip on a cold cache, and on every
-    fetch of a lane with no label of its own (the miss is not cached), so it is called in a
-    worker thread (:meth:`PromptSet.resolve`), which sees the lane bound on the loop.
+    to production. ``cached`` False asks the SDK for a fetch with no cache
+    (``cache_ttl_seconds=0``, see the module docstring). Blocking: the SDK makes a network round
+    trip on a cold cache, on every fetch that is not cached, and on every fetch of a lane with no
+    label of its own (the miss is not cached), so it is called in a worker thread
+    (:meth:`PromptSet.resolve`), which sees the lane bound on the loop.
     """
+    ttl = _PROMPT_CACHE_TTL_SECONDS if cached else 0
     lane = current_context().lane or settings.lane
     if lane and lane != "prod":
         try:
             prompt = _get_client().get_prompt(
-                prompt_id, label=lane, cache_ttl_seconds=_PROMPT_CACHE_TTL_SECONDS
+                prompt_id, label=lane, cache_ttl_seconds=ttl
             )
             return prompt, lane
         except Exception:
@@ -99,9 +108,7 @@ def _fetch(prompt_id: str) -> tuple[PromptClient, str]:
                 prompt_id,
                 lane,
             )
-    prompt = _get_client().get_prompt(
-        prompt_id, label=None, cache_ttl_seconds=_PROMPT_CACHE_TTL_SECONDS
-    )
+    prompt = _get_client().get_prompt(prompt_id, label=None, cache_ttl_seconds=ttl)
     return prompt, PRODUCTION
 
 
@@ -227,7 +234,9 @@ class PromptSet:
                 names.append(name)
                 if name in resolved:
                     continue
-                prompt, label = await asyncio.to_thread(_fetch, segment.prompt_id)
+                prompt, label = await asyncio.to_thread(
+                    _fetch, segment.prompt_id, cached=segment.cached
+                )
                 wanted, declared = frozenset(segment.variables), _declared(prompt)
                 if declared != wanted:
                     error = PromptConfigError(

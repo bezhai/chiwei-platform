@@ -366,12 +366,17 @@ VarsFn = Callable[["Round"], Awaitable[Mapping[str, str]]]
 class Segment:
     """One Langfuse prompt a plugin contributes. ``variables`` are the ones its template must
     declare, no more and no fewer; ``values`` works them out when a round starts, or is ``None``
-    when the caller gives them at the call."""
+    when the caller gives them at the call. ``cached`` False fetches the prompt from Langfuse every
+    time it is resolved instead of from the SDK's cache: for a prompt resolved days apart, because
+    the SDK hands back an expired prompt and only refreshes it in the background, so a cached one
+    would always render the version that was current the time before
+    (:func:`app.agent.prompts._fetch`)."""
 
     name: str
     prompt_id: str
     variables: tuple[str, ...] = ()
     values: VarsFn | None = None
+    cached: bool = True
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.prompt_id.strip():

@@ -93,6 +93,7 @@ EXPECTED_TABLES: dict[str, list[str]] = {
         "data_session_transcript",
         "data_spoken_outbound",
         "data_thinking_tokens_spent",
+        "data_weekly_note",
         "data_whereabouts",
         "message_record",
         "model_mappings",
