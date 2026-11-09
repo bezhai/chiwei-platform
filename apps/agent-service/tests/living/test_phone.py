@@ -5,9 +5,10 @@
     **按时间排，最新的在前**，没有谁被提到前面去。
   * **会话列表**要她自己翻手机才看得到：按**这条会话最后一条消息**的时间倒序，零未读
     的那些也在里面，一屏十来条、想往下自己翻。
-  * **会话详情**是点进某一条：默认落在**把她叫来的那条**（群里是 @ 她那条、私聊是最早
-    那条未读）上下，往前翻得回去。窗口、未读、游标是三件事：窗口不看游标，未读是
-    "游标之后别人发的没撤的"，游标只推到**这一页里真摆到她眼前的那些未读**中最新的一条。
+  * **会话详情**是点进某一条：有人在叫她时落在**叫她的那条**（群里是 @ 她那条、私聊是
+    最早那条未读）上下，没有就是最新那一页，往前翻得回去。窗口、未读、游标是三件事：
+    窗口不看游标，未读是"游标之后别人发的没撤的"，游标推到**时刻不晚于这一页最新那行
+    的未读**里最新的一条，往前翻不推。
   * **看手机是她的动作，成功返回之后才推游标。** 中途炸掉 = 一条都不算已读。
   * **睡觉时消息照堆、不算已读。** 她没做这个动作，游标就不动。
 """
@@ -597,10 +598,10 @@ async def test_an_empty_phone_says_so_instead_of_leaving_a_hole(living_db):
 #     （留痕迹），不含别人撤掉的。
 #   * 「其中 N 条是新的」= |U ∩ P|；「后面还有 N 条没看到」= 比这一页最新那条还新的
 #     未读；「前面还有 N 条」= 比这一页最早那条还早、她翻得回去的消息。
-#   * **游标推到 max(U ∩ P)**：只有真摆到她眼前的那些才算她看过。推到 max(U) 是改之前
-#     的做法，分页之后照搬就是"翻一页 = 几千条算看过"；推到这一页最新那条（不看是不是
-#     未读）同样不行 —— 那条可能是她自己发的、晚于任何未读，之后乱序到达、时刻更早的
-#     消息会被永久跳过。
+#   * **游标推到 U 里不晚于 P 最新那行的最新一条**：比这一页晚的都不算她看过。推到
+#     max(U) 是改之前的做法，分页之后照搬就是"翻一页 = 几千条算看过"；推到这一页最新
+#     那行本身同样不行 —— 那行可能是她自己发的、晚于任何未读，之后乱序到达、时刻更早
+#     的消息会被永久跳过。
 
 
 @pytest.mark.integration
@@ -814,7 +815,7 @@ async def test_the_window_and_the_unread_set_come_from_one_query(
     assert (
         await read_through(lane=LANE, persona_id="akao", channel_id=str(_DM))
     ) == (_ms(_at(20, PHONE_PAGE_AFTER)), shown_last), (
-        "游标没落在这一页里真摆到她眼前那些未读中最新的一条上"
+        "游标没落在不晚于这一页最新那行的未读里最新那条上"
     )
 
 
@@ -1168,29 +1169,31 @@ async def test_a_page_handle_that_points_nowhere_is_refused(living_db, in_a_mome
 
 
 # --------------------------------------------------------------------------
-# 四 · 一页一页往下读；没摆到她眼前的那些不算她看过
+# 四 · 私聊一页一页往下读，群里再打开是最新那一页
 # --------------------------------------------------------------------------
 #
 # 改之前"看一眼 = 所有未读都算看过"（游标推到 ``max(U)``）。那在"每次只给最近十条"
 # 时是有意的取舍，分页之后照搬就成了"翻一页 = 几千条算看过"。
 #
-# 新契约三条（实现写在 :meth:`app.living.phone.handset.Handset.look_at_phone` 上）：
+# 新契约（规则写在 :data:`app.data.queries.messages._CONVERSATION_PAGE_SQL` 上）：
 #
-#   * **翻页推到哪**：推到**这一页里真摆到她眼前、而且之前没看过的那些**中最新的一条。
+#   * **打开推到哪**：推到**时刻不晚于这一页最新那行的未读**里最新的一条；往前翻不推。
 #   * **通知层的瞥见不算看过**：通知一个字正文都没有，游标只有"打开会话"推得动。
-#   * **翻页期间新到的**：比这一页最新那条还新，落在水位之上，仍然是未读。
+#   * **翻页期间新到的**：比这一页最新那行还新，落在水位之上，仍然是未读。
 #
 # 剩下那半如实说：比这一页最早那条还早、又没摆出来的未读落到水位之下就此过去 ——
 # 水位是一条单调的线，不是一张"看过哪几条"的清单。她往前翻还找得到它们，只是不再
-# 算未读。
+# 算未读。群里没人叫她时这一页是最后几条，这一页之前的未读都落在这一侧；这一页里
+# 一条未读都没有时也一样。
 
 
 @pytest.mark.integration
 async def test_she_catches_up_one_page_at_a_time(living_db, in_a_moment):
-    """一屏读不完的未读，下一次打开接着往下 —— 一条都没被跳过。
+    """私聊里一屏读不完的未读，下一次打开接着往下 —— 一条都没被跳过。
 
-    锚点落在**最早那条还没看过的**上，所以每打开一次她就往前推进一页。改之前游标
-    一次就推到 ``max(U)``：她眼前只有最后十条，中间那些一个字没看过却已经算读过了。
+    私聊里每一条未读都在叫她，锚点落在**最早那条还没看过的**上，所以每打开一次她就
+    往前推进一页。改之前游标一次就推到 ``max(U)``：她眼前只有最后十条，中间那些一个
+    字没看过却已经算读过了。
     """
     await _seed_world()
     for i in range(15):
@@ -1223,16 +1226,17 @@ async def test_she_catches_up_one_page_at_a_time(living_db, in_a_moment):
 
 
 @pytest.mark.integration
-async def test_a_group_carries_on_from_where_the_last_page_ended(
+async def test_a_group_opened_again_without_anyone_calling_her_shows_the_latest(
     living_db, in_a_moment, pinned
 ):
-    """群里翻过一页之后再打开，接着上一页往下走 —— 不是退回最新那条。
+    """群里那条 @ 看过之后再打开，落在最新那条上 —— 她在这个群上已经有水位也一样。
 
-    只有第一句在叫她。第一次打开落在它上面、给到第 8 句；第二次打开时它已经读过、
-    群里没有别的召唤。锚点这时候退回最新那条的话，这一页是最后十几条，中间那二十来
-    句一个字都没摆到她眼前，却已经落到水位之下、不再算未读。
+    只有第一句在叫她。第一次打开落在它上面、给到第 8 句，她在这个群上有了水位，第 9 句
+    往后还是未读。第二次打开时没有谁在叫她，这一页就是最后 :data:`PHONE_PAGE` 条，跟真人
+    点开一个大群一样：看最新的，想看更早的自己往前翻。游标推到这一页里最新那条未读，
+    中间那几句没摆到她眼前，也随之不再算未读。
 
-    私聊里遇不到这个分支：那儿每一条未读都在叫她，锚点永远是"最早那条还没看过的"。
+    私聊不走这条路：那儿每一条未读都在叫她，锚点一直是最早那条还没看过的。
     """
     await _seed_world()
     pinned(str(_GROUP))
@@ -1254,18 +1258,18 @@ async def test_a_group_carries_on_from_where_the_last_page_ended(
     assert "第8句" in first and "第9句" not in first, (
         f"用例前提没成立：第一页该落在那条 @ 上、给到第 8 句。拿到：\n{first}"
     )
-    assert "第9句" in second, (
-        f"第二次打开退回了最新那条 —— 中间那些她一个字都没看到。拿到：\n{second}"
+    assert "第29句" in second and f"第{30 - PHONE_PAGE}句" in second, (
+        f"第二次打开没落在最新那条上 —— 这一页该是最后 {PHONE_PAGE} 条。拿到：\n{second}"
     )
-    assert "第29句" not in second, (
-        f"第二页一路跳到了最后。拿到：\n{second}"
+    assert f"第{30 - PHONE_PAGE - 1}句" not in second, (
+        f"这一页不止最后 {PHONE_PAGE} 条。拿到：\n{second}"
     )
     left = [
         e.unread
         for e in await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 11))
     ]
-    assert left == [29 - 17], (
-        f"没摆到她眼前的那些被算成看过了。拿到：{left}"
+    assert left == [], (
+        f"游标没推到这一页里最新那条未读。拿到：{left}"
     )
 
 
@@ -1304,6 +1308,44 @@ async def test_the_chatter_before_the_mention_stops_being_unread(
     )
     assert await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(21, 31)) == [], (
         "@ 之前那些没摆出来的闲聊还在通知上算没看过 —— 她会为它们反复拿起手机"
+    )
+
+
+@pytest.mark.integration
+async def test_an_unread_line_behind_a_page_of_her_own_words_stops_being_unread(
+    living_db, in_a_moment, pinned
+):
+    """最新那一页全是她自己说的，更早那条别人的未读也随这一页过去。
+
+    她在群里已经有水位，之后有人说了一句，再之后她自己连说了 :data:`PHONE_PAGE` 句，没人
+    叫她。打开落在最新那一页，这一页里一条新的都没有。游标只看"这一页里摆出来的未读"
+    的话就一步不动，那一句每次打开都摆不出来，通知上却一直挂着。
+    """
+    await _seed_world()
+    pinned(str(_GROUP))
+    await _incoming(
+        _GROUP, text_body="早", at=_at(20, 0), sender=_SOMEONE, sender_name="路人"
+    )
+    async with in_a_moment("akao", now=_at(20, 1)):
+        await look_at_phone.invoke({"channel_id": str(_GROUP)})
+    await _incoming(
+        _GROUP, text_body="有人在吗", at=_at(20, 5), sender=_SOMEONE, sender_name="路人"
+    )
+    for i in range(PHONE_PAGE):
+        await _her_own(_GROUP, text_body=f"自言自语第{i}句", at=_at(20, 10 + i))
+
+    async with in_a_moment("akao", now=_at(20, 40)):
+        seen = glance_text(await look_at_phone.invoke({"channel_id": str(_GROUP)}))
+
+    assert "有人在吗" not in seen and "其中 0 条是新的" in seen, (
+        f"用例前提没成立：这一页该是她自己说的最后 {PHONE_PAGE} 句。拿到：\n{seen}"
+    )
+    left = [
+        e.unread
+        for e in await envelopes_for(her_records=HER_RECORDS, lane=LANE, persona_id="akao", now=_at(20, 41))
+    ]
+    assert left == [], (
+        f"比这一页更早的那条未读还挂在通知上 —— 打开这个群永远清不掉它。拿到：{left}"
     )
 
 

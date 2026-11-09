@@ -508,12 +508,12 @@ async def test_the_newest_summons_wins(bot_db):
 
 
 # ---------------------------------------------------------------------------
-# 打开一条会话：锚点、这一页、前后各还剩多少，一条语句给全
+# 打开一条会话：锚点、这一页、前后各还剩多少、游标推到哪，一条语句给全
 # ---------------------------------------------------------------------------
 #
 # 锚点三选一，按优先级：她抄回来的那条（往前翻）→ 在叫她的未读里**最早**那条 → 这条
-# 会话上最新那条。取最早不取最新，是因为游标只推到"这一页里真摆出来的未读"上：取最新
-# 的话第一页就落在未读堆顶，中间那些一个字没看过却已经算读过了。
+# 会话上最新那条。取最早不取最新，是因为游标推到这一页最新那行为止：取最新的话这一页
+# 落在最后那条召唤上，更早那几条叫她的一个字没摆出来却已经算读过了。
 
 
 def _page_args(
@@ -587,13 +587,28 @@ async def test_a_group_page_starts_at_the_earliest_message_naming_her(bot_db):
     )
 
 
-async def test_a_conversation_nobody_is_calling_her_in_ends_at_the_latest(bot_db):
-    """没有谁在叫她时锚点是最新那条，所以这一页就是最后几条。"""
+@pytest.mark.parametrize(
+    "read_through",
+    [None, 1],
+    ids=["never-opened", "opened-with-unread-left"],
+)
+async def test_a_conversation_nobody_is_calling_her_in_ends_at_the_latest(
+    bot_db, read_through
+):
+    """没有谁在叫她时锚点是最新那条，所以这一页就是最后几条。
+
+    她在这条会话上有没有水位都一样：读到闲聊1、后面还有 4 条未读时也落在最新那条上。
+    """
     await _seed_her_phone()
     for i in range(6):
         await _message(_GROUP, at=_at(9, i), body=f"闲聊{i}", scope="group")
+    cursor = (
+        {}
+        if read_through is None
+        else {"after_ms": _ms(_at(9, read_through)), "after_id": "z"}
+    )
     rows = await find_conversation_page(
-        **{**_page_args(_GROUP, page=3, after_n=3), "is_direct": False}
+        **{**_page_args(_GROUP, page=3, after_n=3, **cursor), "is_direct": False}
     )
     assert [r["at_ms"] for r in rows] == [_ms(_at(9, i)) for i in (5, 4, 3)]
     assert rows[0]["earlier_total"] == 3
@@ -608,6 +623,28 @@ async def test_paging_back_ends_at_the_line_she_copied(bot_db):
     )
     assert [r["at_ms"] for r in rows] == [_ms(_at(9, i)) for i in (5, 4, 3)]
     assert rows[0]["earlier_total"] == 3
+
+
+async def test_only_a_page_opened_without_a_handle_moves_her_cursor(bot_db):
+    """不带 ``before_id`` 打开的那一页给出游标推到哪；往前翻的那一页不给，哪怕里面全是未读。"""
+    await _seed_her_phone()
+    ids = [await _message(_DM, at=_at(9, i), body=f"第{i}条") for i in range(10)]
+
+    opened = await find_conversation_page(**_page_args(_DM, page=3, after_n=3))
+    paged_back = await find_conversation_page(
+        **_page_args(_DM, before_id=str(ids[5]), page=3)
+    )
+
+    # 打开：锚点是第0条（最早那条在叫她的未读），这一页第0..第2。
+    assert (opened[0]["read_through_id"], opened[0]["read_through_ms"]) == (
+        str(ids[2]),
+        _ms(_at(9, 2)),
+    ), f"打开那一页没推到不晚于它最新那行的未读里最新那条：{opened[0]}"
+    assert [r["is_unread"] for r in paged_back] == [True, True, True]
+    assert (
+        paged_back[0]["read_through_id"],
+        paged_back[0]["read_through_ms"],
+    ) == (None, None), f"往前翻那一页推了游标：{paged_back[0]}"
 
 
 async def test_a_page_handle_from_another_conversation_yields_nothing(bot_db):
