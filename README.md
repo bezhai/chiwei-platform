@@ -13,7 +13,7 @@ apps/
   lane-sidecar/          # 注入到每个业务 Pod 的透明代理容器，改写出站服务名做泳道路由 (Go)；非独立部署
   lark-service/          # 飞书渠道服务：websocket 长连入站 + common 投影 + 规则指令 + 出站发送撤回 (Bun/TS)
   lite-registry/         # 泳道注册表：watch K8s Services，提供泳道路由真值表 (Go)
-  media-sync-worker/     # Pixiv / Bangumi 媒体素材定时同步 (Bun/TS)
+  media-sync-worker/     # Pixiv 媒体素材定时同步 (Bun/TS)
   monitor-dashboard/     # 运维后台 BFF + 审计落库 (Bun/TS)
   monitor-dashboard-web/ # 运维后台前端 SPA (React)
   paas-engine/           # 自建 PaaS：Kaniko 构建、部署、网关规则、配置管理 (Go)

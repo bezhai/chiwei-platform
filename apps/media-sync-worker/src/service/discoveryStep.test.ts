@@ -9,10 +9,10 @@ describe('discovery operation deadline', () => {
         const step = createDiscoveryStep('author-1', 15, (message) => events.push(message));
         let enqueued = false;
         const discover = async () => {
-            await step('redis.hget', () => read);
+            await step('mongo.history', () => read);
             enqueued = true;
         };
-        await expect(discover()).rejects.toThrow('author=author-1 stage=redis.hget timed out after 15ms');
+        await expect(discover()).rejects.toThrow('author=author-1 stage=mongo.history timed out after 15ms');
         resolveRead(['late']);
         await Bun.sleep(5);
         expect(enqueued).toBe(false);

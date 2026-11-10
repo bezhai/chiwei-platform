@@ -64,7 +64,7 @@ flowchart TB
 
     subgraph aside["旁路 · 与主链路无实时耦合"]
         AW["alert-webhook<br/>告警转飞书"]
-        MS["media-sync-worker<br/>Pixiv / Bangumi 素材同步"]
+        MS["media-sync-worker<br/>Pixiv 素材同步"]
         TAG["tagger-service<br/>GPU 打标(裸机)"]
     end
 
@@ -261,7 +261,7 @@ flowchart LR
 | PostgreSQL · 业务库(chiwei) | lark-service / lark-outbound、channel-server / chat-response-worker、agent-service、world(自己的连续上下文、通信机制的 `message_record`、成本记录)、tool-service、monitor-dashboard、qq-gateway,以及 paas-engine 的 ops 网关(读 + DDL/DML 审批) |
 | PostgreSQL · paas_engine 库 | paas-engine 自己 |
 | MongoDB | lark-service(飞书原始报文 `lark_event`)、media-sync-worker(媒体)、monitor-dashboard。**channel-server 拆分后不再连 Mongo** |
-| Redis | lark-service、lark-outbound(图片注册表)、channel-server、chat-response-worker(图片注册表)、agent-service、tool-service、media-sync-worker、qq-gateway |
+| Redis | lark-service、lark-outbound(图片注册表)、channel-server、chat-response-worker(图片注册表)、agent-service、tool-service、qq-gateway |
 | TOS(对象存储) | tool-service(图像管道上传);lark-service / channel-server / agent-service 只在消息记录里传递 TOS 文件名,不直连 |
 | MinIO(对象存储) | media-sync-worker(素材入库)、tagger-service(打标取图)、lark-service(本地 pixiv 图源) |
 | Harbor(镜像仓库) | paas-engine(Kaniko 构建产物) |
@@ -290,7 +290,7 @@ flowchart LR
 | lite-registry | Go | 网络基建 | watch K8s Service,提供泳道路由真值表 |
 | lane-sidecar | Go | 网络基建 | 注入每 pod,透明改写出站服务名做泳道路由 |
 | alert-webhook | Go | 旁路 | Prometheus 告警转飞书 |
-| media-sync-worker | Bun/TS | 旁路 | 定时从 Pixiv/Bangumi 同步素材到 MongoDB / MinIO,并驱动 tagger-service 打标 |
+| media-sync-worker | Bun/TS | 旁路 | 定时从 Pixiv 同步素材到 MongoDB / MinIO,并驱动 tagger-service 打标 |
 | tagger-service | Python | 旁路 | Pixiv 图片 GPU 打标管线(裸机 systemd,不进 K8s) |
 
 **共享包(不部署)**:`ts-shared`(TS 中间件/缓存/日志/HTTP/MongoDB/LaneRouter SDK/实体)、`py-shared`(Python 同类基建 + LaneRouter SDK + 动态配置)、`lark-utils`(飞书 SDK 封装)、`pixiv-client`(Pixiv API client)。

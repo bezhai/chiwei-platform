@@ -1,5 +1,11 @@
 # pixiv 鉴权字段注入迁内网（走 Dynamic Config）
 
+> **状态：已上线（#269），Redis 回退已经去掉。** 之后 chiwei_bot_server 删除了全部数据库连接，包括 Redis：
+> 它不再保存任何鉴权信息，只用请求里的 `pixiv_auth`，不带 `pixiv_auth` 或其中缺少 `cookie` / `user_agent`
+> 时返回 400。所以 Dynamic Config 的 `pixiv_cookie` 和 `pixiv_user_agent` 必须配置，`pixiv_sec_ch_ua` 可选。
+> 文中的「Redis 逐字段回退」「过渡期维持 Redis 初值」和「回滚时 server 自动回退读 Redis」都已不成立。
+> 文末「可再议」的第一条和第三条也已完成，见那里的标注。
+
 ## Problem
 
 pixiv 的会话凭证（`cookie`/`user-agent`/`sec-ch-ua`）现在存在公网服务 chiwei_bot_server（`www.yuanzhi.xyz`）的 Redis 里，由它的 `/api/v2/proxy`（图片下载走同一 `buildHeaders`）在请求 pixiv.net 时注入。凭证存在外网、归它的 JWT `setting` 模块管，轮换和管控都在内网够不着的地方。
@@ -57,6 +63,6 @@ chiwei_bot_server `/api/v2/proxy` 与图片下载接口的内网调用方（grep
 
 下面是"media sync 链路收口"更大范围的探查结论，本次不做，留待另议：
 
-- chiwei_bot_server 的 image-store 业务逻辑（去重、`img_map`/`trans_map` 写入、列表查询、飞书上传回填）收口进内网 media-sync-worker，让 server 只剩 proxy 透传 + 瘦下载（下字节 + 存 OSS + 返回 key）。
+- chiwei_bot_server 的 image-store 业务逻辑（去重、`img_map`/`trans_map` 写入、列表查询、飞书上传回填）收口进内网 media-sync-worker，让 server 只剩 proxy 透传 + 瘦下载（下字节 + 存 OSS + 返回 key）。**已完成（2026-11）**：server 只剩 `/api/v2/proxy` 和 `/api/v2/image-store/download` 两个接口，下载接口在响应里返回 OSS key，去重和目录记录由 worker 负责。
 - channel-server 的发图功能（`发图`/`换一批`/`查看详情`/每日推图）去留——若收口则交互式发图无法保留（飞书事件只进 channel-server），需产品取舍。
-- `img_map`/`trans_map`/`download_task` 这份 `chiwei` 库当前在阿里云外网、worker 与 chiwei_bot_server 共用，迁内网是有状态 owner 切换，需单独的 cutover 与回滚方案。
+- `img_map`/`trans_map`/`download_task` 这份 `chiwei` 库当前在阿里云外网、worker 与 chiwei_bot_server 共用，迁内网是有状态 owner 切换，需单独的 cutover 与回滚方案。**已完成（2026-11）**：数据一次性导入集群 Mongo 的 `chiwei_pixiv` 库（`pixiv_images`、`pixiv_download_tasks`、`pixiv_tag_translations`、`pixiv_author_downloads`），三个名单和 `version` 改放 Dynamic Config；worker 和 server 都不再连接云机器上的 Mongo / Redis。

@@ -1,5 +1,10 @@
 # Pixiv discovery timeout
 
+> **Status: historical spec.** Since 2026-11 the worker no longer connects to Redis: the block lists
+> come from Dynamic Config and the author throttle lives in the cluster Mongo (`chiwei_pixiv`). The
+> worker Redis command timeout described below is gone with the Redis client; the per-step discovery
+> deadline (`DOWNLOAD_DISCOVERY_STEP_TIMEOUT_MS`) still works as described.
+
 ## Goal
 
 Prevent a stalled external call from blocking daily author discovery indefinitely.

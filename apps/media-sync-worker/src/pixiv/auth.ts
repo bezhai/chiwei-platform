@@ -8,8 +8,9 @@ export const PIXIV_SEC_CH_UA_KEY = "pixiv_sec_ch_ua";
 
 /**
  * 从 Dynamic Config 读 pixiv 鉴权字段（cookie / user-agent / sec-ch-ua）。
- * 只放非空字段；三项都空时返回 undefined —— 此时 worker 不带 pixiv_auth，
- * chiwei_bot_server 全量回退读自己的 Redis（Dynamic Config 还没配时的零回归路径）。
+ * 只放非空字段；三项都空时返回 undefined，此时 worker 不带 pixiv_auth。
+ * chiwei_bot_server 自己不保存鉴权信息：不带 pixiv_auth、或其中缺少 cookie / user_agent 的请求，
+ * 它直接返回 400，所以 pixiv_cookie 和 pixiv_user_agent 必须配置，pixiv_sec_ch_ua 可选。
  */
 export async function readPixivAuth(
   config: DynamicConfigReader,

@@ -25,12 +25,12 @@ describe('readPixivAuth：从 Dynamic Config 读 pixiv 鉴权字段', () => {
     expect(auth).toEqual({ cookie: 'ck', user_agent: 'ua', sec_ch_ua: 'sec' });
   });
 
-  it('只配了 cookie：只返回非空字段（空的交给 server 逐字段回退）', async () => {
+  it('只配了 cookie：只返回非空字段', async () => {
     const auth = await readPixivAuth(fakeConfig({ [PIXIV_COOKIE_KEY]: 'ck' }));
     expect(auth).toEqual({ cookie: 'ck' });
   });
 
-  it('三项都没配：返回 undefined（worker 不带 pixiv_auth，server 全量回退 Redis）', async () => {
+  it('三项都没配：返回 undefined（worker 不带 pixiv_auth）', async () => {
     const auth = await readPixivAuth(fakeConfig({}));
     expect(auth).toBeUndefined();
   });
