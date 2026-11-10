@@ -8,11 +8,11 @@ import {
   SearchUnDownloadTask,
   Success,
 } from "../mongo/service";
-import { EnumIllustType } from "./types";
-import { getIllustInfoWithCache, getIllustPageDetail } from "../pixiv/pixiv";
-import redisClient from "../redis/redisClient";
-import { MultiTag } from "../mongo/types";
-import { getContent } from "../pixiv/pixivProxy";
+import type { IllustrationPageDetail } from "@inner/pixiv-client";
+import { EnumIllustType, type GetIllustInfoBody } from "./types";
+import { downloadToOss, getIllustInfoWithCache, getIllustPageDetail } from "../pixiv/pixiv";
+import { getDownloadFilters, type DownloadFilters } from "../pixiv/settings";
+import { DownloadTask, MultiTag } from "../mongo/types";
 import {
   elapsedMs,
   loadConsumerGuardConfig,
@@ -27,10 +27,8 @@ import {
   runWithTimeout,
 } from "./consumerWatchdog";
 import { runPostDownloadSync } from "./postDownloadSync";
-import {
-  assertPageDownloadsSucceeded,
-  type PageDownloadOutcome,
-} from "./pageDownloadResult";
+import { assertPageDownloadsSucceeded } from "./pageDownloadResult";
+import { downloadPage, type PageDownloadDeps } from "./pageDownload";
 
 type DownloadIllustStatus =
   | "completed"
@@ -56,10 +54,38 @@ interface DownloadIllustTiming {
   error?: string;
 }
 
-interface PageDownloadMetrics extends PageDownloadOutcome {
-  proxyDownloadMs: number;
-  addImageMs: number;
-  postSyncMs: number;
+export type ClaimOutcome =
+  | { status: "claimed"; task: DownloadTask; filters: DownloadFilters }
+  | { status: "idle" }
+  | { status: "filters_unavailable"; error: string };
+
+interface ClaimDeps {
+  readFilters: () => Promise<DownloadFilters>;
+  claim: () => Promise<DownloadTask | null>;
+}
+
+/**
+ * 先读名单再领取任务。
+ *
+ * 领取会消耗任务的重试预算（retry_time +1）。如果先领取、后读名单，Dynamic Config
+ * 一出故障，consumer 会把碰到的每个任务都标失败，几分钟内整个队列都会进 Dead。
+ * 所以名单读不到时不领取，由调用方退避后再试。
+ */
+export async function claimNextTask(
+  deps: ClaimDeps = { readFilters: getDownloadFilters, claim: () => SearchUnDownloadTask() }
+): Promise<ClaimOutcome> {
+  let filters: DownloadFilters;
+  try {
+    filters = await deps.readFilters();
+  } catch (err) {
+    return { status: "filters_unavailable", error: err instanceof Error ? err.message : String(err) };
+  }
+
+  const task = await deps.claim();
+  if (!task) {
+    return { status: "idle" };
+  }
+  return { status: "claimed", task, filters };
 }
 
 // 连续超时退出阈值：约 3 × 循环上限（默认 3 小时）不消费即判定系统性故障。
@@ -97,26 +123,33 @@ export async function consumeDownloadTaskAsync() {
   // 单轮循环体（被 watchdog 包裹；watchdog 放弃后本轮仍在后台继续，
   // 其迟到的 Success/Fail 收尾由领取代次条件化静默丢弃）
   const runOneCycle = async () => {
-    // 1. 获取未下载的任务
-    const task = await SearchUnDownloadTask();
+    // 1. 读名单并领取一个任务
+    const next = await claimNextTask();
 
-    if (!task) {
+    if (next.status !== "claimed") {
       sleepTime = sleepTime >= 60 ? sleepTime : sleepTime * 2;
-      console.log(
-        `No pending tasks found. Waiting for ${sleepTime} seconds...`
-      );
+      if (next.status === "filters_unavailable") {
+        console.error(
+          `Download filters unavailable, not claiming tasks: ${next.error}. Waiting for ${sleepTime} seconds...`
+        );
+      } else {
+        console.log(
+          `No pending tasks found. Waiting for ${sleepTime} seconds...`
+        );
+      }
       await setTimeout(sleepTime * 1000);
       return;
     }
 
     sleepTime = 1;
+    const { task, filters } = next;
 
     // 2. 尝试获取下载许可
     await downloadLimiter.tryDownload(); // 等待限流器允许下载
 
     try {
       // 3. 下载任务
-      await downloadIllust(task.illust_id, delayConfig);
+      await downloadIllust(task.illust_id, filters, delayConfig);
       console.log(`Download successful for task: ${task.illust_id}`);
 
       // 4. 标记任务成功
@@ -155,14 +188,34 @@ export async function consumeDownloadTaskAsync() {
   }
 }
 
+/** 下载一个作品用到的外部调用；默认是生产实现，测试注入替身。 */
+export interface IllustDownloadDeps extends Omit<PageDownloadDeps, "waitBeforeDownload"> {
+  getIllustInfo: (illustId: string) => Promise<GetIllustInfoBody>;
+  getIllustPageDetail: (illustId: string) => Promise<IllustrationPageDetail[]>;
+  searchAndAddTranslate: (word: string, en: string, zh: string) => Promise<string>;
+}
+
+const defaultIllustDownloadDeps: IllustDownloadDeps = {
+  getIllustInfo: getIllustInfoWithCache,
+  getIllustPageDetail,
+  searchAndAddTranslate,
+  checkExistPixivImg,
+  downloadToOss,
+  addImage,
+  runPostDownloadSync,
+};
+
 /**
  * 下载插画
  * @param illustId - 插画的 ID
+ * @param filters - 领取任务前读到的名单
  * @throws 如果下载失败，将抛出错误
  */
-async function downloadIllust(
+export async function downloadIllust(
   illustId: string,
-  delayConfig: DownloadDelayConfig = loadDownloadDelayConfig()
+  filters: DownloadFilters,
+  delayConfig: DownloadDelayConfig = loadDownloadDelayConfig(),
+  deps: IllustDownloadDeps = defaultIllustDownloadDeps
 ) {
   const totalStartedAt = nowMs();
   const timing: DownloadIllustTiming = {
@@ -184,7 +237,7 @@ async function downloadIllust(
   // 获取插画信息（缓存包装器）
   try {
     const illustInfoStartedAt = nowMs();
-    const illustInfo = await getIllustInfoWithCache(illustId);
+    const illustInfo = await deps.getIllustInfo(illustId);
     timing.illust_info_ms = elapsedMs(illustInfoStartedAt);
 
     await waitMs(delayConfig.afterIllustInfoMs);
@@ -200,8 +253,7 @@ async function downloadIllust(
     }
 
     // 检查是否是被禁用户
-    const bannedUsers = await redisClient.smembers("ban_user");
-    if (bannedUsers.includes(userId)) {
+    if (filters.bannedUsers.includes(userId)) {
       timing.status = "skipped_banned_user";
       console.warn(`用户 ${userId} 已被封禁`);
       return;
@@ -216,8 +268,7 @@ async function downloadIllust(
         isR18Illust = true;
       }
 
-      const skipWords = await redisClient.smembers("skip_words");
-      if (skipWords.some((v: string) => filterTag.includes(v))) {
+      if (filters.skipWords.some((v: string) => filterTag.includes(v))) {
         timing.status = "skipped_sensitive_word";
         console.warn(`插画 ${illustId} 包含敏感词 ${filterTag}`);
         return;
@@ -228,7 +279,7 @@ async function downloadIllust(
     let pages;
     try {
       const pageDetailStartedAt = nowMs();
-      pages = await getIllustPageDetail(illustId);
+      pages = await deps.getIllustPageDetail(illustId);
       timing.page_detail_ms = elapsedMs(pageDetailStartedAt);
     } catch (error) {
       throw error;
@@ -249,7 +300,7 @@ async function downloadIllust(
         continue;
       }
 
-      const translation = await searchAndAddTranslate(
+      const translation = await deps.searchAndAddTranslate(
         tag.tag,
         tag.translation?.en ?? "",
         tag.translation?.zh ?? ""
@@ -263,91 +314,22 @@ async function downloadIllust(
     timing.translate_ms = elapsedMs(translateStartedAt);
 
     // 并发控制器（限制并发数为 2）
-    const tasks = pages.map((page, index) => async (): Promise<PageDownloadMetrics> => {
-      const metrics = createPageMetrics();
-      const imageUrl = page.urls?.original;
-      if (!imageUrl) {
-        metrics.status = "missing_url";
-        console.warn(`插画 ${illustId} 第 ${index + 1} 页图片地址为空`);
-        return metrics;
-      }
-
-      const tempSplitRes = imageUrl.split("/");
-      const pixivAddr = tempSplitRes[tempSplitRes.length - 1];
-
-      // 检查图片是否已存在
-      if (await checkExistPixivImg(pixivAddr)) {
-        const postSyncStartedAt = nowMs();
-        try {
-          await runPostDownloadSync(pixivAddr);
-          metrics.postSyncMs = elapsedMs(postSyncStartedAt);
-          metrics.status = "exists";
-          console.info(
-            `插画 ${illustId} 第 ${index + 1} 页图片已上传，后处理已重放`
-          );
-        } catch (postSyncError) {
-          metrics.postSyncMs = elapsedMs(postSyncStartedAt);
-          metrics.status = "post_sync_failed";
-          metrics.error = formatError(postSyncError);
-          console.error(
-            `重放插画 ${illustId} 第 ${index + 1} 页后处理失败: ${postSyncError}`
-          );
+    const image = {
+      need_download: true,
+      author: illustInfo.userName,
+      author_id: userId,
+      is_r18: isR18Illust,
+      title: illustInfo.illustTitle,
+    };
+    const tasks = pages.map((page, pageIndex) => () =>
+      downloadPage(
+        { illustId, pageIndex, imageUrl: page.urls?.original, tags: multiTags, image },
+        {
+          ...deps,
+          waitBeforeDownload: () => waitMs(delayConfig.beforePageDownloadMs),
         }
-        return metrics;
-      }
-
-      await waitMs(delayConfig.beforePageDownloadMs);
-
-      console.info(`开始下载插画 ${illustId} 第 ${index + 1} 页`);
-      try {
-        const downloadStartedAt = nowMs();
-        await getContent(imageUrl); // 下载图片内容
-        metrics.proxyDownloadMs = elapsedMs(downloadStartedAt);
-      } catch (downloadError) {
-        metrics.status = "download_failed";
-        metrics.error = formatError(downloadError);
-        console.error(
-          `下载插画 ${illustId} 第 ${index + 1} 页失败: ${downloadError}`
-        );
-        return metrics;
-      }
-
-      // 上传图片信息至数据库
-      try {
-        const addImageStartedAt = nowMs();
-        await addImage(multiTags, {
-          pixiv_name: pixivAddr,
-          need_download: true,
-          author: illustInfo.userName,
-          author_id: userId,
-          is_r18: isR18Illust,
-          title: illustInfo.illustTitle,
-        });
-        metrics.addImageMs = elapsedMs(addImageStartedAt);
-      } catch (uploadError) {
-        metrics.status = "add_image_failed";
-        metrics.error = formatError(uploadError);
-        console.error(
-          `上传插画 ${illustId} 第 ${index + 1} 页失败: ${uploadError}`
-        );
-        return metrics;
-      }
-
-      const postSyncStartedAt = nowMs();
-      try {
-        await runPostDownloadSync(pixivAddr);
-        metrics.postSyncMs = elapsedMs(postSyncStartedAt);
-        metrics.status = "downloaded";
-      } catch (postSyncError) {
-        metrics.postSyncMs = elapsedMs(postSyncStartedAt);
-        metrics.status = "post_sync_failed";
-        metrics.error = formatError(postSyncError);
-        console.error(
-          `插画 ${illustId} 第 ${index + 1} 页后处理失败: ${postSyncError}`
-        );
-      }
-      return metrics;
-    });
+      )
+    );
 
     // 使用并发限制执行下载任务
     const pageMetrics = await limitConcurrency(2, tasks);
@@ -379,15 +361,6 @@ async function downloadIllust(
     timing.total_ms = elapsedMs(totalStartedAt);
     console.info(`download_illust_timing ${JSON.stringify(timing)}`);
   }
-}
-
-function createPageMetrics(): PageDownloadMetrics {
-  return {
-    status: "downloaded",
-    proxyDownloadMs: 0,
-    addImageMs: 0,
-    postSyncMs: 0,
-  };
 }
 
 function formatError(err: unknown): string {

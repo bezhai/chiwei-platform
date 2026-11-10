@@ -1,17 +1,32 @@
-import { PixivClient, createPixivClient, FollowerInfo, IllustrationPageDetail } from "@inner/pixiv-client";
-import redisClient from "../redis/redisClient";
+import { PixivClient, FollowerInfo, IllustrationPageDetail } from "@inner/pixiv-client";
+import type axios from "axios";
 import { GetIllustInfoBody } from "../service/types";
 import { cacheProxy } from "../utils/cache";
-import { getPixivAuth } from "./auth";
+import { dynamicConfig, type DynamicConfigReader } from "../config/dynamicConfig";
+import { readPixivAuth } from "./auth";
+import { readPixivVersion } from "./settings";
 
-// 创建 Pixiv 客户端实例
-const pixivClient = createPixivClient({
-  proxyHost: process.env.PIXIV_PROXY_HOST || 'http://www.yuanzhi.xyz',
-  httpSecret: process.env.HTTP_SECRET || process.env.PROXY_HTTP_SECRET || '',
-  defaultUserId: '35384654',
-  getVersion: async () => redisClient.get("version"),
-  authProvider: getPixivAuth,
-});
+/**
+ * worker 用的 Pixiv 客户端：鉴权头和 version 参数每次请求时从 Dynamic Config 读。
+ * 参数只给测试注入用。
+ */
+export function createWorkerPixivClient(
+  deps: { config?: DynamicConfigReader; httpClient?: typeof axios } = {}
+): PixivClient {
+  const config = deps.config ?? dynamicConfig;
+  return new PixivClient(
+    {
+      proxyHost: process.env.PIXIV_PROXY_HOST || 'http://www.yuanzhi.xyz',
+      httpSecret: process.env.HTTP_SECRET || process.env.PROXY_HTTP_SECRET || '',
+      defaultUserId: '35384654',
+      getVersion: () => readPixivVersion(config),
+      authProvider: () => readPixivAuth(config),
+    },
+    deps.httpClient
+  );
+}
+
+const pixivClient = createWorkerPixivClient();
 
 /**
  * 获取用户指定标签下的关注列表
@@ -68,6 +83,15 @@ async function getIllustInfoWithCache(illustId: string): Promise<GetIllustInfoBo
  */
 export async function getIllustPageDetail(illustId: string): Promise<IllustrationPageDetail[]> {
   return pixivClient.getIllustPageDetail(illustId);
+}
+
+/**
+ * 让 server 下载图片并上传 OSS
+ * @param imageUrl Pixiv 原图 URL
+ * @returns server 实际写入的 OSS key
+ */
+export async function downloadToOss(imageUrl: string): Promise<string> {
+  return pixivClient.downloadContent(imageUrl);
 }
 
 export { getFollowersByTag, getAuthorArtwork, getTagArtwork, getIllustInfoWithCache, getIllustInfo };

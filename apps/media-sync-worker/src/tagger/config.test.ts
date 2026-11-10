@@ -16,14 +16,10 @@ describe('loadTaggerResultMongoConfig', () => {
         expect(config).toBeNull();
     });
 
-    it('does not fall back to legacy MONGO_* source envs', () => {
+    it('requires TAGGER_RESULT_MONGO_HOST once enabled', () => {
         expect(() =>
             loadTaggerResultMongoConfig({
                 TAGGER_RESULT_MONGO_ENABLED: 'true',
-                MONGO_HOST: 'legacy-source-mongo',
-                MONGO_PORT: '27017',
-                MONGO_INITDB_ROOT_USERNAME: 'legacy-user',
-                MONGO_INITDB_ROOT_PASSWORD: 'legacy-pass',
             })
         ).toThrow('TAGGER_RESULT_MONGO_HOST is required');
     });

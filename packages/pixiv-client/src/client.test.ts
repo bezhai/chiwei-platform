@@ -1,13 +1,15 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { PixivClient } from './client';
 
+const OSS_KEY = 'pixiv_img_v2/20261110/img_p0.png';
+
 // 注入一个假的 axios 风格 httpClient：记录每次 post 的 body，返回同时满足
-// pixivProxy（{error,body}）与 downloadContent（{code,msg}）两种调用的响应壳。
-function makeMockHttp() {
+// pixivProxy（{error,body}）与 downloadContent（{code,msg,data}）两种调用的响应壳。
+function makeMockHttp(data: unknown = { error: false, body: {}, code: 0, msg: 'ok', data: { tos_file_name: OSS_KEY } }) {
     const calls: Array<{ url: string; body: any }> = [];
     const post = mock(async (url: string, body: any) => {
         calls.push({ url, body });
-        return { data: { error: false, body: {}, code: 0, msg: 'ok' } };
+        return { data };
     });
     return { post, calls };
 }
@@ -132,5 +134,36 @@ describe('PixivClient 鉴权头注入（pixiv_auth）', () => {
         await client.downloadContent('https://i.pximg.net/img_p0.png');
 
         expect(http.calls[0].body.pixiv_auth).toBeUndefined();
+    });
+});
+
+describe('PixivClient.downloadContent 返回 server 上传后的 OSS key', () => {
+    function clientWith(http: ReturnType<typeof makeMockHttp>) {
+        return new PixivClient({ proxyHost: 'http://srv', httpSecret: 's' }, http as any);
+    }
+
+    it('returns data.tos_file_name from the server response', async () => {
+        const http = makeMockHttp({ code: 0, msg: 'success', data: { tos_file_name: OSS_KEY } });
+
+        await expect(clientWith(http).downloadContent('https://i.pximg.net/img_p0.png')).resolves.toBe(OSS_KEY);
+    });
+
+    // An old server answers {code:0, data:null}. Treating that as success would
+    // let the worker write a catalog record without a key.
+    it.each([
+        ['data is null', null],
+        ['data has no tos_file_name', {}],
+        ['tos_file_name is empty', { tos_file_name: '' }],
+        ['tos_file_name is not a string', { tos_file_name: 42 }],
+    ])('rejects a code=0 response when %s', async (_case, data) => {
+        const http = makeMockHttp({ code: 0, msg: 'success', data });
+
+        await expect(clientWith(http).downloadContent('https://i.pximg.net/img_p0.png')).rejects.toThrow('tos_file_name');
+    });
+
+    it('still rejects a non-zero code with the server message', async () => {
+        const http = makeMockHttp({ code: 1, msg: 'upload failed', data: null });
+
+        await expect(clientWith(http).downloadContent('https://i.pximg.net/img_p0.png')).rejects.toThrow('upload failed');
     });
 });

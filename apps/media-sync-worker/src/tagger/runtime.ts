@@ -7,7 +7,8 @@ import {
     type TaggerTriggerConfig,
 } from './config';
 import { createTaggerResultMongo, type TaggerResultMongo } from './resultMongo';
-import { startTaggerCallbackServer } from './callbackServer';
+import { createTaggerCallbackHandler, startTaggerCallbackServer } from './callbackServer';
+import { cloudImportHandlerFromEnv, routeCloudImport } from '../cloudImport/http';
 import { TaggerSubmitClient } from './submitClient';
 import { startTaggerTriggerWorker, type TaggerTriggerWorker } from './triggerWorker';
 import { startTaggerProjectionWorker, type TaggerProjectionWorker } from './projectionWorker';
@@ -34,10 +35,7 @@ export async function initTaggerRuntime(): Promise<void> {
     const projectionConfig = loadTaggerProjectionConfig();
     const callbackServerConfig = loadTaggerCallbackServerConfig();
 
-    validateTaggerFeatureFlags({
-        triggerEnabled: triggerConfig !== null,
-        projectionEnabled: projectionConfig !== null,
-    });
+    validateTaggerFeatureFlags({ triggerEnabled: triggerConfig !== null });
 
     if (!resultMongoConfig) {
         if (triggerConfig || callbackServerConfig || projectionConfig) {
@@ -53,8 +51,15 @@ export async function initTaggerRuntime(): Promise<void> {
     console.log(
         `Tagger result Mongo ready: host=${resultMongoConfig.host} database=${resultMongoConfig.database}`
     );
+    // 一次性云端导入的 admin 路由（/internal/media-sync/）挂在同一个 server 上，T6 删除
     const callbackServer = callbackServerConfig
-        ? startTaggerCallbackServer(resultMongo.repository, callbackServerConfig)
+        ? startTaggerCallbackServer(
+            routeCloudImport(
+                cloudImportHandlerFromEnv(),
+                createTaggerCallbackHandler(resultMongo.repository, callbackServerConfig)
+            ),
+            callbackServerConfig.port
+        )
         : null;
     const submitClient = triggerConfig
         ? new TaggerSubmitClient({
@@ -159,19 +164,11 @@ export async function syncMinioAndMaybeSubmitTagger(pixivAddr: string): Promise<
 type RuntimeFlagEnv = Record<string, string | undefined>;
 
 export function validateTaggerFeatureFlags(
-    features: { triggerEnabled: boolean; projectionEnabled: boolean },
+    features: { triggerEnabled: boolean },
     env: RuntimeFlagEnv = process.env
 ): void {
     if (features.triggerEnabled && !isEnabled(env.MINIO_SYNC_ENABLED)) {
         throw new Error('MINIO_SYNC_ENABLED must be true when TAGGER_TRIGGER_ENABLED is true');
-    }
-    if (
-        (features.triggerEnabled || features.projectionEnabled)
-        && !isEnabled(env.PIXIV_IMAGE_MIRROR_MONGO_ENABLED)
-    ) {
-        throw new Error(
-            'PIXIV_IMAGE_MIRROR_MONGO_ENABLED must be true when tagger trigger or projection is enabled'
-        );
     }
 }
 

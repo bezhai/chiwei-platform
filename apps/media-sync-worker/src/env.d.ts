@@ -1,21 +1,11 @@
 declare namespace NodeJS {
   interface ProcessEnv {
-    REDIS_PASSWORD: string;
     APP_ID: string;
     APP_SECRET: string;
-    MONGO_INITDB_ROOT_USERNAME: string;
-    MONGO_INITDB_ROOT_PASSWORD: string;
     SELF_CHAT_ID: string;
     HTTP_SECRET: string;
     PROXY_HTTP_SECRET: string;
-    REDIS_HOST: string;
-    REDIS_PORT: string;
-    BANGUMI_ACCESS_TOKEN: string;
-    MONGO_HOST: string;
-    MONGO_PORT: string;
-    MONGO_CONNECT_TIMEOUT_MS: string;
     DOWNLOAD_CRON: string;
-    REDIS_COMMAND_TIMEOUT_MS: string;
     DOWNLOAD_DISCOVERY_STEP_TIMEOUT_MS: string;
     DOWNLOAD_AFTER_ILLUST_INFO_DELAY_MS: string;
     DOWNLOAD_BEFORE_PAGE_DOWNLOAD_DELAY_MS: string;
@@ -36,21 +26,14 @@ declare namespace NodeJS {
     MINIO_SECRET_KEY: string;
     MINIO_BUCKET: string;
     MINIO_SYNC_ENABLED: string;
-    PIXIV_IMAGE_MIRROR_MONGO_ENABLED: string;
-    PIXIV_IMAGE_MIRROR_MONGO_HOST: string;
-    PIXIV_IMAGE_MIRROR_MONGO_PORT: string;
-    PIXIV_IMAGE_MIRROR_MONGO_DATABASE: string;
-    PIXIV_IMAGE_MIRROR_MONGO_USERNAME: string;
-    PIXIV_IMAGE_MIRROR_MONGO_PASSWORD: string;
-    PIXIV_IMAGE_MIRROR_MONGO_AUTH_SOURCE: string;
-    PIXIV_IMAGE_MIRROR_MONGO_CONNECT_TIMEOUT_MS: string;
-    POST_DOWNLOAD_RECONCILE_ENABLED: string;
-    POST_DOWNLOAD_RECONCILE_BATCH_SIZE: string;
-    POST_DOWNLOAD_RECONCILE_RETRY_BATCH_SIZE: string;
-    POST_DOWNLOAD_RECONCILE_IDLE_DELAY_MS: string;
-    POST_DOWNLOAD_RECONCILE_RETRY_DELAY_MS: string;
-    POST_DOWNLOAD_RECONCILE_LEASE_MS: string;
-    POST_DOWNLOAD_RECONCILE_EPOCH_DELAY_MS: string;
+    PIXIV_MONGO_HOST: string;
+    PIXIV_MONGO_PORT: string;
+    PIXIV_MONGO_DATABASE: string;
+    PIXIV_MONGO_USERNAME: string;
+    PIXIV_MONGO_PASSWORD: string;
+    PIXIV_MONGO_AUTH_SOURCE: string;
+    PIXIV_MONGO_CONNECT_TIMEOUT_MS: string;
+    PIXIV_MONGO_SOCKET_TIMEOUT_MS: string;
     TAGGER_RESULT_MONGO_ENABLED: string;
     TAGGER_RESULT_MONGO_HOST: string;
     TAGGER_RESULT_MONGO_PORT: string;
@@ -82,5 +65,15 @@ declare namespace NodeJS {
     TAGGER_PROJECTION_WORKER_IDLE_DELAY_MS: string;
     TAGGER_PROJECTION_RETRY_DELAY_MS: string;
     TAGGER_PROJECTION_PROCESSING_TIMEOUT_MS: string;
+    // 服务间调用鉴权（ConfigBundle inter-service-auth），一次性云端导入的 admin 接口用它校验
+    INNER_HTTP_SECRET: string;
+    // 一次性云端导入读取的云机器 Mongo / Redis（ConfigBundle media-sync-worker-cloud-data），T6 删除
+    MONGO_HOST: string;
+    MONGO_PORT: string;
+    MONGO_INITDB_ROOT_USERNAME: string;
+    MONGO_INITDB_ROOT_PASSWORD: string;
+    REDIS_HOST: string;
+    REDIS_PORT: string;
+    REDIS_PASSWORD: string;
   }
 }

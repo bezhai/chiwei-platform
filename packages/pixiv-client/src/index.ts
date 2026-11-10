@@ -23,11 +23,8 @@ export type {
     MultiTag,
     ImageForLark,
     BaseResponse,
-    PaginationResponse,
     ListPixivImageDto,
-    UploadImageToLarkDto,
     ReportLarkUploadDto,
-    UploadLarkResp,
 } from './types';
 // Runtime values (enum, function) exported separately
 export { StatusMode, createDefaultPixivConfig } from './types';

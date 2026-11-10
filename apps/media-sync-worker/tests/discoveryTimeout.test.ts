@@ -1,7 +1,7 @@
 import { expect, it } from 'bun:test';
 
-for (const scenario of ['redis', 'proxy', 'notification', 'enqueue', 'dedup']) {
-    it(`daily discovery continues after ${scenario} failure without marking success`, async () => {
+for (const scenario of ['throttle', 'proxy', 'notification', 'enqueue', 'dedup', 'ban_config']) {
+    it(`daily discovery handles a ${scenario} failure without marking success`, async () => {
         const process = Bun.spawn([Bun.which('bun')!, `${import.meta.dir}/fixtures/discoveryTimeout.ts`, scenario], {
             stdout: 'pipe', stderr: 'pipe',
         });
