@@ -1,7 +1,7 @@
 {
   "name": "media-sync-worker",
   "version": "1.0.0",
-  "description": "Pixiv and Bangumi media sync worker",
+  "description": "Pixiv media sync worker",
   "main": "src/index.ts",
   "scripts": {
     "start": "bun run src/index.ts",
@@ -17,7 +17,6 @@
     "@types/lodash": "^4.17.13",
     "@types/node": "^22.10.1",
     "@types/node-cron": "^3.0.11",
-    "@types/unzipper": "^0.10.10",
     "typescript": "^5.6.3"
   },
   "dependencies": {
@@ -25,7 +24,6 @@
     "@inner/pixiv-client": "*",
     "@inner/shared": "*",
     "@larksuiteoapi/node-sdk": "^1.38.0",
-    "adm-zip": "^0.5.16",
     "ali-oss": "^6.23.0",
     "axios": "^1.7.7",
     "dayjs": "^1.11.13",
@@ -35,7 +33,6 @@
     "lodash": "^4.17.21",
     "minio": "^8.0.1",
     "mongodb": "^6.10.0",
-    "node-cron": "^3.0.3",
-    "unzipper": "^0.12.3"
+    "node-cron": "^3.0.3"
   }
 }

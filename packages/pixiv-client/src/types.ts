@@ -97,13 +97,10 @@ export interface BaseResponse<T> {
 }
 
 /**
- * 分页响应
+ * `/api/v2/image-store/download` 成功时的 data：server 实际写入的 OSS key
  */
-export interface PaginationResponse<T> {
-    total: number;
-    page?: number;
-    page_size?: number;
-    data: T[];
+export interface ImageStoreDownloadData {
+    tos_file_name: string;
 }
 
 /**
@@ -132,13 +129,6 @@ export interface ListPixivImageDto {
 }
 
 /**
- * 上传图片到飞书参数
- */
-export interface UploadImageToLarkDto {
-    pixiv_addr: string;
-}
-
-/**
  * 上报飞书上传结果参数
  */
 export interface ReportLarkUploadDto {
@@ -146,15 +136,6 @@ export interface ReportLarkUploadDto {
     image_key: string;
     width: number;
     height: number;
-}
-
-/**
- * 上传飞书响应
- */
-export interface UploadLarkResp {
-    image_key?: string;
-    width?: number;
-    height?: number;
 }
 
 /**

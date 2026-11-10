@@ -7,12 +7,7 @@ import {
     PixivProxyRequestBody,
     PixivAuth,
     BaseResponse,
-    PaginationResponse,
-    ImageForLark,
-    ListPixivImageDto,
-    UploadImageToLarkDto,
-    UploadLarkResp,
-    ReportLarkUploadDto,
+    ImageStoreDownloadData,
     FollowerInfo,
     FollowerBody,
     AuthorArtworkResponseBody,
@@ -215,9 +210,12 @@ export class PixivClient {
     }
 
     /**
-     * 下载 Pixiv 图片内容
+     * 让 server 下载 Pixiv 图片并上传 OSS，返回实际写入的 OSS key。
+     *
+     * key 带 server 当天的日期前缀，调用方推算不出来，只能从响应里取。
+     * 响应里没有 key 时报错：调用方要拿它写目录记录，没有 key 的成功等于丢图。
      */
-    async downloadContent(pixivUrl: string): Promise<void> {
+    async downloadContent(pixivUrl: string): Promise<string> {
         const reqBody: { pixiv_url: string; pixiv_auth?: PixivAuth } = { pixiv_url: pixivUrl };
 
         const auth = await this.config.authProvider?.();
@@ -225,7 +223,7 @@ export class PixivClient {
             reqBody.pixiv_auth = auth;
         }
 
-        const response = await sendAuthenticatedRequest<BaseResponse<void>>(
+        const response = await sendAuthenticatedRequest<BaseResponse<ImageStoreDownloadData | null>>(
             `${this.config.proxyHost}/api/v2/image-store/download`,
             reqBody,
             this.config.httpSecret,
@@ -235,64 +233,12 @@ export class PixivClient {
         if (response.code !== 0) {
             throw new Error(response.msg);
         }
-    }
 
-    /**
-     * 获取 Pixiv 图片列表
-     */
-    async getPixivImages(params: ListPixivImageDto): Promise<ImageForLark[]> {
-        const url = `${this.config.proxyHost}/api/v2/image-store/token-auth-list`;
-
-        const response = await sendAuthenticatedRequest<BaseResponse<PaginationResponse<ImageForLark>>>(
-            url,
-            params,
-            this.config.httpSecret,
-            this.httpClient
-        );
-
-        if (response.code !== 0) {
-            throw new Error(response.msg);
+        const key = response.data?.tos_file_name;
+        if (typeof key !== 'string' || key === '') {
+            throw new Error(`image-store download for ${pixivUrl} returned no tos_file_name`);
         }
-
-        return response.data.data;
-    }
-
-    /**
-     * 上传图片到飞书
-     */
-    async uploadToLark(params: UploadImageToLarkDto): Promise<UploadLarkResp> {
-        const url = `${this.config.proxyHost}/api/v2/image-store/upload-lark`;
-
-        const response = await sendAuthenticatedRequest<BaseResponse<UploadLarkResp>>(
-            url,
-            params,
-            this.config.httpSecret,
-            this.httpClient
-        );
-
-        if (response.code !== 0) {
-            throw new Error(response.msg);
-        }
-
-        return response.data;
-    }
-
-    /**
-     * 上报飞书上传结果
-     */
-    async reportLarkUpload(params: ReportLarkUploadDto): Promise<void> {
-        const url = `${this.config.proxyHost}/api/v2/image-store/report-lark-upload`;
-
-        const response = await sendAuthenticatedRequest<BaseResponse<void>>(
-            url,
-            params,
-            this.config.httpSecret,
-            this.httpClient
-        );
-
-        if (response.code !== 0) {
-            throw new Error(response.msg);
-        }
+        return key;
     }
 }
 

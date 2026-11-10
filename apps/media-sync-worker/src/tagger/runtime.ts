@@ -34,10 +34,7 @@ export async function initTaggerRuntime(): Promise<void> {
     const projectionConfig = loadTaggerProjectionConfig();
     const callbackServerConfig = loadTaggerCallbackServerConfig();
 
-    validateTaggerFeatureFlags({
-        triggerEnabled: triggerConfig !== null,
-        projectionEnabled: projectionConfig !== null,
-    });
+    validateTaggerFeatureFlags({ triggerEnabled: triggerConfig !== null });
 
     if (!resultMongoConfig) {
         if (triggerConfig || callbackServerConfig || projectionConfig) {
@@ -159,19 +156,11 @@ export async function syncMinioAndMaybeSubmitTagger(pixivAddr: string): Promise<
 type RuntimeFlagEnv = Record<string, string | undefined>;
 
 export function validateTaggerFeatureFlags(
-    features: { triggerEnabled: boolean; projectionEnabled: boolean },
+    features: { triggerEnabled: boolean },
     env: RuntimeFlagEnv = process.env
 ): void {
     if (features.triggerEnabled && !isEnabled(env.MINIO_SYNC_ENABLED)) {
         throw new Error('MINIO_SYNC_ENABLED must be true when TAGGER_TRIGGER_ENABLED is true');
-    }
-    if (
-        (features.triggerEnabled || features.projectionEnabled)
-        && !isEnabled(env.PIXIV_IMAGE_MIRROR_MONGO_ENABLED)
-    ) {
-        throw new Error(
-            'PIXIV_IMAGE_MIRROR_MONGO_ENABLED must be true when tagger trigger or projection is enabled'
-        );
     }
 }
 

@@ -3,8 +3,8 @@ dotenv.config();
 
 import cron from 'node-cron';  // 导入 node-cron
 import { loadDownloadCron } from './config/cron';
+import { pixivCollections } from './mongo/client';
 import { initTaggerRuntime } from './tagger/runtime';
-import { initPostDownloadReconcileRuntime } from './service/postDownloadReconcileRuntime';
 
 // 重试配置
 const RETRY_DELAYS = [1000, 5000, 15000]; // 重试延迟时间（毫秒）
@@ -56,19 +56,13 @@ const scheduleTask = (cronTime: string, taskName: string, taskFn: () => Promise<
 const disableSchedules = isEnabled(process.env.DISABLE_SCHEDULES);
 const disableConsumer = isEnabled(process.env.DISABLE_CONSUMER);
 const runConnectivityCheck = isEnabled(process.env.RUN_CONNECTIVITY_CHECK);
-const needsSourceMongoAtStartup = !disableConsumer
-  || isEnabled(process.env.TAGGER_TRIGGER_ENABLED)
-  || isEnabled(process.env.POST_DOWNLOAD_RECONCILE_ENABLED);
 
 async function initBackgroundRuntime(): Promise<void> {
-  // Trigger/reconcile workers can call ImgCollection immediately. Source Mongo must
-  // therefore be ready before either worker loop is allowed to start.
-  if (needsSourceMongoAtStartup) {
-    const { mongoInitPromise } = await import('./mongo/client');
-    await mongoInitPromise;
-  }
+  // The cluster Mongo holds the catalog, queue and throttle, and the tagger workers
+  // read pixiv_images as soon as they start. It is required: connect (and create
+  // indexes) before any loop starts, and exit if that fails.
+  await pixivCollections();
   await initTaggerRuntime();
-  await initPostDownloadReconcileRuntime();
 }
 
 const backgroundRuntimeInitPromise = initBackgroundRuntime().catch((err) => {
@@ -77,18 +71,23 @@ const backgroundRuntimeInitPromise = initBackgroundRuntime().catch((err) => {
 });
 
 async function checkDataConnections() {
-  console.log('Checking MongoDB and Redis connectivity...');
+  console.log('Checking pixiv Mongo connectivity...');
+  await pixivCollections();
+  console.log('Pixiv Mongo connectivity check completed.');
 
-  const [{ mongoInitPromise }, { default: redisClient }] = await Promise.all([
-    import('./mongo/client'),
-    import('./redis/redisClient'),
+  console.log('Checking pixiv Dynamic Config...');
+  const [{ checkPixivSettings }, { dynamicConfig }] = await Promise.all([
+    import('./pixiv/settings'),
+    import('./config/dynamicConfig'),
   ]);
-
-  await mongoInitPromise;
-  await redisClient.getNativeClient().ping();
-  await redisClient.close();
-
-  console.log('MongoDB and Redis connectivity check completed.');
+  for (const result of await checkPixivSettings(dynamicConfig)) {
+    const line = `Dynamic Config ${result.key}: ${result.ok ? 'OK' : 'FAILED'} (${result.detail})`;
+    if (result.ok) {
+      console.log(line);
+    } else {
+      console.error(line);
+    }
+  }
 
   console.log('Checking OSS and MinIO connectivity...');
   const { checkStorageConnectivity } = await import('./storage/connectivity');
@@ -107,12 +106,6 @@ if (disableSchedules) {
   scheduleTask(downloadCron, 'download task', async () => {
     const { startDownload } = await import('./service/dailyDownload');
     await startDownload();
-  });
-
-  // 定时任务：Bangumi Archive 数据同步 (每周三上午7点)
-  scheduleTask('0 7 * * 3', 'bangumi archive sync', async () => {
-    const { syncBangumiArchive } = await import('./service/bangumiArchiveService');
-    await syncBangumiArchive();
   });
 }
 

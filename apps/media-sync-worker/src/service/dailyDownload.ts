@@ -1,16 +1,19 @@
+import type { FollowerInfo } from "@inner/pixiv-client";
 import { send_msg } from "../lark";
-import { getMaxIllustId, insertDownloadTask } from "../mongo/service";
+import {
+  getAuthorLastDownloadAt,
+  getMaxIllustId,
+  insertDownloadTask,
+  recordAuthorDownload,
+} from "../mongo/service";
 import {
   getAuthorArtwork,
   getFollowersByTag,
   getTagArtwork,
 } from "../pixiv/pixiv";
-import { FollowerInfo } from "../pixiv/types";
-import redisClient from "../redis/redisClient";
+import { getBanIllusts } from "../pixiv/settings";
 import { loadDownloadDelayConfig, waitMs } from "./downloadRuntime";
 import { createDiscoveryStep, type DiscoveryStep } from "./discoveryStep";
-
-const RedisDownloadUserDictKey = "download_user_dict";
 
 const getRandomDays = (): number => {
   return Math.floor(Math.random() * 3) + 2;
@@ -23,6 +26,9 @@ export const startDownload = async (): Promise<void> => {
   const step = createDiscoveryStep();
 
   try {
+    // 名单读不到时整轮失败，不能当成空名单继续（被 ban 的作品会被入队）
+    const banIllusts = await step("config.ban_illusts", () => getBanIllusts());
+
     // 获取 "已上传" 标签下的关注者
     const authorArr = await step("pixiv.followers", (signal) => getFollowersByTag("已上传", signal));
 
@@ -32,7 +38,7 @@ export const startDownload = async (): Promise<void> => {
       // 这里放置你的下载逻辑
       // 假设你需要对每个作者执行下载操作
       for (const author of authorArr) {
-        await downloadEachUser(author, delayConfig);
+        await downloadEachUser(author, banIllusts, delayConfig);
       }
     } else {
       // 如果没有关注者，发送消息
@@ -49,6 +55,7 @@ export const startDownload = async (): Promise<void> => {
 
 const downloadEachUser = async (
   author: FollowerInfo,
+  banIllusts: string[],
   delayConfig = loadDownloadDelayConfig()
 ): Promise<void> => {
   console.log(`Downloading images for author: ${author.userName}`);
@@ -57,22 +64,19 @@ const downloadEachUser = async (
   const step = createDiscoveryStep(authorId);
 
   try {
-    // 从 Redis 获取对应作者的下载时间，使用封装的 hGetValue 函数
-    const lastDownloadTime = await step("redis.hget", () => redisClient.hget(
-      RedisDownloadUserDictKey,
-      authorId
-    ));
+    // 读作者上次扫描成功的时间（unix 秒）
+    const lastDownloadAt = await step("mongo.author_last_download", () =>
+      getAuthorLastDownloadAt(authorId)
+    );
 
-    if (!lastDownloadTime) {
+    if (lastDownloadAt === null) {
       console.log(
-        `Redis field is empty, starting download for author: ${authorId}`
+        `No previous download recorded, starting download for author: ${authorId}`
       );
     } else {
-      const lastDownloadTimestamp = parseInt(lastDownloadTime, 10);
       const randDay = getRandomDays(); // 随机生成 2 到 4 天
       const nextAllowedDownloadTime =
-        new Date(lastDownloadTimestamp * 1000).getTime() +
-        randDay * 24 * 60 * 60 * 1000;
+        lastDownloadAt * 1000 + randDay * 24 * 60 * 60 * 1000;
 
       // 如果距离上次下载不足指定天数，则跳过该作者
       if (nextAllowedDownloadTime > Date.now()) {
@@ -89,14 +93,14 @@ const downloadEachUser = async (
       authorLastFilter: true,
     };
 
-    const result = await DownloadIllusts(downloadRequest, step);
+    const result = await DownloadIllusts(downloadRequest, banIllusts, step);
 
     await waitMs(delayConfig.afterAuthorMs);
 
     if (result) {
-      await step("redis.record_success", () => redisClient.hset(
-        RedisDownloadUserDictKey, authorId, `${Math.floor(Date.now() / 1000)}`
-      ));
+      await step("mongo.record_author_download", () =>
+        recordAuthorDownload(authorId, new Date())
+      );
       console.log(`Download successful for author: ${authorId}`);
     } else {
       throw new Error(`Download failed for author: ${authorId}`);
@@ -121,6 +125,7 @@ interface DownloadIllustsReq {
 
 export const DownloadIllusts = async (
   req: DownloadIllustsReq,
+  banIllusts: string[],
   step: DiscoveryStep = createDiscoveryStep(req.authorId),
 ): Promise<boolean> => {
   let illustIds: string[] = req.limitIllusts || [];
@@ -183,13 +188,8 @@ export const DownloadIllusts = async (
       }
     }
 
-    // 从 Redis 获取 ban_illusts 列表
-    const banIllusts = await step("redis.banned_illusts", () => redisClient.smembers("ban_illusts"));
-
     // 过滤掉被禁止的作品
-    if (banIllusts) {
-      illustIds = illustIds.filter((id) => !banIllusts.includes(id));
-    }
+    illustIds = illustIds.filter((id) => !banIllusts.includes(id));
 
     if (illustIds.length === 0) {
       if (req.authorId) {

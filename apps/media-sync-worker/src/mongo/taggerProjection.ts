@@ -1,6 +1,6 @@
 import type { Document, Filter, UpdateFilter, UpdateResult } from 'mongodb';
 import { extractTaggerSearchTerms } from '../tagger/searchTerms';
-import { getPixivImageMirrorCollection } from './imageMirror';
+import { pixivCollections } from './client';
 
 export interface TaggerProjectionParams {
     pixivAddr: string;
@@ -54,9 +54,6 @@ export async function projectTaggerResultToCollection(
 export async function projectTaggerResultToLocal(
     params: TaggerProjectionParams
 ): Promise<number> {
-    const collection = await getPixivImageMirrorCollection();
-    if (!collection) {
-        throw new Error('pixiv image mirror is disabled; tagger result cannot be projected');
-    }
-    return projectTaggerResultToCollection(collection, params);
+    const { images } = await pixivCollections();
+    return projectTaggerResultToCollection(images.getNativeCollection(), params);
 }

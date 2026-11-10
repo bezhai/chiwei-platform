@@ -5,28 +5,31 @@ import {
   SortDirection,
   UpdateFilter,
   UpdateOptions,
-  UpdateResult,
 } from "mongodb";
-import { MongoCollection } from "@inner/shared/mongo";
 import {
   DownloadTask,
   DownloadTaskStatus,
   MultiTag,
   PixivImageInfo,
   TranslateWord,
-    UploadImgV2Req,
+  UploadImgV2Req,
 } from "./types";
-import { DownloadTaskMap, ImgCollection, TranslateWordMap } from "./client";
+import { pixivCollections, type PixivCollections } from "./client";
 import { loadConsumerGuardConfig } from "../service/downloadRuntime";
+
+// 每个函数的最后一个参数 collections 只给测试注入用；生产调用不传，取集群连接。
 
 /**
  * 获取给定 illustIds 中最大值的 illust_id
- * @param collection - MongoDB 集合封装类
  * @param illustIds - 要查询的 illust_id 列表
  * @returns 最大的 illust_id 或 0（如果找不到）
  */
-export async function getMaxIllustId(illustIds: number[]): Promise<number> {
+export async function getMaxIllustId(
+  illustIds: number[],
+  collections?: PixivCollections
+): Promise<number> {
   try {
+    const { images } = collections ?? (await pixivCollections());
     // 构建查询条件，查询 illust_id 在给定数组中的文档
     const filter = {
       illust_id: { $in: illustIds },
@@ -38,7 +41,7 @@ export async function getMaxIllustId(illustIds: number[]): Promise<number> {
       sort: { illust_id: -1 as SortDirection }, // 按照 illust_id 倒序排列
     };
 
-    const result = await ImgCollection.find(filter, options);
+    const result = await images.find(filter, options);
 
     // 如果查询结果为空，返回 0
     if (result.length === 0) {
@@ -59,13 +62,18 @@ export async function getMaxIllustId(illustIds: number[]): Promise<number> {
  * @returns 返回一个 Promise，表示是否成功插入新任务
  * @throws 如果在数据库操作中发生错误，将抛出错误
  */
-export async function insertDownloadTask(illustId: string, signal: AbortSignal): Promise<boolean> {
+export async function insertDownloadTask(
+  illustId: string,
+  signal: AbortSignal,
+  collections?: PixivCollections
+): Promise<boolean> {
+  const { downloadTasks } = collections ?? (await pixivCollections());
   // 查询是否已经存在相同 illustId 的任务
   const filter: Filter<DownloadTask> = { illust_id: illustId };
 
   // 使用封装的 find 方法查找是否已经存在此任务
   signal.throwIfAborted();
-  const existingTasks = await DownloadTaskMap.find(filter);
+  const existingTasks = await downloadTasks.find(filter);
   signal.throwIfAborted();
 
   // 如果找到了现有任务，返回 false 表示未插入
@@ -77,7 +85,7 @@ export async function insertDownloadTask(illustId: string, signal: AbortSignal):
   const newTask = DownloadTask.createTask(illustId);
 
   // 插入新任务
-  await DownloadTaskMap.insertOne(newTask);
+  await downloadTasks.insertOne(newTask);
 
   // 返回 true 表示成功插入
   return true;
@@ -191,12 +199,15 @@ export function buildCompletionFilter(
  * @returns 返回一个 Promise，表示领取到的任务；如果没有任务返回 null
  * @throws 如果在数据库操作中发生错误，将抛出错误
  */
-export async function SearchUnDownloadTask(): Promise<DownloadTask | null> {
+export async function SearchUnDownloadTask(
+  collections?: PixivCollections
+): Promise<DownloadTask | null> {
+  const { downloadTasks } = collections ?? (await pixivCollections());
   const now = new Date();
   const { runningTaskReclaimMs } = loadConsumerGuardConfig();
 
   // 领取前先死信化清扫预算耗尽的滞留任务，否则它们会被无限回收重领
-  const swept = await DownloadTaskMap.updateMany(
+  const swept = await downloadTasks.updateMany(
     buildExhaustedReclaimFilter(now, runningTaskReclaimMs),
     buildDeadLetterUpdate(now)
   );
@@ -207,7 +218,7 @@ export async function SearchUnDownloadTask(): Promise<DownloadTask | null> {
   }
 
   // findOneAndUpdate 原子领取，杜绝 find+update 之间被其他协程抢占的窗口
-  const claimed = await DownloadTaskMap.findOneAndUpdate(
+  const claimed = await downloadTasks.findOneAndUpdate(
     buildClaimableTaskFilter(now, runningTaskReclaimMs),
     buildClaimUpdate(now),
     { returnDocument: "after" }
@@ -230,8 +241,10 @@ export async function SearchUnDownloadTask(): Promise<DownloadTask | null> {
  */
 export async function Fail(
   task: DownloadTask,
-  createErr: Error
+  createErr: Error,
+  collections?: PixivCollections
 ): Promise<void> {
+  const { downloadTasks } = collections ?? (await pixivCollections());
   // 先取领取代次构建条件，再生成更新操作
   const filter = buildCompletionFilter(task.illust_id, task.last_run_time);
 
@@ -239,7 +252,7 @@ export async function Fail(
   const update = task.fail(createErr);
 
   // 更新数据库中的任务状态
-  await DownloadTaskMap.updateOne(filter, update);
+  await downloadTasks.updateOne(filter, update);
 }
 
 /**
@@ -249,7 +262,11 @@ export async function Fail(
  * @returns 返回一个 Promise，表示是否成功更新任务状态
  * @throws 如果在数据库操作中发生错误，将抛出错误
  */
-export async function Success(task: DownloadTask): Promise<void> {
+export async function Success(
+  task: DownloadTask,
+  collections?: PixivCollections
+): Promise<void> {
+  const { downloadTasks } = collections ?? (await pixivCollections());
   // 先取领取代次构建条件，再生成更新操作
   const filter = buildCompletionFilter(task.illust_id, task.last_run_time);
 
@@ -257,37 +274,26 @@ export async function Success(task: DownloadTask): Promise<void> {
   const update = task.success();
 
   // 更新数据库中的任务状态
-  await DownloadTaskMap.updateOne(filter, update);
+  await downloadTasks.updateOne(filter, update);
 }
 
 /**
- * 添加翻译字段并更新数据库
+ * 添加翻译词条（按 origin upsert）
  * @param translateItem - 翻译词条对象
- * @param updateImg - 是否更新图片信息
  * @throws 如果在数据库操作中发生错误，将抛出错误
  */
 export async function addTranslate(
   translateItem: TranslateWord,
-  updateImg: boolean
+  collections?: PixivCollections
 ): Promise<void> {
+  const { tagTranslations } = collections ?? (await pixivCollections());
   try {
     // 构建查询条件
     const filter = { origin: translateItem.origin };
 
     // 更新翻译字段，若不存在则插入
     const updateOptions: UpdateOptions = { upsert: true };
-    await TranslateWordMap.updateMany(filter, translateItem, updateOptions);
-
-    // 如果需要更新图片信息，并且翻译已存在
-    if (updateImg && translateItem.has_translate) {
-      const imgFilter = { "multi_tags.name": translateItem.origin };
-      const imgUpdate = {
-        "multi_tags.$.translation": translateItem.translation,
-      };
-
-      // 更新图片中的标签翻译
-      await ImgCollection.updateMany(imgFilter, imgUpdate);
-    }
+    await tagTranslations.updateMany(filter, translateItem, updateOptions);
   } catch (err) {
     console.error(
       `Error updating translation for ${translateItem.origin}:`,
@@ -308,11 +314,13 @@ export async function addTranslate(
 export async function searchAndAddTranslate(
   word: string,
   en: string,
-  zh: string
+  zh: string,
+  collections?: PixivCollections
 ): Promise<string> {
+  const resolved = collections ?? (await pixivCollections());
   try {
     // 查找翻译
-    const item = await TranslateWordMap.findOne({
+    const item = await resolved.tagTranslations.findOne({
       origin: word,
       has_translate: true,
     });
@@ -332,7 +340,7 @@ export async function searchAndAddTranslate(
         },
         has_translate: false, // 因为没有翻译，所以设置为 false
       },
-      false
+      resolved
     );
 
     // 如果没有找到翻译且刚刚添加了翻译，返回空字符串
@@ -353,13 +361,17 @@ export async function searchAndAddTranslate(
  * @param imgName - 图片名称
  * @returns 如果图片存在则返回 true，否则返回 false
  */
-export async function checkExistPixivImg(imgName: string): Promise<boolean> {
+export async function checkExistPixivImg(
+  imgName: string,
+  collections?: PixivCollections
+): Promise<boolean> {
   const filter = buildCompletedPixivImageFilter(imgName);
   if (!filter) return false;
 
   try {
+    const { images } = collections ?? (await pixivCollections());
     // 计数符合条件的文档
-    const count = await ImgCollection.countDocuments(filter);
+    const count = await images.countDocuments(filter);
     return count > 0;
   } catch (err) {
     console.error("Failed to count documents:", err);
@@ -369,8 +381,9 @@ export async function checkExistPixivImg(imgName: string): Promise<boolean> {
 
 /**
  * A page is reusable by the download state machine only after both the OSS key
- * and the metadata written by addImage exist. This prevents a retry after an
- * addImage failure from treating a storage-only partial row as completed.
+ * and the metadata written by addImage exist. Rows imported from the retired cloud
+ * catalog can carry a key without that metadata; requiring both keeps such a row
+ * from being treated as a completed download.
  */
 export function buildCompletedPixivImageFilter(
   pixivAddr: string
@@ -411,20 +424,22 @@ export function buildImageByPixivAddrFilter(
 }
 
 /**
- * 按 pixiv_addr 取一条已落 OSS 的图片文档（用于读取代理回填的 tos_file_name）。
+ * 按 pixiv_addr 取一条已落 OSS 的图片文档（用于读取 tos_file_name 做 MinIO 同步）。
  * @param pixivAddr - Pixiv 图片名（imageUrl 最后一段）
  * @returns 命中的文档；未命中（含 pixivAddr 为空 / 无非空 tos_file_name）返回 null
  * @throws 数据库错误向上抛出，由调用方决定是否吞错（best-effort 同步在外层兜）
  */
 export async function findImageByPixivAddr(
-  pixivAddr: string
+  pixivAddr: string,
+  collections?: PixivCollections
 ): Promise<PixivImageInfo | null> {
   const filter = buildImageByPixivAddrFilter(pixivAddr);
   if (filter === null) {
     return null;
   }
 
-  return ImgCollection.findOne(filter);
+  const { images } = collections ?? (await pixivCollections());
+  return images.findOne(filter);
 }
 
 /**
@@ -454,42 +469,74 @@ function intDefault(str: string, defaultValue: number): number {
 }
 
 /**
- * 添加图片信息到数据库
- * @param tags - 图片的标签数组
- * @param args - 上传图片的请求参数
- * @returns Promise<void> 如果操作成功则返回，否则抛出异常
+ * 写一张下载完成的图片的目录记录：server 返回的 OSS key 和 tag、作者等元信息一次写入。
+ *
+ * 同一 pixiv_addr 的每份文档都更新（历史上有重复文档）。只 $set worker 拥有的字段，
+ * lark-service 写的 image_key / width / height 和 tagger projection 写的 tagger_*
+ * 不出现在更新里，所以不会被覆盖。update_time 是 lark-service 发图分页的游标，它回写
+ * image_key 时也会更新，所以只在插入时写。
+ *
+ * 必须在 runPostDownloadSync 之前完成：MinIO 同步按 pixiv_addr 读这里的 key，
+ * tagger projection 按 pixiv_addr 匹配这条记录。
  */
 export async function addImage(
   tags: MultiTag[],
-  args: UploadImgV2Req
+  args: UploadImgV2Req,
+  collections?: PixivCollections
 ): Promise<void> {
-  // 将标签设置为可见
-  tags.forEach((tag) => {
-    tag.visible = true;
-  });
+  const { images } = collections ?? (await pixivCollections());
+  const now = new Date();
+  const update: UpdateFilter<PixivImageInfo> = {
+    $set: {
+      multi_tags: tags.map((tag) => ({ ...tag, visible: true })),
+      pixiv_addr: args.pixiv_name,
+      tos_file_name: args.tos_file_name,
+      visible: !args.is_r18,
+      author: args.author,
+      create_time: now,
+      need_download: args.need_download,
+      author_id: args.author_id,
+      illust_id: getIllustId(args.pixiv_name),
+      title: args.title,
+      del_flag: false,
+    },
+    $setOnInsert: { update_time: now },
+  };
 
   try {
-    // 更新图片信息至数据库
-    await ImgCollection.updateMany(
-      { pixiv_addr: args.pixiv_name }, // 查找条件
-      {
-        multi_tags: tags,
-        pixiv_addr: args.pixiv_name,
-        visible: !args.is_r18,
-        author: args.author,
-        create_time: new Date(),
-        update_time: new Date(),
-        need_download: args.need_download,
-        author_id: args.author_id,
-        illust_id: getIllustId(args.pixiv_name),
-        title: args.title,
-        del_flag: false,
-      },
-      { upsert: true } // 如果没有找到文档，则插入新的文档
-    );
+    await images
+      .getNativeCollection()
+      .updateMany({ pixiv_addr: args.pixiv_name }, update, { upsert: true });
     console.log(`Image added successfully for ${args.pixiv_name}`);
   } catch (err) {
     console.error("Error in addImage:", err);
     throw err;
   }
+}
+
+/**
+ * 读作者上次成功扫描的时间
+ * @returns unix 秒；从没扫描过返回 null
+ */
+export async function getAuthorLastDownloadAt(
+  authorId: string,
+  collections?: PixivCollections
+): Promise<number | null> {
+  const { authorDownloads } = collections ?? (await pixivCollections());
+  const record = await authorDownloads.findOne({ _id: authorId });
+  return record?.last_download_at ?? null;
+}
+
+/** 记下作者这次扫描成功的时间（unix 秒） */
+export async function recordAuthorDownload(
+  authorId: string,
+  at: Date,
+  collections?: PixivCollections
+): Promise<void> {
+  const { authorDownloads } = collections ?? (await pixivCollections());
+  await authorDownloads.updateOne(
+    { _id: authorId },
+    { last_download_at: Math.floor(at.getTime() / 1000) },
+    { upsert: true }
+  );
 }

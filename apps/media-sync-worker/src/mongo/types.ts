@@ -116,9 +116,16 @@ export interface TranslateWord {
   extra_info?: Extra; // 额外信息
 }
 
-// 图片上传请求参数
+// 作者节流记录：上次成功扫描该作者的时间
+export interface AuthorDownload {
+  _id: string; // pixiv 作者 ID
+  last_download_at: number; // unix 秒
+}
+
+// 一张下载完成的图片：写目录记录的参数
 export interface UploadImgV2Req {
   pixiv_name: string; // Pixiv 图片名称
+  tos_file_name: string; // server 上传后返回的 OSS key
   need_download: boolean; // 是否需要下载
   author: string; // 作者名称
   author_id?: string; // 作者 ID，可能为空
