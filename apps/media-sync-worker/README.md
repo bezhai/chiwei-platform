@@ -30,6 +30,26 @@ worker 的全部状态都在集群内：
 
 Tagger 结果另存：打标结果写入 `TAGGER_RESULT_MONGO_*` 指向的 Mongo，复用 channel-server 已在使用的本地 Mongo 基础设施。
 
+## 一次性云端导入（T6 删除）
+
+切换到集群存储时，把云机器上的 worker 状态一次性合并进 `chiwei_pixiv`。代码在 `src/cloudImport/`，和 ConfigBundle `media-sync-worker-cloud-data` 一起在 T6 删除。
+
+接口挂在 tagger 回调 server 上（需要 `TAGGER_CALLBACK_SERVER_ENABLED=true`），都要求 `Authorization: Bearer <INNER_HTTP_SECRET>`，和其他服务间调用同一约定：
+
+- `POST /internal/media-sync/cloud-import`：在后台启动一次导入，立即返回 `202 {run_id}`；已有一次在跑时返回 `409`。
+- `GET /internal/media-sync/cloud-import[?limit=N]`：正在跑的那次的进度（`active`），和最近 N 次（默认 5）运行的事件（`runs`）。
+- `GET /internal/media-sync/cloud-settings`：只读地返回云端 Redis 的 `ban_illusts`、`ban_user`、`skip_words`（按字典序排序，带条数、JSON 字节数和对应的 Dynamic Config key）和 `version`。不写 Dynamic Config。
+
+导入依次处理，每批 500 条，按 `_id` 分页、用 bulkWrite 写入：
+
+- 云端 `img_map` → `pixiv_images`：按 `_id` 合并，非本地字段覆盖写入，lark-service 和 tagger 写的字段（`image_key`、`width`、`height`、`update_time`、`tagger_*`）只在插入时写。集群里没有这个 `_id`、但已有同 `pixiv_addr` 的文档时跳过（切换后 worker 自己写的目录记录 `_id` 不同）。
+- `download_task` → `pixiv_download_tasks`、`trans_map` → `pixiv_tag_translations`：按 `illust_id` / `origin`，集群里没有的才插入（保留源 `_id`），已有的不动。
+- Redis `download_user_dict` → `pixiv_author_downloads`：值转成数字，不是整数的计数后跳过；集群里没有的才插入。
+
+每次运行把事件追加写进 `pixiv_cloud_import_runs`，不更新已有记录：`started`、每个集合一条 `collection_done`（源端条数、读到的条数、插入、合并、各类跳过原因的计数、目标端条数）、最后一条 `finished` 或 `failed`（带错误信息和出错集合的部分计数）。按 `_id` 分页读到的条数少于开始前的总数时，这次运行失败。重复运行结果不变。
+
+云端连接只在处理这几个请求时建立、用完即关；云端 env 缺失时导入和读设置返回 `503`，worker 照常启动。
+
 ## 必需环境变量
 
 - `PIXIV_MONGO_HOST`（可包含端口；包含端口时不再读取 `PIXIV_MONGO_PORT`）
@@ -66,6 +86,8 @@ Tagger 结果另存：打标结果写入 `TAGGER_RESULT_MONGO_*` 指向的 Mongo
 - `TAGGER_PROJECTION_*`：结果投影的 batch、轮询、重试和 processing 超时配置。
 - `TAGGER_CALLBACK_URL` / `TAGGER_CALLBACK_AUTH_TOKEN`：tagger-service 回调地址和回调鉴权 token。
 - `TAGGER_CALLBACK_SERVER_ENABLED` / `TAGGER_CALLBACK_PORT`：开启 worker 内部 HTTP callback 入口及端口。
+- `INNER_HTTP_SECRET`：`/internal/media-sync/` 下接口的鉴权，未配置时这些接口一律 `401`。
+- `MONGO_HOST` / `MONGO_PORT` / `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD` / `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD`：一次性云端导入读取的云机器，见上文，T6 删除。
 
 ## 部署验证开关
 

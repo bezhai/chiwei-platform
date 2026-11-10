@@ -65,5 +65,15 @@ declare namespace NodeJS {
     TAGGER_PROJECTION_WORKER_IDLE_DELAY_MS: string;
     TAGGER_PROJECTION_RETRY_DELAY_MS: string;
     TAGGER_PROJECTION_PROCESSING_TIMEOUT_MS: string;
+    // 服务间调用鉴权（ConfigBundle inter-service-auth），一次性云端导入的 admin 接口用它校验
+    INNER_HTTP_SECRET: string;
+    // 一次性云端导入读取的云机器 Mongo / Redis（ConfigBundle media-sync-worker-cloud-data），T6 删除
+    MONGO_HOST: string;
+    MONGO_PORT: string;
+    MONGO_INITDB_ROOT_USERNAME: string;
+    MONGO_INITDB_ROOT_PASSWORD: string;
+    REDIS_HOST: string;
+    REDIS_PORT: string;
+    REDIS_PASSWORD: string;
   }
 }

@@ -7,7 +7,8 @@ import {
     type TaggerTriggerConfig,
 } from './config';
 import { createTaggerResultMongo, type TaggerResultMongo } from './resultMongo';
-import { startTaggerCallbackServer } from './callbackServer';
+import { createTaggerCallbackHandler, startTaggerCallbackServer } from './callbackServer';
+import { cloudImportHandlerFromEnv, routeCloudImport } from '../cloudImport/http';
 import { TaggerSubmitClient } from './submitClient';
 import { startTaggerTriggerWorker, type TaggerTriggerWorker } from './triggerWorker';
 import { startTaggerProjectionWorker, type TaggerProjectionWorker } from './projectionWorker';
@@ -50,8 +51,15 @@ export async function initTaggerRuntime(): Promise<void> {
     console.log(
         `Tagger result Mongo ready: host=${resultMongoConfig.host} database=${resultMongoConfig.database}`
     );
+    // 一次性云端导入的 admin 路由（/internal/media-sync/）挂在同一个 server 上，T6 删除
     const callbackServer = callbackServerConfig
-        ? startTaggerCallbackServer(resultMongo.repository, callbackServerConfig)
+        ? startTaggerCallbackServer(
+            routeCloudImport(
+                cloudImportHandlerFromEnv(),
+                createTaggerCallbackHandler(resultMongo.repository, callbackServerConfig)
+            ),
+            callbackServerConfig.port
+        )
         : null;
     const submitClient = triggerConfig
         ? new TaggerSubmitClient({
