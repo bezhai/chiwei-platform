@@ -17,3 +17,71 @@ data:
             annotations:
               summary: "飞书消息发送失败"
               description: "chat-response-worker 在过去 5 分钟内有消息发送失败，请检查日志。"
+
+      # 飞书入站链路告警。
+      #
+      # 背景：2026-07-28 事故——飞书事件订阅填的是裸内网 IP，飞书推送端到该网段丢了
+      # 路由，请求在 connect() 阶段就 ENETUNREACH，成功率跌到 50% 以下。当时 33 条告警
+      # 规则一条都没响，因为失败的请求**根本没到达我们**：Pod 健康、到达的请求 100% 是
+      # 200、blackbox 从集群内探测也通。所有基于「错误率」的告警对这类故障天生失明。
+      #
+      # 事故后入站改成 WSClient 长连接（我们主动连出去），所以这组规则盯两件事：
+      # 连接本身是否建得起来，以及事件是否真的还在进来。
+      #
+      # 选择器为什么是 pod=~ 而不是 lane=：Loki 的 stream label 只有
+      # namespace / app / pod 等，**没有 lane**——promtail 没把 Pod 的 lane label
+      # 提上来。实测 {app="channel-server"} 有日志、加上 lane="prod" 返回 0 行。
+      # 写 lane= 会让两条计数规则永远为空（静默失效），并让 absent_over_time
+      # 永远为真（上线即持续误报）。pod 名带泳道后缀，用它区分 prod 与泳道。
+      #
+      # 已知盲区（本组规则抓不到，需要按 bot 维度的 metric 才能覆盖）：
+      #   - 单个 bot 掉线：6 个 bot 的事件混在一起，其余 bot 的流量会盖住它
+      #   - 部分丢事件：同一 app_id 有多个长连接客户端时飞书是**随机投递**而非
+      #     广播，所以泳道抢连接只会分走一部分事件，prod 不会彻底断流
+      #   - WS 假活：连接还在但不再收包，且不打任何日志
+      - name: lark-inbound-alerts
+        rules:
+          # 长连接建不起来。飞书 SDK 在 connect 失败时打 error 级 [ws] 日志。
+          # 注意这是日志脉冲不是连接状态：单次失败会 critical 并因 [5m] 窗口保持
+          # 约五分钟，即便下一次重试已经成功。
+          - alert: LarkWebSocketConnectFailure
+            expr: |
+              sum(count_over_time({namespace="prod", app="channel-server", pod=~"channel-server-prod-.*"} |~ `\[ws\].*(connect failed|ws error|new WebSocket error)` [5m])) > 0
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "飞书长连接建立失败"
+              description: "channel-server 的飞书 WebSocket 连接报错，事件可能收不到。查 make logs APP=channel-server KEYWORD='[ws]'。"
+
+          # 重连风暴。单次重连是正常的网络抖动，SDK 会无限重试；但它的重连间隔是
+          # 120s + 随机 0-30s，15 分钟内超过 3 次说明是持续连不上而不是抖动。
+          - alert: LarkWebSocketReconnectStorm
+            expr: |
+              sum(count_over_time({namespace="prod", app="channel-server", pod=~"channel-server-prod-.*"} |= "[ws]" |= "reconnect" [15m])) > 3
+            for: 0m
+            labels:
+              severity: warning
+            annotations:
+              summary: "飞书长连接反复重连"
+              description: "channel-server 15 分钟内重连超过 3 次，长连接不稳定。"
+
+          # 入站事件断流——唯一能抓到 2026-07-28 那类故障的信号：不是错误变多，
+          # 而是流量消失。
+          #
+          # 必须用 absent_over_time，不能写 sum(count_over_time(...)) == 0：完全没有
+          # 日志时 count_over_time 返回空向量而非 0，`== 0` 永远不会触发，恰好在该
+          # 告警的时候静默。
+          #
+          # 45m 这个窗口是初值，缺乏夜间流量基线支撑，上线后按实际误报情况收紧；
+          # 真要定准应该按 bot、按时段统计事件间隔分布。0-8 点（北京时间）由
+          # Alertmanager 的 mute_time_intervals 静音。
+          - alert: LarkInboundEventsSilent
+            expr: |
+              absent_over_time({namespace="prod", app="channel-server", pod=~"channel-server-prod-.*"} |= "[inbound]" [45m])
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "飞书入站事件断流"
+              description: "channel-server 已连续 45 分钟没有收到任何飞书事件。检查长连接状态和飞书开放平台事件订阅配置。"
