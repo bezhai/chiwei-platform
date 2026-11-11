@@ -140,7 +140,8 @@ export interface ReportLarkUploadDto {
 
 /**
  * pixiv 鉴权头：随 proxy / 下载请求带给 server，由 server 转发给 pixiv.net。
- * 字段缺失或为空时，server 端逐字段回退读自己的 Redis（过渡期兼容）。
+ * server 自己不保存鉴权信息：不带 pixiv_auth、或其中缺少 cookie / user_agent 时返回 400。
+ * sec_ch_ua 可选。
  */
 export interface PixivAuth {
     cookie?: string;
@@ -172,7 +173,7 @@ export interface PixivClientConfig {
     getVersion?: () => Promise<string | null>;
     /**
      * 运行时提供 pixiv 鉴权头（cookie/user-agent/sec-ch-ua），随 proxy / 下载请求
-     * 带给 server 转发给 pixiv.net。返回 undefined 时不带 pixiv_auth，server 回退读 Redis。
+     * 带给 server 转发给 pixiv.net。返回 undefined 时不带 pixiv_auth，server 会以 400 拒绝请求。
      */
     authProvider?: () => Promise<PixivAuth | undefined>;
 }

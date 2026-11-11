@@ -124,7 +124,7 @@ describe('PixivClient 鉴权头注入（pixiv_auth）', () => {
         expect(http.calls[0].body.pixiv_auth).toEqual(AUTH);
     });
 
-    it('authProvider 返回 undefined 时不带 pixiv_auth（交由 server 回退 Redis）', async () => {
+    it('authProvider 返回 undefined 时不带 pixiv_auth', async () => {
         const http = makeMockHttp();
         const client = new PixivClient(
             { proxyHost: 'http://srv', httpSecret: 's', authProvider: async () => undefined },

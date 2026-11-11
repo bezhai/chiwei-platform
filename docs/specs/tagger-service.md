@@ -25,7 +25,7 @@
 
 ## Non-goals
 
-- 不写 mongo、不查 `img_map` 增量、不懂 pixiv 业务——那是平台编排 worker 的另一份 spec。
+- 不写 mongo、不查图片目录增量、不懂 pixiv 业务——那是平台编排 worker 的另一份 spec。
 - 不做请求级模型选择：维度由部署参数（激活哪些模型）定，单请求固定跑该机全维度。
 - 不接入 chiwei-platform 的 PaaS/K8s、不动 paas-engine GPU 调度——服务直接在 .206/.98 进程常驻。
 - 不做 catalog 拼装，不在本 spec 内新增 OCR 之外的打标维度。

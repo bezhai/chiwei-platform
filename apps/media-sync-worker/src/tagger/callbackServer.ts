@@ -1,3 +1,4 @@
+import type { TaggerCallbackServerConfig } from './config';
 import type { TaggerCallbackPayload } from './types';
 
 export interface TaggerCallbackRepository {
@@ -56,17 +57,19 @@ export function createTaggerCallbackHandler(
     };
 }
 
-/** worker 唯一的 HTTP server；handler 由 runtime 组装（tagger 回调、/health 和其他内部路由） */
-export function startTaggerCallbackServer(handler: RequestHandler, port: number): { stop: () => void } {
+export function startTaggerCallbackServer(
+    repository: TaggerCallbackRepository,
+    config: TaggerCallbackServerConfig
+): { stop: () => void } {
     const bun = (globalThis as any).Bun;
     if (!bun?.serve) {
         throw new Error('Bun.serve is required to start tagger callback server');
     }
     const server = bun.serve({
-        port,
-        fetch: handler,
+        port: config.port,
+        fetch: createTaggerCallbackHandler(repository, config),
     });
-    console.log(`Tagger callback server listening on port ${port}`);
+    console.log(`Tagger callback server listening on port ${config.port}`);
     return {
         stop: () => server.stop(),
     };

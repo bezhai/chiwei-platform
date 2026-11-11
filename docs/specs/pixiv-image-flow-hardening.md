@@ -1,5 +1,11 @@
 # Pixiv 图片链路可靠性闭环
 
+> **状态：历史 spec，部分内容已被实现取代。** 2026-11 起，云机器上的源 Mongo（`chiwei` 库）已不再使用，
+> 集群 Mongo 的 `chiwei_pixiv.pixiv_images` 是图片目录的唯一来源，由 consumer 下载后直接写入。文中
+> 「源 Mongo」和「本地镜像」两层因此合并：下载后的镜像步骤、历史 post-download reconciler 及其配置
+> 都已删除，下载后处理只剩 tagger outbox（tagger 关闭时直接同步 MinIO）。tagger 的提交、callback、
+> submitted 对账和 projection 仍按本文的设计运行。当前实现以 `apps/media-sync-worker/README.md` 为准。
+
 ## Problem
 
 当前 Pixiv 图片链路已经从作品发现贯通到本地 Mongo、MinIO、Tagger 和飞书发图，但五处状态边界会造成静默漏图或永久悬挂：

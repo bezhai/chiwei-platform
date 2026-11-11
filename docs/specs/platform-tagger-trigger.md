@@ -1,5 +1,11 @@
 # 平台内 Tagger 触发器
 
+> **状态：历史 spec，数据边界已经变化。** 2026-11 起，worker 不再连接云机器上的旧 Mongo（`chiwei` 库）
+> 和 Redis：图片目录、下载队列、翻译表和作者节流都在集群 Mongo 的 `chiwei_pixiv` 库，`pixiv_images`
+> 是图片目录的唯一来源，tagger projection 写的 `tagger_*` 字段也在这个集合里。文中的「旧 Mongo」和
+> worker 的 `MONGO_*` 连接都已不存在；tagger 结果库（`TAGGER_RESULT_MONGO_*`）不变。当前实现以
+> `apps/media-sync-worker/README.md` 为准。
+
 ## Problem
 
 `tagger-service` 已验证可以按 MinIO object basename 异步打标并回调结果，但 chiwei-platform 里还没有自动触发器。当前 Pixiv 下载链路只负责把图片写入旧 Mongo / OSS，并 best-effort 同步到自建 MinIO；打标仍需要人工提交文件名。
